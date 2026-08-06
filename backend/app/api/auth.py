@@ -73,8 +73,8 @@ from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.db.models import OneTimeToken, RecoveryCode, Session, User, UserSettings
-from app.email.backends import OutboundEmail
 from app.email.outbox import enqueue_email_intent
+from app.email.templates import email_change_confirmation, password_reset_email, verification_email
 from app.tasks import email_outbox_drain
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -257,10 +257,11 @@ async def register(
                 session,
                 settings,
                 token_record,
-                OutboundEmail(
+                verification_email(
                     to=str(user.email),
-                    subject="Verify your Kaede Chat account",
-                    text=f"Verify your account: {settings.app_url}/verify#token={token}",
+                    app_url=settings.app_url,
+                    token=token,
+                    expires_in_hours=settings.verification_ttl_hours,
                 ),
             )
         await session.commit()
@@ -335,10 +336,11 @@ async def resend_verification_email(
             session,
             settings,
             token_record,
-            OutboundEmail(
+            verification_email(
                 to=str(user.email),
-                subject="Verify your Kaede Chat account",
-                text=f"Verify your account: {settings.app_url}/verify#token={token}",
+                app_url=settings.app_url,
+                token=token,
+                expires_in_hours=settings.verification_ttl_hours,
             ),
         )
         await session.commit()
@@ -567,10 +569,11 @@ async def forgot_password(
             session,
             settings,
             token_record,
-            OutboundEmail(
+            password_reset_email(
                 to=str(user.email),
-                subject="Reset your Kaede Chat password",
-                text=f"Reset your password: {settings.app_url}/reset-password#token={token}",
+                app_url=settings.app_url,
+                token=token,
+                expires_in_minutes=settings.password_reset_ttl_minutes,
             ),
         )
         await session.commit()
@@ -649,10 +652,10 @@ async def request_email_change(
         session,
         settings,
         token_record,
-        OutboundEmail(
+        email_change_confirmation(
             to=email,
-            subject="Confirm your new Kaede Chat email",
-            text=(f"Confirm your new email: {settings.app_url}/verify-email-change#token={token}"),
+            app_url=settings.app_url,
+            token=token,
         ),
     )
     await session.commit()
