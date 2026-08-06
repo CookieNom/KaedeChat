@@ -50,7 +50,7 @@ http://{$KAEDE_DOMAIN} {
 		}
 		handle @livekit_enabled {
 			uri strip_prefix /livekit
-			reverse_proxy host.docker.internal:7880 {
+			reverse_proxy host.docker.internal:{$LIVEKIT_CONTROL_PORT:7880} {
 				header_up -X-Kaede-Edge-Secret
 			}
 		}

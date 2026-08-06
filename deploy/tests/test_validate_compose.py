@@ -11,6 +11,7 @@ from validate_compose import (
     validate_caddy_edge,
     validate_development,
     validate_migration_startup,
+    validate_voice,
 )
 
 
@@ -86,6 +87,82 @@ class MigrationStartupPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ComposePolicyError, "bootstrap must run after"):
             validate_migration_startup(services)
 
+
+class VoiceComposePolicyTests(unittest.TestCase):
+    def test_custom_livekit_ports_are_accepted_when_caddy_matches(self) -> None:
+        services = {
+            "voice-preflight": {"command": ["validate", "--voice"], "user": "1000:1000"},
+            "api": {
+                "environment": {
+                    "KAEDE_VOICE_ENABLED": "true",
+                    "KAEDE_VOICE_LIVEKIT_URL": "http://host.docker.internal:7890",
+                }
+            },
+            "caddy": {"environment": {"LIVEKIT_CONTROL_PORT": "7890"}},
+            "livekit": {
+                "image": "livekit/livekit-server:v1.13.3",
+                "network_mode": "host",
+                "restart": "unless-stopped",
+                "depends_on": {"voice-preflight": {}},
+                "environment": {
+                    "LIVEKIT_CONTROL_PORT": "7890",
+                    "LIVEKIT_RTC_TCP_PORT": "7891",
+                    "LIVEKIT_RTC_UDP_PORT": "7892",
+                    "LIVEKIT_TURN_TLS_PORT": "5350",
+                    "KAEDE_TURN_UDP_PORT": "13489",
+                    "LIVEKIT_CONFIG": """port: 7890
+rtc:
+  tcp_port: 7891
+  udp_port: 7892
+turn:
+  udp_port: 13489
+  tls_port: 5350
+""",
+                },
+                "volumes": [
+                    {
+                        "target": "/run/secrets/livekit-turn-cert.pem",
+                        "read_only": True,
+                    },
+                    {
+                        "target": "/run/secrets/livekit-turn-key.pem",
+                        "read_only": True,
+                    },
+                ],
+            },
+        }
+        validate_voice(services)
+
+    def test_caddy_control_port_mismatch_is_rejected(self) -> None:
+        services = {
+            "voice-preflight": {"command": ["validate", "--voice"], "user": "1000:1000"},
+            "api": {
+                "environment": {
+                    "KAEDE_VOICE_ENABLED": "true",
+                    "KAEDE_VOICE_LIVEKIT_URL": "http://host.docker.internal:7890",
+                }
+            },
+            "caddy": {"environment": {"LIVEKIT_CONTROL_PORT": "7880"}},
+            "livekit": {
+                "image": "livekit/livekit-server:v1.13.3",
+                "network_mode": "host",
+                "restart": "unless-stopped",
+                "depends_on": {"voice-preflight": {}},
+                "environment": {
+                    "LIVEKIT_CONTROL_PORT": "7890",
+                    "LIVEKIT_CONFIG": (
+                        "port: 7890\ntcp_port: 7881\nudp_port: 7882\n"
+                        "udp_port: 13478\ntls_port: 5349\n"
+                    ),
+                },
+                "volumes": [
+                    {"target": "/run/secrets/livekit-turn-cert.pem", "read_only": True},
+                    {"target": "/run/secrets/livekit-turn-key.pem", "read_only": True},
+                ],
+            },
+        }
+        with self.assertRaisesRegex(ComposePolicyError, "same control port"):
+            validate_voice(services)
 
 if __name__ == "__main__":
     unittest.main()

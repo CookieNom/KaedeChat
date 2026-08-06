@@ -159,6 +159,14 @@ compose-check:
 		docker run --rm -i --network none \
 		-v "$(CURDIR)/deploy/validate_compose.py:/validate_compose.py:ro" \
 		python:3.12.13-slim python /validate_compose.py --voice
+	@KAEDE_OPERATOR_ENV_FILE="$(abspath deploy/.env.schema)" KAEDE_VOICE_ENABLED=true \
+		LIVEKIT_CONTROL_PORT=7890 LIVEKIT_RTC_TCP_PORT=7891 LIVEKIT_RTC_UDP_PORT=7892 \
+		LIVEKIT_TURN_TLS_PORT=5350 KAEDE_TURN_UDP_PORT=13489 \
+		KAEDE_VOICE_LIVEKIT_URL=http://host.docker.internal:7890 \
+		docker compose --profile voice --env-file deploy/.env.schema -f deploy/compose.yml config --format json | \
+		docker run --rm -i --network none \
+		-v "$(CURDIR)/deploy/validate_compose.py:/validate_compose.py:ro" \
+		python:3.12.13-slim python /validate_compose.py --voice
 	docker compose --env-file deploy/reference.env.example -f deploy/compose.yml config --quiet
 	@docker compose --env-file .env.s3.example -f deploy/compose.yml -f deploy/compose.s3.yml config --format json | \
 		docker run --rm -i -v "$(CURDIR)/deploy/validate_compose.py:/validate_compose.py:ro" \

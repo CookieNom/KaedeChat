@@ -71,9 +71,12 @@ for both DM calls and guild voice channels.
 ## Deployment and validation
 
 The production `voice` Compose profile runs pinned LiveKit with host networking,
-ICE TCP 7881, UDP mux 7882, embedded TURN UDP (13478 by default), TURN/TLS 5349,
-an API webhook on the loopback-only API binding, and an empty-room timeout of
-300 seconds. Caddy exposes `/livekit` only when `KAEDE_VOICE_ENABLED=true`.
+configurable ICE TCP and UDP mux ports, configurable embedded TURN UDP and
+TURN/TLS ports, an API webhook on the loopback-only API binding, and an
+empty-room timeout of 300 seconds. Defaults remain TCP 7881, UDP 7882, TURN UDP
+13478, and TURN/TLS TCP 5349. The setup wizard can select a free five-port set
+when several Kaede/LiveKit deployments share a host. Caddy exposes `/livekit`
+only when `KAEDE_VOICE_ENABLED=true`.
 Application controls reach the host-networked server through the Docker host
 gateway; secrets never reach the frontend or gateway service.
 

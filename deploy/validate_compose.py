@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from typing import Any
+from urllib.parse import urlsplit
 
 
 class ComposePolicyError(ValueError):
@@ -211,9 +212,38 @@ def validate_voice(services: dict[str, dict[str, Any]]) -> None:
     require(livekit.get("network_mode") == "host", "LiveKit must use host networking")
     require(livekit.get("restart") == "unless-stopped", "LiveKit needs a restart policy")
     require(not livekit.get("ports"), "host-networked LiveKit must not declare port mappings")
-    config = str(livekit.get("environment", {}).get("LIVEKIT_CONFIG", ""))
-    for required in ("port: 7880", "tcp_port: 7881", "udp_port: 7882", "tls_port: 5349"):
+    environment = livekit.get("environment", {})
+    config = str(environment.get("LIVEKIT_CONFIG", ""))
+    expected_ports = {
+        "port": str(environment.get("LIVEKIT_CONTROL_PORT", "7880")),
+        "tcp_port": str(environment.get("LIVEKIT_RTC_TCP_PORT", "7881")),
+        "udp_port": str(environment.get("LIVEKIT_RTC_UDP_PORT", "7882")),
+        "tls_port": str(environment.get("LIVEKIT_TURN_TLS_PORT", "5349")),
+        "turn_udp_port": str(environment.get("KAEDE_TURN_UDP_PORT", "13478")),
+    }
+    required_settings = (
+        f"port: {expected_ports['port']}",
+        f"tcp_port: {expected_ports['tcp_port']}",
+        f"udp_port: {expected_ports['udp_port']}",
+        f"tls_port: {expected_ports['tls_port']}",
+        f"udp_port: {expected_ports['turn_udp_port']}",
+    )
+    for required in required_settings:
         require(required in config, f"LiveKit configuration is missing {required}")
+    require(
+        str(services["caddy"].get("environment", {}).get("LIVEKIT_CONTROL_PORT"))
+        == expected_ports["port"],
+        "Caddy and LiveKit must use the same control port",
+    )
+    livekit_url = str(services["api"].get("environment", {}).get("KAEDE_VOICE_LIVEKIT_URL", ""))
+    try:
+        api_control_port = urlsplit(livekit_url).port
+    except ValueError as error:
+        raise ComposePolicyError("API LiveKit control URL has an invalid port") from error
+    require(
+        str(api_control_port) == expected_ports["port"],
+        "API and LiveKit must use the same control port",
+    )
     mounts = {str(mount.get("target", "")): mount for mount in livekit.get("volumes", [])}
     for target in ("/run/secrets/livekit-turn-cert.pem", "/run/secrets/livekit-turn-key.pem"):
         require(target in mounts, f"LiveKit is missing the {target} mount")

@@ -301,10 +301,23 @@ port_in_use() {
   [[ -n $output ]]
 }
 
+declare -A RESERVED_HOST_PORTS=()
+
+reserve_host_port() {
+  local port=$1 label=$2
+  if [[ -n ${RESERVED_HOST_PORTS[$port]-} ]]; then
+    die "$label conflicts with ${RESERVED_HOST_PORTS[$port]} on port $port"
+  fi
+  RESERVED_HOST_PORTS[$port]=$label
+}
+
 available_port() {
   local port=$1 protocol=${2:-tcp}
   while ((port <= 65535)); do
-    port_in_use "$port" "$protocol" || { printf '%s' "$port"; return; }
+    if [[ -z ${RESERVED_HOST_PORTS[$port]-} ]] && ! port_in_use "$port" "$protocol"; then
+      printf '%s' "$port"
+      return
+    fi
     ((port += 1))
   done
   die 'no available host port found'
@@ -315,6 +328,19 @@ ask_port() {
   while :; do
     value=$(prompt_text "$prompt" "$default")
     valid_port "$value" "$minimum" || { warn "Use a port from $minimum to 65535."; continue; }
+    printf '%s' "$value"
+    return
+  done
+}
+
+ask_unreserved_port() {
+  local prompt=$1 default=$2 protocol=${3:-tcp} value
+  while :; do
+    value=$(ask_port "$prompt" "$default" "$protocol")
+    if [[ -n ${RESERVED_HOST_PORTS[$value]-} ]]; then
+      warn "Port $value is already selected for ${RESERVED_HOST_PORTS[$value]}."
+      continue
+    fi
     printf '%s' "$value"
     return
   done
@@ -456,48 +482,90 @@ EDGE_PREFERRED=$(old_uint KAEDE_CADDY_HOST_PORT 18081)
 valid_port "$EDGE_PREFERRED" || die 'existing KAEDE_CADDY_HOST_PORT is outside 1024-65535'
 [[ -e $ENV_FILE ]] || EDGE_PREFERRED=$(available_port "$EDGE_PREFERRED")
 EDGE_PORT=$(ask_port 'Loopback edge port' "$EDGE_PREFERRED")
+reserve_host_port "$EDGE_PORT" 'the loopback edge'
 API_PREFERRED=$(old_uint KAEDE_API_HOST_PORT 18082)
 valid_port "$API_PREFERRED" || die 'existing KAEDE_API_HOST_PORT is outside 1024-65535'
 [[ -e $ENV_FILE ]] || API_PREFERRED=$(available_port "$API_PREFERRED")
-while :; do
-  API_PORT=$(ask_port 'Loopback API diagnostics port' "$API_PREFERRED")
-  [[ $API_PORT != "$EDGE_PORT" ]] && break
-  warn 'The edge and API diagnostics ports must differ.'
-done
+API_PORT=$(ask_unreserved_port 'Loopback API diagnostics port' "$API_PREFERRED")
+reserve_host_port "$API_PORT" 'API diagnostics'
 
 GRAFANA_PORT=$(old_uint KAEDE_GRAFANA_HOST_PORT 18084)
 valid_port "$GRAFANA_PORT" || die 'existing KAEDE_GRAFANA_HOST_PORT is outside 1024-65535'
 if [[ $OBSERVABILITY == true ]]; then
   [[ -e $ENV_FILE ]] || GRAFANA_PORT=$(available_port "$GRAFANA_PORT")
-  while :; do
-    GRAFANA_PORT=$(ask_port 'Loopback Grafana port' "$GRAFANA_PORT")
-    [[ $GRAFANA_PORT != "$EDGE_PORT" && $GRAFANA_PORT != "$API_PORT" ]] && break
-    warn 'Grafana must use a distinct port.'
-  done
+  GRAFANA_PORT=$(ask_unreserved_port 'Loopback Grafana port' "$GRAFANA_PORT")
+  reserve_host_port "$GRAFANA_PORT" 'Grafana'
 fi
 
+LIVEKIT_CONTROL_PORT=$(old_uint LIVEKIT_CONTROL_PORT 7880)
+if [[ -z ${OLD[LIVEKIT_CONTROL_PORT]-} && ${OLD[KAEDE_VOICE_LIVEKIT_URL]-} =~ ^http://(host\.docker\.internal|127\.0\.0\.1|localhost):([0-9]+)$ ]]; then
+  LIVEKIT_CONTROL_PORT=${BASH_REMATCH[2]}
+fi
+LIVEKIT_RTC_TCP_PORT=$(old_uint LIVEKIT_RTC_TCP_PORT 7881)
+LIVEKIT_RTC_UDP_PORT=$(old_uint LIVEKIT_RTC_UDP_PORT 7882)
+LIVEKIT_TURN_TLS_PORT=$(old_uint LIVEKIT_TURN_TLS_PORT 5349)
 TURN_PORT=$(old_uint KAEDE_TURN_UDP_PORT 13478)
-valid_port "$TURN_PORT" || die 'existing KAEDE_TURN_UDP_PORT is outside 1024-65535'
+for port_setting in \
+  "LIVEKIT_CONTROL_PORT:$LIVEKIT_CONTROL_PORT" \
+  "LIVEKIT_RTC_TCP_PORT:$LIVEKIT_RTC_TCP_PORT" \
+  "LIVEKIT_RTC_UDP_PORT:$LIVEKIT_RTC_UDP_PORT" \
+  "LIVEKIT_TURN_TLS_PORT:$LIVEKIT_TURN_TLS_PORT" \
+  "KAEDE_TURN_UDP_PORT:$TURN_PORT"; do
+  valid_port "${port_setting#*:}" || die "existing ${port_setting%%:*} is outside 1024-65535"
+done
 if [[ $VOICE == true ]]; then
-  [[ -e $ENV_FILE ]] || TURN_PORT=$(available_port "$TURN_PORT" udp)
-  while :; do
-    TURN_PORT=$(ask_port 'TURN UDP port' "$TURN_PORT" udp)
-    [[ $TURN_PORT != 7882 ]] && break
-    warn 'UDP 7882 is reserved for LiveKit RTC.'
-  done
-  for fixed in 5349 7880 7881; do
-    [[ $EDGE_PORT != "$fixed" && $API_PORT != "$fixed" ]] || \
-      die "a selected TCP port conflicts with LiveKit's fixed port $fixed"
-    [[ $OBSERVABILITY != true || $GRAFANA_PORT != "$fixed" ]] || \
-      die "the Grafana port conflicts with LiveKit's fixed port $fixed"
-  done
+  if [[ -e $ENV_FILE && $(old KAEDE_VOICE_ENABLED false) == true ]]; then
+    VOICE_PORT_LABEL=$(choose 'LiveKit host port selection' 'Keep configured ports' \
+      'Keep configured ports' 'Automatically choose available ports' 'Choose ports manually')
+  else
+    VOICE_PORT_LABEL=$(choose 'LiveKit host port selection' \
+      'Automatically choose available ports' \
+      'Automatically choose available ports' 'Choose ports manually')
+  fi
+  case "$VOICE_PORT_LABEL" in
+    'Keep configured ports') VOICE_PORT_MODE=keep ;;
+    'Automatically choose available ports') VOICE_PORT_MODE=automatic ;;
+    *) VOICE_PORT_MODE=manual ;;
+  esac
+  if [[ $VOICE_PORT_MODE == automatic ]]; then
+    command -v ss >/dev/null 2>&1 || \
+      die 'automatic LiveKit port selection requires the ss command; choose ports manually instead'
+    LIVEKIT_CONTROL_PORT=$(available_port "$LIVEKIT_CONTROL_PORT" tcp)
+    reserve_host_port "$LIVEKIT_CONTROL_PORT" 'LiveKit control'
+    LIVEKIT_RTC_TCP_PORT=$(available_port "$LIVEKIT_RTC_TCP_PORT" tcp)
+    reserve_host_port "$LIVEKIT_RTC_TCP_PORT" 'LiveKit RTC TCP'
+    LIVEKIT_RTC_UDP_PORT=$(available_port "$LIVEKIT_RTC_UDP_PORT" udp)
+    reserve_host_port "$LIVEKIT_RTC_UDP_PORT" 'LiveKit RTC UDP'
+    LIVEKIT_TURN_TLS_PORT=$(available_port "$LIVEKIT_TURN_TLS_PORT" tcp)
+    reserve_host_port "$LIVEKIT_TURN_TLS_PORT" 'LiveKit TURN TLS'
+    TURN_PORT=$(available_port "$TURN_PORT" udp)
+    reserve_host_port "$TURN_PORT" 'LiveKit TURN UDP'
+    note "Selected LiveKit ports: control $LIVEKIT_CONTROL_PORT/tcp, RTC $LIVEKIT_RTC_TCP_PORT/tcp and $LIVEKIT_RTC_UDP_PORT/udp, TURN $LIVEKIT_TURN_TLS_PORT/tcp and $TURN_PORT/udp."
+  elif [[ $VOICE_PORT_MODE == manual ]]; then
+    LIVEKIT_CONTROL_PORT=$(ask_unreserved_port 'LiveKit control port' "$LIVEKIT_CONTROL_PORT" tcp)
+    reserve_host_port "$LIVEKIT_CONTROL_PORT" 'LiveKit control'
+    LIVEKIT_RTC_TCP_PORT=$(ask_unreserved_port 'LiveKit RTC TCP port' "$LIVEKIT_RTC_TCP_PORT" tcp)
+    reserve_host_port "$LIVEKIT_RTC_TCP_PORT" 'LiveKit RTC TCP'
+    LIVEKIT_RTC_UDP_PORT=$(ask_unreserved_port 'LiveKit RTC UDP port' "$LIVEKIT_RTC_UDP_PORT" udp)
+    reserve_host_port "$LIVEKIT_RTC_UDP_PORT" 'LiveKit RTC UDP'
+    LIVEKIT_TURN_TLS_PORT=$(ask_unreserved_port 'LiveKit TURN TLS port' "$LIVEKIT_TURN_TLS_PORT" tcp)
+    reserve_host_port "$LIVEKIT_TURN_TLS_PORT" 'LiveKit TURN TLS'
+    TURN_PORT=$(ask_unreserved_port 'LiveKit TURN UDP port' "$TURN_PORT" udp)
+    reserve_host_port "$TURN_PORT" 'LiveKit TURN UDP'
+  else
+    reserve_host_port "$LIVEKIT_CONTROL_PORT" 'LiveKit control'
+    reserve_host_port "$LIVEKIT_RTC_TCP_PORT" 'LiveKit RTC TCP'
+    reserve_host_port "$LIVEKIT_RTC_UDP_PORT" 'LiveKit RTC UDP'
+    reserve_host_port "$LIVEKIT_TURN_TLS_PORT" 'LiveKit TURN TLS'
+    reserve_host_port "$TURN_PORT" 'LiveKit TURN UDP'
+  fi
 fi
 
 check_selected_port() {
-  local label=$1 port=$2 protocol=$3 old_key=${4-} old_port=
+  local label=$1 port=$2 protocol=$3 old_key=${4-} preserved=${5:-false} old_port=
   port_in_use "$port" "$protocol" || return 0
   [[ -z $old_key ]] || old_port=$(old "$old_key" '')
-  if [[ $old_port == "$port" ]]; then
+  if [[ $preserved == true || $old_port == "$port" ]]; then
     note "$label $port/$protocol is already in use; the preserved value may belong to the current Kaede deployment."
     return 0
   fi
@@ -509,11 +577,13 @@ check_selected_port 'Loopback edge' "$EDGE_PORT" tcp KAEDE_CADDY_HOST_PORT
 check_selected_port 'API diagnostics' "$API_PORT" tcp KAEDE_API_HOST_PORT
 [[ $OBSERVABILITY != true ]] || check_selected_port 'Grafana' "$GRAFANA_PORT" tcp KAEDE_GRAFANA_HOST_PORT
 if [[ $VOICE == true ]]; then
-  check_selected_port 'LiveKit control' 7880 tcp
-  check_selected_port 'LiveKit RTC' 7881 tcp
-  check_selected_port 'LiveKit RTC' 7882 udp
-  check_selected_port 'TURN TLS' 5349 tcp
-  check_selected_port 'TURN UDP' "$TURN_PORT" udp KAEDE_TURN_UDP_PORT
+  VOICE_PORTS_PRESERVED=false
+  [[ $VOICE_PORT_MODE != keep ]] || VOICE_PORTS_PRESERVED=true
+  check_selected_port 'LiveKit control' "$LIVEKIT_CONTROL_PORT" tcp LIVEKIT_CONTROL_PORT "$VOICE_PORTS_PRESERVED"
+  check_selected_port 'LiveKit RTC' "$LIVEKIT_RTC_TCP_PORT" tcp LIVEKIT_RTC_TCP_PORT "$VOICE_PORTS_PRESERVED"
+  check_selected_port 'LiveKit RTC' "$LIVEKIT_RTC_UDP_PORT" udp LIVEKIT_RTC_UDP_PORT "$VOICE_PORTS_PRESERVED"
+  check_selected_port 'TURN TLS' "$LIVEKIT_TURN_TLS_PORT" tcp LIVEKIT_TURN_TLS_PORT "$VOICE_PORTS_PRESERVED"
+  check_selected_port 'TURN UDP' "$TURN_PORT" udp KAEDE_TURN_UDP_PORT "$VOICE_PORTS_PRESERVED"
 fi
 
 if [[ $HOST_NGINX == true || $VOICE == true ]]; then
@@ -825,10 +895,14 @@ emit() {
   emit KAEDE_API_HOST_PORT "$API_PORT"
   emit KAEDE_GRAFANA_HOST_PORT "$GRAFANA_PORT"
   emit KAEDE_VOICE_ENABLED "$VOICE"
+  emit LIVEKIT_CONTROL_PORT "$LIVEKIT_CONTROL_PORT"
+  emit LIVEKIT_RTC_TCP_PORT "$LIVEKIT_RTC_TCP_PORT"
+  emit LIVEKIT_RTC_UDP_PORT "$LIVEKIT_RTC_UDP_PORT"
+  emit LIVEKIT_TURN_TLS_PORT "$LIVEKIT_TURN_TLS_PORT"
   emit KAEDE_TURN_UDP_PORT "$TURN_PORT"
   if [[ $VOICE == true ]]; then
     emit KAEDE_VOICE_PUBLIC_URL "wss://$DOMAIN/livekit"
-    emit KAEDE_VOICE_LIVEKIT_URL http://host.docker.internal:7880
+    emit KAEDE_VOICE_LIVEKIT_URL "http://host.docker.internal:$LIVEKIT_CONTROL_PORT"
     emit LIVEKIT_API_KEY "$LIVEKIT_KEY"
     emit LIVEKIT_API_SECRET "$LIVEKIT_SECRET"
     emit LIVEKIT_TURN_CERT_PATH "$CERT_PATH"
@@ -910,7 +984,9 @@ fi
     printf '\nKeep all S3 buckets private and configure browser CORS for PUT/GET/HEAD from https://%s.\n' "$DOMAIN"
   fi
   if [[ $VOICE == true ]]; then
-    printf '\nVoice requires TCP 7880/7881/5349 and UDP 7882/%s plus valid TURN certificate files.\n' "$TURN_PORT"
+    printf '\nVoice requires TCP %s/%s/%s and UDP %s/%s plus valid TURN certificate files.\n' \
+      "$LIVEKIT_CONTROL_PORT" "$LIVEKIT_RTC_TCP_PORT" "$LIVEKIT_TURN_TLS_PORT" \
+      "$LIVEKIT_RTC_UDP_PORT" "$TURN_PORT"
   fi
   printf '\nAfter review, start explicitly with:\n'
   printf '  KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env -f deploy/compose.yml -f deploy/compose.generated.yml up -d --build --wait\n'

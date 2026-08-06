@@ -16,14 +16,20 @@ changes during a manual setup, update both `.env` and the host-nginx upstream.
 The LiveKit foundation uses host networking and is isolated behind the `voice`
 Compose profile, so the default topology does not bind its host ports. The edge also
 returns 404 for `/livekit` unless `KAEDE_VOICE_ENABLED=true`; the voice preflight
-requires that exact opt-in. Leave it false unless the host's TCP 7880 is reserved
-for this Kaede deployment. When voice is intentionally enabled with both the
-setting and `--profile voice`, allow
-the documented RTC/TURN traffic through the host and provider firewalls: TCP
-7881, UDP 7882, UDP `KAEDE_TURN_UDP_PORT` (13478 by default), and TCP 5349. Keep
-TCP 7880 and the API/edge loopback ports blocked from external interfaces. The
-TURN certificate paths must be absolute host paths and the certificate name must
-match `KAEDE_DOMAIN`.
+requires that exact opt-in. When voice is intentionally enabled with both the
+setting and `--profile voice`, allow the selected RTC/TURN traffic through the
+host and provider firewalls: TCP `LIVEKIT_RTC_TCP_PORT`, UDP
+`LIVEKIT_RTC_UDP_PORT`, UDP `KAEDE_TURN_UDP_PORT`, and TCP
+`LIVEKIT_TURN_TLS_PORT`. Keep `LIVEKIT_CONTROL_PORT` and the API/edge loopback
+ports blocked from external interfaces. The TURN certificate paths must be
+absolute host paths and the certificate name must match `KAEDE_DOMAIN`.
+
+The defaults are control TCP 7880, RTC TCP 7881, RTC UDP 7882, TURN/TLS TCP
+5349, and TURN UDP 13478. Every host-networked LiveKit process on the same host
+must use a different five-port set. The setup wizard can find and reserve an
+available set automatically, or accept a manually selected set. Automatic
+selection prevents conflicts with listeners present while setup runs; it cannot
+prevent another process from claiming a selected port before Compose starts.
 
 ## Secrets and initial configuration
 
@@ -99,7 +105,8 @@ into both `DRAGONFLY_PASSWORD` and `KAEDE_DRAGONFLY_URL`. Set the public HTTPS
 `KAEDE_APP_URL`, email sender/backend credentials, and an optional random
 `KAEDE_ADMIN_TOKEN`. When enabling the `voice` profile, also set
 `KAEDE_VOICE_ENABLED=true`, `KAEDE_VOICE_PUBLIC_URL=wss://<domain>/livekit`, plus
-the LiveKit keys and certificate paths. Preserve
+the LiveKit keys, five port settings, and certificate paths. The control port in
+`KAEDE_VOICE_LIVEKIT_URL` must match `LIVEKIT_CONTROL_PORT`. Preserve
 `KAEDE_SECRET_KEY`: the instance signing key, pending email-outbox messages, and
 other protected application material stored in PostgreSQL cannot be decrypted
 without it. Changing or losing this value can strand pending verification/reset

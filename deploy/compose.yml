@@ -304,6 +304,7 @@ services:
       KAEDE_PROXY_SECRET: ${KAEDE_PROXY_SECRET:?set KAEDE_PROXY_SECRET}
       KAEDE_EDGE_SECRET: ${KAEDE_EDGE_SECRET:?set KAEDE_EDGE_SECRET}
       KAEDE_VOICE_ENABLED: ${KAEDE_VOICE_ENABLED:-false}
+      LIVEKIT_CONTROL_PORT: ${LIVEKIT_CONTROL_PORT:-7880}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - frontend-static:/srv/frontend:ro
@@ -521,18 +522,23 @@ services:
     environment:
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
+      LIVEKIT_CONTROL_PORT: ${LIVEKIT_CONTROL_PORT:-7880}
+      LIVEKIT_RTC_TCP_PORT: ${LIVEKIT_RTC_TCP_PORT:-7881}
+      LIVEKIT_RTC_UDP_PORT: ${LIVEKIT_RTC_UDP_PORT:-7882}
+      LIVEKIT_TURN_TLS_PORT: ${LIVEKIT_TURN_TLS_PORT:-5349}
+      KAEDE_TURN_UDP_PORT: ${KAEDE_TURN_UDP_PORT:-13478}
       LIVEKIT_CONFIG: |
-        port: 7880
+        port: ${LIVEKIT_CONTROL_PORT:-7880}
         bind_addresses: ["0.0.0.0"]
         rtc:
-          tcp_port: 7881
-          udp_port: 7882
+          tcp_port: ${LIVEKIT_RTC_TCP_PORT:-7881}
+          udp_port: ${LIVEKIT_RTC_UDP_PORT:-7882}
           use_external_ip: true
         turn:
           enabled: true
           domain: "${KAEDE_DOMAIN:?set KAEDE_DOMAIN}"
           udp_port: ${KAEDE_TURN_UDP_PORT:-13478}
-          tls_port: 5349
+          tls_port: ${LIVEKIT_TURN_TLS_PORT:-5349}
           cert_file: /run/secrets/livekit-turn-cert.pem
           key_file: /run/secrets/livekit-turn-key.pem
         keys:

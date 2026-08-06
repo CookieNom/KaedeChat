@@ -45,6 +45,47 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
             observability=True,
         )
 
+    def test_custom_livekit_port_set_is_accepted(self) -> None:
+        validate_values(
+            self.production
+            | {
+                "KAEDE_VOICE_ENABLED": "true",
+                "LIVEKIT_CONTROL_PORT": "7890",
+                "LIVEKIT_RTC_TCP_PORT": "7891",
+                "LIVEKIT_RTC_UDP_PORT": "7892",
+                "LIVEKIT_TURN_TLS_PORT": "5350",
+                "KAEDE_TURN_UDP_PORT": "13489",
+                "KAEDE_VOICE_LIVEKIT_URL": "http://host.docker.internal:7890",
+            },
+            observability=False,
+        )
+
+    def test_duplicate_livekit_port_is_rejected(self) -> None:
+        values = self.production | {
+            "KAEDE_VOICE_ENABLED": "true",
+            "LIVEKIT_CONTROL_PORT": "7890",
+            "LIVEKIT_RTC_TCP_PORT": "7890",
+        }
+        with self.assertRaisesRegex(DeploymentConfigurationError, "must be distinct"):
+            validate_values(values, observability=False)
+
+    def test_livekit_control_url_must_match_selected_port(self) -> None:
+        values = self.production | {
+            "KAEDE_VOICE_ENABLED": "true",
+            "LIVEKIT_CONTROL_PORT": "7890",
+            "KAEDE_VOICE_LIVEKIT_URL": "http://host.docker.internal:7880",
+        }
+        with self.assertRaisesRegex(DeploymentConfigurationError, "must match"):
+            validate_values(values, observability=False)
+
+    def test_livekit_port_must_be_in_range(self) -> None:
+        values = self.production | {
+            "KAEDE_VOICE_ENABLED": "true",
+            "LIVEKIT_CONTROL_PORT": "70000",
+        }
+        with self.assertRaisesRegex(DeploymentConfigurationError, "1024 to 65535"):
+            validate_values(values, observability=False)
+
     def test_duplicate_file_assignment_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "operator.env")

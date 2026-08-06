@@ -89,5 +89,10 @@ listener on 80/443.
 
 For external S3, keep all three buckets private and configure provider CORS for
 browser `PUT`, `GET`, and `HEAD` requests from the exact Kaede HTTPS origin.
-For voice, also review the documented LiveKit RTC/TURN ports and certificate
-paths before enabling the profile.
+For voice, choose whether to keep an existing port set, have setup select an
+available set, or enter all five host ports manually. Each LiveKit deployment on
+one host needs unique control, RTC TCP, RTC UDP, TURN/TLS TCP, and TURN UDP
+ports. Review those ports, host/provider firewall rules, NAT forwarding, and
+certificate paths before enabling the profile. Automatic selection only checks
+listeners at setup time, so start the deployment before assigning those ports to
+anything else.

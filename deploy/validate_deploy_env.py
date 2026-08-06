@@ -47,6 +47,13 @@ SENSITIVE_NAMES = {
     "LIVEKIT_API_SECRET",
     "POSTGRES_PASSWORD",
 }
+VOICE_PORT_DEFAULTS = {
+    "LIVEKIT_CONTROL_PORT": 7880,
+    "LIVEKIT_RTC_TCP_PORT": 7881,
+    "LIVEKIT_RTC_UDP_PORT": 7882,
+    "LIVEKIT_TURN_TLS_PORT": 5349,
+    "KAEDE_TURN_UDP_PORT": 13478,
+}
 
 
 class DeploymentConfigurationError(ValueError):
@@ -84,6 +91,67 @@ def _is_placeholder(value: str) -> bool:
     return any(marker in lowered for marker in PLACEHOLDER_MARKERS)
 
 
+def _deployment_port(values: dict[str, str], name: str, default: int) -> int:
+    raw_value = values.get(name, str(default)).strip()
+    if not raw_value.isdecimal():
+        raise DeploymentConfigurationError(f"{name} must be an integer from 1024 to 65535")
+    port = int(raw_value)
+    if not 1024 <= port <= 65535:
+        raise DeploymentConfigurationError(f"{name} must be an integer from 1024 to 65535")
+    return port
+
+
+def _validate_voice_ports(values: dict[str, str]) -> None:
+    ports = {
+        name: _deployment_port(values, name, default)
+        for name, default in VOICE_PORT_DEFAULTS.items()
+    }
+    duplicates: dict[int, list[str]] = {}
+    for name, port in ports.items():
+        duplicates.setdefault(port, []).append(name)
+    collision = next((names for names in duplicates.values() if len(names) > 1), None)
+    if collision:
+        raise DeploymentConfigurationError(
+            "LiveKit host ports must be distinct; conflicting settings: " + ", ".join(collision)
+        )
+
+    for name, default in (
+        ("KAEDE_CADDY_HOST_PORT", 18081),
+        ("KAEDE_API_HOST_PORT", 18082),
+    ):
+        host_port = _deployment_port(values, name, default)
+        if host_port in duplicates:
+            raise DeploymentConfigurationError(
+                f"{name} conflicts with {duplicates[host_port][0]} on port {host_port}"
+            )
+
+    livekit_url = values.get(
+        "KAEDE_VOICE_LIVEKIT_URL",
+        f"http://host.docker.internal:{ports['LIVEKIT_CONTROL_PORT']}",
+    ).strip()
+    parsed = urlsplit(livekit_url)
+    try:
+        url_port = parsed.port
+    except ValueError as error:
+        raise DeploymentConfigurationError("KAEDE_VOICE_LIVEKIT_URL has an invalid port") from error
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"host.docker.internal", "127.0.0.1", "localhost"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise DeploymentConfigurationError(
+            "KAEDE_VOICE_LIVEKIT_URL must be a local HTTP control-plane URL"
+        )
+    if url_port != ports["LIVEKIT_CONTROL_PORT"]:
+        raise DeploymentConfigurationError(
+            "KAEDE_VOICE_LIVEKIT_URL port must match LIVEKIT_CONTROL_PORT"
+        )
+
+
 def validate_values(values: dict[str, str], *, observability: bool) -> None:
     environment = values.get("KAEDE_ENVIRONMENT", "production").strip().lower()
     allow_nonproduction = values.get("ALLOW_NONPRODUCTION_DEPLOYMENT", "").lower() == "true"
@@ -102,6 +170,9 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
 
     if values.get("KAEDE_MEDIA_SCAN_ENABLED", "true").strip().lower() != "true":
         raise DeploymentConfigurationError("KAEDE_MEDIA_SCAN_ENABLED must be true in production")
+
+    if values.get("KAEDE_VOICE_ENABLED", "false").strip().lower() == "true":
+        _validate_voice_ports(values)
 
     domain = values.get("KAEDE_DOMAIN", "").strip().lower().removesuffix(".")
     if domain.endswith(".example.com"):
