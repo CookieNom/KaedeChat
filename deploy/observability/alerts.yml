@@ -1,0 +1,18 @@
+groups:
+  - name: kaede-release
+    rules:
+      - alert: KaedeAPIDown
+        expr: absent(kaede_up) or max(kaede_up) == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations: { summary: "Kaede API metrics are unavailable" }
+      - alert: KaedeFederationBacklog
+        expr: kaede_federation_outbox_pending > 1000
+        for: 15m
+        labels: { severity: warning }
+        annotations: { summary: "Kaede federation backlog exceeds 1000 events" }
+      - alert: KaedeFederationFailures
+        expr: increase(kaede_federation_delivery_failures_total[15m]) > 20
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Kaede federation delivery failures are elevated" }

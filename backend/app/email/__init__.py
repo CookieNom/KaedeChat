@@ -1,0 +1,1 @@
+"""Pluggable email delivery."""

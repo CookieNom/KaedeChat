@@ -1,0 +1,95 @@
+{
+	auto_https off
+}
+
+http://{$KAEDE_DOMAIN} {
+	@untrusted_edge not header X-Kaede-Edge-Secret {$KAEDE_EDGE_SECRET}
+	respond @untrusted_edge 403
+
+	encode zstd gzip
+	header {
+		-Server
+		# SvelteKit emits the build-specific hash-based resource policy in the
+		# static HTML. frame-ancestors cannot be enforced from a meta tag, so the
+		# edge retains that directive (plus duplicate document restrictions) as a
+		# response header without overriding the generated bootstrap hash.
+		Content-Security-Policy "base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"
+		Permissions-Policy "camera=(self), microphone=(self), display-capture=(self), geolocation=()"
+		Referrer-Policy "no-referrer"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+
+	# Keep proxy and SPA fallback order literal. Without route, Caddy sorts
+	# try_files ahead of reverse_proxy and can rewrite API/WS paths to index.html.
+	route {
+		# The edge credential authenticates nginx to Caddy only. Remove it from
+		# the live request before proxying or access-log serialization.
+		request_header -X-Kaede-Edge-Secret
+
+		@api path /api/* /media/* /_kaede/* /.well-known/kaede/*
+		reverse_proxy @api api:8000 {
+			header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
+			header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
+			header_up X-Forwarded-Proto {http.request.header.X-Forwarded-Proto}
+			header_up -X-Kaede-Edge-Secret
+		}
+
+		@gateway path /gateway
+		reverse_proxy @gateway gateway:8001 {
+			header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
+			header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
+			header_up X-Forwarded-Proto {http.request.header.X-Forwarded-Proto}
+			header_up -X-Kaede-Edge-Secret
+		}
+
+		@livekit_enabled {
+			path /livekit /livekit/*
+			expression `{$KAEDE_VOICE_ENABLED:false}`
+		}
+		handle @livekit_enabled {
+			uri strip_prefix /livekit
+			reverse_proxy host.docker.internal:7880 {
+				header_up -X-Kaede-Edge-Secret
+			}
+		}
+		@livekit_disabled path /livekit /livekit/*
+		respond @livekit_disabled 404
+
+		root * /srv/frontend/current
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		format filter {
+			# Host nginx keeps a query-free path log. Omit the URI and all request
+			# headers here so one-time, webhook, presigned, and custom edge
+			# credentials cannot reach a second access log.
+			request>uri delete
+			request>headers delete
+		}
+	}
+}
+
+http://media.{$KAEDE_DOMAIN} {
+	@untrusted_edge not header X-Kaede-Edge-Secret {$KAEDE_EDGE_SECRET}
+	respond @untrusted_edge 403
+
+	header {
+		-Server
+		Referrer-Policy "no-referrer"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Access-Control-Allow-Origin "https://{$KAEDE_DOMAIN}"
+		Access-Control-Allow-Methods "GET, HEAD, PUT, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type"
+	}
+	@cors_preflight method OPTIONS
+	respond @cors_preflight 204
+	reverse_proxy garage:3900 {
+		header_up -X-Kaede-Edge-Secret
+	}
+}

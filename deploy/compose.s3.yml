@@ -1,0 +1,6 @@
+services:
+  # The base topology keeps self-hosted Garage as its default. This override
+  # excludes that service when an operator selects an external S3-compatible
+  # provider; the provider-neutral storage-init gate still verifies all buckets.
+  garage:
+    profiles: [garage]

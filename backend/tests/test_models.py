@@ -1,0 +1,502 @@
+from sqlalchemy import CheckConstraint, Computed, ForeignKeyConstraint, UniqueConstraint
+
+from app.db import models  # noqa: F401
+from app.db.base import Base
+
+
+def test_complete_v1_schema_is_registered() -> None:
+    required = {
+        "instances",
+        "peer_keys",
+        "users",
+        "user_settings",
+        "relationships",
+        "sessions",
+        "one_time_tokens",
+        "email_outbox",
+        "recovery_codes",
+        "auth_events",
+        "guilds",
+        "guild_events",
+        "guild_history_exports",
+        "guild_history_export_channels",
+        "guild_members",
+        "roles",
+        "member_roles",
+        "channels",
+        "channel_overwrites",
+        "messages",
+        "message_projections",
+        "guild_history_imports",
+        "guild_history_import_channels",
+        "guild_history_staged_messages",
+        "federated_history_messages",
+        "attachments",
+        "reactions",
+        "pins",
+        "dm_conversations",
+        "dm_participants",
+        "read_states",
+        "invites",
+        "bans",
+        "audit_log_entries",
+        "emojis",
+        "webhooks",
+        "federation_events",
+        "federation_outbox",
+        "federation_inbox",
+        "remote_media_cache",
+        "remote_media_tombstones",
+        "user_storage_usage",
+        "instance_blocks",
+    }
+    assert required == set(Base.metadata.tables)
+
+
+def test_email_outbox_contains_only_encrypted_delivery_content() -> None:
+    outbox = Base.metadata.tables["email_outbox"]
+    assert {"to", "recipient", "subject", "text", "html", "token"}.isdisjoint(outbox.columns)
+    assert {
+        "ck_email_outbox_status_value",
+        "ck_email_outbox_claim_state",
+        "ck_email_outbox_completion_state",
+        "ck_email_outbox_encrypted_payload_length",
+    } <= constraint_names("email_outbox")
+    assert {
+        "ix_email_outbox_due",
+        "ix_email_outbox_stale_claim",
+        "ix_email_outbox_terminal_retention",
+    } <= {index.name for index in outbox.indexes}
+    token_fk = foreign_key_for_columns("email_outbox", ("one_time_token_id",))
+    assert tuple(element.target_fullname for element in token_fk.elements) == (
+        "one_time_tokens.id",
+    )
+    assert token_fk.ondelete == "CASCADE"
+
+
+def test_messages_are_partitioned_and_have_workhorse_indexes() -> None:
+    messages = Base.metadata.tables["messages"]
+    assert messages.dialect_options["postgresql"]["partition_by"] == "RANGE (id)"
+    names = {index.name for index in messages.indexes}
+    expected = {
+        "ix_messages_channel_id_desc",
+        "ix_messages_author_id_desc",
+        "ix_messages_id_brin",
+    }
+    assert expected <= names
+
+
+def test_message_projection_work_is_durable_and_channel_bound() -> None:
+    projections = Base.metadata.tables["message_projections"]
+    assert tuple(projections.primary_key.columns.keys()) == ("message_id", "message_domain")
+    message_fk = foreign_key_for_columns(
+        "message_projections",
+        ("message_id", "message_domain", "channel_id", "channel_domain"),
+    )
+    assert tuple(element.target_fullname for element in message_fk.elements) == (
+        "messages.id",
+        "messages.origin_domain",
+        "messages.channel_id",
+        "messages.channel_domain",
+    )
+    assert "ix_message_projections_pending" in {index.name for index in projections.indexes}
+
+
+def test_federated_history_grants_and_import_provenance_are_bound() -> None:
+    exports = Base.metadata.tables["guild_history_exports"]
+    imports = Base.metadata.tables["guild_history_imports"]
+    staged = Base.metadata.tables["guild_history_staged_messages"]
+    provenance = Base.metadata.tables["federated_history_messages"]
+
+    assert tuple(exports.primary_key.columns.keys()) == ("id",)
+    assert tuple(imports.primary_key.columns.keys()) == ("export_id", "export_domain")
+    assert tuple(staged.primary_key.columns.keys()) == (
+        "export_id",
+        "export_domain",
+        "message_id",
+        "message_domain",
+    )
+    assert tuple(provenance.primary_key.columns.keys()) == ("message_id", "message_domain")
+    assert has_foreign_key(
+        "guild_history_staged_messages",
+        ("export_id", "export_domain"),
+        ("guild_history_imports.export_id", "guild_history_imports.export_domain"),
+    )
+    assert has_foreign_key(
+        "federated_history_messages",
+        ("message_id", "message_domain"),
+        ("messages.id", "messages.origin_domain"),
+    )
+    assert "ck_guilds_federated_history_policy_value" in constraint_names("guilds")
+    assert "ck_channels_federated_history_policy_value" in constraint_names("channels")
+
+
+def test_federation_events_and_outbox_references_are_origin_scoped() -> None:
+    events = Base.metadata.tables["federation_events"]
+    outbox = Base.metadata.tables["federation_outbox"]
+    assert tuple(events.primary_key.columns.keys()) == ("origin_domain", "event_id")
+    event_fk = foreign_key_for_columns(outbox.name, ("event_origin_domain", "event_id"))
+    assert tuple(element.target_fullname for element in event_fk.elements) == (
+        "federation_events.origin_domain",
+        "federation_events.event_id",
+    )
+    assert any(
+        isinstance(constraint, UniqueConstraint)
+        and tuple(constraint.columns.keys()) == ("destination", "event_origin_domain", "event_id")
+        for constraint in outbox.constraints
+    )
+
+
+def test_media_staging_objects_have_a_recoverable_cleanup_cursor() -> None:
+    attachments = Base.metadata.tables["attachments"]
+    assert "staging_object_key" in attachments.c
+    indexes = {index.name: index for index in attachments.indexes}
+    assert "ix_attachments_staging_gc" in indexes
+    message_index = indexes["ix_attachments_live_message"]
+    assert tuple(message_index.columns.keys()) == ("message_id", "message_domain", "id")
+    assert str(message_index.dialect_options["postgresql"]["where"]) == (
+        "deleted_at IS NULL AND message_id IS NOT NULL"
+    )
+
+
+def test_local_user_tables_have_database_constraints() -> None:
+    users = Base.metadata.tables["users"]
+    assert any(
+        isinstance(constraint, CheckConstraint)
+        and constraint.name is not None
+        and constraint.name.endswith("local_auth_fields")
+        and str(constraint.sqltext) == "NOT is_local OR password_hash IS NOT NULL"
+        for constraint in users.constraints
+    )
+    for table_name in {
+        "user_settings",
+        "relationships",
+        "sessions",
+        "one_time_tokens",
+        "recovery_codes",
+        "auth_events",
+        "read_states",
+        "user_storage_usage",
+    }:
+        table = Base.metadata.tables[table_name]
+        assert any(
+            isinstance(constraint, CheckConstraint) and str(constraint.sqltext) == "user_is_local"
+            for constraint in table.constraints
+        ), table_name
+        assert any(
+            tuple(constraint.column_keys) == ("user_id", "user_domain", "user_is_local")
+            and tuple(element.target_fullname for element in constraint.elements)
+            == ("users.id", "users.origin_domain", "users.is_local")
+            for constraint in table.foreign_key_constraints
+        ), table_name
+
+
+def test_profiles_and_relationship_requests_have_bounded_state() -> None:
+    users = Base.metadata.tables["users"]
+    relationships = Base.metadata.tables["relationships"]
+    assert users.c.custom_status.type.length == 128
+    assert relationships.c.request_id.type.length == 64
+    assert "ck_relationships_relationship_request_id_format" in constraint_names("relationships")
+
+
+def test_federated_entity_identities_use_composite_primary_keys() -> None:
+    for table_name in {
+        "users",
+        "guilds",
+        "roles",
+        "channels",
+        "messages",
+        "attachments",
+        "dm_conversations",
+        "emojis",
+    }:
+        table = Base.metadata.tables[table_name]
+        assert tuple(table.primary_key.columns.keys()) == ("id", "origin_domain"), table_name
+
+
+def constraint_names(table_name: str) -> set[str]:
+    return {
+        constraint.name
+        for constraint in Base.metadata.tables[table_name].constraints
+        if constraint.name is not None
+    }
+
+
+def has_foreign_key(
+    table_name: str, local_columns: tuple[str, ...], targets: tuple[str, ...]
+) -> bool:
+    return any(
+        tuple(constraint.column_keys) == local_columns
+        and tuple(element.target_fullname for element in constraint.elements) == targets
+        for constraint in Base.metadata.tables[table_name].foreign_key_constraints
+    )
+
+
+def foreign_key_for_columns(
+    table_name: str, local_columns: tuple[str, ...]
+) -> ForeignKeyConstraint:
+    return next(
+        constraint
+        for constraint in Base.metadata.tables[table_name].foreign_key_constraints
+        if tuple(constraint.column_keys) == local_columns
+    )
+
+
+def test_composite_references_are_complete_and_guild_scoped() -> None:
+    assert {
+        "ck_channels_parent_ref_complete",
+        "ck_channels_last_message_ref_complete",
+    } <= constraint_names("channels")
+    assert "ck_messages_referenced_message_ref_complete" in constraint_names("messages")
+    assert "ck_attachments_message_ref_complete" in constraint_names("attachments")
+    assert "ck_invites_channel_ref_complete" in constraint_names("invites")
+    assert "ck_read_states_last_message_ref_complete" in constraint_names("read_states")
+
+    roles = Base.metadata.tables["roles"]
+    assert any(
+        isinstance(constraint, UniqueConstraint)
+        and tuple(constraint.columns.keys()) == ("id", "origin_domain", "guild_id", "guild_domain")
+        for constraint in roles.constraints
+    )
+    assert has_foreign_key(
+        "member_roles",
+        ("role_id", "role_domain", "guild_id", "guild_domain"),
+        ("roles.id", "roles.origin_domain", "roles.guild_id", "roles.guild_domain"),
+    )
+
+
+def test_channel_and_message_references_cannot_cross_owners() -> None:
+    channels = Base.metadata.tables["channels"]
+    assert any(
+        isinstance(constraint, UniqueConstraint)
+        and tuple(constraint.columns.keys()) == ("id", "origin_domain", "guild_id", "guild_domain")
+        for constraint in channels.constraints
+    )
+    assert "ck_channels_parent_requires_guild" in constraint_names("channels")
+    assert has_foreign_key(
+        "channels",
+        ("parent_id", "parent_domain", "guild_id", "guild_domain"),
+        (
+            "channels.id",
+            "channels.origin_domain",
+            "channels.guild_id",
+            "channels.guild_domain",
+        ),
+    )
+    parent_fk = foreign_key_for_columns(
+        "channels", ("parent_id", "parent_domain", "guild_id", "guild_domain")
+    )
+    assert parent_fk.deferrable is True
+    assert parent_fk.initially == "DEFERRED"
+
+    messages = Base.metadata.tables["messages"]
+    assert any(
+        isinstance(constraint, UniqueConstraint)
+        and tuple(constraint.columns.keys())
+        == ("id", "origin_domain", "channel_id", "channel_domain")
+        for constraint in messages.constraints
+    )
+    message_target = (
+        "messages.id",
+        "messages.origin_domain",
+        "messages.channel_id",
+        "messages.channel_domain",
+    )
+    assert has_foreign_key(
+        "messages",
+        (
+            "referenced_message_id",
+            "referenced_message_domain",
+            "channel_id",
+            "channel_domain",
+        ),
+        message_target,
+    )
+    assert has_foreign_key(
+        "channels",
+        ("last_message_id", "last_message_domain", "id", "origin_domain"),
+        message_target,
+    )
+    assert has_foreign_key(
+        "read_states",
+        ("last_message_id", "last_message_domain", "channel_id", "channel_domain"),
+        message_target,
+    )
+    assert has_foreign_key(
+        "pins",
+        ("message_id", "message_domain", "channel_id", "channel_domain"),
+        message_target,
+    )
+
+
+def test_invites_webhooks_and_dm_conversations_bind_to_their_channel_identity() -> None:
+    channel_guild_target = (
+        "channels.id",
+        "channels.origin_domain",
+        "channels.guild_id",
+        "channels.guild_domain",
+    )
+    assert has_foreign_key(
+        "invites",
+        ("channel_id", "channel_domain", "guild_id", "guild_domain"),
+        channel_guild_target,
+    )
+    invite_channel_fk = foreign_key_for_columns(
+        "invites", ("channel_id", "channel_domain", "guild_id", "guild_domain")
+    )
+    assert invite_channel_fk.deferrable is True
+    assert invite_channel_fk.initially == "DEFERRED"
+    assert has_foreign_key(
+        "webhooks",
+        ("channel_id", "channel_domain", "guild_id", "guild_domain"),
+        channel_guild_target,
+    )
+
+    identity_fk = foreign_key_for_columns(
+        "dm_conversations", ("id", "origin_domain", "channel_type")
+    )
+    assert tuple(element.target_fullname for element in identity_fk.elements) == (
+        "channels.id",
+        "channels.origin_domain",
+        "channels.type",
+    )
+    assert identity_fk.deferrable is True
+    assert identity_fk.initially == "DEFERRED"
+    assert identity_fk.ondelete == "CASCADE"
+
+
+def test_guild_owner_must_be_a_member_of_the_same_guild() -> None:
+    owner_membership = foreign_key_for_columns(
+        "guilds", ("id", "origin_domain", "owner_id", "owner_domain")
+    )
+    assert tuple(element.target_fullname for element in owner_membership.elements) == (
+        "guild_members.guild_id",
+        "guild_members.guild_domain",
+        "guild_members.user_id",
+        "guild_members.user_domain",
+    )
+    assert owner_membership.deferrable is True
+    assert owner_membership.initially == "DEFERRED"
+
+
+def test_channel_overwrites_bind_to_existing_targets_in_the_same_guild() -> None:
+    assert has_foreign_key(
+        "channel_overwrites",
+        ("channel_id", "channel_domain", "guild_id", "guild_domain"),
+        (
+            "channels.id",
+            "channels.origin_domain",
+            "channels.guild_id",
+            "channels.guild_domain",
+        ),
+    )
+    role_target = foreign_key_for_columns(
+        "channel_overwrites",
+        ("role_target_id", "role_target_domain", "guild_id", "guild_domain"),
+    )
+    assert tuple(element.target_fullname for element in role_target.elements) == (
+        "roles.id",
+        "roles.origin_domain",
+        "roles.guild_id",
+        "roles.guild_domain",
+    )
+    member_target = foreign_key_for_columns(
+        "channel_overwrites",
+        ("guild_id", "guild_domain", "member_target_id", "member_target_domain"),
+    )
+    assert tuple(element.target_fullname for element in member_target.elements) == (
+        "guild_members.guild_id",
+        "guild_members.guild_domain",
+        "guild_members.user_id",
+        "guild_members.user_domain",
+    )
+    assert role_target.ondelete == member_target.ondelete == "CASCADE"
+    overwrites = Base.metadata.tables["channel_overwrites"]
+    assert isinstance(overwrites.c.role_target_id.computed, Computed)
+    assert isinstance(overwrites.c.member_target_id.computed, Computed)
+
+
+def test_type_one_channels_and_dm_conversations_have_an_inverse_identity_fk() -> None:
+    channels = Base.metadata.tables["channels"]
+    assert any(
+        isinstance(constraint, UniqueConstraint)
+        and tuple(constraint.columns.keys()) == ("id", "origin_domain", "type")
+        for constraint in channels.constraints
+    )
+    inverse = foreign_key_for_columns("channels", ("dm_conversation_id", "dm_conversation_domain"))
+    assert tuple(element.target_fullname for element in inverse.elements) == (
+        "dm_conversations.id",
+        "dm_conversations.origin_domain",
+    )
+    assert inverse.ondelete == "CASCADE"
+    assert inverse.deferrable is True
+    assert inverse.initially == "DEFERRED"
+    assert isinstance(channels.c.dm_conversation_id.computed, Computed)
+
+
+def test_security_sensitive_actor_and_origin_foreign_keys_exist() -> None:
+    expected = (
+        (
+            "invites",
+            ("channel_id", "channel_domain"),
+            ("channels.id", "channels.origin_domain"),
+        ),
+        ("bans", ("actor_id", "actor_domain"), ("users.id", "users.origin_domain")),
+        (
+            "audit_log_entries",
+            ("actor_id", "actor_domain"),
+            ("users.id", "users.origin_domain"),
+        ),
+        (
+            "emojis",
+            ("creator_id", "creator_domain"),
+            ("users.id", "users.origin_domain"),
+        ),
+        (
+            "webhooks",
+            ("guild_id", "guild_domain"),
+            ("guilds.id", "guilds.origin_domain"),
+        ),
+        (
+            "webhooks",
+            ("creator_id", "creator_domain"),
+            ("users.id", "users.origin_domain"),
+        ),
+        (
+            "federation_outbox",
+            ("destination",),
+            ("instances.domain",),
+        ),
+        (
+            "federation_inbox",
+            ("origin_domain",),
+            ("instances.domain",),
+        ),
+    )
+    for table, local_columns, targets in expected:
+        assert has_foreign_key(table, local_columns, targets), (table, local_columns)
+
+
+def test_lifecycle_and_range_constraints_are_registered() -> None:
+    required = {
+        "instances": {
+            "ck_instances_federation_mode_value",
+            "ck_instances_capabilities_are_array",
+        },
+        "peer_keys": {
+            "ck_peer_keys_expiry_after_fetch",
+            "ck_peer_keys_retirement_after_fetch",
+        },
+        "sessions": {"ck_sessions_expiry_order"},
+        "guilds": {"ck_guilds_event_sequence_order"},
+        "channels": {"ck_channels_rate_limit_range", "ck_channels_dm_type_matches_guild"},
+        "messages": {"ck_messages_content_length", "ck_messages_deleted_message_has_no_content"},
+        "federation_outbox": {
+            "ck_federation_outbox_status_value",
+            "ck_federation_outbox_nonnegative_attempts",
+        },
+        "federation_inbox": {"ck_federation_inbox_status_value"},
+        "remote_media_cache": {"ck_remote_media_cache_scan_status"},
+    }
+    for table, names in required.items():
+        assert names <= constraint_names(table), table

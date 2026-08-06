@@ -1,0 +1,239 @@
+# Install inside nginx's http context, usually as /etc/nginx/conf.d/kaede.conf.
+# Replace chat.example.com and the certificate paths before enabling it.
+
+# Kaede accepts long, valid FQDNs; nginx's platform default can be too small.
+server_names_hash_bucket_size 512;
+
+map $http_upgrade $kaede_connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
+# Invite codes are bearer credentials. Keep route-level observability without
+# copying those path segments into access logs.
+map $uri $kaede_safe_uri {
+    ~^/api/v1/invites/[^/]+$ /api/v1/invites/[redacted];
+    ~^/api/v1/webhooks/ /api/v1/webhooks/[redacted];
+    default $uri;
+}
+
+# Bound unauthenticated WebSocket upgrades before they reach Caddy. These zones
+# live in nginx's http context; the limits themselves are applied only to the
+# exact /gateway location below, so ordinary API and static requests are not
+# throttled by them. Twenty simultaneous handshakes and ten new upgrades per
+# second (with a burst of twenty) leave headroom for legitimate NATed clients.
+limit_conn_zone $binary_remote_addr zone=kaede_gateway_connections:10m;
+limit_req_zone $binary_remote_addr zone=kaede_gateway_upgrades:10m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=kaede_livekit_connections:10m;
+limit_req_zone $binary_remote_addr zone=kaede_livekit_upgrades:10m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=kaede_federation_connections:10m;
+limit_req_zone $binary_remote_addr zone=kaede_federation_upgrades:10m rate=2r/s;
+limit_conn_zone $binary_remote_addr zone=kaede_media_connections:10m;
+limit_req_zone $binary_remote_addr zone=kaede_media_requests:10m rate=30r/s;
+
+# Deliberately omit the query string and request headers (including Referer):
+# one-time and presigned credentials must never be copied into host access logs.
+log_format kaede_no_query '$remote_addr - $remote_user [$time_local] '
+                          '"$request_method $kaede_safe_uri $server_protocol" $status $body_bytes_sent';
+
+upstream kaede_caddy {
+    server 127.0.0.1:18081;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name chat.example.com;
+    access_log /var/log/nginx/kaede.access.log kaede_no_query;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+    }
+
+    location / {
+        return 301 https://$server_name$request_uri;
+    }
+}
+
+server {
+    # The listen-parameter form works with nginx 1.24 shipped by current Ubuntu
+    # LTS releases. Newer nginx versions still accept it.
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name chat.example.com;
+    access_log /var/log/nginx/kaede.access.log kaede_no_query;
+    server_tokens off;
+
+    ssl_certificate /etc/letsencrypt/live/chat.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chat.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:KaedeTLS:10m;
+    ssl_session_timeout 1d;
+
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+
+    # Application APIs, including the signed federation batch endpoint, never
+    # require the much larger direct-upload allowance on the media host.
+    client_max_body_size 2m;
+    client_body_timeout 15s;
+
+    # Federation links are mutually authenticated in the API, but bounding
+    # upgrade work at the public edge protects that verification path during
+    # reconnect storms. Durable delivery falls back to the signed HTTP inbox.
+    location = /_kaede/v1/link {
+        limit_conn kaede_federation_connections 8;
+        limit_conn_status 429;
+        limit_req zone=kaede_federation_upgrades burst=4 nodelay;
+        limit_req_status 429;
+        proxy_pass http://kaede_caddy;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Kaede-Edge-Secret replace-with-kaede-edge-secret;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $kaede_connection_upgrade;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    # Keep WebSocket upgrade behavior and long-lived timeouts scoped to the
+    # gateway. Applying these settings to every request disables upstream
+    # keepalive and buffering for ordinary API, media, and static responses.
+    location = /gateway {
+        limit_conn kaede_gateway_connections 20;
+        limit_conn_status 429;
+        limit_req zone=kaede_gateway_upgrades burst=20 nodelay;
+        limit_req_status 429;
+        proxy_pass http://kaede_caddy;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # Discard any client-supplied forwarding chain. Caddy reconstructs a
+        # single trusted client address before passing requests to the API.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        # Generate a separate random value and set the matching
+        # KAEDE_EDGE_SECRET in Kaede's .env. This prevents other local processes
+        # or containers from forging nginx's trusted client-address assertion.
+        proxy_set_header X-Kaede-Edge-Secret replace-with-kaede-edge-secret;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $kaede_connection_upgrade;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    # LiveKit performs ordinary discovery/validation requests before upgrading
+    # /livekit/rtc to a long-lived signaling WebSocket. Keep this separate from
+    # the catch-all below, which deliberately clears hop-by-hop headers.
+    location ~ ^/livekit(?:/|$) {
+        limit_conn kaede_livekit_connections 64;
+        limit_conn_status 429;
+        limit_req zone=kaede_livekit_upgrades burst=20 nodelay;
+        limit_req_status 429;
+        proxy_pass http://kaede_caddy;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Kaede-Edge-Secret replace-with-kaede-edge-secret;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $kaede_connection_upgrade;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    location / {
+        proxy_pass http://kaede_caddy;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # Discard any client-supplied forwarding chain. Caddy reconstructs a
+        # single trusted client address before passing requests to the API.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Kaede-Edge-Secret replace-with-kaede-edge-secret;
+        # Remove nginx's default close header so the upstream keepalive pool is
+        # effective for ordinary HTTP requests.
+        proxy_set_header Connection "";
+    }
+}
+
+# KAEDE_SETUP_GARAGE_MEDIA_BEGIN
+# Direct object traffic has a separate request budget and body-size boundary.
+# Remove this server entirely when KAEDE_MEDIA_PUBLIC_BASE_URL points at an
+# external S3-compatible provider.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name media.chat.example.com;
+    access_log /var/log/nginx/kaede.access.log kaede_no_query;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+    }
+
+    location / {
+        return 301 https://$server_name$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name media.chat.example.com;
+    access_log /var/log/nginx/kaede.access.log kaede_no_query;
+    server_tokens off;
+
+    ssl_certificate /etc/letsencrypt/live/chat.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chat.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:KaedeTLS:10m;
+    ssl_session_timeout 1d;
+
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+
+    # The default application maximum is 100 MiB. The extra MiB covers request
+    # framing without weakening the 2 MiB API/federation boundary above.
+    client_max_body_size 101m;
+    client_body_timeout 30s;
+    send_timeout 300s;
+
+    location / {
+        limit_conn kaede_media_connections 32;
+        limit_conn_status 429;
+        limit_req zone=kaede_media_requests burst=60 nodelay;
+        limit_req_status 429;
+        limit_except GET HEAD PUT OPTIONS { deny all; }
+
+        proxy_pass http://kaede_caddy;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Kaede-Edge-Secret replace-with-kaede-edge-secret;
+        proxy_set_header Connection "";
+
+        # Stream large uploads instead of writing client bodies to host disk,
+        # and do not buffer private object responses at the public edge.
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+    }
+}
+# KAEDE_SETUP_GARAGE_MEDIA_END

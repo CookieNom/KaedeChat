@@ -1,0 +1,195 @@
+import DOMPurify from 'dompurify';
+import { marked } from 'marked';
+import { entityRef } from './refs';
+import type { UserSummary } from './types';
+
+const EXPLICIT_MENTION = /^<@(\d+)(?:@([a-z0-9.-]+))?>$/i;
+const TOKEN =
+  /(<@\d+(?:@[a-z0-9.-]+)?>|@[a-z0-9_.-]{1,64}@[a-z0-9.-]+|#[a-z0-9_-]{1,100}|:[a-z0-9_+-]{1,64}:)/gi;
+const COMPLETE_TOKEN =
+  /^(<@\d+(?:@[a-z0-9.-]+)?>|@[a-z0-9_.-]{1,64}@[a-z0-9.-]+|#[a-z0-9_-]{1,100}|:[a-z0-9_+-]{1,64}:)$/i;
+const SPOILER = /(\|\|[^|](?:.|\n)*?\|\|)/g;
+
+export function splitSpoilers(value: string): string[] {
+  return value.split(SPOILER).filter(Boolean);
+}
+
+export function tokenKind(token: string): 'mention' | 'channel' | 'emoji' {
+  if (token.startsWith('@') || token.startsWith('<@')) return 'mention';
+  if (token.startsWith('#')) return 'channel';
+  return 'emoji';
+}
+
+export function tokenizeText(
+  value: string
+): { text: string; kind: 'text' | 'mention' | 'channel' | 'emoji' }[] {
+  const parts = value.split(TOKEN);
+  return parts
+    .filter(Boolean)
+    .map((part) =>
+      COMPLETE_TOKEN.test(part)
+        ? { text: part, kind: tokenKind(part) }
+        : { text: part, kind: 'text' }
+    );
+}
+
+function mentionUser(
+  token: string,
+  users: UserSummary[],
+  localDomain: string
+): UserSummary | undefined {
+  const explicit = EXPLICIT_MENTION.exec(token);
+  if (explicit) {
+    const [, id, domain] = explicit;
+    return users.find(
+      (user) =>
+        user.id === id &&
+        (domain
+          ? user.origin_domain.toLowerCase() === domain.toLowerCase()
+          : user.origin_domain.toLowerCase() === localDomain.toLowerCase())
+    );
+  }
+  const handle = token.slice(1).toLowerCase();
+  return users.find((user) => user.handle.toLowerCase() === handle);
+}
+
+function mentionSpan(token: string, users: UserSummary[], localDomain: string): HTMLSpanElement {
+  const user = mentionUser(token, users, localDomain);
+  const explicit = EXPLICIT_MENTION.exec(token);
+  const reference = explicit ? `${explicit[1]}${explicit[2] ? `@${explicit[2]}` : ''}` : undefined;
+  const handle = user?.handle ?? (token.startsWith('@') ? token.slice(1) : undefined);
+  const visibleName = user?.display_name ?? user?.username;
+  const span = document.createElement('span');
+  span.className = 'chat-token chat-token-mention';
+  span.textContent = visibleName ? `@${visibleName}` : handle ? `@${handle}` : '@unknown-user';
+  span.tabIndex = 0;
+  span.setAttribute('role', 'button');
+  if (user) span.dataset.userRef = entityRef(user);
+  else if (reference) span.dataset.userRef = reference;
+  if (handle) span.dataset.userHandle = handle;
+  span.title = user ? `@${user.handle}` : (reference ?? token);
+  span.setAttribute(
+    'aria-label',
+    `View profile for ${visibleName ?? handle ?? reference ?? 'user'}`
+  );
+  return span;
+}
+
+function replaceLegacyMentionLinks(
+  root: DocumentFragment,
+  users: UserSummary[],
+  localDomain: string
+): void {
+  for (const anchor of root.querySelectorAll<HTMLAnchorElement>('a[href^="mailto:"]')) {
+    const previous = anchor.previousSibling;
+    const next = anchor.nextSibling;
+    if (!(previous instanceof Text)) continue;
+    const address = anchor.textContent?.trim() ?? '';
+    if (
+      previous.data.endsWith('<@') &&
+      next instanceof Text &&
+      next.data.startsWith('>') &&
+      /^\d+@[a-z0-9.-]+$/i.test(address)
+    ) {
+      previous.data = previous.data.slice(0, -2);
+      next.data = next.data.slice(1);
+      anchor.replaceWith(mentionSpan(`<@${address}>`, users, localDomain));
+      continue;
+    }
+    if (!previous.data.endsWith('@')) continue;
+    if (!/^[a-z0-9_.-]{1,64}@[a-z0-9.-]+$/i.test(address)) continue;
+    previous.data = previous.data.slice(0, -1);
+    anchor.replaceWith(mentionSpan(`@${address}`, users, localDomain));
+  }
+}
+
+export function renderMessageMarkdown(
+  content: string,
+  users: UserSummary[] = [],
+  localDomain = ''
+): string {
+  const parsed = marked.parse(content, { async: false, breaks: true, gfm: true });
+  const sanitized = DOMPurify.sanitize(parsed, {
+    ALLOWED_TAGS: [
+      'p',
+      'br',
+      'strong',
+      'em',
+      'del',
+      'code',
+      'pre',
+      'blockquote',
+      'ul',
+      'ol',
+      'li',
+      'a',
+      'h1',
+      'h2',
+      'h3',
+      'h4',
+      'h5',
+      'h6',
+      'hr',
+      'table',
+      'thead',
+      'tbody',
+      'tr',
+      'th',
+      'td',
+      'input'
+    ],
+    ALLOWED_ATTR: ['href', 'title', 'type', 'checked', 'disabled'],
+    ALLOW_DATA_ATTR: false
+  });
+  const template = document.createElement('template');
+  template.innerHTML = sanitized;
+  replaceLegacyMentionLinks(template.content, users, localDomain);
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+  for (const node of nodes) {
+    if (node.parentElement?.closest('code, pre, a, .chat-token')) continue;
+    const spoilerParts = splitSpoilers(node.data);
+    const hasSpoiler = spoilerParts.some((part) => part.startsWith('||') && part.endsWith('||'));
+    const hasToken = tokenizeText(node.data).some((part) => part.kind !== 'text');
+    if (!hasSpoiler && !hasToken) continue;
+    const fragment = document.createDocumentFragment();
+    for (const spoilerPart of spoilerParts) {
+      if (spoilerPart.startsWith('||') && spoilerPart.endsWith('||')) {
+        const spoiler = document.createElement('span');
+        spoiler.className = 'chat-spoiler';
+        spoiler.tabIndex = 0;
+        spoiler.setAttribute('role', 'button');
+        spoiler.setAttribute('aria-label', 'Reveal spoiler');
+        spoiler.textContent = spoilerPart.slice(2, -2);
+        fragment.append(spoiler);
+        continue;
+      }
+      for (const part of tokenizeText(spoilerPart)) {
+        if (part.kind === 'text') fragment.append(document.createTextNode(part.text));
+        else {
+          if (part.kind === 'mention') {
+            fragment.append(mentionSpan(part.text, users, localDomain));
+          } else {
+            const span = document.createElement('span');
+            span.className = `chat-token chat-token-${part.kind}`;
+            span.textContent = part.text;
+            fragment.append(span);
+          }
+        }
+      }
+    }
+    node.replaceWith(fragment);
+  }
+  for (const anchor of template.content.querySelectorAll('a')) {
+    anchor.setAttribute('rel', 'noopener noreferrer nofollow');
+    anchor.setAttribute('target', '_blank');
+  }
+  for (const input of template.content.querySelectorAll('input')) {
+    input.setAttribute('type', 'checkbox');
+    input.setAttribute('disabled', '');
+    input.removeAttribute('name');
+    input.removeAttribute('value');
+  }
+  return template.innerHTML;
+}

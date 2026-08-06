@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: Kaede Chat
+    orgId: 1
+    folder: Kaede Chat
+    type: file
+    disableDeletion: true
+    editable: false
+    options:
+      path: /var/lib/grafana/dashboards

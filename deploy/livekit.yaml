@@ -1,0 +1,23 @@
+port: 7880
+bind_addresses: ["0.0.0.0"]
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: true
+# This file is an operator-readable template. Compose passes its rendered
+# equivalent through LIVEKIT_CONFIG because LiveKit does not expand ${...}
+# placeholders inside a mounted YAML file.
+turn:
+  enabled: true
+  domain: "${KAEDE_DOMAIN}"
+  udp_port: ${KAEDE_TURN_UDP_PORT}
+  tls_port: 5349
+  cert_file: /run/secrets/livekit-turn-cert.pem
+  key_file: /run/secrets/livekit-turn-key.pem
+keys:
+  "${LIVEKIT_API_KEY}": "${LIVEKIT_API_SECRET}"
+webhook:
+  api_key: "${LIVEKIT_API_KEY}"
+  urls: ["http://127.0.0.1:${KAEDE_API_HOST_PORT}/internal/livekit/webhook"]
+room:
+  empty_timeout: 300

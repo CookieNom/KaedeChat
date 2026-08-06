@@ -1,0 +1,287 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+from fastapi import HTTPException
+from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.settings import Settings
+from app.core.snowflake import SnowflakeGenerator
+from app.db.models import Attachment, User, UserStorageUsage
+from app.media.processing import normalize_declared_type, sanitize_filename
+from app.media.storage import S3Storage, StorageError
+
+
+def original_object_key(domain: str, attachment_id: int) -> str:
+    # Browser-issued PUT credentials are valid for the full ticket lifetime, so
+    # this key is staging-only and must never be served after scanning.
+    return f"{domain}/{attachment_id}/staging/original"
+
+
+def clean_object_key(domain: str, attachment_id: int, digest: str) -> str:
+    """Return a server-only immutable key for the exact bytes that were scanned."""
+
+    return f"{domain}/{attachment_id}/clean/{digest}/original"
+
+
+def derived_object_key(domain: str, attachment_id: int, variant: str) -> str:
+    return f"{domain}/{attachment_id}/{variant}.webp"
+
+
+def attachment_payload(attachment: Attachment) -> dict[str, object]:
+    return {
+        "id": str(attachment.id),
+        "origin_domain": attachment.origin_domain,
+        "filename": attachment.filename,
+        "content_type": attachment.detected_content_type or attachment.content_type,
+        "size": attachment.size,
+        "width": attachment.width,
+        "height": attachment.height,
+        "blurhash": attachment.blurhash,
+        "scan_status": attachment.scan_status,
+        "purpose": attachment.purpose,
+        "variants": attachment.variants,
+        "finalized_at": (
+            attachment.finalized_at.isoformat() if attachment.finalized_at is not None else None
+        ),
+    }
+
+
+async def locked_usage(session: AsyncSession, settings: Settings, user: User) -> UserStorageUsage:
+    if user.origin_domain != settings.domain or not user.is_local:
+        raise HTTPException(status_code=403, detail={"code": "LOCAL_USER_REQUIRED"})
+    await session.execute(
+        pg_insert(UserStorageUsage)
+        .values(
+            user_id=user.id,
+            user_domain=settings.domain,
+            user_is_local=True,
+            bytes_used=0,
+            pending_bytes=0,
+        )
+        .on_conflict_do_nothing(index_elements=["user_id", "user_domain"])
+    )
+    usage = await session.scalar(
+        select(UserStorageUsage)
+        .where(
+            UserStorageUsage.user_id == user.id,
+            UserStorageUsage.user_domain == settings.domain,
+        )
+        .with_for_update()
+    )
+    if usage is None:
+        raise RuntimeError("storage accounting row did not converge")
+    return usage
+
+
+async def create_upload_ticket(
+    session: AsyncSession,
+    settings: Settings,
+    snowflake: SnowflakeGenerator,
+    user: User,
+    *,
+    filename: str,
+    content_type: str,
+    size: int,
+    purpose: str = "attachment",
+) -> tuple[Attachment, str]:
+    if size <= 0 or size > settings.media_max_attachment_bytes:
+        raise HTTPException(status_code=413, detail={"code": "ATTACHMENT_TOO_LARGE"})
+    declared_type = normalize_declared_type(content_type)
+    usage = await locked_usage(session, settings, user)
+    pending_count = await session.scalar(
+        select(func.count())
+        .select_from(Attachment)
+        .where(
+            Attachment.uploader_id == user.id,
+            Attachment.uploader_domain == user.origin_domain,
+            Attachment.finalized_at.is_(None),
+            Attachment.deleted_at.is_(None),
+            Attachment.upload_expires_at > func.now(),
+        )
+    )
+    if (pending_count or 0) >= settings.media_inflight_limit:
+        raise HTTPException(status_code=429, detail={"code": "UPLOAD_INFLIGHT_LIMIT"})
+    if usage.pending_bytes + size > settings.media_inflight_quota_bytes:
+        raise HTTPException(status_code=413, detail={"code": "UPLOAD_INFLIGHT_QUOTA_EXCEEDED"})
+    if usage.bytes_used + usage.pending_bytes + size > settings.media_user_quota_bytes:
+        raise HTTPException(status_code=413, detail={"code": "USER_STORAGE_QUOTA_EXCEEDED"})
+    attachment_id = await snowflake.mint()
+    expires_at = datetime.now(UTC) + timedelta(seconds=settings.media_upload_ttl_seconds)
+    attachment = Attachment(
+        id=attachment_id,
+        origin_domain=settings.domain,
+        uploader_id=user.id,
+        uploader_domain=user.origin_domain,
+        filename=sanitize_filename(filename),
+        content_type=declared_type,
+        size=size,
+        object_key=original_object_key(settings.domain, attachment_id),
+        staging_object_key=original_object_key(settings.domain, attachment_id),
+        scan_status="pending",
+        purpose=purpose,
+        upload_expires_at=expires_at,
+        variants={},
+    )
+    session.add(attachment)
+    usage.pending_bytes += size
+    await session.flush()
+    try:
+        upload_url = S3Storage(settings).presign(
+            "PUT",
+            settings.media_attachments_bucket,
+            attachment.object_key,
+            expires=settings.media_upload_ttl_seconds,
+            content_length=size,
+            content_type=declared_type,
+        )
+    except StorageError as exc:
+        raise HTTPException(status_code=503, detail={"code": "MEDIA_STORAGE_UNAVAILABLE"}) from exc
+    return attachment, upload_url
+
+
+async def finalize_attachment(
+    session: AsyncSession,
+    settings: Settings,
+    user: User,
+    attachment_id: int,
+    *,
+    required_purpose: str | None = None,
+) -> Attachment:
+    attachment = await session.scalar(
+        select(Attachment)
+        .where(
+            Attachment.id == attachment_id,
+            Attachment.origin_domain == settings.domain,
+        )
+        .with_for_update()
+    )
+    if attachment is None or attachment.deleted_at is not None:
+        raise HTTPException(status_code=404, detail={"code": "ATTACHMENT_NOT_FOUND"})
+    if (attachment.uploader_id, attachment.uploader_domain) != (user.id, user.origin_domain):
+        raise HTTPException(status_code=403, detail={"code": "ATTACHMENT_NOT_OWNED"})
+    if required_purpose is not None and attachment.purpose != required_purpose:
+        raise HTTPException(status_code=400, detail={"code": "ATTACHMENT_PURPOSE_MISMATCH"})
+    if attachment.finalized_at is not None:
+        return attachment
+    now = datetime.now(UTC)
+    if attachment.upload_expires_at is None or attachment.upload_expires_at <= now:
+        raise HTTPException(status_code=410, detail={"code": "UPLOAD_TICKET_EXPIRED"})
+    try:
+        metadata = await S3Storage(settings).head(
+            settings.media_attachments_bucket, attachment.object_key
+        )
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail={"code": "UPLOAD_INCOMPLETE"}) from exc
+    if metadata.size != attachment.size:
+        raise HTTPException(status_code=400, detail={"code": "UPLOAD_SIZE_MISMATCH"})
+    try:
+        stored_type = normalize_declared_type(metadata.content_type)
+    except ValueError:
+        stored_type = ""
+    if stored_type != attachment.content_type:
+        raise HTTPException(status_code=400, detail={"code": "UPLOAD_TYPE_MISMATCH"})
+    usage = await locked_usage(session, settings, user)
+    if usage.pending_bytes < attachment.size:
+        raise RuntimeError("pending storage accounting underflow")
+    if usage.bytes_used + attachment.size > settings.media_user_quota_bytes:
+        raise HTTPException(status_code=413, detail={"code": "USER_STORAGE_QUOTA_EXCEEDED"})
+    usage.pending_bytes -= attachment.size
+    usage.bytes_used += attachment.size
+    attachment.finalized_at = now
+    return attachment
+
+
+async def bind_asset(
+    session: AsyncSession, attachment: Attachment, binding: str
+) -> Attachment | None:
+    if attachment.asset_binding not in {None, binding}:
+        raise HTTPException(status_code=409, detail={"code": "ASSET_ALREADY_USED"})
+    previous = await session.scalar(
+        select(Attachment)
+        .where(
+            Attachment.asset_binding == binding,
+            tuple_(Attachment.id, Attachment.origin_domain)
+            != (attachment.id, attachment.origin_domain),
+        )
+        .with_for_update()
+    )
+    if previous is not None:
+        previous.asset_binding = None
+        await session.flush()
+    attachment.asset_binding = binding
+    return previous
+
+
+async def discard_attachment(
+    session: AsyncSession, settings: Settings, attachment: Attachment
+) -> None:
+    usage = await session.scalar(
+        select(UserStorageUsage)
+        .where(
+            UserStorageUsage.user_id == attachment.uploader_id,
+            UserStorageUsage.user_domain == attachment.uploader_domain,
+        )
+        .with_for_update()
+    )
+    if usage is not None:
+        if attachment.finalized_at is None:
+            usage.pending_bytes = max(0, usage.pending_bytes - attachment.size)
+        else:
+            usage.bytes_used = max(0, usage.bytes_used - attachment.size)
+    attachment.deleted_at = datetime.now(UTC)
+
+
+async def expired_pending_attachments(
+    session: AsyncSession, *, limit: int = 100
+) -> list[Attachment]:
+    return list(
+        await session.scalars(
+            select(Attachment)
+            .where(
+                Attachment.finalized_at.is_(None),
+                Attachment.deleted_at.is_(None),
+                Attachment.upload_expires_at <= func.now(),
+            )
+            .order_by(Attachment.upload_expires_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    )
+
+
+async def attachments_for_messages(
+    session: AsyncSession, refs: set[tuple[int, str]]
+) -> dict[tuple[int, str], list[Attachment]]:
+    if not refs:
+        return {}
+    rows = list(
+        await session.scalars(
+            select(Attachment)
+            .where(
+                Attachment.message_id.is_not(None),
+                Attachment.message_domain.is_not(None),
+                Attachment.deleted_at.is_(None),
+                tuple_(Attachment.message_id, Attachment.message_domain).in_(refs),
+            )
+            .order_by(Attachment.id)
+        )
+    )
+    result: dict[tuple[int, str], list[Attachment]] = {}
+    for attachment in rows:
+        if attachment.message_id is not None and attachment.message_domain is not None:
+            result.setdefault((attachment.message_id, attachment.message_domain), []).append(
+                attachment
+            )
+    return result
+
+
+async def delete_attachment_row(session: AsyncSession, attachment: Attachment) -> None:
+    await session.execute(
+        delete(Attachment).where(
+            Attachment.id == attachment.id,
+            Attachment.origin_domain == attachment.origin_domain,
+        )
+    )

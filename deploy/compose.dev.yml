@@ -1,0 +1,298 @@
+name: kaede-dev
+
+x-api: &api
+  build: { context: ../backend, target: development }
+  command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--no-access-log"]
+  volumes: ["../backend:/workspace"]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+
+x-gateway: &gateway
+  build: { context: ../backend, target: development }
+  command:
+    [
+      "uvicorn",
+      "app.gateway:app",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8001",
+      "--reload",
+      "--ws-max-size",
+      "65536",
+      "--no-access-log",
+    ]
+  volumes: ["../backend:/workspace"]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/live')"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+
+x-postgres: &postgres
+  image: postgres:16.14-alpine
+  environment: { POSTGRES_USER: kaede, POSTGRES_PASSWORD: kaede, POSTGRES_DB: kaede }
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U kaede"]
+    interval: 3s
+    timeout: 2s
+    retries: 30
+
+x-dragonfly: &dragonfly
+  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0
+  command: ["--dir=/data", "--dbfilename=dump", "--snapshot_cron=*/5 * * * *"]
+  healthcheck:
+    test: ["CMD", "redis-cli", "ping"]
+    interval: 3s
+    timeout: 2s
+    retries: 30
+
+services:
+  caddy:
+    image: caddy:2.11.4-alpine
+    environment:
+      KAEDE_PROXY_SECRET: kaede-development-proxy-secret-00001
+      KAEDE_DEV_HTTPS_PORT: ${KAEDE_DEV_HTTPS_PORT:-18443}
+    ports:
+      - "127.0.0.1:${KAEDE_DEV_HTTP_PORT:-18083}:80"
+      - "127.0.0.1:${KAEDE_DEV_HTTPS_PORT:-18443}:443"
+    volumes:
+      - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
+      - caddy-dev-data:/data
+    networks: [edge, alpha, beta]
+
+  alpha-api:
+    <<: *api
+    env_file: .env.alpha
+    environment:
+      KAEDE_APP_URL: https://alpha.localhost:${KAEDE_DEV_HTTPS_PORT:-18443}
+      KAEDE_MEDIA_PUBLIC_BASE_URL: https://media.alpha.localhost:${KAEDE_DEV_HTTPS_PORT:-18443}
+    networks: [alpha, federation]
+    depends_on:
+      alpha-migrate: { condition: service_completed_successfully }
+      alpha-garage-init: { condition: service_completed_successfully }
+      clamav: { condition: service_healthy }
+  alpha-gateway:
+    <<: *gateway
+    env_file: .env.alpha
+    environment:
+      KAEDE_APP_URL: https://alpha.localhost:${KAEDE_DEV_HTTPS_PORT:-18443}
+      KAEDE_SERVICE_ROLE: gateway
+      KAEDE_SECRET_KEY: QEBBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM
+    networks: [alpha]
+    depends_on:
+      alpha-migrate: { condition: service_completed_successfully }
+  alpha-worker:
+    build: { context: ../backend, target: development }
+    command: ["taskiq", "worker", "app.tasks:broker", "--reload"]
+    env_file: .env.alpha
+    volumes: ["../backend:/workspace"]
+    networks: [alpha, federation]
+    depends_on:
+      alpha-migrate: { condition: service_completed_successfully }
+      alpha-garage-init: { condition: service_completed_successfully }
+      clamav: { condition: service_healthy }
+  alpha-scheduler:
+    build: { context: ../backend, target: development }
+    command: ["taskiq", "scheduler", "app.scheduler:scheduler"]
+    environment:
+      KAEDE_DRAGONFLY_URL: redis://alpha-dragonfly:6379/0
+      KAEDE_LOG_LEVEL: INFO
+    volumes: ["../backend:/workspace"]
+    networks: [alpha]
+    depends_on:
+      alpha-migrate: { condition: service_completed_successfully }
+  alpha-migrate:
+    build: { context: ../backend, target: development }
+    command: ["sh", "-ec", "alembic upgrade head && kaede bootstrap"]
+    env_file: .env.alpha
+    volumes: ["../backend:/workspace"]
+    networks: [alpha]
+    depends_on:
+      alpha-postgres: { condition: service_healthy }
+      alpha-dragonfly: { condition: service_healthy }
+    restart: "no"
+  alpha-postgres:
+    <<: *postgres
+    volumes: [alpha-postgres:/var/lib/postgresql/data]
+    networks: [alpha]
+  alpha-dragonfly:
+    <<: *dragonfly
+    volumes: [alpha-dragonfly:/data]
+    networks: [alpha]
+  alpha-garage:
+    image: dxflrs/garage:v2.3.0
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_RPC_SECRET: "1111111111111111111111111111111111111111111111111111111111111111"
+      GARAGE_ADMIN_TOKEN: alpha-development-garage-admin
+      GARAGE_DEFAULT_ACCESS_KEY: GK11111111111111111111111111111111
+      GARAGE_DEFAULT_SECRET_KEY: "1111111111111111111111111111111111111111111111111111111111111111"
+      GARAGE_DEFAULT_BUCKET: kaede-attachments
+      GARAGE_RPC_PUBLIC_ADDR: alpha-garage:3901
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - alpha-garage-meta:/var/lib/garage/meta
+      - alpha-garage-data:/var/lib/garage/data
+    networks: [alpha]
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  alpha-garage-init:
+    build: { context: ../backend, target: development }
+    command: ["python", "-m", "app.media.init_buckets"]
+    env_file: .env.alpha
+    volumes: ["../backend:/workspace"]
+    networks: [alpha]
+    depends_on:
+      alpha-garage: { condition: service_healthy }
+
+  beta-api:
+    <<: *api
+    env_file: .env.beta
+    environment:
+      KAEDE_APP_URL: https://beta.localhost:${KAEDE_DEV_HTTPS_PORT:-18443}
+      KAEDE_MEDIA_PUBLIC_BASE_URL: https://media.beta.localhost:${KAEDE_DEV_HTTPS_PORT:-18443}
+    networks: [beta, federation]
+    depends_on:
+      beta-migrate: { condition: service_completed_successfully }
+      beta-garage-init: { condition: service_completed_successfully }
+      clamav: { condition: service_healthy }
+  beta-gateway:
+    <<: *gateway
+    env_file: .env.beta
+    environment:
+      KAEDE_APP_URL: https://beta.localhost:${KAEDE_DEV_HTTPS_PORT:-18443}
+      KAEDE_SERVICE_ROLE: gateway
+      KAEDE_SECRET_KEY: QEBBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM
+    networks: [beta]
+    depends_on:
+      beta-migrate: { condition: service_completed_successfully }
+  beta-worker:
+    build: { context: ../backend, target: development }
+    command: ["taskiq", "worker", "app.tasks:broker", "--reload"]
+    env_file: .env.beta
+    volumes: ["../backend:/workspace"]
+    networks: [beta, federation]
+    depends_on:
+      beta-migrate: { condition: service_completed_successfully }
+      beta-garage-init: { condition: service_completed_successfully }
+      clamav: { condition: service_healthy }
+  beta-scheduler:
+    build: { context: ../backend, target: development }
+    command: ["taskiq", "scheduler", "app.scheduler:scheduler"]
+    environment:
+      KAEDE_DRAGONFLY_URL: redis://beta-dragonfly:6379/0
+      KAEDE_LOG_LEVEL: INFO
+    volumes: ["../backend:/workspace"]
+    networks: [beta]
+    depends_on:
+      beta-migrate: { condition: service_completed_successfully }
+  beta-migrate:
+    build: { context: ../backend, target: development }
+    command: ["sh", "-ec", "alembic upgrade head && kaede bootstrap"]
+    env_file: .env.beta
+    volumes: ["../backend:/workspace"]
+    networks: [beta]
+    depends_on:
+      beta-postgres: { condition: service_healthy }
+      beta-dragonfly: { condition: service_healthy }
+    restart: "no"
+  beta-postgres:
+    <<: *postgres
+    volumes: [beta-postgres:/var/lib/postgresql/data]
+    networks: [beta]
+  beta-dragonfly:
+    <<: *dragonfly
+    volumes: [beta-dragonfly:/data]
+    networks: [beta]
+  beta-garage:
+    image: dxflrs/garage:v2.3.0
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_RPC_SECRET: "2222222222222222222222222222222222222222222222222222222222222222"
+      GARAGE_ADMIN_TOKEN: beta-development-garage-admin
+      GARAGE_DEFAULT_ACCESS_KEY: GK22222222222222222222222222222222
+      GARAGE_DEFAULT_SECRET_KEY: "2222222222222222222222222222222222222222222222222222222222222222"
+      GARAGE_DEFAULT_BUCKET: kaede-attachments
+      GARAGE_RPC_PUBLIC_ADDR: beta-garage:3901
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - beta-garage-meta:/var/lib/garage/meta
+      - beta-garage-data:/var/lib/garage/data
+    networks: [beta]
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  beta-garage-init:
+    build: { context: ../backend, target: development }
+    command: ["python", "-m", "app.media.init_buckets"]
+    env_file: .env.beta
+    volumes: ["../backend:/workspace"]
+    networks: [beta]
+    depends_on:
+      beta-garage: { condition: service_healthy }
+
+  clamav:
+    image: clamav/clamav:1.5.3
+    volumes: [clamav-dev:/var/lib/clamav]
+    networks: [alpha, beta, federation]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+
+  frontend:
+    build: { context: ../frontend, target: development }
+    command: ["sh", "-ec", "pnpm install --frozen-lockfile && pnpm dev"]
+    environment:
+      KAEDE_MEDIA_UPLOAD_ORIGINS: >-
+        https://media.alpha.localhost:${KAEDE_DEV_HTTPS_PORT:-18443},
+        https://media.beta.localhost:${KAEDE_DEV_HTTPS_PORT:-18443}
+    volumes: ["../frontend:/workspace", "frontend-modules:/workspace/node_modules"]
+    networks: [edge]
+
+  federation-check:
+    build: { context: ../backend, target: development }
+    command: ["python", "-m", "scripts.verify_federation"]
+    environment:
+      ALPHA_URL: http://alpha-api:8000
+      BETA_URL: http://beta-api:8000
+      ALPHA_DATABASE_URL: postgresql+asyncpg://kaede:kaede@alpha-postgres:5432/kaede
+      BETA_DATABASE_URL: postgresql+asyncpg://kaede:kaede@beta-postgres:5432/kaede
+      BETA_DRAGONFLY_URL: redis://beta-dragonfly:6379/0
+      KAEDE_DOMAIN: validation.localhost
+      KAEDE_ENVIRONMENT: test
+      KAEDE_SECRET_KEY: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+      KAEDE_DATABASE_URL: postgresql+asyncpg://kaede:kaede@alpha-postgres:5432/kaede
+      KAEDE_DRAGONFLY_URL: redis://alpha-dragonfly:6379/0
+    volumes: ["../backend:/workspace"]
+    networks: [alpha, beta, federation]
+    profiles: [validation]
+
+networks:
+  edge:
+  alpha:
+  beta:
+  federation:
+
+volumes:
+  caddy-dev-data:
+  alpha-postgres:
+  alpha-dragonfly:
+  alpha-garage-meta:
+  alpha-garage-data:
+  beta-postgres:
+  beta-dragonfly:
+  beta-garage-meta:
+  beta-garage-data:
+  clamav-dev:
+  frontend-modules:

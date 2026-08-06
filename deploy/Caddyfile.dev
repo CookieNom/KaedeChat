@@ -1,0 +1,56 @@
+{
+	local_certs
+	auto_https disable_redirects
+}
+
+http://alpha.localhost {
+	redir https://alpha.localhost:{$KAEDE_DEV_HTTPS_PORT}{uri} 308
+}
+
+http://beta.localhost {
+	redir https://beta.localhost:{$KAEDE_DEV_HTTPS_PORT}{uri} 308
+}
+
+alpha.localhost {
+	@api path /api/* /media/* /_kaede/* /.well-known/kaede/*
+	reverse_proxy @api alpha-api:8000 {
+		header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
+	}
+	reverse_proxy /gateway alpha-gateway:8001 {
+		header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
+	}
+	reverse_proxy frontend:5173
+}
+
+beta.localhost {
+	@api path /api/* /media/* /_kaede/* /.well-known/kaede/*
+	reverse_proxy @api beta-api:8000 {
+		header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
+	}
+	reverse_proxy /gateway beta-gateway:8001 {
+		header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
+	}
+	reverse_proxy frontend:5173
+}
+
+media.alpha.localhost {
+	header {
+		Access-Control-Allow-Origin "https://alpha.localhost:{$KAEDE_DEV_HTTPS_PORT}"
+		Access-Control-Allow-Methods "GET, HEAD, PUT, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type"
+	}
+	@cors_preflight method OPTIONS
+	respond @cors_preflight 204
+	reverse_proxy alpha-garage:3900
+}
+
+media.beta.localhost {
+	header {
+		Access-Control-Allow-Origin "https://beta.localhost:{$KAEDE_DEV_HTTPS_PORT}"
+		Access-Control-Allow-Methods "GET, HEAD, PUT, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type"
+	}
+	@cors_preflight method OPTIONS
+	respond @cors_preflight 204
+	reverse_proxy beta-garage:3900
+}

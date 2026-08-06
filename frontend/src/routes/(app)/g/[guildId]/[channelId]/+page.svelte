@@ -1,0 +1,2801 @@
+<script lang="ts">
+  import { page } from '$app/state';
+  import { resolve } from '$app/paths';
+  import { api, ApiError } from '$lib/api/client';
+  import {
+    channelCompletions,
+    completionAt,
+    EMOJI_COMPLETIONS,
+    memberCompletions,
+    replaceCompletion
+  } from '$lib/chat/completion';
+  import { mentionsUser } from '$lib/chat/mentions';
+  import {
+    discardAttachments,
+    pendingMessageSend,
+    type PendingMessageSend,
+    withoutSubmittedUploads
+  } from '$lib/chat/outbox';
+  import {
+    firstNavigableChannel,
+    groupChannels,
+    moveChannel,
+    type ChannelDropPlacement
+  } from '$lib/chat/channels';
+  import {
+    compareMessages,
+    failPendingMessage,
+    mergeMessageSnapshot,
+    reconcileMessage
+  } from '$lib/chat/reconcile';
+  import { compareEntityRefs, entityKey, entityRef, matchesEntityRef } from '$lib/chat/refs';
+  import { buildTimeline } from '$lib/chat/timeline';
+  import type {
+    Attachment,
+    Channel,
+    Guild,
+    GuildMemberSummary,
+    Message,
+    ReadStateStatus,
+    Role,
+    UserSummary
+  } from '$lib/chat/types';
+  import {
+    GATEWAY_SESSION_RESET_EVENT,
+    type Dispatch,
+    type GatewayClient
+  } from '$lib/gateway/client';
+  import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
+  import { Permission } from '$lib/generated/permissions';
+  import ComposerAutocomplete, {
+    type Completion
+  } from '$lib/components/ComposerAutocomplete.svelte';
+  import GuildMemberRoster from '$lib/components/GuildMemberRoster.svelte';
+  import Icon from '$lib/components/Icon.svelte';
+  import MessageRow from '$lib/components/MessageRow.svelte';
+  import PresencePicker from '$lib/components/PresencePicker.svelte';
+  import UploadPreviewTray from '$lib/components/UploadPreviewTray.svelte';
+  import UserProfileCard from '$lib/components/UserProfileCard.svelte';
+  import VirtualMessageList from '$lib/components/VirtualMessageList.svelte';
+  import { uploadChannelFile, type PendingUpload } from '$lib/media/uploads';
+  import {
+    channelSettingsPath,
+    directMessagePath,
+    guildChannelPath,
+    guildSettingsPath
+  } from '$lib/navigation/routes';
+  import { chatEntities as entities } from '$lib/stores/entities.svelte';
+  import { placeContextMenu } from '$lib/ui/context-menu';
+  import { developerMode } from '$lib/ui/developer-mode.svelte';
+  import VoiceDock from '$lib/voice/VoiceDock.svelte';
+  import {
+    applyVoiceStateUpdate,
+    type VoiceOccupant,
+    type VoiceStateUpdate
+  } from '$lib/voice/occupancy';
+  import { onMount, tick, untrack } from 'svelte';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+
+  const guildId = $derived(page.params.guildId ?? '');
+  const channelId = $derived(page.params.channelId ?? '');
+  const localDomain = typeof window === 'undefined' ? '' : window.location.hostname;
+  let guild = $state<Guild | null>(null);
+  const guilds = $derived(entities.guilds.values);
+  const messages = $derived(
+    entities.messages.values.filter((message) =>
+      matchesEntityRef(
+        channelId,
+        { id: message.channel_id, origin_domain: message.channel_domain },
+        localDomain
+      )
+    )
+  );
+  const readStates = $derived(entities.readStates.values);
+  const members = $derived(entities.members.values);
+  const currentUser = $derived(entities.currentUser);
+  let content = $state('');
+  let error = $state('');
+  let busy = $state(false);
+  let channelReady = $state(false);
+  let typing = $state('');
+  let hasEarlier = $state(true);
+  let loadingEarlier = $state(false);
+  let hasLater = $state(false);
+  let loadingLater = $state(false);
+  let lastTypingAt = 0;
+  let loadGeneration = 0;
+  let snapshotGeneration = 0;
+  let typingTimer: number | null = null;
+  let gateway: GatewayClient | null = null;
+  let dispatchBuffer: Dispatch[] | null = null;
+  let uploads = $state<PendingUpload[]>([]);
+  let fileInput = $state<HTMLInputElement | null>(null);
+  let composerInput = $state<HTMLTextAreaElement | null>(null);
+  let autocomplete = $state<{ handleKeydown(event: KeyboardEvent): boolean } | null>(null);
+  let editingMessage = $state<Message | null>(null);
+  let composerDraftBeforeEdit = $state<{ content: string; cursor: number } | null>(null);
+  let composerCursor = $state(0);
+  let completionActive = $state(0);
+  let completionOpen = $state(false);
+  let timelineAtBottom = $state(false);
+  let channelMenu = $state<{ channel: Channel | null; x: number; y: number } | null>(null);
+  let channelMenuElement = $state<HTMLElement | null>(null);
+  let channelMenuReturnFocus: HTMLElement | null = null;
+  let channelDialogOpen = $state(false);
+  let channelDialogTarget = $state<Channel | null>(null);
+  let channelDialogName = $state('');
+  let channelDialogType = $state(0);
+  let channelDialogParent = $state('');
+  let channelDialogBusy = $state(false);
+  let channelDialogInput = $state<HTMLInputElement | null>(null);
+  let channelDialogElement = $state<HTMLElement | null>(null);
+  let channelDialogReturnFocus: HTMLElement | null = null;
+  let channelDeleteTarget = $state<Channel | null>(null);
+  let channelDeleteBusy = $state(false);
+  let channelDeleteDialog = $state<HTMLElement | null>(null);
+  let channelDeleteCancel = $state<HTMLButtonElement | null>(null);
+  let channelDeleteReturnFocus: HTMLElement | null = null;
+  let channelDeleteGeneration = 0;
+  let draggedChannelKey = $state<string | null>(null);
+  let dragOverChannelKey = $state<string | null>(null);
+  let reorderingChannels = $state(false);
+  let channelOrderStatus = $state('');
+  let channelReorderGeneration = 0;
+  let mobileNavigationOpen = $state(false);
+  let mobileNavigationToggle = $state<HTMLButtonElement | null>(null);
+  let mobileNavigationDrawer = $state<HTMLElement | null>(null);
+  let mobileNavigationClose = $state<HTMLButtonElement | null>(null);
+  let memberRosterOpen = $state(true);
+  let profile = $state<{ user: UserSummary; x: number; y: number } | null>(null);
+  let presencePreference = $state<'online' | 'idle' | 'dnd' | 'invisible'>('online');
+  let voiceOccupancy = $state<Record<string, VoiceOccupant[]>>({});
+  let voiceOccupancyVersion = 0;
+  let voiceRefreshSequence = 0;
+  const uploadControllers = new SvelteMap<string, AbortController>();
+  const pendingSends = new SvelteMap<string, PendingMessageSend>();
+  const collapsedCategories = new SvelteSet<string>();
+
+  const channel = $derived(
+    guild?.channels?.find((item) => matchesEntityRef(channelId, item, localDomain)) ?? null
+  );
+  const currentReadState = $derived(channel ? unreadFor(channel) : undefined);
+  const channelGroups = $derived(groupChannels(guild?.channels ?? []));
+  const canManageChannels = $derived.by(() => {
+    if (!guild || guild.origin_domain !== localDomain) return false;
+    if (
+      currentUser &&
+      guild.owner_id === currentUser.id &&
+      guild.origin_domain === currentUser.origin_domain
+    )
+      return true;
+    try {
+      const permissions = BigInt(guild.permissions ?? '0');
+      return Boolean(permissions & (Permission.ADMINISTRATOR | Permission.MANAGE_CHANNELS));
+    } catch {
+      return false;
+    }
+  });
+  function channelHasPermission(target: Channel, permission: bigint): boolean {
+    if (!guild || guild.origin_domain !== localDomain) return false;
+    if (
+      currentUser &&
+      guild.owner_id === currentUser.id &&
+      guild.origin_domain === currentUser.origin_domain
+    )
+      return true;
+    try {
+      const effective = BigInt(target.permissions ?? guild.permissions ?? '0');
+      return Boolean(effective & (Permission.ADMINISTRATOR | permission));
+    } catch {
+      return false;
+    }
+  }
+  const timeline = $derived(
+    buildTimeline(
+      messages,
+      currentReadState?.read_message_id && currentReadState.read_message_domain
+        ? {
+            id: currentReadState.read_message_id,
+            origin_domain: currentReadState.read_message_domain
+          }
+        : null
+    )
+  );
+  const aroundMessage = $derived(page.url.searchParams.get('around'));
+  const targetTimelineKey = $derived.by(() => {
+    if (!aroundMessage) return null;
+    const target = messages.find((message) =>
+      matchesEntityRef(aroundMessage, message, localDomain)
+    );
+    return target ? `message:${entityKey(target)}` : null;
+  });
+  const completionQuery = $derived(completionAt(content, composerCursor));
+  const completionOptions = $derived.by((): Completion[] => {
+    if (!completionQuery) return [];
+    if (completionQuery.marker === '@') return memberCompletions(members, completionQuery.query);
+    if (completionQuery.marker === '#')
+      return channelCompletions(guild?.channels ?? [], completionQuery.query);
+    return EMOJI_COMPLETIONS.filter((item) => item.value.includes(completionQuery.query));
+  });
+
+  const setMessages = (items: Message[]) => {
+    const target = channel;
+    if (!target) {
+      entities.messages.upsertMany(items);
+      return;
+    }
+    entities.messages.replaceWhere(
+      items,
+      (message) =>
+        message.channel_id === target.id && message.channel_domain === target.origin_domain
+    );
+  };
+  const setReadStates = (items: ReadStateStatus[]) => entities.readStates.replace(items);
+  const setMembers = (items: GuildMemberSummary[]) => entities.ingestMembers(items);
+  const setGuilds = (items: Guild[]) => {
+    entities.ingestGuilds(items);
+  };
+
+  function setCurrentChannels(channels: Channel[]) {
+    if (!guild) return;
+    const reconciled = [
+      ...new Map(channels.map((channel) => [entityKey(channel), channel])).values()
+    ];
+    guild = { ...guild, channels: reconciled };
+    entities.guilds.upsert(guild);
+    entities.channels.upsertMany(reconciled);
+  }
+
+  function closeChannelMenu(restoreFocus = false) {
+    const returnFocus = channelMenuReturnFocus;
+    channelMenu = null;
+    channelMenuReturnFocus = null;
+    if (restoreFocus && returnFocus?.isConnected) {
+      void tick().then(() => returnFocus.focus());
+    }
+  }
+
+  function openChannelMenu(
+    target: Channel | null,
+    anchor: HTMLElement,
+    pointer?: { x: number; y: number }
+  ) {
+    if (channelDialogOpen || (!target && !canManageChannels)) return;
+    closeChannelMenu(false);
+    const bounds = anchor.getBoundingClientRect();
+    const x = pointer?.x ?? Math.min(bounds.right, bounds.left + 28);
+    const y = pointer?.y ?? Math.min(bounds.bottom, bounds.top + 28);
+    channelMenuReturnFocus =
+      anchor.tabIndex >= 0
+        ? anchor
+        : (anchor.querySelector<HTMLElement>(':scope > button:not([disabled]), :scope > a[href]') ??
+          activeElement());
+    channelMenu = { channel: target, x, y };
+    void tick().then(() => {
+      if (channelMenu && channelMenuElement) {
+        placeContextMenu(channelMenuElement, channelMenu.x, channelMenu.y);
+        channelMenuItems()[0]?.focus();
+      }
+    });
+  }
+
+  function showChannelMenu(event: MouseEvent, target: Channel | null) {
+    event.preventDefault();
+    event.stopPropagation();
+    const anchor = event.currentTarget;
+    if (!(anchor instanceof HTMLElement)) return;
+    const pointer =
+      event.clientX === 0 && event.clientY === 0
+        ? undefined
+        : { x: event.clientX, y: event.clientY };
+    openChannelMenu(target, anchor, pointer);
+  }
+
+  function showChannelMenuFromKeyboard(event: KeyboardEvent, target: Channel | null) {
+    if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+    if (event.target !== event.currentTarget) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const anchor = event.currentTarget;
+    if (anchor instanceof HTMLElement) openChannelMenu(target, anchor);
+  }
+
+  function activeElement(): HTMLElement | null {
+    return document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
+
+  function channelMenuItems(): HTMLElement[] {
+    if (!channelMenuElement) return [];
+    return Array.from(
+      channelMenuElement.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])')
+    );
+  }
+
+  function channelMenuKeydown(event: KeyboardEvent) {
+    if (!channelMenu) return;
+    if (event.key === 'Escape' || event.key === 'Tab') {
+      event.preventDefault();
+      closeChannelMenu(true);
+      return;
+    }
+    const items = channelMenuItems();
+    if (!items.length) return;
+    const focused = activeElement();
+    const currentIndex = focused ? items.indexOf(focused) : -1;
+    let nextIndex: number | null = null;
+    if (event.key === 'ArrowDown') {
+      nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
+    } else if (event.key === 'ArrowUp') {
+      nextIndex =
+        currentIndex < 0 ? items.length - 1 : (currentIndex - 1 + items.length) % items.length;
+    } else if (event.key === 'Home') {
+      nextIndex = 0;
+    } else if (event.key === 'End') {
+      nextIndex = items.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    items[nextIndex]?.focus();
+  }
+
+  async function copyChannelValue(value: string, event: MouseEvent) {
+    event.stopPropagation();
+    closeChannelMenu(true);
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      error = 'Clipboard access was denied by the browser.';
+    }
+  }
+
+  function absoluteChannelLink(target: Channel): string {
+    if (!guild) return window.location.href;
+    return `${window.location.origin}${guildChannelPath(guild, target)}`;
+  }
+
+  function guildLandingPath(targetGuild: Guild): string {
+    const target = firstNavigableChannel(targetGuild.channels);
+    return target ? guildChannelPath(targetGuild, target) : resolve('/home');
+  }
+
+  async function openMobileNavigation() {
+    mobileNavigationOpen = true;
+    await tick();
+    mobileNavigationClose?.focus();
+  }
+
+  function closeMobileNavigation(restoreFocus = true) {
+    if (!mobileNavigationOpen) return;
+    mobileNavigationOpen = false;
+    if (restoreFocus) void tick().then(() => mobileNavigationToggle?.focus());
+  }
+
+  function toggleMobileNavigation() {
+    if (mobileNavigationOpen) closeMobileNavigation();
+    else void openMobileNavigation();
+  }
+
+  function mobileNavigationKeydown(event: KeyboardEvent) {
+    if (!mobileNavigationOpen) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeMobileNavigation();
+      return;
+    }
+    if (event.key !== 'Tab' || !mobileNavigationDrawer) return;
+    const focusable = Array.from(
+      mobileNavigationDrawer.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    );
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1) ?? first;
+    if (!mobileNavigationDrawer.contains(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function openChannelDialog(
+    type: number,
+    parent: Channel | null = null,
+    target: Channel | null = null,
+    invoker: HTMLElement | null = null
+  ) {
+    const returnFocus = channelMenuReturnFocus ?? invoker ?? activeElement();
+    channelDialogReturnFocus = mobileNavigationOpen ? mobileNavigationToggle : returnFocus;
+    closeChannelMenu(false);
+    if (mobileNavigationOpen) closeMobileNavigation(false);
+    channelDialogTarget = target;
+    channelDialogName = target?.name ?? '';
+    channelDialogType = target?.type ?? type;
+    channelDialogParent =
+      target?.parent_id && target.parent_domain
+        ? `${target.parent_id}@${target.parent_domain}`
+        : parent
+          ? entityKey(parent)
+          : '';
+    channelDialogOpen = true;
+    void tick().then(() => channelDialogInput?.focus());
+  }
+
+  function closeChannelDialog(restoreFocus = true) {
+    if (channelDialogBusy) return;
+    const returnFocus = channelDialogReturnFocus;
+    channelDialogOpen = false;
+    channelDialogTarget = null;
+    channelDialogReturnFocus = null;
+    if (restoreFocus && returnFocus?.isConnected) {
+      void tick().then(() => returnFocus.focus());
+    }
+  }
+
+  function channelDialogKeydown(event: KeyboardEvent) {
+    if (!channelDialogOpen || !channelDialogElement) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeChannelDialog();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(
+      channelDialogElement.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    );
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1) ?? first;
+    if (!channelDialogElement.contains(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function requestChannelDeletion(target: Channel) {
+    channelDeleteReturnFocus = channelMenuReturnFocus ?? activeElement();
+    closeChannelMenu(false);
+    channelDeleteTarget = target;
+    error = '';
+    void tick().then(() => channelDeleteCancel?.focus());
+  }
+
+  function closeChannelDeleteDialog(restoreFocus = true) {
+    if (channelDeleteBusy) return;
+    const returnFocus = channelDeleteReturnFocus;
+    channelDeleteTarget = null;
+    channelDeleteReturnFocus = null;
+    if (restoreFocus && returnFocus?.isConnected) {
+      void tick().then(() => returnFocus.focus());
+    }
+  }
+
+  function channelDeleteDialogKeydown(event: KeyboardEvent) {
+    if (!channelDeleteTarget || !channelDeleteDialog) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeChannelDeleteDialog();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(
+      channelDeleteDialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    );
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1) ?? first;
+    if (!channelDeleteDialog.contains(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  async function saveChannelDialog() {
+    if (!guild || channelDialogBusy || !channelDialogName.trim()) return;
+    const targetGuild = entityRef(guild);
+    const routeGeneration = loadGeneration;
+    const target = channelDialogTarget;
+    const stillCurrent = () =>
+      routeGeneration === loadGeneration &&
+      guild !== null &&
+      entityRef(guild) === targetGuild &&
+      channelDialogTarget === target;
+    const parent = guild.channels?.find(
+      (item) => entityKey(item) === channelDialogParent && item.type === 4
+    );
+    channelDialogBusy = true;
+    error = '';
+    let saved = false;
+    try {
+      if (target) {
+        const updated = await api<Channel>(
+          `/guilds/${encodeURIComponent(targetGuild)}/channels/${encodeURIComponent(entityRef(target))}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({
+              name: channelDialogName.trim(),
+              parent_id: target.type === 4 ? null : (parent?.id ?? null)
+            })
+          }
+        );
+        if (!stillCurrent()) return;
+        setCurrentChannels(
+          (guild.channels ?? []).map((item) =>
+            entityKey(item) === entityKey(updated) ? updated : item
+          )
+        );
+      } else {
+        const created = await api<Channel>(`/guilds/${encodeURIComponent(targetGuild)}/channels`, {
+          method: 'POST',
+          body: JSON.stringify({
+            name: channelDialogName.trim(),
+            type: channelDialogType,
+            parent_id: channelDialogType === 4 ? null : (parent?.id ?? null)
+          })
+        });
+        if (!stillCurrent()) return;
+        setCurrentChannels([...(guild.channels ?? []), created]);
+      }
+      saved = true;
+    } catch (caught) {
+      if (!stillCurrent()) return;
+      error = caught instanceof ApiError ? caught.message : 'Could not save the channel.';
+    } finally {
+      if (stillCurrent()) {
+        channelDialogBusy = false;
+        if (saved) closeChannelDialog();
+      }
+    }
+  }
+
+  async function removeChannel(target: Channel) {
+    if (!guild || channelDeleteBusy || channelDeleteTarget !== target) return;
+    const label = target.type === 4 ? 'category' : 'channel';
+    const targetGuild = entityRef(guild);
+    const routeGeneration = loadGeneration;
+    const deletionGeneration = ++channelDeleteGeneration;
+    const stillCurrent = () =>
+      deletionGeneration === channelDeleteGeneration &&
+      routeGeneration === loadGeneration &&
+      guild !== null &&
+      entityRef(guild) === targetGuild &&
+      channelDeleteTarget === target;
+    channelDeleteBusy = true;
+    error = '';
+    try {
+      await api(
+        `/guilds/${encodeURIComponent(targetGuild)}/channels/${encodeURIComponent(entityRef(target))}`,
+        { method: 'DELETE' }
+      );
+      if (!stillCurrent()) return;
+      const remaining = (guild?.channels ?? []).filter(
+        (item) => entityKey(item) !== entityKey(target)
+      );
+      setCurrentChannels(remaining);
+      channelDeleteBusy = false;
+      closeChannelDeleteDialog();
+      if (channel && entityKey(channel) === entityKey(target)) {
+        const next = remaining.find((item) => item.type !== 4);
+        window.location.assign(guild && next ? guildChannelPath(guild, next) : resolve('/home'));
+      }
+    } catch (caught) {
+      if (!stillCurrent()) return;
+      error = caught instanceof ApiError ? caught.message : `Could not delete the ${label}.`;
+    } finally {
+      if (deletionGeneration === channelDeleteGeneration) channelDeleteBusy = false;
+    }
+  }
+
+  async function markChannelRead(target: Channel) {
+    closeChannelMenu(true);
+    if (!target.last_message_id || !target.last_message_domain) return;
+    try {
+      await api(`/channels/${encodeURIComponent(entityRef(target))}/ack`, {
+        method: 'POST',
+        body: JSON.stringify({
+          message_id: `${target.last_message_id}@${target.last_message_domain}`
+        })
+      });
+      setReadStates(
+        readStates.map((state) =>
+          state.channel_id === target.id && state.channel_domain === target.origin_domain
+            ? { ...state, mention_count: 0, unread: false }
+            : state
+        )
+      );
+    } catch (caught) {
+      error = caught instanceof ApiError ? caught.message : 'Could not mark the channel as read.';
+    }
+  }
+
+  function channelDragStart(event: DragEvent, target: Channel) {
+    if (!canManageChannels || reorderingChannels) {
+      event.preventDefault();
+      return;
+    }
+    draggedChannelKey = entityKey(target);
+    closeChannelMenu();
+    event.dataTransfer?.setData('text/plain', draggedChannelKey);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+
+  function channelDragEnd() {
+    draggedChannelKey = null;
+    dragOverChannelKey = null;
+  }
+
+  function channelDragOver(event: DragEvent, target: Channel | null) {
+    if (!draggedChannelKey || !canManageChannels || reorderingChannels) return;
+    const dragged = guild?.channels?.find((item) => entityKey(item) === draggedChannelKey);
+    if (!dragged || (dragged.type === 4 && target && target.type !== 4)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    dragOverChannelKey = target ? entityKey(target) : 'ungrouped';
+  }
+
+  async function channelDrop(event: DragEvent, target: Channel | null) {
+    if (!draggedChannelKey || !guild || !canManageChannels || reorderingChannels) return;
+    event.preventDefault();
+    const dragged = guild.channels?.find((item) => entityKey(item) === draggedChannelKey);
+    if (!dragged) return;
+    let placement: ChannelDropPlacement = target ? 'before' : 'ungrouped';
+    if (target?.type === 4 && dragged.type !== 4) {
+      placement = 'inside';
+    } else if (target) {
+      const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+      placement = event.clientY > bounds.top + bounds.height / 2 ? 'after' : 'before';
+    }
+    const previous = guild.channels ?? [];
+    const next = moveChannel(
+      previous,
+      draggedChannelKey,
+      target ? entityKey(target) : null,
+      placement
+    );
+    channelDragEnd();
+    await persistChannelOrder(previous, next, 'Channel order saved.');
+  }
+
+  function channelReorderSiblings(target: Channel): Channel[] {
+    if (target.type === 4) {
+      return channelGroups.flatMap((group) => (group.category ? [group.category] : []));
+    }
+    return (
+      channelGroups.find((group) =>
+        group.channels.some((item) => entityKey(item) === entityKey(target))
+      )?.channels ?? []
+    );
+  }
+
+  function canMoveChannel(target: Channel, direction: -1 | 1): boolean {
+    if (!canManageChannels || reorderingChannels) return false;
+    const siblings = channelReorderSiblings(target);
+    const index = siblings.findIndex((item) => entityKey(item) === entityKey(target));
+    return index >= 0 && index + direction >= 0 && index + direction < siblings.length;
+  }
+
+  async function moveChannelByStep(target: Channel, direction: -1 | 1) {
+    if (!guild || !canMoveChannel(target, direction)) return;
+    const siblings = channelReorderSiblings(target);
+    const index = siblings.findIndex((item) => entityKey(item) === entityKey(target));
+    const neighbor = siblings[index + direction];
+    if (!neighbor) return;
+    const previous = guild.channels ?? [];
+    const next = moveChannel(
+      previous,
+      entityKey(target),
+      entityKey(neighbor),
+      direction < 0 ? 'before' : 'after'
+    );
+    const label = target.type === 4 ? 'Category' : 'Channel';
+    const destination = index + direction + 1;
+    closeChannelMenu(true);
+    await persistChannelOrder(
+      previous,
+      next,
+      `${label} “${target.name}” moved ${direction < 0 ? 'up' : 'down'} to position ${destination}.`
+    );
+  }
+
+  function channelOrderChanged(previous: Channel[], next: Channel[]): boolean {
+    return (
+      previous.length !== next.length ||
+      next.some(
+        (item, index) =>
+          entityKey(item) !== entityKey(previous[index]) ||
+          item.position !== previous[index]?.position ||
+          item.parent_id !== previous[index]?.parent_id
+      )
+    );
+  }
+
+  async function persistChannelOrder(previous: Channel[], next: Channel[], successMessage: string) {
+    if (!guild || reorderingChannels || !channelOrderChanged(previous, next)) return;
+    const reorderGeneration = ++channelReorderGeneration;
+    const routeGeneration = loadGeneration;
+    const targetGuild = entityRef(guild);
+    const stillCurrent = () =>
+      reorderGeneration === channelReorderGeneration &&
+      routeGeneration === loadGeneration &&
+      guild !== null &&
+      entityRef(guild) === targetGuild;
+    setCurrentChannels(next);
+    reorderingChannels = true;
+    error = '';
+    channelOrderStatus = 'Saving channel order…';
+    try {
+      const saved = await api<Channel[]>(`/guilds/${encodeURIComponent(targetGuild)}/channels`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          channels: next.map((item) => ({
+            id: item.id,
+            position: item.position,
+            parent_id: item.parent_id
+          }))
+        })
+      });
+      if (!stillCurrent()) return;
+      setCurrentChannels(saved);
+      channelOrderStatus = successMessage;
+    } catch (caught) {
+      if (!stillCurrent()) return;
+      setCurrentChannels(previous);
+      error = caught instanceof ApiError ? caught.message : 'Could not save the channel order.';
+      channelOrderStatus = 'Channel order was not saved. The previous order has been restored.';
+    } finally {
+      if (reorderGeneration === channelReorderGeneration) reorderingChannels = false;
+    }
+  }
+
+  function toggleCategory(category: Channel) {
+    const key = entityKey(category);
+    if (collapsedCategories.has(key)) collapsedCategories.delete(key);
+    else collapsedCategories.add(key);
+  }
+
+  function unreadFor(targetChannel: {
+    id: string;
+    origin_domain: string;
+  }): ReadStateStatus | undefined {
+    return readStates.find(
+      (state) =>
+        state.channel_id === targetChannel.id &&
+        state.channel_domain === targetChannel.origin_domain
+    );
+  }
+
+  function isCurrentChannel(targetId: string, targetDomain: string): boolean {
+    return matchesEntityRef(channelId, { id: targetId, origin_domain: targetDomain }, localDomain);
+  }
+
+  function dispatchTargetsCurrentChannel(targetId: string, targetDomain?: string): boolean {
+    return targetDomain ? isCurrentChannel(targetId, targetDomain) : channel?.id === targetId;
+  }
+
+  function isCurrentGuild(targetId: string, targetDomain: string): boolean {
+    return matchesEntityRef(guildId, { id: targetId, origin_domain: targetDomain }, localDomain);
+  }
+
+  function presenceFor(user: UserSummary) {
+    return entities.presenceFor(user);
+  }
+
+  function setMyPresence(status: 'online' | 'idle' | 'dnd' | 'invisible') {
+    presencePreference = status;
+    try {
+      localStorage.setItem('kaede.presence', status);
+    } catch {
+      // Presence still applies to this connection when persistent storage is unavailable.
+    }
+    gateway?.setPresence(status);
+    if (currentUser) entities.setPresence(currentUser, status === 'invisible' ? 'offline' : status);
+  }
+
+  function myPresencePreference(): 'online' | 'idle' | 'dnd' | 'invisible' {
+    try {
+      const preferred = localStorage.getItem('kaede.presence');
+      if (preferred === 'idle' || preferred === 'dnd' || preferred === 'invisible')
+        return preferred;
+    } catch {
+      // Use online when browser storage is unavailable.
+    }
+    return 'online';
+  }
+
+  function toggleMemberRoster() {
+    memberRosterOpen = !memberRosterOpen;
+    try {
+      localStorage.setItem('kaede.member-roster.visible', String(memberRosterOpen));
+    } catch {
+      // The roster can still be toggled for this page when storage is unavailable.
+    }
+  }
+
+  function memberFor(userId: string, userDomain: string) {
+    return members.find(
+      (member) => member.user.id === userId && member.user.origin_domain === userDomain
+    );
+  }
+
+  function occupantsFor(target: Channel): VoiceOccupant[] {
+    return voiceOccupancy[entityKey(target)] ?? [];
+  }
+
+  function openProfile(user: UserSummary, event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.currentTarget as HTMLElement | null;
+    const bounds = target?.getBoundingClientRect();
+    profile = {
+      user,
+      x: event.clientX || (bounds?.right ?? window.innerWidth / 2),
+      y: event.clientY || (bounds?.top ?? window.innerHeight / 2)
+    };
+  }
+
+  function openMessageProfile(message: Message, event: MouseEvent) {
+    if (message.author) openProfile(message.author, event);
+  }
+
+  async function openHandleProfile(event: Event) {
+    const detail = (event as CustomEvent<{ handle?: string; reference?: string }>).detail;
+    const handle = detail?.handle;
+    if (detail?.reference) {
+      const reference = detail.reference.includes('@')
+        ? detail.reference
+        : `${detail.reference}@${localDomain}`;
+      const knownUser = entities.users.get(reference);
+      if (knownUser) {
+        profile = { user: knownUser, x: window.innerWidth / 2, y: window.innerHeight / 2 };
+        return;
+      }
+    }
+    if (!handle) return;
+    try {
+      const user = await api<UserSummary>(`/users/lookup?handle=${encodeURIComponent(handle)}`);
+      profile = { user, x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    } catch {
+      error = 'Could not load that profile.';
+    }
+  }
+
+  async function loadVoiceOccupancy(channels: Channel[], generation: number) {
+    const voiceChannels = channels.filter((item) => item.type === 2);
+    if (voiceChannels.length === 0) return;
+    const sequence = ++voiceRefreshSequence;
+    const version = voiceOccupancyVersion;
+    const snapshots = await Promise.all(
+      voiceChannels.map(async (item) => {
+        try {
+          const snapshot = await api<{ participants: VoiceOccupant[] }>(
+            `/channels/${encodeURIComponent(entityRef(item))}/voice/occupancy`
+          );
+          return [entityKey(item), snapshot.participants] as const;
+        } catch {
+          return null;
+        }
+      })
+    );
+    if (
+      generation !== loadGeneration ||
+      sequence !== voiceRefreshSequence ||
+      version !== voiceOccupancyVersion
+    )
+      return;
+    voiceOccupancy = {
+      ...voiceOccupancy,
+      ...Object.fromEntries(snapshots.filter((snapshot) => snapshot !== null))
+    };
+    voiceOccupancyVersion += 1;
+  }
+
+  function refreshVoiceOccupancy() {
+    if (document.visibilityState !== 'visible' || !guild) return;
+    const occupiedVoiceChannels = (guild.channels ?? []).filter(
+      (item) => item.type === 2 && (voiceOccupancy[entityKey(item)]?.length ?? 0) > 0
+    );
+    if (occupiedVoiceChannels.length > 0) {
+      void loadVoiceOccupancy(occupiedVoiceChannels, loadGeneration);
+    }
+  }
+
+  function applyDispatch(dispatch: Dispatch) {
+    if (dispatch.t === 'MESSAGE_CREATE') {
+      const message = dispatch.d as Message;
+      if (isCurrentChannel(message.channel_id, message.channel_domain)) {
+        reconcile(message);
+        if (document.visibilityState === 'visible' && timelineAtBottom) void acknowledge(message);
+      } else {
+        setReadStates(
+          readStates.map((state) =>
+            state.channel_id === message.channel_id &&
+            state.channel_domain === message.channel_domain
+              ? {
+                  ...state,
+                  last_message_id: message.id,
+                  last_message_domain: message.origin_domain,
+                  unread: true
+                }
+              : state
+          )
+        );
+      }
+    } else if (dispatch.t === 'MESSAGE_UPDATE') {
+      const update = dispatch.d as Message;
+      setMessages(
+        messages.map((item) =>
+          entityKey(item) === entityKey(update) ? { ...item, ...update } : item
+        )
+      );
+    } else if (dispatch.t === 'ATTACHMENT_UPDATE') {
+      const update = dispatch.d as {
+        message_id: string;
+        message_domain: string;
+        attachment: Attachment;
+      };
+      setMessages(
+        messages.map((item) =>
+          item.id === update.message_id && item.origin_domain === update.message_domain
+            ? {
+                ...item,
+                attachments: item.attachments?.map((attachment) =>
+                  attachment.id === update.attachment.id &&
+                  attachment.origin_domain === update.attachment.origin_domain
+                    ? update.attachment
+                    : attachment
+                )
+              }
+            : item
+        )
+      );
+    } else if (dispatch.t === 'MESSAGE_DELETE') {
+      const deleted = dispatch.d as {
+        id: string;
+        origin_domain: string;
+        channel_id: string;
+        channel_domain: string;
+      };
+      if (isCurrentChannel(deleted.channel_id, deleted.channel_domain)) {
+        setMessages(
+          messages.map((item) =>
+            item.id === deleted.id && item.origin_domain === deleted.origin_domain
+              ? { ...item, content: null, deleted_at: new Date().toISOString() }
+              : item
+          )
+        );
+      }
+    } else if (dispatch.t === 'MESSAGE_SEND_REJECTED') {
+      const rejected = dispatch.d as {
+        channel_id: string;
+        channel_domain: string;
+        client_nonce: string;
+        code: string;
+      };
+      if (isCurrentChannel(rejected.channel_id, rejected.channel_domain)) {
+        setMessages(
+          messages.map((item) =>
+            item.client_nonce === rejected.client_nonce
+              ? { ...item, queued: false, pending: false, failed: true }
+              : item
+          )
+        );
+        error = `Queued message rejected: ${rejected.code}`;
+      }
+    } else if (dispatch.t === 'TYPING_START') {
+      const started = dispatch.d as {
+        channel_id: string;
+        channel_domain?: string;
+        user_id: string;
+        user_domain?: string;
+      };
+      const authoredByMe =
+        currentUser?.id === started.user_id &&
+        (!started.user_domain || currentUser.origin_domain === started.user_domain);
+      if (
+        !authoredByMe &&
+        dispatchTargetsCurrentChannel(started.channel_id, started.channel_domain)
+      ) {
+        typing = 'Someone is writing…';
+        if (typingTimer) window.clearTimeout(typingTimer);
+        typingTimer = window.setTimeout(() => {
+          typing = '';
+          typingTimer = null;
+        }, 10_000);
+      }
+    } else if (dispatch.t === 'READ_STATE_UPDATE') {
+      const update = dispatch.d as {
+        channel_id: string;
+        channel_domain: string;
+        last_message_id: string;
+        last_message_domain: string;
+        mention_count: number;
+      };
+      setReadStates(
+        readStates.map((state) =>
+          state.channel_id === update.channel_id && state.channel_domain === update.channel_domain
+            ? {
+                ...state,
+                read_message_id: update.last_message_id,
+                read_message_domain: update.last_message_domain,
+                mention_count: update.mention_count,
+                unread: false
+              }
+            : state
+        )
+      );
+    } else if (dispatch.t === 'CHANNEL_CREATE' || dispatch.t === 'CHANNEL_ACCESS_GRANTED') {
+      const created = dispatch.d as Channel;
+      if (
+        guild &&
+        created.guild_id === guild.id &&
+        created.guild_domain === guild.origin_domain &&
+        !(guild.channels ?? []).some((item) => entityKey(item) === entityKey(created))
+      ) {
+        setCurrentChannels([...(guild.channels ?? []), created]);
+      }
+    } else if (dispatch.t === 'CHANNEL_UPDATE') {
+      const updated = dispatch.d as Channel;
+      if (guild && updated.guild_id === guild.id && updated.guild_domain === guild.origin_domain) {
+        setCurrentChannels(
+          (guild.channels ?? []).map((item) =>
+            entityKey(item) === entityKey(updated) ? { ...item, ...updated } : item
+          )
+        );
+      }
+    } else if (dispatch.t === 'CHANNEL_PERMISSION_UPDATE') {
+      const updated = dispatch.d as {
+        channel_id: string;
+        channel_domain: string;
+        permissions: string;
+      };
+      if (guild) {
+        setCurrentChannels(
+          (guild.channels ?? []).map((item) =>
+            item.id === updated.channel_id && item.origin_domain === updated.channel_domain
+              ? { ...item, permissions: updated.permissions }
+              : item
+          )
+        );
+      }
+    } else if (dispatch.t === 'CHANNEL_DELETE' || dispatch.t === 'CHANNEL_ACCESS_REVOKED') {
+      const deleted = dispatch.d as {
+        id?: string;
+        origin_domain?: string;
+        channel_id?: string;
+        channel_domain?: string;
+        guild_id: string;
+        guild_domain: string;
+      };
+      if (guild && deleted.guild_id === guild.id && deleted.guild_domain === guild.origin_domain) {
+        const deletedId = deleted.id ?? deleted.channel_id;
+        const deletedDomain = deleted.origin_domain ?? deleted.channel_domain;
+        setCurrentChannels(
+          (guild.channels ?? []).filter(
+            (item) => item.id !== deletedId || item.origin_domain !== deletedDomain
+          )
+        );
+      }
+    } else if (dispatch.t === 'GUILD_ROLE_CREATE' || dispatch.t === 'GUILD_ROLE_UPDATE') {
+      const role = dispatch.d as Role;
+      if (guild && role.guild_id === guild.id && role.guild_domain === guild.origin_domain) {
+        guild = {
+          ...guild,
+          roles: [
+            ...(guild.roles ?? []).filter((candidate) => entityKey(candidate) !== entityKey(role)),
+            role
+          ]
+        };
+      }
+    } else if (dispatch.t === 'GUILD_ROLE_DELETE') {
+      const role = dispatch.d as {
+        id: string;
+        origin_domain: string;
+        guild_id: string;
+        guild_domain: string;
+      };
+      if (guild && role.guild_id === guild.id && role.guild_domain === guild.origin_domain) {
+        guild = {
+          ...guild,
+          roles: (guild.roles ?? []).filter(
+            (candidate) =>
+              candidate.id !== role.id || candidate.origin_domain !== role.origin_domain
+          )
+        };
+      }
+    } else if (dispatch.t === 'READY' || dispatch.t === 'RESUMED') {
+      gateway?.subscribeMembers(guildId);
+    } else if (dispatch.t === 'GUILD_MEMBER_LIST_UPDATE') {
+      const update = dispatch.d as {
+        guild_id: string;
+        guild_domain: string;
+        ops: { op: string; items: GuildMemberSummary[] }[];
+      };
+      if (isCurrentGuild(update.guild_id, update.guild_domain))
+        setMembers(update.ops.flatMap((operation) => operation.items ?? []));
+    } else if (dispatch.t === 'GUILD_MEMBERS_CHUNK') {
+      const chunk = dispatch.d as {
+        guild_id: string;
+        guild_domain: string;
+        members: GuildMemberSummary[];
+      };
+      if (isCurrentGuild(chunk.guild_id, chunk.guild_domain)) setMembers(chunk.members);
+    } else if (dispatch.t === 'GUILD_AVAILABILITY_UPDATE') {
+      const update = dispatch.d as {
+        guild_id: string;
+        guild_domain: string;
+        available: boolean;
+      };
+      if (isCurrentGuild(update.guild_id, update.guild_domain) && guild) {
+        guild = { ...guild, unavailable: !update.available };
+      }
+      setGuilds(
+        guilds.map((item) =>
+          item.id === update.guild_id && item.origin_domain === update.guild_domain
+            ? { ...item, unavailable: !update.available }
+            : item
+        )
+      );
+    } else if (dispatch.t === 'PRESENCE_UPDATE') {
+      const update = dispatch.d as {
+        user_id: string;
+        user_domain: string;
+        status: import('$lib/chat/types').PresenceStatus;
+      };
+      entities.setPresence(
+        { id: update.user_id, origin_domain: update.user_domain },
+        update.status
+      );
+    } else if (dispatch.t === 'VOICE_STATE_UPDATE') {
+      voiceOccupancy = applyVoiceStateUpdate(
+        voiceOccupancy,
+        guild?.channels ?? [],
+        dispatch.d as VoiceStateUpdate
+      );
+      voiceOccupancyVersion += 1;
+    } else if (dispatch.t === 'VOICE_TOKEN') {
+      const update = dispatch.d as { grant: import('$lib/voice/session').VoiceToken };
+      window.dispatchEvent(new CustomEvent('kaede:voice-token', { detail: update.grant }));
+    }
+  }
+
+  onMount(() => {
+    const client = authenticatedGateway.client;
+    const desktopViewport = window.matchMedia('(min-width: 741px)');
+    const viewportChanged = () => {
+      if (desktopViewport.matches) closeMobileNavigation(false);
+    };
+    const dismissChannelMenu = () => closeChannelMenu(false);
+    gateway = client;
+    try {
+      memberRosterOpen = localStorage.getItem('kaede.member-roster.visible') !== 'false';
+    } catch {
+      memberRosterOpen = true;
+    }
+    const visibilityChanged = () => {
+      acknowledgeLatestIfVisible();
+      refreshVoiceOccupancy();
+    };
+    const focused = () => refreshVoiceOccupancy();
+    const voiceRefreshTimer = window.setInterval(refreshVoiceOccupancy, 30_000);
+    const sessionReset = () => recoverCurrentRoute();
+    const profileRequest = (event: Event) => void openHandleProfile(event);
+    const receive = (event: Event) => {
+      const dispatch = (event as CustomEvent<Dispatch>).detail;
+      if (dispatchBuffer && dispatch.t !== 'READY' && dispatch.t !== 'RESUMED') {
+        dispatchBuffer.push(dispatch);
+        return;
+      }
+      applyDispatch(dispatch);
+    };
+    document.addEventListener('visibilitychange', visibilityChanged);
+    window.addEventListener('focus', focused);
+    window.addEventListener('resize', dismissChannelMenu);
+    window.addEventListener('scroll', dismissChannelMenu, true);
+    window.addEventListener('kaede:open-user-profile', profileRequest);
+    desktopViewport.addEventListener('change', viewportChanged);
+    viewportChanged();
+    client.addEventListener('dispatch', receive);
+    client.addEventListener(GATEWAY_SESSION_RESET_EVENT, sessionReset);
+    return () => {
+      loadGeneration += 1;
+      snapshotGeneration += 1;
+      voiceRefreshSequence += 1;
+      dispatchBuffer = null;
+      document.removeEventListener('visibilitychange', visibilityChanged);
+      window.removeEventListener('focus', focused);
+      window.clearInterval(voiceRefreshTimer);
+      window.removeEventListener('resize', dismissChannelMenu);
+      window.removeEventListener('scroll', dismissChannelMenu, true);
+      window.removeEventListener('kaede:open-user-profile', profileRequest);
+      desktopViewport.removeEventListener('change', viewportChanged);
+      client.removeEventListener('dispatch', receive);
+      client.removeEventListener(GATEWAY_SESSION_RESET_EVENT, sessionReset);
+      if (gateway === client) gateway = null;
+      if (typingTimer) window.clearTimeout(typingTimer);
+      resetUploads();
+    };
+  });
+
+  $effect(() => {
+    const targetGuild = guildId;
+    const targetChannel = channelId;
+    const targetAround = aroundMessage;
+    untrack(() => {
+      const routeGeneration = ++loadGeneration;
+      const snapshot = ++snapshotGeneration;
+      const buffered: Dispatch[] = [];
+      dispatchBuffer = buffered;
+      guild = null;
+      setMessages([]);
+      setMembers([]);
+      resetUploads();
+      content = '';
+      composerCursor = 0;
+      editingMessage = null;
+      composerDraftBeforeEdit = null;
+      channelMenu = null;
+      channelMenuReturnFocus = null;
+      channelDialogOpen = false;
+      channelDialogTarget = null;
+      channelDialogReturnFocus = null;
+      channelDialogBusy = false;
+      channelDeleteGeneration += 1;
+      channelDeleteTarget = null;
+      channelDeleteBusy = false;
+      channelDeleteDialog = null;
+      channelDeleteCancel = null;
+      channelDeleteReturnFocus = null;
+      draggedChannelKey = null;
+      dragOverChannelKey = null;
+      channelReorderGeneration += 1;
+      reorderingChannels = false;
+      channelOrderStatus = '';
+      mobileNavigationOpen = false;
+      profile = null;
+      voiceOccupancy = {};
+      voiceOccupancyVersion += 1;
+      voiceRefreshSequence += 1;
+      typing = '';
+      error = '';
+      busy = false;
+      channelReady = false;
+      timelineAtBottom = false;
+      loadingEarlier = false;
+      hasLater = false;
+      loadingLater = false;
+      lastTypingAt = 0;
+      if (typingTimer) window.clearTimeout(typingTimer);
+      typingTimer = null;
+      hasEarlier = true;
+      pendingSends.clear();
+      gateway?.subscribeMembers(targetGuild);
+      void load(
+        targetGuild,
+        targetChannel,
+        routeGeneration,
+        snapshot,
+        buffered,
+        false,
+        targetAround
+      );
+    });
+  });
+
+  function recoverCurrentRoute() {
+    const targetGuild = guildId;
+    const targetChannel = channelId;
+    const targetAround = aroundMessage;
+    const routeGeneration = loadGeneration;
+    const snapshot = ++snapshotGeneration;
+    const buffered: Dispatch[] = [];
+    dispatchBuffer = buffered;
+    void load(targetGuild, targetChannel, routeGeneration, snapshot, buffered, true, targetAround);
+  }
+
+  async function load(
+    targetGuild: string,
+    targetChannel: string,
+    routeGeneration: number,
+    snapshot: number,
+    buffered: Dispatch[],
+    preserveMessages: boolean,
+    targetAround: string | null
+  ) {
+    try {
+      const [loadedGuild, loadedGuilds, loadedMessages, loadedReadStates, loadedCurrentUser] =
+        await Promise.all([
+          api<Guild>(`/guilds/${encodeURIComponent(targetGuild)}`),
+          api<Guild[]>('/users/@me/guilds'),
+          api<Message[]>(
+            `/channels/${encodeURIComponent(targetChannel)}/messages${targetAround ? `?around=${encodeURIComponent(targetAround)}` : ''}`
+          ),
+          api<ReadStateStatus[]>('/users/@me/read-states'),
+          api<UserSummary>('/users/@me')
+        ]);
+      if (
+        routeGeneration !== loadGeneration ||
+        snapshot !== snapshotGeneration ||
+        targetGuild !== guildId ||
+        targetChannel !== channelId
+      )
+        return;
+      guild = loadedGuild;
+      setGuilds(loadedGuilds);
+      setReadStates(loadedReadStates);
+      entities.ingestCurrentUser(loadedCurrentUser);
+      const preferredPresence = myPresencePreference();
+      presencePreference = preferredPresence;
+      entities.setPresence(
+        loadedCurrentUser,
+        preferredPresence === 'idle' || preferredPresence === 'dnd'
+          ? preferredPresence
+          : preferredPresence === 'invisible'
+            ? 'offline'
+            : 'online'
+      );
+      void loadVoiceOccupancy(loadedGuild.channels ?? [], routeGeneration);
+      hasEarlier = targetAround ? loadedMessages.length > 0 : loadedMessages.length === 50;
+      hasLater = Boolean(targetAround && loadedMessages.length > 0);
+      const orderedMessages = loadedMessages.reverse().sort(compareMessages);
+      setMessages(
+        preserveMessages
+          ? mergeMessageSnapshot(messages, orderedMessages, {
+              authoritative: true,
+              complete: loadedMessages.length < 50,
+              preserveNonces: new Set(pendingSends.keys())
+            })
+          : orderedMessages
+      );
+      for (const dispatch of buffered) applyDispatch(dispatch);
+      forgetConfirmedSends();
+      if (dispatchBuffer === buffered) dispatchBuffer = null;
+      channelReady = true;
+      acknowledgeLatestIfVisible();
+    } catch (caught) {
+      if (
+        routeGeneration !== loadGeneration ||
+        snapshot !== snapshotGeneration ||
+        targetGuild !== guildId ||
+        targetChannel !== channelId
+      )
+        return;
+      for (const dispatch of buffered) applyDispatch(dispatch);
+      forgetConfirmedSends();
+      if (dispatchBuffer === buffered) dispatchBuffer = null;
+      if (!preserveMessages) {
+        error = caught instanceof ApiError ? caught.message : 'Could not open this channel.';
+      } else if (!error) {
+        error = 'Live updates resumed, but channel state could not be refreshed.';
+      }
+    }
+  }
+
+  async function loadEarlier() {
+    const generation = loadGeneration;
+    const targetChannel = channelId;
+    const oldest = messages[0];
+    if (!oldest || loadingEarlier || !hasEarlier || messages.length >= 1_000) return;
+    loadingEarlier = true;
+    try {
+      const older = await api<Message[]>(
+        `/channels/${encodeURIComponent(targetChannel)}/messages?before=${encodeURIComponent(entityRef(oldest))}`
+      );
+      if (generation !== loadGeneration || targetChannel !== channelId) return;
+      const available = Math.max(0, 1_000 - messages.length);
+      const prepended = older.reverse().slice(-available);
+      const byKey = Object.create(null) as Record<string, Message>;
+      for (const message of prepended) byKey[entityKey(message)] = message;
+      for (const message of messages) byKey[entityKey(message)] = message;
+      setMessages(Object.values(byKey).sort(compareMessages));
+      hasEarlier = older.length === 50 && messages.length < 1_000;
+    } catch (caught) {
+      if (generation !== loadGeneration || targetChannel !== channelId) return;
+      error = caught instanceof ApiError ? caught.message : 'Could not load earlier messages.';
+    } finally {
+      if (generation === loadGeneration && targetChannel === channelId) loadingEarlier = false;
+    }
+  }
+
+  async function loadLater() {
+    const generation = loadGeneration;
+    const targetChannel = channelId;
+    const newest = messages.at(-1);
+    if (!newest || loadingLater || !hasLater) return;
+    loadingLater = true;
+    try {
+      const newer = await api<Message[]>(
+        `/channels/${encodeURIComponent(targetChannel)}/messages?after=${encodeURIComponent(entityRef(newest))}`
+      );
+      if (generation !== loadGeneration || targetChannel !== channelId) return;
+      const byKey = Object.create(null) as Record<string, Message>;
+      for (const message of messages) byKey[entityKey(message)] = message;
+      for (const message of newer.reverse()) byKey[entityKey(message)] = message;
+      setMessages(Object.values(byKey).sort(compareMessages).slice(-1_000));
+      hasLater = newer.length === 50;
+    } catch (caught) {
+      if (generation !== loadGeneration || targetChannel !== channelId) return;
+      error = caught instanceof ApiError ? caught.message : 'Could not load newer messages.';
+    } finally {
+      if (generation === loadGeneration && targetChannel === channelId) loadingLater = false;
+    }
+  }
+
+  async function acknowledge(message: Message) {
+    const targetChannel = {
+      id: message.channel_id,
+      origin_domain: message.channel_domain
+    };
+    const succeeded = await api(`/channels/${encodeURIComponent(entityRef(targetChannel))}/ack`, {
+      method: 'POST',
+      body: JSON.stringify({ message_id: entityRef(message) })
+    })
+      .then(() => true)
+      .catch(() => false);
+    if (!succeeded) return;
+    setReadStates(
+      readStates.map((state) =>
+        state.channel_id === targetChannel.id &&
+        state.channel_domain === targetChannel.origin_domain
+          ? state.read_message_id !== null &&
+            state.read_message_domain !== null &&
+            compareEntityRefs(message, {
+              id: state.read_message_id,
+              origin_domain: state.read_message_domain
+            }) < 0
+            ? state
+            : {
+                ...state,
+                read_message_id: message.id,
+                read_message_domain: message.origin_domain,
+                mention_count: 0,
+                unread: false
+              }
+          : state
+      )
+    );
+  }
+
+  function reconcile(message: Message) {
+    if (message.client_nonce && !dispatchBuffer) pendingSends.delete(message.client_nonce);
+    setMessages(reconcileMessage(messages, message));
+  }
+
+  function forgetConfirmedSends() {
+    for (const message of messages) {
+      if (message.client_nonce && !message.id.startsWith('pending-')) {
+        pendingSends.delete(message.client_nonce);
+      }
+    }
+  }
+
+  function clearSubmittedUploads(attachmentIds: readonly string[]) {
+    uploads = withoutSubmittedUploads(uploads, attachmentIds);
+  }
+
+  function acknowledgeLatestIfVisible() {
+    if (document.visibilityState !== 'visible' || !timelineAtBottom) return;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (!message.id.startsWith('pending-')) {
+        void acknowledge(message);
+        return;
+      }
+    }
+  }
+
+  async function send(retry?: PendingMessageSend) {
+    const text = content.trim();
+    if (editingMessage && !retry) {
+      if (!text || busy) return;
+      const editing = editingMessage;
+      const generation = loadGeneration;
+      busy = true;
+      try {
+        const saved = await api<Message>(
+          `/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(entityRef(editing))}`,
+          { method: 'PATCH', body: JSON.stringify({ content: text }) }
+        );
+        if (generation !== loadGeneration) return;
+        reconcile(saved);
+        finishEditing();
+      } catch (caught) {
+        if (generation === loadGeneration)
+          error = caught instanceof ApiError ? caught.message : 'Message edit failed.';
+      } finally {
+        if (generation === loadGeneration) busy = false;
+      }
+      return;
+    }
+    if (busy || !channelReady || !channel) return;
+    const attachmentIds = retry
+      ? retry.attachmentIds
+      : uploads
+          .filter((item) => item.status === 'ready' && item.attachmentId)
+          .map((item) => item.attachmentId as string);
+    if (!retry && uploads.some((item) => item.status === 'uploading')) return;
+    const mentionUserIds = retry
+      ? retry.mentionUserIds
+      : members
+          .filter((member) => mentionsUser(text, member.user, localDomain))
+          .map((member) => entityRef(member.user));
+    if (!retry && !text && !attachmentIds.length) return;
+    const draft = retry ?? pendingMessageSend(text || null, attachmentIds, mentionUserIds);
+    if (!draft.content && !draft.attachmentIds.length) {
+      error = 'Reattach this message’s files before retrying.';
+      return;
+    }
+    const generation = loadGeneration;
+    const routeChannel = channelId;
+    const targetChannel = channel ? entityRef(channel) : channelId;
+    const nonce = draft.clientNonce;
+    error = '';
+    pendingSends.set(nonce, draft);
+    const existing = messages.find((message) => message.client_nonce === nonce);
+    const optimistic: Message = existing
+      ? { ...existing, pending: true, queued: false, failed: false }
+      : {
+          id: `pending-${nonce}`,
+          origin_domain: '',
+          channel_id: channel.id,
+          channel_domain: channel.origin_domain,
+          author_id: 'me',
+          author_domain: '',
+          author: null,
+          content: draft.content,
+          message_type: 0,
+          flags: 0,
+          client_nonce: nonce,
+          referenced_message_id: null,
+          referenced_message_domain: null,
+          mention_user_refs: [],
+          edited_at: null,
+          deleted_at: null,
+          created_at: new Date().toISOString(),
+          pending: true
+        };
+    setMessages(
+      existing
+        ? messages.map((message) => (message.client_nonce === nonce ? optimistic : message))
+        : [...messages, optimistic].slice(-250)
+    );
+    if (!retry) {
+      content = '';
+      composerCursor = 0;
+    }
+    busy = true;
+    try {
+      const saved = await api<Message | { status: 'queued'; client_nonce: string }>(
+        `/channels/${encodeURIComponent(targetChannel)}/messages`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            content: draft.content,
+            client_nonce: nonce,
+            attachment_ids: draft.attachmentIds,
+            mention_user_ids: draft.mentionUserIds
+          })
+        }
+      );
+      if (generation !== loadGeneration || routeChannel !== channelId) return;
+      if ('status' in saved) {
+        setMessages(
+          messages.map((item) =>
+            item.client_nonce === saved.client_nonce && item.pending
+              ? { ...item, pending: false, queued: true }
+              : item
+          )
+        );
+        clearSubmittedUploads(draft.attachmentIds);
+        return;
+      }
+      reconcile(saved);
+      clearSubmittedUploads(draft.attachmentIds);
+      await acknowledge(saved);
+    } catch (caught) {
+      if (generation !== loadGeneration || routeChannel !== channelId) return;
+      const stillPending = messages.some((item) => item.client_nonce === nonce && item.pending);
+      setMessages(failPendingMessage(messages, nonce));
+      if (stillPending) {
+        if (caught instanceof ApiError && caught.code === 'ATTACHMENT_ALREADY_USED') {
+          pendingSends.set(nonce, discardAttachments(draft));
+          clearSubmittedUploads(draft.attachmentIds);
+          error =
+            'Those files were already used by another message. Reattach them before retrying.';
+        } else {
+          error = caught instanceof ApiError ? caught.message : 'Message failed to send.';
+        }
+      }
+    } finally {
+      if (generation === loadGeneration && routeChannel === channelId) busy = false;
+    }
+  }
+
+  async function queueFiles(files: FileList | File[]) {
+    if (!channel || busy || uploads.length >= 10) return;
+    const target = entityRef(channel);
+    const generation = loadGeneration;
+    const routeChannel = channelId;
+    for (const file of Array.from(files).slice(0, 10 - uploads.length)) {
+      const key = crypto.randomUUID();
+      const controller = new AbortController();
+      uploadControllers.set(key, controller);
+      uploads = [...uploads, { key, file, progress: 0, status: 'uploading' }];
+      void uploadChannelFile(
+        target,
+        file,
+        (progress) => {
+          if (
+            controller.signal.aborted ||
+            generation !== loadGeneration ||
+            routeChannel !== channelId
+          )
+            return;
+          uploads = uploads.map((item) => (item.key === key ? { ...item, progress } : item));
+        },
+        controller.signal
+      )
+        .then((ticket) => {
+          uploadControllers.delete(key);
+          if (generation !== loadGeneration || routeChannel !== channelId) return;
+          uploads = uploads.map((item) =>
+            item.key === key
+              ? { ...item, progress: 100, status: 'ready', attachmentId: ticket.id }
+              : item
+          );
+        })
+        .catch((caught: unknown) => {
+          uploadControllers.delete(key);
+          if (
+            controller.signal.aborted ||
+            generation !== loadGeneration ||
+            routeChannel !== channelId
+          )
+            return;
+          uploads = uploads.map((item) =>
+            item.key === key
+              ? {
+                  ...item,
+                  status: 'failed',
+                  error: caught instanceof Error ? caught.message : 'Upload failed'
+                }
+              : item
+          );
+        });
+    }
+  }
+
+  function removeUpload(key: string) {
+    uploadControllers.get(key)?.abort();
+    uploadControllers.delete(key);
+    uploads = uploads.filter((item) => item.key !== key);
+  }
+
+  function resetUploads() {
+    for (const controller of uploadControllers.values()) controller.abort();
+    uploadControllers.clear();
+    uploads = [];
+  }
+
+  function composerPaste(event: ClipboardEvent) {
+    if (editingMessage) return;
+    if (event.clipboardData?.files.length) void queueFiles(event.clipboardData.files);
+  }
+
+  function composerDrop(event: DragEvent) {
+    event.preventDefault();
+    if (editingMessage) return;
+    if (event.dataTransfer?.files.length) void queueFiles(event.dataTransfer.files);
+  }
+
+  function announceTyping() {
+    if (Date.now() - lastTypingAt < 8000) return;
+    lastTypingAt = Date.now();
+    const targetChannel = channel ? entityRef(channel) : channelId;
+    void api(`/channels/${encodeURIComponent(targetChannel)}/typing`, { method: 'POST' }).catch(
+      () => undefined
+    );
+  }
+
+  function syncComposerCursor() {
+    composerCursor = composerInput?.selectionStart ?? content.length;
+  }
+
+  function composerChanged() {
+    syncComposerCursor();
+    announceTyping();
+  }
+
+  function composerKeydown(event: KeyboardEvent) {
+    if (autocomplete?.handleKeydown(event)) return;
+    if (event.key === 'Escape' && editingMessage) {
+      event.preventDefault();
+      finishEditing();
+      return;
+    }
+    if (event.key === 'ArrowUp' && !content && !event.shiftKey) {
+      const own = messages.findLast(
+        (message) =>
+          !message.deleted_at &&
+          !message.pending &&
+          message.author_id === currentUser?.id &&
+          message.author_domain === currentUser.origin_domain
+      );
+      if (own) {
+        event.preventDefault();
+        startEditing(own);
+      }
+      return;
+    }
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      void send();
+    }
+  }
+
+  function startEditing(message: Message) {
+    if (!editingMessage) {
+      composerDraftBeforeEdit = { content, cursor: composerCursor };
+    }
+    editingMessage = message;
+    content = message.content ?? '';
+    composerCursor = content.length;
+    void tick().then(() => {
+      composerInput?.focus();
+      composerInput?.setSelectionRange(composerCursor, composerCursor);
+    });
+  }
+
+  function finishEditing() {
+    const draft = composerDraftBeforeEdit;
+    editingMessage = null;
+    composerDraftBeforeEdit = null;
+    content = draft?.content ?? '';
+    composerCursor = Math.min(draft?.cursor ?? content.length, content.length);
+    void tick().then(() => {
+      composerInput?.focus();
+      composerInput?.setSelectionRange(composerCursor, composerCursor);
+    });
+  }
+
+  async function deleteMessage(message: Message) {
+    const generation = loadGeneration;
+    const routeChannel = channelId;
+    try {
+      await api(
+        `/channels/${encodeURIComponent(routeChannel)}/messages/${encodeURIComponent(entityRef(message))}`,
+        { method: 'DELETE' }
+      );
+      if (generation !== loadGeneration || routeChannel !== channelId) return;
+      setMessages(
+        messages.map((item) =>
+          entityKey(item) === entityKey(message)
+            ? { ...item, content: null, deleted_at: new Date().toISOString() }
+            : item
+        )
+      );
+      if (editingMessage && entityKey(editingMessage) === entityKey(message)) finishEditing();
+    } catch (caught) {
+      if (generation !== loadGeneration || routeChannel !== channelId) return;
+      error = caught instanceof ApiError ? caught.message : 'Message deletion failed.';
+    }
+  }
+
+  async function messageUser(user: UserSummary) {
+    if (currentUser && entityKey(user) === entityKey(currentUser)) return;
+    const generation = loadGeneration;
+    const routeGuild = guildId;
+    const routeChannel = channelId;
+    const stillCurrent = () =>
+      generation === loadGeneration && routeGuild === guildId && routeChannel === channelId;
+    try {
+      const opened = await api<
+        import('$lib/chat/types').Channel | { status: 'queued'; operation_id: string }
+      >('/users/@me/channels', {
+        method: 'POST',
+        body: JSON.stringify({ handle: user.handle })
+      });
+      if (!stillCurrent()) return;
+      if ('status' in opened) {
+        error = 'The direct-message request is queued with the recipient’s instance.';
+        return;
+      }
+      window.location.assign(directMessagePath(opened));
+    } catch (caught) {
+      if (!stillCurrent()) return;
+      error = caught instanceof ApiError ? caught.message : 'Could not open a direct message.';
+    }
+  }
+
+  async function messageAuthor(message: Message) {
+    if (message.author) await messageUser(message.author);
+  }
+
+  function retryMessage(message: Message) {
+    editingMessage = null;
+    composerDraftBeforeEdit = null;
+    if (message.delivery_status === 'failed') {
+      content = message.content ?? '';
+      composerCursor = content.length;
+      if (!content) error = 'Reattach this message’s files before sending it again.';
+      void tick().then(() => composerInput?.focus());
+      return;
+    }
+    let draft = message.client_nonce ? pendingSends.get(message.client_nonce) : undefined;
+    if (draft && !draft.attachmentIds.length) {
+      const replacements = uploads
+        .filter((upload) => upload.status === 'ready' && upload.attachmentId)
+        .map((upload) => upload.attachmentId as string);
+      if (replacements.length) {
+        draft = pendingMessageSend(
+          draft.content,
+          replacements,
+          draft.mentionUserIds,
+          draft.clientNonce
+        );
+        pendingSends.set(draft.clientNonce, draft);
+      }
+    }
+    if (!draft) {
+      content = message.content ?? '';
+      composerCursor = content.length;
+      if (!content) error = 'Reattach this message’s files before retrying.';
+      void tick().then(() => composerInput?.focus());
+      return;
+    }
+    void send(draft);
+  }
+
+  function chooseCompletion(completion: Completion) {
+    if (!completionQuery) return;
+    const cursor = completionQuery.start + completion.value.length + 1;
+    content = replaceCompletion(content, completionQuery, completion.value);
+    composerCursor = cursor;
+    void tick().then(() => {
+      composerInput?.focus();
+      composerInput?.setSelectionRange(cursor, cursor);
+    });
+  }
+
+  function timelineBottomChanged(value: boolean) {
+    timelineAtBottom = value;
+    if (value) acknowledgeLatestIfVisible();
+  }
+</script>
+
+<!-- eslint-disable svelte/no-navigation-without-resolve -- route helpers resolve the typed template before substituting encoded parameters -->
+
+<svelte:head><title>{channel?.name ?? 'Channel'} · Kaede Chat</title></svelte:head>
+<svelte:window
+  onclick={() => closeChannelMenu(false)}
+  onkeydown={(event) => {
+    if (channelDeleteTarget) {
+      channelDeleteDialogKeydown(event);
+      return;
+    }
+    if (channelDialogOpen) {
+      channelDialogKeydown(event);
+      return;
+    }
+    if (channelMenu) {
+      channelMenuKeydown(event);
+      return;
+    }
+    if (mobileNavigationOpen) {
+      mobileNavigationKeydown(event);
+      return;
+    }
+  }}
+/>
+
+{#if mobileNavigationOpen}
+  <button
+    class="mobile-sidebar-backdrop"
+    type="button"
+    aria-label="Close guild navigation"
+    onclick={() => closeMobileNavigation()}
+  ></button>
+{/if}
+
+{#snippet voiceMembers(target: Channel)}
+  {#if target.type === 2 && occupantsFor(target).length}
+    <div class="voice-channel-members" aria-label={`People in ${target.name}`}>
+      {#each occupantsFor(target) as occupant (occupant.identity)}
+        {@const voiceMember = memberFor(occupant.user_id, occupant.user_domain)}
+        {#if voiceMember}
+          <button
+            type="button"
+            title={`${voiceMember.user.handle}${occupant.self_mute || occupant.server_mute ? ' · muted' : ''}`}
+            oncontextmenu={(event) => openProfile(voiceMember.user, event)}
+            onclick={(event) => openProfile(voiceMember.user, event)}
+          >
+            <span class="voice-member-avatar">
+              {#if voiceMember.user.avatar_hash}
+                <img src={`/media/assets/${voiceMember.user.avatar_hash}/thumbnail_128`} alt="" />
+              {:else}
+                {(
+                  voiceMember.nickname ??
+                  voiceMember.user.display_name ??
+                  voiceMember.user.username
+                )
+                  .slice(0, 1)
+                  .toUpperCase()}
+              {/if}
+              <i class={`presence-dot presence-${presenceFor(voiceMember.user)}`}></i>
+            </span>
+            <span
+              >{voiceMember.nickname ??
+                voiceMember.user.display_name ??
+                voiceMember.user.username}</span
+            >
+            {#if occupant.self_mute || occupant.server_mute}<Icon
+                name="microphone-off"
+                size={13}
+              />{/if}
+            {#if occupant.self_deaf || occupant.server_deaf}<span
+                class="voice-state-icon"
+                aria-label="Deafened"
+                title="Deafened"><Icon name="headphones-off" size={13} /></span
+              >{/if}
+          </button>
+        {/if}
+      {/each}
+    </div>
+  {/if}
+{/snippet}
+
+<main class:member-roster-visible={memberRosterOpen} class="chat-app">
+  <nav class="guild-spine" aria-label="Guilds">
+    <a class="spine-home" href={resolve('/home')} aria-label="Home" title="Home">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 10.5 12 4l8 6.5v8a1.5 1.5 0 0 1-1.5 1.5h-4v-6h-5v6h-4A1.5 1.5 0 0 1 4 18.5z" />
+      </svg>
+    </a>
+    <div class="spine-separator" aria-hidden="true"></div>
+    {#each guilds as item (entityKey(item))}
+      <a
+        class:active={matchesEntityRef(guildId, item, localDomain)}
+        href={guildLandingPath(item)}
+        aria-label={item.name}
+        aria-current={matchesEntityRef(guildId, item, localDomain) ? 'page' : undefined}
+        title={item.name}
+      >
+        {#if item.icon_hash}
+          <img src={`/media/assets/${item.icon_hash}/thumbnail_128`} alt="" />
+        {:else}
+          {item.name.slice(0, 2).toUpperCase()}
+        {/if}
+      </a>
+    {/each}
+  </nav>
+  <aside
+    bind:this={mobileNavigationDrawer}
+    class:mobile-open={mobileNavigationOpen}
+    class="channel-sidebar"
+    id="guild-channel-navigation"
+    role={mobileNavigationOpen ? 'dialog' : undefined}
+    aria-modal={mobileNavigationOpen ? 'true' : undefined}
+    aria-label="Guild navigation"
+  >
+    <header>
+      <div class="sidebar-heading">
+        <div>
+          <p>Guild</p>
+          <h2>{guild?.name ?? 'Loading…'}</h2>
+        </div>
+        <div class="mobile-sidebar-tools">
+          {#if guild}
+            <a
+              class="sidebar-settings"
+              href={guildSettingsPath(guild)}
+              aria-label="Guild settings"
+              title="Guild settings"
+              onclick={() => closeMobileNavigation(false)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8 3.5-.1-1.2 2-1.5-2-3.4-2.4 1a8.8 8.8 0 0 0-2.1-1.2L15 3h-4l-.4 2.7c-.8.3-1.5.7-2.1 1.2l-2.4-1-2 3.4 2 1.5A9.7 9.7 0 0 0 6 12l.1 1.2-2 1.5 2 3.4 2.4-1c.6.5 1.3.9 2.1 1.2L11 21h4l.4-2.7c.8-.3 1.5-.7 2.1-1.2l2.4 1 2-3.4-2-1.5.1-1.2Z"
+                />
+              </svg>
+            </a>
+          {/if}
+          <button
+            bind:this={mobileNavigationClose}
+            class="mobile-sidebar-close"
+            type="button"
+            aria-label="Close guild navigation"
+            onclick={() => closeMobileNavigation()}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <path d="m6 6 12 12M18 6 6 18" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="channel-header-actions">
+        <button
+          class="icon-button"
+          type="button"
+          aria-label="Jump to a channel"
+          title="Jump to a channel (Ctrl+K)"
+          onclick={() => window.dispatchEvent(new Event('kaede:open-command-switcher'))}
+        >
+          <Icon name="search" size={18} />
+        </button>
+      </div>
+    </header>
+    <div class="sidebar-section-heading">
+      <p class="sidebar-section-label">Channels</p>
+      {#if canManageChannels}
+        <button
+          type="button"
+          aria-label="Create channel"
+          title="Create channel"
+          onclick={(event) => {
+            event.stopPropagation();
+            openChannelDialog(0, null, null, event.currentTarget);
+          }}>+</button
+        >
+      {/if}
+    </div>
+    <p class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+      {channelOrderStatus}
+    </p>
+    <nav
+      class="channel-tree"
+      aria-label="Channels"
+      aria-busy={reorderingChannels}
+      oncontextmenu={(event) => showChannelMenu(event, null)}
+    >
+      {#each channelGroups as group (group.category ? entityKey(group.category) : 'ungrouped')}
+        {#if group.category}
+          <section class="channel-category">
+            <div
+              class:drag-over={dragOverChannelKey === entityKey(group.category)}
+              class="channel-category-heading"
+              role="group"
+              draggable={canManageChannels && !reorderingChannels}
+              ondragstart={(event) => channelDragStart(event, group.category!)}
+              ondragend={channelDragEnd}
+              ondragover={(event) => channelDragOver(event, group.category)}
+              ondragleave={() => (dragOverChannelKey = null)}
+              ondrop={(event) => channelDrop(event, group.category)}
+              oncontextmenu={(event) => showChannelMenu(event, group.category)}
+            >
+              <button
+                class="category-toggle"
+                type="button"
+                aria-expanded={!collapsedCategories.has(entityKey(group.category))}
+                aria-haspopup="menu"
+                aria-label={`${collapsedCategories.has(entityKey(group.category)) ? 'Expand' : 'Collapse'} ${group.category.name}`}
+                onkeydown={(event) => showChannelMenuFromKeyboard(event, group.category)}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  toggleCategory(group.category!);
+                }}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 3 5 5-5 5" /></svg>
+              </button>
+              <span>{group.category.name}</span>
+              {#if canManageChannels}
+                <button
+                  class="category-add"
+                  type="button"
+                  aria-label={`Create a channel in ${group.category.name}`}
+                  title="Create channel"
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    openChannelDialog(0, group.category, null, event.currentTarget);
+                  }}>+</button
+                >
+              {/if}
+              <button
+                class="channel-row-actions"
+                type="button"
+                aria-label={`Actions for ${group.category.name}`}
+                aria-haspopup="menu"
+                aria-controls="channel-context-menu"
+                aria-expanded={channelMenu?.channel
+                  ? entityKey(channelMenu.channel) === entityKey(group.category)
+                  : false}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  openChannelMenu(group.category, event.currentTarget);
+                }}
+              >
+                <Icon name="more" size={18} />
+              </button>
+            </div>
+            {#if !collapsedCategories.has(entityKey(group.category))}
+              <div class="category-channels">
+                {#each group.channels as item (entityKey(item))}
+                  <div class="channel-row">
+                    <a
+                      class:active={matchesEntityRef(channelId, item, localDomain)}
+                      class:drag-over={dragOverChannelKey === entityKey(item)}
+                      draggable={canManageChannels && !reorderingChannels}
+                      href={guild ? guildChannelPath(guild, item) : resolve('/home')}
+                      aria-haspopup="menu"
+                      aria-current={matchesEntityRef(channelId, item, localDomain)
+                        ? 'page'
+                        : undefined}
+                      ondragstart={(event) => channelDragStart(event, item)}
+                      ondragend={channelDragEnd}
+                      ondragover={(event) => channelDragOver(event, item)}
+                      ondragleave={() => (dragOverChannelKey = null)}
+                      ondrop={(event) => channelDrop(event, item)}
+                      oncontextmenu={(event) => showChannelMenu(event, item)}
+                      onkeydown={(event) => showChannelMenuFromKeyboard(event, item)}
+                      onclick={() => closeMobileNavigation(false)}
+                    >
+                      <span>
+                        <Icon
+                          name={item.type === 2 ? 'volume' : item.type === 5 ? 'bell' : 'hash'}
+                          size={16}
+                        />
+                        {item.name}
+                      </span>
+                      {#if unreadFor(item)?.unread}<small class="unread-badge"
+                          >{Math.max(1, unreadFor(item)?.mention_count ?? 0)}</small
+                        >{/if}
+                    </a>
+                    <button
+                      class="channel-row-actions"
+                      type="button"
+                      aria-label={`Actions for ${item.name}`}
+                      aria-haspopup="menu"
+                      aria-controls="channel-context-menu"
+                      aria-expanded={channelMenu?.channel
+                        ? entityKey(channelMenu.channel) === entityKey(item)
+                        : false}
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        openChannelMenu(item, event.currentTarget);
+                      }}
+                    >
+                      <Icon name="more" size={18} />
+                    </button>
+                  </div>
+                  {@render voiceMembers(item)}
+                {/each}
+              </div>
+            {/if}
+          </section>
+        {:else}
+          <div
+            class:drag-over={dragOverChannelKey === 'ungrouped'}
+            class="uncategorized-channels"
+            role="group"
+            ondragover={(event) => channelDragOver(event, null)}
+            ondragleave={() => (dragOverChannelKey = null)}
+            ondrop={(event) => channelDrop(event, null)}
+          >
+            {#each group.channels as item (entityKey(item))}
+              <div class="channel-row">
+                <a
+                  class:active={matchesEntityRef(channelId, item, localDomain)}
+                  class:drag-over={dragOverChannelKey === entityKey(item)}
+                  draggable={canManageChannels && !reorderingChannels}
+                  href={guild ? guildChannelPath(guild, item) : resolve('/home')}
+                  aria-haspopup="menu"
+                  aria-current={matchesEntityRef(channelId, item, localDomain) ? 'page' : undefined}
+                  ondragstart={(event) => channelDragStart(event, item)}
+                  ondragend={channelDragEnd}
+                  ondragover={(event) => channelDragOver(event, item)}
+                  ondragleave={() => (dragOverChannelKey = null)}
+                  ondrop={(event) => channelDrop(event, item)}
+                  oncontextmenu={(event) => showChannelMenu(event, item)}
+                  onkeydown={(event) => showChannelMenuFromKeyboard(event, item)}
+                  onclick={() => closeMobileNavigation(false)}
+                >
+                  <span>
+                    <Icon
+                      name={item.type === 2 ? 'volume' : item.type === 5 ? 'bell' : 'hash'}
+                      size={16}
+                    />
+                    {item.name}
+                  </span>
+                  {#if unreadFor(item)?.unread}<small class="unread-badge"
+                      >{Math.max(1, unreadFor(item)?.mention_count ?? 0)}</small
+                    >{/if}
+                </a>
+                <button
+                  class="channel-row-actions"
+                  type="button"
+                  aria-label={`Actions for ${item.name}`}
+                  aria-haspopup="menu"
+                  aria-controls="channel-context-menu"
+                  aria-expanded={channelMenu?.channel
+                    ? entityKey(channelMenu.channel) === entityKey(item)
+                    : false}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    openChannelMenu(item, event.currentTarget);
+                  }}
+                >
+                  <Icon name="more" size={18} />
+                </button>
+              </div>
+              {@render voiceMembers(item)}
+            {/each}
+          </div>
+        {/if}
+      {/each}
+    </nav>
+    <div class="sidebar-user-dock">
+      <span class="avatar avatar-small">
+        {#if currentUser?.avatar_hash}
+          <img src={`/media/assets/${currentUser.avatar_hash}/thumbnail_128`} alt="" />
+        {:else}
+          {currentUser?.username.slice(0, 1).toUpperCase() ?? 'K'}
+        {/if}
+      </span>
+      <div class="sidebar-user-identity">
+        <strong>{currentUser?.display_name ?? currentUser?.username ?? 'Your account'}</strong>
+        {#if currentUser?.custom_status?.trim()}
+          <small title={currentUser.custom_status}>{currentUser.custom_status}</small>
+        {/if}
+        <PresencePicker value={presencePreference} onChange={setMyPresence} />
+      </div>
+      <a class="icon-button" href={resolve('/settings')} aria-label="User settings">
+        <Icon name="settings" size={18} />
+      </a>
+    </div>
+  </aside>
+  <section class:guild-voice-pane={channel?.type === 2} class="message-pane">
+    <header class:guild-voice-header={channel?.type === 2} class="channel-header">
+      <div class="channel-header-primary">
+        <button
+          bind:this={mobileNavigationToggle}
+          class="mobile-sidebar-toggle"
+          type="button"
+          aria-label={mobileNavigationOpen ? 'Close guild navigation' : 'Open guild navigation'}
+          aria-controls="guild-channel-navigation"
+          aria-expanded={mobileNavigationOpen}
+          onclick={toggleMobileNavigation}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M4 7h16M4 12h16M4 17h16" />
+          </svg>
+        </button>
+        <div class="channel-title">
+          <span class="channel-mark" aria-hidden="true">
+            {#if channel?.type === 2}
+              <Icon name="volume" size={18} />
+            {:else if channel?.type === 5}
+              <Icon name="bell" size={18} />
+            {:else}
+              #
+            {/if}
+          </span>
+          <div>
+            <strong>{channel?.name ?? 'Channel'}</strong>
+            {#if channel?.topic}<span>{channel.topic}</span>{/if}
+          </div>
+        </div>
+      </div>
+      <div class="channel-header-actions">
+        <button
+          class:active={memberRosterOpen}
+          class="icon-button member-roster-toggle"
+          type="button"
+          aria-label={memberRosterOpen ? 'Hide member list' : 'Show member list'}
+          aria-pressed={memberRosterOpen}
+          title={memberRosterOpen ? 'Hide member list' : 'Show member list'}
+          onclick={toggleMemberRoster}
+        >
+          <Icon name="users" size={19} />
+        </button>
+      </div>
+    </header>
+    {#if channel?.type === 2}
+      <div class="guild-voice-content">
+        {#key entityRef(channel)}
+          <VoiceDock channelRef={entityRef(channel)} />
+        {/key}
+      </div>
+    {:else}
+      <div
+        class="message-list"
+        aria-live="polite"
+        role="log"
+        aria-label={`Messages in ${channel?.name ?? 'channel'}`}
+      >
+        {#if error}<p class="form-error message-error">{error}</p>{/if}
+        {#snippet emptyTimeline()}
+          {#if channelReady && channel}
+            <section class="channel-welcome">
+              <span class="welcome-mark" aria-hidden="true">#</span>
+              <h2>Welcome to #{channel.name}</h2>
+              <p>This is the beginning of the conversation.</p>
+            </section>
+          {/if}
+        {/snippet}
+        {#key channelId}
+          <VirtualMessageList
+            items={timeline}
+            empty={emptyTimeline}
+            {hasEarlier}
+            {loadingEarlier}
+            {hasLater}
+            {loadingLater}
+            onLoadEarlier={loadEarlier}
+            onLoadLater={loadLater}
+            targetKey={targetTimelineKey}
+            onBottomChange={timelineBottomChanged}
+            label={`Messages in ${channel?.name ?? 'channel'}`}
+          >
+            {#snippet renderItem(item)}
+              {#if item.kind === 'day'}
+                <div class="timeline-divider" role="separator"><span>{item.label}</span></div>
+              {:else if item.kind === 'new'}
+                <div class="timeline-divider new" role="separator"><span>{item.label}</span></div>
+              {:else}
+                <MessageRow
+                  message={item.message}
+                  compact={item.compact}
+                  mentionUsers={entities.users.values}
+                  presence={item.message.author ? presenceFor(item.message.author) : 'offline'}
+                  canEdit={item.message.author_id === currentUser?.id &&
+                    item.message.author_domain === currentUser?.origin_domain}
+                  onEdit={startEditing}
+                  onDelete={deleteMessage}
+                  onMessageAuthor={item.message.author &&
+                  (item.message.author_id !== currentUser?.id ||
+                    item.message.author_domain !== currentUser?.origin_domain)
+                    ? messageAuthor
+                    : undefined}
+                  onRetry={retryMessage}
+                  onViewProfile={openMessageProfile}
+                />
+              {/if}
+            {/snippet}
+          </VirtualMessageList>
+        {/key}
+      </div>
+      <footer class="composer-wrap">
+        <span class="typing-line">{typing}</span>
+        {#if editingMessage}
+          <div class="editing-banner">
+            <span>Editing message <small>Your draft and attachments are saved.</small></span>
+            <button type="button" onclick={finishEditing}>Cancel</button>
+          </div>
+        {/if}
+        <ComposerAutocomplete
+          bind:this={autocomplete}
+          query={completionQuery?.query ?? ''}
+          options={completionOptions}
+          listboxId="guild-message-suggestions"
+          onActiveIndexChange={(index) => (completionActive = index)}
+          onOpenChange={(open) => (completionOpen = open)}
+          onSelect={chooseCompletion}
+        />
+        <form
+          class="composer"
+          ondragover={(event) => event.preventDefault()}
+          ondrop={composerDrop}
+          onsubmit={(event) => {
+            event.preventDefault();
+            send();
+          }}
+        >
+          <input
+            class="visually-hidden"
+            bind:this={fileInput}
+            type="file"
+            multiple
+            onchange={(event) => {
+              const target = event.currentTarget;
+              if (target.files) void queueFiles(target.files);
+              target.value = '';
+            }}
+          />
+          <button
+            class="attach-button"
+            type="button"
+            disabled={busy || !channelReady || !channel || Boolean(editingMessage)}
+            onclick={() => fileInput?.click()}
+            aria-label="Attach files"
+            title="Attach files"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m9.5 12.5 5.8-5.8a3 3 0 1 1 4.2 4.3l-8.2 8.1a5 5 0 0 1-7.1-7L12 4.3" />
+            </svg>
+          </button>
+          <textarea
+            bind:this={composerInput}
+            bind:value={content}
+            oninput={composerChanged}
+            onselect={syncComposerCursor}
+            onclick={syncComposerCursor}
+            onkeyup={syncComposerCursor}
+            onkeydown={composerKeydown}
+            onpaste={composerPaste}
+            disabled={!channelReady || !channel}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={completionOpen}
+            aria-controls={completionOpen ? 'guild-message-suggestions' : undefined}
+            aria-activedescendant={completionOpen
+              ? `guild-message-suggestions-option-${completionActive}`
+              : undefined}
+            aria-label={`Message ${channel?.name ?? 'channel'}`}
+            placeholder={`Message #${channel?.name ?? 'channel'}`}
+            rows="1"
+            maxlength="4000"
+          ></textarea>
+          <small class="composer-count">{content.length}/4000</small>
+          <button
+            class="send-button"
+            disabled={busy ||
+              !channelReady ||
+              !channel ||
+              uploads.some((item) => item.status === 'uploading') ||
+              (editingMessage
+                ? !content.trim()
+                : !content.trim() && !uploads.some((item) => item.status === 'ready'))}
+            aria-label="Send message"
+            title="Send message"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m4 4 17 8-17 8 3-7 8-1-8-1z" />
+            </svg>
+          </button>
+        </form>
+        {#if uploads.length && !editingMessage}
+          <UploadPreviewTray {uploads} onRemove={removeUpload} />
+        {/if}
+      </footer>
+    {/if}
+  </section>
+  {#if memberRosterOpen}
+    <GuildMemberRoster
+      {members}
+      {presenceFor}
+      onProfile={openProfile}
+      onClose={toggleMemberRoster}
+    />
+  {/if}
+</main>
+
+{#if profile}
+  <UserProfileCard
+    user={profile.user}
+    presence={presenceFor(profile.user)}
+    x={profile.x}
+    y={profile.y}
+    isSelf={Boolean(currentUser && entityKey(currentUser) === entityKey(profile.user))}
+    onClose={() => (profile = null)}
+    onMessage={messageUser}
+  />
+{/if}
+
+{#if channelMenu}
+  <div
+    bind:this={channelMenuElement}
+    id="channel-context-menu"
+    class="channel-context-menu"
+    role="menu"
+    aria-label={channelMenu.channel ? 'Channel actions' : 'Channel list actions'}
+    aria-busy={reorderingChannels}
+  >
+    {#if channelMenu.channel}
+      {@const target = channelMenu.channel}
+      {@const canEditChannel =
+        canManageChannels || channelHasPermission(target, Permission.MANAGE_CHANNELS)}
+      {@const canEditPermissions = channelHasPermission(target, Permission.MANAGE_ROLES)}
+      {#if target.type !== 4 && guild}
+        <a
+          role="menuitem"
+          tabindex="-1"
+          href={guildChannelPath(guild, target)}
+          onclick={() => closeChannelMenu(false)}
+        >
+          <span>Open channel</span>
+        </a>
+      {/if}
+      {#if target.type !== 4 && target.last_message_id}
+        <button type="button" role="menuitem" tabindex="-1" onclick={() => markChannelRead(target)}>
+          <span>Mark as read</span>
+        </button>
+      {/if}
+      {#if canEditChannel && target.type === 4}
+        <button
+          type="button"
+          role="menuitem"
+          tabindex="-1"
+          onclick={(event) => openChannelDialog(0, target, null, event.currentTarget)}
+        >
+          <span>Create channel</span>
+        </button>
+      {/if}
+      {#if guild && (canEditChannel || canEditPermissions)}
+        <a
+          class="menu-separator"
+          role="menuitem"
+          tabindex="-1"
+          href={channelSettingsPath(guild, target, canEditChannel ? 'overview' : 'permissions')}
+          onclick={() => closeChannelMenu(false)}
+        >
+          <span>Edit {target.type === 4 ? 'category' : 'channel'}</span>
+        </a>
+      {/if}
+      {#if canEditChannel}
+        <button
+          type="button"
+          role="menuitem"
+          tabindex="-1"
+          disabled={!canMoveChannel(target, -1)}
+          onclick={() => moveChannelByStep(target, -1)}
+        >
+          <span>Move up</span>
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          tabindex="-1"
+          disabled={!canMoveChannel(target, 1)}
+          onclick={() => moveChannelByStep(target, 1)}
+        >
+          <span>Move down</span>
+        </button>
+        <button
+          class="danger-item"
+          type="button"
+          role="menuitem"
+          tabindex="-1"
+          onclick={() => requestChannelDeletion(target)}
+        >
+          <span>Delete {target.type === 4 ? 'category' : 'channel'}</span>
+        </button>
+      {/if}
+      {#if target.type !== 4 && guild}
+        <button
+          class="menu-separator"
+          type="button"
+          role="menuitem"
+          tabindex="-1"
+          onclick={(event) => copyChannelValue(absoluteChannelLink(target), event)}
+        >
+          <span>Copy channel link</span>
+        </button>
+      {/if}
+      {#if developerMode.enabled}
+        <button
+          class:menu-separator={target.type === 4}
+          type="button"
+          role="menuitem"
+          tabindex="-1"
+          onclick={(event) => copyChannelValue(entityRef(target), event)}
+        >
+          <span>Copy {target.type === 4 ? 'category' : 'channel'} ID</span>
+        </button>
+      {/if}
+    {:else if canManageChannels}
+      <button
+        type="button"
+        role="menuitem"
+        tabindex="-1"
+        onclick={(event) => openChannelDialog(0, null, null, event.currentTarget)}
+      >
+        <span>Create channel</span>
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        tabindex="-1"
+        onclick={(event) => openChannelDialog(4, null, null, event.currentTarget)}
+      >
+        <span>Create category</span>
+      </button>
+    {/if}
+  </div>
+{/if}
+
+{#if channelDeleteTarget}
+  <div class="channel-dialog-layer">
+    <button
+      class="channel-dialog-backdrop"
+      type="button"
+      aria-label="Cancel channel deletion"
+      disabled={channelDeleteBusy}
+      onclick={() => closeChannelDeleteDialog()}
+    ></button>
+    <div
+      bind:this={channelDeleteDialog}
+      class="channel-dialog confirmation-dialog"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="channel-delete-title"
+      aria-describedby="channel-delete-description"
+      aria-busy={channelDeleteBusy}
+    >
+      <header>
+        <div>
+          <p>Permanent action</p>
+          <h2 id="channel-delete-title">
+            Delete {channelDeleteTarget.type === 4 ? 'category' : 'channel'}?
+          </h2>
+        </div>
+      </header>
+      <div class="confirmation-copy">
+        <p id="channel-delete-description">
+          <strong>“{channelDeleteTarget.name ?? 'Untitled'}”</strong> will be permanently removed.
+          {channelDeleteTarget.type === 4
+            ? ' The category must be empty before it can be deleted.'
+            : ' A channel containing messages cannot be deleted.'}
+        </p>
+        {#if error}<p class="form-error" role="alert">{error}</p>{/if}
+      </div>
+      <footer>
+        <button
+          bind:this={channelDeleteCancel}
+          class="secondary-button"
+          type="button"
+          disabled={channelDeleteBusy}
+          onclick={() => closeChannelDeleteDialog()}>Cancel</button
+        >
+        <button
+          class="danger-button"
+          type="button"
+          disabled={channelDeleteBusy}
+          onclick={() => void removeChannel(channelDeleteTarget!)}
+        >
+          {channelDeleteBusy
+            ? 'Deleting…'
+            : `Delete ${channelDeleteTarget.type === 4 ? 'category' : 'channel'}`}
+        </button>
+      </footer>
+    </div>
+  </div>
+{/if}
+
+{#if channelDialogOpen}
+  <div class="channel-dialog-layer">
+    <button
+      class="channel-dialog-backdrop"
+      type="button"
+      aria-label="Close channel dialog"
+      onclick={() => closeChannelDialog()}
+    ></button>
+    <div
+      bind:this={channelDialogElement}
+      class="channel-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="channel-dialog-title"
+      aria-busy={channelDialogBusy}
+    >
+      <header>
+        <div>
+          <p>{channelDialogTarget ? 'Edit' : 'Create'}</p>
+          <h2 id="channel-dialog-title">
+            {channelDialogTarget
+              ? channelDialogTarget.type === 4
+                ? 'Edit category'
+                : 'Edit channel'
+              : channelDialogType === 4
+                ? 'Create category'
+                : 'Create channel'}
+          </h2>
+        </div>
+        <button
+          type="button"
+          aria-label="Close"
+          disabled={channelDialogBusy}
+          onclick={() => closeChannelDialog()}>×</button
+        >
+      </header>
+      <form
+        onsubmit={(event) => {
+          event.preventDefault();
+          void saveChannelDialog();
+        }}
+      >
+        {#if !channelDialogTarget}
+          <fieldset>
+            <legend>Channel type</legend>
+            <label>
+              <input type="radio" bind:group={channelDialogType} value={0} />
+              <span><strong>Text</strong><small>Messages, images, and files</small></span>
+            </label>
+            <label>
+              <input type="radio" bind:group={channelDialogType} value={2} />
+              <span><strong>Voice</strong><small>Voice and video conversations</small></span>
+            </label>
+            <label>
+              <input type="radio" bind:group={channelDialogType} value={4} />
+              <span><strong>Category</strong><small>Organize related channels</small></span>
+            </label>
+            <label>
+              <input type="radio" bind:group={channelDialogType} value={5} />
+              <span><strong>Announcement</strong><small>Broadcast important updates</small></span>
+            </label>
+          </fieldset>
+        {/if}
+        <label class="channel-dialog-field">
+          {channelDialogType === 4 ? 'Category name' : 'Channel name'}
+          <input
+            bind:this={channelDialogInput}
+            bind:value={channelDialogName}
+            minlength="1"
+            maxlength="100"
+            autocomplete="off"
+            required
+          />
+        </label>
+        {#if channelDialogType !== 4}
+          <label class="channel-dialog-field">
+            Category
+            <select bind:value={channelDialogParent}>
+              <option value="">No category</option>
+              {#each (guild?.channels ?? []).filter((item) => item.type === 4) as category (entityKey(category))}
+                <option value={entityKey(category)}>{category.name}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
+        <footer>
+          <button
+            class="quiet-button"
+            type="button"
+            disabled={channelDialogBusy}
+            onclick={() => closeChannelDialog()}>Cancel</button
+          >
+          <button class="primary-button" disabled={channelDialogBusy || !channelDialogName.trim()}>
+            {channelDialogBusy
+              ? 'Saving…'
+              : channelDialogTarget
+                ? 'Save changes'
+                : channelDialogType === 4
+                  ? 'Create category'
+                  : 'Create channel'}
+          </button>
+        </footer>
+      </form>
+    </div>
+  </div>
+{/if}

@@ -1,0 +1,106 @@
+services:
+  tls-init:
+    build: { context: ../backend, target: development }
+    command: ["python", "-m", "scripts.generate_federation_tls"]
+    volumes: ["../backend:/workspace", "federation-tls:/tls"]
+    restart: "no"
+
+  tls-edge:
+    image: nginx:1.29.0-alpine
+    volumes:
+      - ./nginx/federation-validation.conf:/etc/nginx/conf.d/default.conf:ro
+      - federation-tls:/tls:ro
+    networks:
+      federation:
+        aliases: [alpha.localhost, beta.localhost]
+      alpha-edge: {}
+      beta-edge: {}
+    depends_on:
+      tls-init: { condition: service_completed_successfully }
+      alpha-caddy: { condition: service_started }
+      beta-caddy: { condition: service_started }
+
+  alpha-caddy:
+    image: caddy:2.11.4-alpine
+    environment:
+      KAEDE_DOMAIN: alpha.localhost
+      KAEDE_PROXY_SECRET: kaede-development-proxy-secret-00001
+      KAEDE_EDGE_SECRET: kaede-validation-edge-secret-0001
+      KAEDE_VOICE_ENABLED: "false"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - tls-frontend:/srv/frontend/current:ro
+    networks:
+      alpha:
+      alpha-edge:
+
+  beta-caddy:
+    image: caddy:2.11.4-alpine
+    environment:
+      KAEDE_DOMAIN: beta.localhost
+      KAEDE_PROXY_SECRET: kaede-development-proxy-secret-00001
+      KAEDE_EDGE_SECRET: kaede-validation-edge-secret-0001
+      KAEDE_VOICE_ENABLED: "false"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - tls-frontend:/srv/frontend/current:ro
+    networks:
+      beta:
+      beta-edge:
+
+  alpha-api:
+    environment:
+      KAEDE_FEDERATION_PEER_OVERRIDES: '{"beta.localhost":"https://beta.localhost"}'
+      KAEDE_FEDERATION_CA_FILE: /tls/ca.crt
+    volumes: ["../backend:/workspace", "federation-tls:/tls:ro"]
+    networks:
+      alpha:
+        aliases: [api]
+      federation: {}
+
+  alpha-gateway:
+    networks:
+      alpha:
+        aliases: [gateway]
+
+  alpha-worker:
+    environment:
+      KAEDE_FEDERATION_PEER_OVERRIDES: '{"beta.localhost":"https://beta.localhost"}'
+      KAEDE_FEDERATION_CA_FILE: /tls/ca.crt
+    volumes: ["../backend:/workspace", "federation-tls:/tls:ro"]
+
+  beta-api:
+    environment:
+      KAEDE_FEDERATION_PEER_OVERRIDES: '{"alpha.localhost":"https://alpha.localhost"}'
+      KAEDE_FEDERATION_CA_FILE: /tls/ca.crt
+    volumes: ["../backend:/workspace", "federation-tls:/tls:ro"]
+    networks:
+      beta:
+        aliases: [api]
+      federation: {}
+
+  beta-gateway:
+    networks:
+      beta:
+        aliases: [gateway]
+
+  beta-worker:
+    environment:
+      KAEDE_FEDERATION_PEER_OVERRIDES: '{"alpha.localhost":"https://alpha.localhost"}'
+      KAEDE_FEDERATION_CA_FILE: /tls/ca.crt
+    volumes: ["../backend:/workspace", "federation-tls:/tls:ro"]
+
+  federation-check:
+    environment:
+      ALPHA_URL: https://alpha.localhost
+      BETA_URL: https://beta.localhost
+      TLS_CA_FILE: /tls/ca.crt
+    volumes: ["../backend:/workspace", "federation-tls:/tls:ro"]
+
+networks:
+  alpha-edge:
+  beta-edge:
+
+volumes:
+  federation-tls:
+  tls-frontend:

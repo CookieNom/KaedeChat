@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kaede-chat"
+version = "0.1.0"
+description = "Federated, self-hosted real-time chat"
+requires-python = ">=3.12"
+dependencies = [
+  "aiosmtplib>=5.1.1,<6",
+  "aiohttp>=3.14.3,<4",
+  "alembic>=1.14,<2",
+  "asyncpg>=0.30,<1",
+  "cryptography>=50.0.0,<51",
+  "email-validator>=2.2,<3",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "httpcore>=1.0,<2",
+  "blurhash>=1.1,<2",
+  "ImageHash>=4.3,<5",
+  "livekit-api>=1.0,<2",
+  "numpy>=2.2,<3",
+  "orjson>=3.10,<4",
+  "Pillow>=11,<13",
+  "pwdlib[argon2]>=0.2,<1",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.7,<3",
+  "pyotp>=2.9,<3",
+  "pyvips>=3,<4",
+  "redis>=5.2,<7",
+  "sqlalchemy[asyncio]>=2.0.36,<3",
+  "structlog>=24.4,<26",
+  "taskiq[reload]>=0.11,<1",
+  "taskiq-redis>=1.0,<2",
+  "typer>=0.15,<1",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.scripts]
+kaede = "app.cli:main"
+
+[dependency-groups]
+dev = [
+  "httpx2>=2.7,<3",
+  "mypy>=1.14,<2",
+  "pip-audit>=2.9,<3",
+  "pytest>=9.0.3,<10",
+  "pytest-asyncio>=1.0,<2",
+  "pytest-cov>=6,<7",
+  "ruff>=0.9,<1",
+  "testcontainers[postgres,redis]>=4.9,<5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/api/*.py" = ["B008"]
+"tests/*.py" = ["S101", "S105", "S106", "S107"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
