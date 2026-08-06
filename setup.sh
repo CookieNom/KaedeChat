@@ -139,11 +139,32 @@ prompt_text() {
 }
 
 prompt_secret() {
-  local prompt=$1 answer
+  local prompt=$1 answer= character
   if [[ $USE_GUM == true ]]; then
     answer=$(gum input --password --prompt "$prompt: ") || exit 130
   else
-    IFS= read -r -s -p "$prompt: " answer
+    printf '%s: ' "$prompt" >&2
+    while IFS= read -r -s -n 1 character; do
+      [[ -n $character ]] || break
+      case "$character" in
+        $'\b'|$'\177')
+          if [[ -n $answer ]]; then
+            answer=${answer%?}
+            printf '\b \b' >&2
+          fi
+          ;;
+        $'\025')
+          while [[ -n $answer ]]; do
+            answer=${answer%?}
+            printf '\b \b' >&2
+          done
+          ;;
+        *)
+          answer+=$character
+          printf '*' >&2
+          ;;
+      esac
+    done
     printf '\n' >&2
   fi
   printf '%s' "$answer"
