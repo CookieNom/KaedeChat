@@ -3,7 +3,8 @@
   import { resolve } from '$app/paths';
   import { api, ApiError } from '$lib/api/client';
   import { formatDateTime } from '$lib/ui/locale';
-  import { firstNavigableChannel } from '$lib/chat/channels';
+  import { invitedChannel } from '$lib/chat/invite-preview';
+  import { entityRef } from '$lib/chat/refs';
   import type { Guild } from '$lib/chat/types';
   import { guildChannelPath } from '$lib/navigation/routes';
 
@@ -13,6 +14,7 @@
     uses?: number;
     max_uses?: number | null;
     expires_at: string | null;
+    channel_id: string | null;
   }
 
   const code = $derived(page.params.code ?? '');
@@ -58,12 +60,14 @@
         method: 'POST'
       });
       if (generation !== loadGeneration || targetCode !== code) return;
-      const channel = firstNavigableChannel(guild.channels);
+      const hydrated = await api<Guild>(`/guilds/${encodeURIComponent(entityRef(guild))}`);
+      if (generation !== loadGeneration || targetCode !== code) return;
+      const channel = invitedChannel(hydrated, preview?.channel_id ?? null);
       if (!channel) {
         window.location.assign(resolve('/home'));
         return;
       }
-      window.location.assign(guildChannelPath(guild, channel));
+      window.location.assign(guildChannelPath(hydrated, channel));
     } catch (caught) {
       if (generation !== loadGeneration || targetCode !== code) return;
       if (caught instanceof ApiError && caught.status === 401) {

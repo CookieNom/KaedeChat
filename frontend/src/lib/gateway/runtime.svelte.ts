@@ -9,6 +9,12 @@ import type {
   Role,
   UserSummary
 } from '$lib/chat/types';
+import { browserNotifications } from '$lib/notifications/browser.svelte';
+import {
+  applyIncomingMessage,
+  applyReadStateDispatch,
+  type ReadStateDispatch
+} from '$lib/notifications/read-state';
 import { chatEntities } from '$lib/stores/entities.svelte';
 import { GatewayClient, type Dispatch } from './client';
 
@@ -30,7 +36,14 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       chatEntities.readStates.upsertMany(ready.read_states);
       return;
     }
-    case 'MESSAGE_CREATE':
+    case 'MESSAGE_CREATE': {
+      const message = dispatch.d as Message;
+      chatEntities.messages.upsert(message);
+      chatEntities.readStates.replace(
+        applyIncomingMessage(chatEntities.readStates.values, message, chatEntities.currentUser)
+      );
+      return;
+    }
     case 'MESSAGE_UPDATE':
       chatEntities.messages.upsert(dispatch.d as Message);
       return;
@@ -122,7 +135,9 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       return;
     }
     case 'READ_STATE_UPDATE':
-      chatEntities.readStates.upsert(dispatch.d as ReadStateStatus);
+      chatEntities.readStates.replace(
+        applyReadStateDispatch(chatEntities.readStates.values, dispatch.d as ReadStateDispatch)
+      );
       return;
     case 'PRESENCE_UPDATE': {
       const presence = dispatch.d as {
@@ -160,6 +175,9 @@ class AuthenticatedGatewayRuntime {
   #reduce = (event: Event) => {
     const dispatch = (event as CustomEvent<Dispatch>).detail;
     applyEntityDispatch(dispatch);
+    if (dispatch.t === 'MESSAGE_CREATE') {
+      browserNotifications.notifyMessage(dispatch.d as Message);
+    }
     if (dispatch.t === 'READ_STATE_UPDATE') this.#readStateSync?.postMessage(dispatch.d);
   };
   #receiveReadState = (event: MessageEvent<unknown>) => {

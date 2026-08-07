@@ -123,6 +123,18 @@ class InviteResolveRequest(BaseModel):
     code: str = Field(pattern=r"^[A-Za-z0-9]{8}$")
 
 
+class PresenceFederationRequest(BaseModel):
+    """Short-lived presence projected by a user's authoritative instance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: SnowflakeString
+    user_domain: FederationDomain
+    status: Literal["online", "idle", "dnd", "offline"]
+    observed_at: int = Field(ge=0)
+    expires_at: int = Field(ge=0)
+
+
 class GuildJoinRequest(BaseModel):
     code: str = Field(pattern=r"^[A-Za-z0-9]{8}$")
     user: RemoteUserProfile

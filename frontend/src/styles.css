@@ -1383,6 +1383,18 @@ progress {
   background: var(--accent);
   font-family: inherit;
   font-size: 0.61rem;
+  font-weight: 800;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.settings-helper {
+  margin: 0;
+  border-top: 1px solid var(--line-soft);
+  padding: 0.9rem 1rem 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
 }
 
 .channel-sidebar,
@@ -3928,12 +3940,23 @@ progress {
   background: var(--surface-subtle);
 }
 
-.message-row.pending {
-  opacity: 0.68;
+.message-row.sending .message-body {
+  opacity: 0.52;
 }
 
 .message-row.failed {
-  background: var(--danger-soft);
+  background: transparent;
+}
+
+.message-row.failed .message-markdown,
+.message-row.failed .message-removed {
+  color: var(--danger);
+}
+
+.message-row.failed .message-attachments img,
+.message-row.failed .message-attachments video,
+.message-row.failed .attachment-file {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
 }
 
 .message-row.compact {
@@ -4199,38 +4222,6 @@ progress {
   color: var(--text-muted);
   font-size: 0.82rem;
   font-style: italic;
-}
-
-.message-quick-actions {
-  position: absolute;
-  z-index: 3;
-  top: -16px;
-  right: 0.45rem;
-  display: flex;
-  width: 34px;
-  height: 30px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  color: var(--text-soft);
-  background: var(--surface-raised);
-  opacity: 0;
-  cursor: pointer;
-  box-shadow: var(--shadow-sm);
-  transition: opacity 100ms ease;
-}
-
-.message-row:hover .message-quick-actions,
-.message-row:focus-within .message-quick-actions,
-.message-quick-actions[aria-expanded='true'] {
-  opacity: 1;
-}
-
-.message-quick-actions svg {
-  width: 18px;
-  height: 18px;
-  fill: currentColor;
 }
 
 .message-attachments {
@@ -6020,7 +6011,6 @@ progress {
 }
 
 @media (hover: none), (pointer: coarse) {
-  .message-quick-actions,
   .channel-row-actions {
     opacity: 0.86;
   }

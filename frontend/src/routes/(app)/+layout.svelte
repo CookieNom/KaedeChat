@@ -2,6 +2,7 @@
   import { api } from '$lib/api/client';
   import CommandSwitcher from '$lib/components/CommandSwitcher.svelte';
   import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
+  import { browserNotifications } from '$lib/notifications/browser.svelte';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import { applyLocale } from '$lib/ui/locale';
   import { applyTheme, type ThemePreference } from '$lib/ui/theme';
@@ -24,6 +25,7 @@
         applyTheme(theme);
         applyLocale(locale);
         developerMode.apply(notification_settings);
+        browserNotifications.apply(notification_settings);
       })
       .catch(() => {
         // The route's own session guard and error state handle unavailable APIs.
@@ -32,6 +34,7 @@
       controller.abort();
       authenticatedGateway.stop();
       developerMode.reset();
+      browserNotifications.disable();
     };
   });
 </script>

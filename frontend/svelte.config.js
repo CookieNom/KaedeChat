@@ -26,7 +26,10 @@ const config = {
         'style-src-attr': ['unsafe-hashes', 'sha256-S8qMpvofolR8Mpjy4kQvEm7m1q8clzU4dfDH0AmvZjo='],
         'img-src': ['self', 'data:', 'blob:', 'https:'],
         'media-src': ['self', 'blob:', 'https:'],
-        'connect-src': ['self', ...mediaUploadOrigins],
+        // Voice rooms are authoritative on the guild's home instance. A
+        // federated member therefore connects directly to that instance's
+        // secure LiveKit signaling endpoint after receiving a signed grant.
+        'connect-src': ['self', 'wss:', ...mediaUploadOrigins],
         'font-src': ['self', 'data:']
       }
     }

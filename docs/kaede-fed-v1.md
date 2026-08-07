@@ -130,8 +130,13 @@ accept the following exact names:
 | `message.send_rejected` | The guild home rejects a previously queued proxy write. |
 | `media.delete` | The attachment origin invalidates every cached variant of one origin-owned attachment. |
 
-Typing, presence, voice-state, and occupancy are not durable events. Media bytes
-are fetched on demand; only deletion is durable.
+Typing, presence, voice-state, and occupancy are not durable events. Peers that
+advertise `presence/1` may send a signed `POST /_kaede/v1/presence` projection.
+The subject domain must equal the signing origin, the recipient must already
+know the subject through a shared guild, and the projection expires within 90
+seconds unless refreshed. Receivers reject stale timestamps and publish the
+state only to local subscribers of shared guilds. Media bytes are fetched on
+demand; only deletion is durable.
 Future durable names require an explicit registry revision.
 
 ## 4. Durable delivery

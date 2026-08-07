@@ -6,11 +6,12 @@ import httpx
 import pytest
 from PIL import Image
 
+from app.api.media import select_variant
 from app.api.webhooks import new_webhook_token, token_digest
 from app.chat.payloads import guild_payload
 from app.chat.schemas import MessageCreate
 from app.core.settings import Settings
-from app.db.models import Guild
+from app.db.models import Attachment, Guild
 from app.media.processing import (
     MediaValidationError,
     image_derivatives,
@@ -221,6 +222,29 @@ def test_guild_payload_includes_both_public_image_hashes() -> None:
 
     assert payload["icon_hash"] == "icon-digest"
     assert payload["banner_hash"] == "banner-digest"
+
+
+def test_missing_image_derivative_falls_back_to_scanned_original() -> None:
+    attachment = Attachment(
+        id=30,
+        origin_domain="alpha.localhost",
+        uploader_id=20,
+        uploader_domain="alpha.localhost",
+        filename="legacy.gif",
+        content_type="image/gif",
+        detected_content_type="image/gif",
+        size=128,
+        object_key="alpha.localhost/30/clean/original",
+        variants={},
+        scan_status="clean",
+        purpose="attachment",
+    )
+
+    bucket, key, filename = select_variant(settings(), attachment, "thumbnail_512")
+
+    assert bucket == "kaede-attachments"
+    assert key == "alpha.localhost/30/clean/original"
+    assert filename == "legacy.gif"
 
 
 def test_webhook_tokens_are_prefixed_random_and_only_stored_as_digests() -> None:

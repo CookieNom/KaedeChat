@@ -1,10 +1,28 @@
 import { api } from '$lib/api/client';
-import type { Guild } from './types';
+import { sameEntity } from './refs';
+import { firstNavigableChannel } from './channels';
+import type { Channel, Guild } from './types';
 
 export interface InvitePreview {
   code: string;
   guild: Guild;
+  channel_id: string | null;
   expires_at: string | null;
+}
+
+export function invitedChannel(guild: Guild, channelId: string | null): Channel | null {
+  const channels = guild.channels ?? [];
+  if (channelId) {
+    const exact = channels.find(
+      (channel) => channel.id === channelId && channel.origin_domain === guild.origin_domain
+    );
+    if (exact && exact.type !== 4) return exact;
+  }
+  return firstNavigableChannel(channels);
+}
+
+export function hasJoinedGuild(guilds: Guild[], invited: Guild): boolean {
+  return guilds.some((guild) => sameEntity(guild, invited));
 }
 
 interface CacheEntry {

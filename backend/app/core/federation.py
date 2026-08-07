@@ -21,7 +21,7 @@ SECURITY_CRITICAL_GUILD_EVENTS = frozenset(
         "relationship.remove",
     }
 )
-FEDERATION_CAPABILITIES = ("guild-history-sync/1", "guild-history-sync/2")
+FEDERATION_CAPABILITIES = ("guild-history-sync/1", "guild-history-sync/2", "presence/1")
 
 
 def block_covers_domain(block_domain: str, include_subdomains: bool, destination: str) -> bool:

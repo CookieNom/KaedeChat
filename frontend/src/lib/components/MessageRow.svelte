@@ -50,7 +50,6 @@
   let menuOpen = $state(false);
   let menuElement = $state<HTMLElement | null>(null);
   let rowElement = $state<HTMLElement | null>(null);
-  let actionButton = $state<HTMLButtonElement | null>(null);
   let menuTrigger: HTMLElement | null = null;
   let confirmingDelete = $state(false);
   let deleteConfirmationButton = $state<HTMLButtonElement | null>(null);
@@ -97,7 +96,7 @@
 
   function showMenu(pointerX: number, pointerY: number, trigger: HTMLElement | null) {
     claimMessageMenu(closeExclusiveMenu);
-    menuTrigger = trigger ?? actionButton;
+    menuTrigger = trigger;
     menuOpen = true;
     addMenuListeners();
     void tick().then(() => {
@@ -119,20 +118,16 @@
     showMenu(
       pointerX,
       pointerY,
-      focused instanceof HTMLElement && rowElement?.contains(focused) ? focused : actionButton
+      focused instanceof HTMLElement && rowElement?.contains(focused) ? focused : rowElement
     );
   }
 
-  function openActionMenu(event: MouseEvent) {
+  function openKeyboardMenu(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
-    const target = event.currentTarget as HTMLElement;
-    if (menuOpen) {
-      closeMenu(true);
-      return;
-    }
-    const bounds = target.getBoundingClientRect();
-    showMenu(bounds.right, bounds.bottom, target);
+    const trigger = event.currentTarget as HTMLButtonElement;
+    const bounds = rowElement?.getBoundingClientRect() ?? trigger.getBoundingClientRect();
+    showMenu(bounds.left + Math.min(bounds.width / 2, 32), bounds.top + 24, trigger);
   }
 
   function editMessage(event: MouseEvent) {
@@ -271,7 +266,7 @@
 
 <article
   bind:this={rowElement}
-  class:pending={message.pending}
+  class:sending={message.pending || message.delivery_status === 'pending'}
   class:failed={message.failed || message.delivery_status === 'failed'}
   class:compact
   class:menu-open={menuOpen}
@@ -282,23 +277,15 @@
   <span class="visually-hidden" role="status" aria-live="polite">{feedback}</span>
   {#if menuAvailable}
     <button
-      bind:this={actionButton}
-      class="message-quick-actions"
+      class="visually-hidden"
       type="button"
-      data-message-action
-      tabindex="-1"
-      aria-label={`Actions for message from ${authorName()} at ${accessibleTime()}`}
+      aria-label={`Open actions for message from ${authorName()} at ${accessibleTime()}`}
       aria-haspopup="menu"
       aria-expanded={menuOpen}
       aria-controls={menuOpen ? `message-actions-${entityRef(message)}` : undefined}
-      title="Message actions"
-      onclick={openActionMenu}
+      onclick={openKeyboardMenu}
     >
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <circle cx="5" cy="12" r="1.7" />
-        <circle cx="12" cy="12" r="1.7" />
-        <circle cx="19" cy="12" r="1.7" />
-      </svg>
+      Message actions
     </button>
   {/if}
   <button
@@ -378,22 +365,14 @@
         {/each}
       </div>
     {/if}
-    {#if message.edited_at || message.delivery_status || message.failed || message.queued}
+    {#if message.edited_at || message.failed || message.delivery_status === 'failed' || message.queued}
       <div class="message-meta-actions">
         {#if message.edited_at}<small>(edited)</small>{/if}
-        {#if message.delivery_status}
-          <small class:delivery-failed={message.delivery_status === 'failed'} role="status">
-            {message.delivery_status === 'pending'
-              ? 'Sending to recipient…'
-              : message.delivery_status === 'delivered'
-                ? 'Delivered'
-                : 'Delivery failed'}
-          </small>
+        {#if message.failed || message.delivery_status === 'failed'}
+          <small class="delivery-failed" role="status"> Message not delivered. </small>
         {/if}
         {#if (message.failed || message.delivery_status === 'failed') && onRetry}
-          <button type="button" onclick={() => onRetry?.(message)}>
-            {message.delivery_status === 'failed' ? 'Send again' : 'Retry'}
-          </button>
+          <button type="button" onclick={() => onRetry?.(message)}>Retry</button>
         {:else if message.queued}
           <small>Queued for the guild home ⏱</small>
         {/if}

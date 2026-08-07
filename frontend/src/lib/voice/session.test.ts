@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { isUsableVoiceToken, type VoiceToken } from './session';
+import { isUsableVoiceToken, withVoiceConnectTimeout, type VoiceToken } from './session';
 
 function grant(overrides: Partial<VoiceToken> = {}): VoiceToken {
   return {
@@ -24,5 +24,13 @@ describe('voice grant validation', () => {
     expect(isUsableVoiceToken(grant(), Date.parse('2026-07-19T12:15:00Z'))).toBe(false);
     expect(isUsableVoiceToken(grant({ url: 'https://chat.example/livekit' }), 0)).toBe(false);
     expect(isUsableVoiceToken(grant({ room: '../g.1.2' }), 0)).toBe(false);
+  });
+});
+
+describe('voice connection timeout', () => {
+  it('rejects a signaling attempt that never settles', async () => {
+    await expect(withVoiceConnectTimeout(new Promise(() => undefined), 1)).rejects.toThrow(
+      'Voice connection timed out'
+    );
   });
 });

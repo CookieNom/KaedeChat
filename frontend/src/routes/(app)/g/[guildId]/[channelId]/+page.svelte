@@ -60,6 +60,12 @@
   import { uploadChannelFile, type PendingUpload } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
   import {
+    compactBadgeCount,
+    directMessageUnreadCount,
+    guildMentionCount
+  } from '$lib/notifications/counts';
+  import { applyReadStateDispatch, type ReadStateDispatch } from '$lib/notifications/read-state';
+  import {
     channelSettingsPath,
     directMessagePath,
     guildChannelPath,
@@ -94,6 +100,7 @@
   const readStates = $derived(entities.readStates.values);
   const members = $derived(entities.members.values);
   const currentUser = $derived(entities.currentUser);
+  const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
   let error = $state('');
   let busy = $state(false);
@@ -1034,26 +1041,7 @@
         }, 10_000);
       }
     } else if (dispatch.t === 'READ_STATE_UPDATE') {
-      const update = dispatch.d as {
-        channel_id: string;
-        channel_domain: string;
-        last_message_id: string;
-        last_message_domain: string;
-        mention_count: number;
-      };
-      setReadStates(
-        readStates.map((state) =>
-          state.channel_id === update.channel_id && state.channel_domain === update.channel_domain
-            ? {
-                ...state,
-                read_message_id: update.last_message_id,
-                read_message_domain: update.last_message_domain,
-                mention_count: update.mention_count,
-                unread: false
-              }
-            : state
-        )
-      );
+      setReadStates(applyReadStateDispatch(readStates, dispatch.d as ReadStateDispatch));
     } else if (dispatch.t === 'CHANNEL_CREATE' || dispatch.t === 'CHANNEL_ACCESS_GRANTED') {
       const created = dispatch.d as Channel;
       if (
@@ -1979,17 +1967,26 @@
 
 <main class:member-roster-visible={memberRosterOpen} class="chat-app">
   <nav class="guild-spine" aria-label="Guilds">
-    <a class="spine-home" href={resolve('/home')} aria-label="Home" title="Home">
+    <a
+      class="spine-home"
+      href={resolve('/home')}
+      aria-label={homeUnreadCount ? `Home, ${homeUnreadCount} unread direct messages` : 'Home'}
+      title="Home"
+    >
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M4 10.5 12 4l8 6.5v8a1.5 1.5 0 0 1-1.5 1.5h-4v-6h-5v6h-4A1.5 1.5 0 0 1 4 18.5z" />
       </svg>
+      {#if homeUnreadCount}
+        <small class="rail-unread">{compactBadgeCount(homeUnreadCount)}</small>
+      {/if}
     </a>
     <div class="spine-separator" aria-hidden="true"></div>
     {#each guilds as item (entityKey(item))}
+      {@const mentionCount = guildMentionCount(readStates, item)}
       <a
         class:active={matchesEntityRef(guildId, item, localDomain)}
         href={guildLandingPath(item)}
-        aria-label={item.name}
+        aria-label={mentionCount ? `${item.name}, ${mentionCount} mentions` : item.name}
         aria-current={matchesEntityRef(guildId, item, localDomain) ? 'page' : undefined}
         title={item.name}
       >
@@ -1998,6 +1995,7 @@
         {:else}
           {item.name.slice(0, 2).toUpperCase()}
         {/if}
+        {#if mentionCount}<small class="rail-unread">{compactBadgeCount(mentionCount)}</small>{/if}
       </a>
     {/each}
   </nav>

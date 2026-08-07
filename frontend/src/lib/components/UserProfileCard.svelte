@@ -1,7 +1,8 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
+  import { api, ApiError } from '$lib/api/client';
   import { entityRef } from '$lib/chat/refs';
-  import type { PresenceStatus, UserSummary } from '$lib/chat/types';
+  import type { PresenceStatus, Relationship, UserSummary } from '$lib/chat/types';
   import { assetUrl } from '$lib/media/assets';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
@@ -28,6 +29,11 @@
 
   let popover = $state<HTMLElement | null>(null);
   let feedback = $state('');
+  let relationshipType = $state<Relationship['type'] | 'none' | 'loading' | 'unavailable'>(
+    'loading'
+  );
+  let relationshipBusy = $state(false);
+  let relationshipError = $state('');
   const statusLabel = $derived(
     presence === 'dnd'
       ? 'Do not disturb'
@@ -39,12 +45,69 @@
   );
 
   onMount(() => {
+    const controller = new AbortController();
     void tick().then(() => {
       if (!popover) return;
       placeContextMenu(popover, x, y);
       popover.focus();
     });
+    if (!isSelf) {
+      void api<Relationship[]>('/users/@me/relationships', { signal: controller.signal })
+        .then((relationships) => {
+          const relationship = relationships.find(
+            (candidate) =>
+              candidate.user.id === user.id && candidate.user.origin_domain === user.origin_domain
+          );
+          relationshipType = relationship?.type ?? 'none';
+        })
+        .catch((caught: unknown) => {
+          if (controller.signal.aborted) return;
+          relationshipType = 'unavailable';
+          relationshipError =
+            caught instanceof ApiError ? caught.message : 'Could not load friendship status.';
+        });
+    }
+    return () => controller.abort();
   });
+
+  async function updateFriendship() {
+    if (isSelf || relationshipBusy || !['none', 'pending_in'].includes(relationshipType)) {
+      return;
+    }
+    relationshipBusy = true;
+    relationshipError = '';
+    try {
+      const relationship = await api<Relationship>('/users/@me/relationships', {
+        method: 'POST',
+        body: JSON.stringify({ handle: `@${user.handle}` })
+      });
+      relationshipType = relationship.type;
+    } catch (caught) {
+      relationshipError =
+        caught instanceof ApiError ? caught.message : 'Could not update friendship.';
+    } finally {
+      relationshipBusy = false;
+    }
+  }
+
+  function friendshipLabel(): string {
+    switch (relationshipType) {
+      case 'friend':
+        return 'Friends';
+      case 'pending_in':
+        return 'Accept friend request';
+      case 'pending_out':
+        return 'Request sent';
+      case 'blocked':
+        return 'Blocked';
+      case 'loading':
+        return 'Checking friendship…';
+      case 'unavailable':
+        return 'Friendship unavailable';
+      default:
+        return 'Add friend';
+    }
+  }
 
   async function copyValue(value: string, successMessage: string) {
     try {
@@ -128,6 +191,19 @@
           <span>Message</span>
         </button>
       {/if}
+      {#if !isSelf}
+        <button
+          type="button"
+          class:relationship-friend={relationshipType === 'friend'}
+          disabled={relationshipBusy || !['none', 'pending_in'].includes(relationshipType)}
+          aria-label={friendshipLabel()}
+          title={friendshipLabel()}
+          onclick={updateFriendship}
+        >
+          <Icon name={relationshipType === 'friend' ? 'check' : 'users'} size={17} />
+          <span>{relationshipBusy ? 'Updating…' : friendshipLabel()}</span>
+        </button>
+      {/if}
       <button type="button" onclick={() => copyValue(`@${user.handle}`, 'Username copied')}>
         <Icon name={feedback === 'Username copied' ? 'check' : 'copy'} size={17} />
         <span>{actionLabel('Username copied', 'Copy username')}</span>
@@ -139,6 +215,9 @@
         </button>
       {/if}
     </div>
+    {#if relationshipError}
+      <p class="user-popover-error" role="alert">{relationshipError}</p>
+    {/if}
   </div>
 </div>
 
@@ -360,9 +439,19 @@
     text-decoration: none;
   }
 
-  .user-popover-actions button:hover {
+  .user-popover-actions button:not(:disabled):hover {
     border-color: color-mix(in srgb, var(--text-muted) 52%, var(--line));
     background: var(--surface-hover);
+  }
+
+  .user-popover-actions button:disabled {
+    cursor: default;
+    opacity: 0.72;
+  }
+
+  .user-popover-actions .relationship-friend {
+    border-color: color-mix(in srgb, #3ba55d 50%, var(--line));
+    color: color-mix(in srgb, #3ba55d 84%, var(--text));
   }
 
   .user-popover-actions .user-popover-primary {
@@ -374,6 +463,13 @@
   .user-popover-actions .user-popover-primary:hover {
     border-color: var(--accent-hover);
     background: var(--accent-hover);
+  }
+
+  .user-popover-error {
+    margin: 9px 2px 0;
+    color: var(--danger);
+    font-size: 0.68rem;
+    line-height: 1.35;
   }
 
   @media (max-width: 420px) {

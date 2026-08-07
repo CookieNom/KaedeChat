@@ -511,6 +511,11 @@ def select_variant(
         return settings.media_attachments_bucket, attachment.object_key, attachment.filename
     raw = attachment.variants.get(variant)
     if not isinstance(raw, dict) or not isinstance(raw.get("object_key"), str):
+        # Older replicated images may predate a requested derivative. Serving
+        # the already-scanned original keeps them usable while avoiding a
+        # permanent broken image on remote replicas.
+        if (attachment.detected_content_type or attachment.content_type) in IMAGE_TYPES:
+            return settings.media_attachments_bucket, attachment.object_key, attachment.filename
         raise HTTPException(status_code=404, detail={"code": "MEDIA_VARIANT_NOT_FOUND"})
     return settings.media_derived_bucket, raw["object_key"], attachment.filename
 

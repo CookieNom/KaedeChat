@@ -6,6 +6,10 @@
   import Icon from '$lib/components/Icon.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
+  import {
+    browserNotifications,
+    browserNotificationsFromSettings
+  } from '$lib/notifications/browser.svelte';
   import { developerMode, developerModeFromSettings } from '$lib/ui/developer-mode.svelte';
   import { applyLocale } from '$lib/ui/locale';
   import { applyTheme, type ThemePreference } from '$lib/ui/theme';
@@ -52,6 +56,7 @@
   let bio = $state('');
   let customStatus = $state('');
   let developerModeDraft = $state(false);
+  let browserNotificationsDraft = $state(false);
 
   let nextEmail = $state('');
   let emailPassword = $state('');
@@ -81,6 +86,10 @@
         settings = loadedSettings;
         developerModeDraft = developerModeFromSettings(loadedSettings.notification_settings);
         developerMode.apply(loadedSettings.notification_settings);
+        browserNotificationsDraft = browserNotificationsFromSettings(
+          loadedSettings.notification_settings
+        );
+        browserNotifications.apply(loadedSettings.notification_settings);
         savedTheme = loadedSettings.theme;
         emailEnabled = authConfiguration.password_recovery_enabled;
         loaded = true;
@@ -255,6 +264,60 @@
       if (controller.signal.aborted || generation !== lifecycle) return;
       developerModeDraft = previous;
       actionError(caught, 'Could not update developer mode.');
+    } finally {
+      if (generation === lifecycle) busy = false;
+    }
+  }
+
+  async function changeBrowserNotifications(enabled: boolean) {
+    const controller = routeController;
+    if (busy || !loaded || !controller) return;
+    const generation = lifecycle;
+    const previous = browserNotificationsDraft;
+    const draftLocale = settings.locale;
+    const draftTheme = settings.theme;
+    const draftPrivacy = settings.dm_privacy;
+
+    if (enabled) {
+      const permission = await browserNotifications.requestPermission();
+      if (controller.signal.aborted || generation !== lifecycle) return;
+      if (permission !== 'granted') {
+        browserNotificationsDraft = false;
+        error = browserNotifications.supported
+          ? 'Browser notifications are blocked. Allow them in this site’s browser settings.'
+          : 'This browser does not support notifications.';
+        return;
+      }
+    }
+
+    browserNotificationsDraft = enabled;
+    beginAction();
+    try {
+      const updated = await api<UserSettings>('/users/@me/settings', {
+        method: 'PATCH',
+        signal: controller.signal,
+        body: JSON.stringify({
+          notification_settings: {
+            ...settings.notification_settings,
+            browser_notifications: enabled
+          }
+        })
+      });
+      if (controller.signal.aborted || generation !== lifecycle) return;
+      settings = {
+        ...updated,
+        locale: draftLocale,
+        theme: draftTheme,
+        dm_privacy: draftPrivacy
+      };
+      browserNotificationsDraft = browserNotificationsFromSettings(updated.notification_settings);
+      browserNotifications.apply(updated.notification_settings);
+      notice = `Browser notifications ${browserNotificationsDraft ? 'enabled' : 'disabled'}.`;
+    } catch (caught) {
+      if (controller.signal.aborted || generation !== lifecycle) return;
+      browserNotificationsDraft = previous;
+      browserNotifications.apply(settings.notification_settings);
+      actionError(caught, 'Could not update browser notifications.');
     } finally {
       if (generation === lifecycle) busy = false;
     }
@@ -475,6 +538,7 @@
       <a href="#security"><Icon name="shield" size={18} />Security</a>
       <p>Preferences</p>
       <a href="#appearance"><Icon name="palette" size={18} />Appearance</a>
+      <a href="#notifications"><Icon name="bell" size={18} />Notifications</a>
       <a href="#privacy"><Icon name="lock" size={18} />Privacy</a>
       <a href="#advanced"><Icon name="settings" size={18} />Advanced</a>
     </nav>
@@ -706,6 +770,43 @@
             </button>
           </div>
         </form>
+      </section>
+
+      <section id="notifications" class="settings-section">
+        <div class="settings-section-heading">
+          <span class="section-icon"><Icon name="bell" /></span>
+          <div>
+            <h2>Notifications</h2>
+            <p>Choose when Kaede may get your attention outside the active tab.</p>
+          </div>
+        </div>
+        <div class="settings-card">
+          <div class="toggle-list">
+            <label class="toggle-row">
+              <span>
+                <strong>Browser notifications</strong>
+                <small>
+                  Notify you about direct messages and mentions while Kaede is in the background.
+                  Your browser will ask for permission before this is enabled.
+                </small>
+              </span>
+              <input
+                type="checkbox"
+                checked={browserNotificationsDraft}
+                disabled={busy || !browserNotifications.supported}
+                onchange={(event) => void changeBrowserNotifications(event.currentTarget.checked)}
+              />
+            </label>
+          </div>
+          {#if !browserNotifications.supported}
+            <p class="settings-helper">This browser does not support system notifications.</p>
+          {:else if browserNotifications.permission === 'denied'}
+            <p class="settings-helper">
+              Notifications are blocked in your browser. Allow them in this site’s permissions to
+              turn them on.
+            </p>
+          {/if}
+        </div>
       </section>
 
       <section id="privacy" class="settings-section">

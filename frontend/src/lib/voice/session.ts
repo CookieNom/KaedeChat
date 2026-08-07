@@ -31,6 +31,28 @@ export interface VoiceParticipant {
   screen: boolean;
 }
 
+const VOICE_CONNECT_TIMEOUT_MS = 15_000;
+
+export async function withVoiceConnectTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs = VOICE_CONNECT_TIMEOUT_MS
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Voice connection timed out. Try again.')),
+          timeoutMs
+        );
+      })
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export function isUsableVoiceToken(value: VoiceToken, now = Date.now()): boolean {
   const expires = Date.parse(value.expires_at);
   return (
@@ -89,7 +111,9 @@ export class VoiceSession extends EventTarget {
     this.canStream = grant.can_stream;
     this.#changed();
     try {
-      await this.room.connect(grant.url, grant.token, { autoSubscribe: true });
+      await withVoiceConnectTimeout(
+        this.room.connect(grant.url, grant.token, { autoSubscribe: true })
+      );
       this.connected = true;
       if (grant.can_speak) {
         await this.room.localParticipant.setMicrophoneEnabled(true);

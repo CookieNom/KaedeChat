@@ -49,6 +49,7 @@ from app.db.models import (
 )
 from app.db.models import Session as AuthSession
 from app.db.session import create_engine_and_sessionmaker
+from app.federation.presence import fanout_presence
 from app.voice.rooms import parse_room_name, participant_identity
 from app.voice.state import update_self_flags
 
@@ -67,6 +68,39 @@ AUTH_REVALIDATION_SECONDS = 30.0
 PRESENCE_REAPER_LEASE_SECONDS = 15
 CONNECTION_OWNER_TTL_SECONDS = 90
 USER_SESSION_LIMIT = 8
+presence_fanout_tasks: set[asyncio.Task[None]] = set()
+
+
+def schedule_presence_fanout(
+    sessionmaker: async_sessionmaker[AsyncSession], user: User, status: str
+) -> None:
+    task = asyncio.create_task(
+        fanout_presence(sessionmaker, settings, user, status),
+        name=f"presence-fanout:{user.origin_domain}:{user.id}",
+    )
+    presence_fanout_tasks.add(task)
+
+    def finished(completed: asyncio.Task[None]) -> None:
+        presence_fanout_tasks.discard(completed)
+        if not completed.cancelled() and completed.exception() is not None:
+            log.warning("presence_fanout_failed", error_type=type(completed.exception()).__name__)
+
+    task.add_done_callback(finished)
+
+
+async def visible_presence_status(redis: Redis, user: User) -> str | None:
+    raw = await redis.get(f"presence:{user.origin_domain}:{user.id}")
+    if not raw:
+        return None
+    try:
+        state = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    status = state.get("status") if isinstance(state, dict) else None
+    if status == "invisible":
+        return "offline"
+    return str(status) if status in {"online", "idle", "dnd"} else None
+
 
 IDENTIFY_LIMIT_SCRIPT = """
 if redis.call('GET', KEYS[3]) ~= 'ready' then return {0, 1000, 0} end
@@ -582,10 +616,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await websocket.close(code=1001)
         reaper.cancel()
         cache_guard.cancel()
+        for task in list(presence_fanout_tasks):
+            task.cancel()
         with suppress(asyncio.CancelledError):
             await reaper
         with suppress(asyncio.CancelledError):
             await cache_guard
+        if presence_fanout_tasks:
+            await asyncio.gather(*list(presence_fanout_tasks), return_exceptions=True)
         await subscription_hub.aclose()
         await redis.aclose()
         await engine.dispose()
@@ -1676,7 +1714,17 @@ async def fanout_loop(
                 await redis.expire(session_key(gateway_session_id), SESSION_TTL_SECONDS)
                 await redis.expire(session_progress_key(gateway_session_id), SESSION_TTL_SECONDS)
                 await touch_gateway_session(redis, gateway_session_id)
-                await renew_presence_state(redis, user)
+                renewed = await renew_presence_state(redis, user)
+                if renewed:
+                    visible_status = await visible_presence_status(redis, user)
+                    refresh_claimed = await redis.set(
+                        f"presence:federation-refresh:{user.origin_domain}:{user.id}",
+                        "1",
+                        ex=30,
+                        nx=True,
+                    )
+                    if visible_status is not None and refresh_claimed:
+                        schedule_presence_fanout(sessionmaker, user, visible_status)
                 await websocket.send_json({"op": GatewayOp.HEARTBEAT_ACK, "d": None})
             elif op == GatewayOp.PRESENCE_UPDATE:
                 raw_data = payload.get("d") or {}
@@ -1704,6 +1752,7 @@ async def fanout_loop(
                             user_id=user.id,
                             generation=generation,
                         )
+                schedule_presence_fanout(sessionmaker, user, visible_status)
             elif op == GatewayOp.VOICE_STATE_UPDATE:
                 raw_data = payload.get("d")
                 if not isinstance(raw_data, dict) or set(raw_data) != {"self_mute", "self_deaf"}:

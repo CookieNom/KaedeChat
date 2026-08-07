@@ -1,11 +1,17 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
   import { api, ApiError } from '$lib/api/client';
-  import { firstNavigableChannel } from '$lib/chat/channels';
-  import { loadInvitePreview, type InvitePreview } from '$lib/chat/invite-preview';
+  import {
+    hasJoinedGuild,
+    invitedChannel,
+    loadInvitePreview,
+    type InvitePreview
+  } from '$lib/chat/invite-preview';
+  import { entityRef } from '$lib/chat/refs';
   import type { Guild } from '$lib/chat/types';
   import { assetUrl } from '$lib/media/assets';
   import { guildChannelPath } from '$lib/navigation/routes';
+  import { chatEntities } from '$lib/stores/entities.svelte';
   import Icon from './Icon.svelte';
 
   let { reference }: { reference: string } = $props();
@@ -14,6 +20,9 @@
   let busy = $state(false);
   let error = $state('');
   let loadGeneration = 0;
+  const alreadyJoined = $derived(
+    preview ? hasJoinedGuild(chatEntities.guilds.values, preview.guild) : false
+  );
 
   $effect(() => {
     const target = reference;
@@ -31,7 +40,7 @@
   });
 
   async function join() {
-    if (busy) return;
+    if (busy || alreadyJoined || !preview) return;
     const generation = loadGeneration;
     busy = true;
     error = '';
@@ -40,8 +49,11 @@
         method: 'POST'
       });
       if (generation !== loadGeneration) return;
-      const channel = firstNavigableChannel(guild.channels);
-      window.location.assign(channel ? guildChannelPath(guild, channel) : resolve('/home'));
+      const hydrated = await api<Guild>(`/guilds/${encodeURIComponent(entityRef(guild))}`);
+      if (generation !== loadGeneration) return;
+      chatEntities.ingestGuilds([hydrated]);
+      const channel = invitedChannel(hydrated, preview.channel_id);
+      window.location.assign(channel ? guildChannelPath(hydrated, channel) : resolve('/home'));
     } catch (caught) {
       if (generation !== loadGeneration) return;
       error = caught instanceof ApiError ? caught.message : 'Could not join this guild.';
@@ -72,8 +84,8 @@
           {preview.guild.description}
         </p>{/if}
     </div>
-    <button class="invite-join" type="button" disabled={busy} onclick={join}>
-      {busy ? 'Joining…' : 'Join guild'}
+    <button class="invite-join" type="button" disabled={busy || alreadyJoined} onclick={join}>
+      {busy ? 'Joining…' : alreadyJoined ? 'Already joined' : 'Join guild'}
     </button>
     {#if error}<p class="invite-error" role="alert">{error}</p>{/if}
   </aside>
@@ -188,7 +200,7 @@
   }
 
   .invite-join:disabled {
-    cursor: wait;
+    cursor: default;
     opacity: 0.7;
   }
 

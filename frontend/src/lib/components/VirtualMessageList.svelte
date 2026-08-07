@@ -57,64 +57,6 @@
     windowEnd = Math.min(itemCount, start + visible + overscan * 2);
   }
 
-  function messageActionButtons(): HTMLButtonElement[] {
-    return Array.from(
-      viewport?.querySelectorAll<HTMLButtonElement>(
-        'button[data-message-action]:not([disabled])'
-      ) ?? []
-    );
-  }
-
-  function makeMessageActionCurrent(target: HTMLButtonElement, focus = false) {
-    const buttons = messageActionButtons();
-    if (!buttons.includes(target)) return;
-    for (const button of buttons) button.tabIndex = button === target ? 0 : -1;
-    if (focus) {
-      target.focus({ preventScroll: true });
-      target.scrollIntoView({ block: 'nearest' });
-    }
-  }
-
-  function syncMessageActionTabStop() {
-    const buttons = messageActionButtons();
-    if (!buttons.length) return;
-    const focused =
-      document.activeElement instanceof HTMLButtonElement &&
-      buttons.includes(document.activeElement)
-        ? document.activeElement
-        : null;
-    const current = focused ?? buttons.find((button) => button.tabIndex === 0) ?? buttons.at(-1);
-    if (current) makeMessageActionCurrent(current);
-  }
-
-  function messageActionFocused(event: FocusEvent) {
-    const target =
-      event.target instanceof Element
-        ? event.target.closest<HTMLButtonElement>('button[data-message-action]')
-        : null;
-    if (target) makeMessageActionCurrent(target);
-  }
-
-  function viewportKeydown(event: KeyboardEvent) {
-    if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) cancelInitialBottomPin();
-    const target =
-      event.target instanceof Element
-        ? event.target.closest<HTMLButtonElement>('button[data-message-action]')
-        : null;
-    if (!target) return;
-    const buttons = messageActionButtons();
-    const current = buttons.indexOf(target);
-    if (current < 0) return;
-    let next = current;
-    if (event.key === 'ArrowDown') next = Math.min(buttons.length - 1, current + 1);
-    else if (event.key === 'ArrowUp') next = Math.max(0, current - 1);
-    else if (event.key === 'Home') next = 0;
-    else if (event.key === 'End') next = buttons.length - 1;
-    else return;
-    event.preventDefault();
-    makeMessageActionCurrent(buttons[next], true);
-  }
-
   function prefersReducedMotion(): boolean {
     return (
       typeof window !== 'undefined' &&
@@ -230,35 +172,27 @@
   onMount(() => {
     if (!viewport) return;
     const currentViewport = viewport;
-    const observer = new MutationObserver(syncMessageActionTabStop);
     const resizeObserver = new ResizeObserver(() => {
       if (!initialized || !atBottom || !viewport) return;
       window.cancelAnimationFrame(resizeFrame);
       resizeFrame = window.requestAnimationFrame(pinViewportToBottom);
     });
-    observer.observe(currentViewport, { childList: true, subtree: true });
     if (contentElement) resizeObserver.observe(contentElement);
     currentViewport.addEventListener('scroll', viewportScrolled);
     currentViewport.addEventListener('wheel', cancelInitialBottomPin, { passive: true });
     currentViewport.addEventListener('pointerdown', cancelInitialBottomPin, { passive: true });
-    currentViewport.addEventListener('focusin', messageActionFocused);
-    currentViewport.addEventListener('keydown', viewportKeydown);
-    syncMessageActionTabStop();
     updateWindow();
     if (items.length && !initialized) {
       if (targetKey) void tick().then(() => scrollToTarget(targetKey));
       else void tick().then(scrollToBottom);
     }
     return () => {
-      observer.disconnect();
       resizeObserver.disconnect();
       window.cancelAnimationFrame(resizeFrame);
       cancelInitialBottomPin();
       currentViewport.removeEventListener('scroll', viewportScrolled);
       currentViewport.removeEventListener('wheel', cancelInitialBottomPin);
       currentViewport.removeEventListener('pointerdown', cancelInitialBottomPin);
-      currentViewport.removeEventListener('focusin', messageActionFocused);
-      currentViewport.removeEventListener('keydown', viewportKeydown);
     };
   });
 
@@ -296,8 +230,8 @@
 
 <div class="virtual-message-shell">
   <span id="message-history-keyboard-help" class="visually-hidden">
-    Scroll this region with Page Up and Page Down. When a message actions button is focused, use Up
-    and Down Arrow to move between messages.
+    Scroll this region with Page Up and Page Down. Each message has a keyboard-accessible actions
+    menu.
   </span>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (the scrollable message region needs a keyboard entry point) -->
   <div

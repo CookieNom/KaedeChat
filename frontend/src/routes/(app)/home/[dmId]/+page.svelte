@@ -46,6 +46,12 @@
   import VirtualMessageList from '$lib/components/VirtualMessageList.svelte';
   import { uploadChannelFile, type PendingUpload } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
+  import {
+    compactBadgeCount,
+    directMessageUnreadCount,
+    guildMentionCount
+  } from '$lib/notifications/counts';
+  import { applyReadStateDispatch, type ReadStateDispatch } from '$lib/notifications/read-state';
   import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
   import VoiceDock from '$lib/voice/VoiceDock.svelte';
@@ -69,6 +75,7 @@
   );
   const readStates = $derived(entities.readStates.values);
   const currentUser = $derived(entities.currentUser);
+  const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
   let error = $state('');
   let busy = $state(false);
@@ -398,9 +405,6 @@
         const applied = applyMessageDeliveryUpdate(messages, update);
         setMessages(applied.messages);
         if (!applied.matched) void recoverDeliveryUpdate(update);
-        if (update.status === 'failed') {
-          error = `Message delivery failed: ${update.code ?? 'FEDERATION_DELIVERY_FAILED'}`;
-        }
       }
     } else if (dispatch.t === 'TYPING_START') {
       const started = dispatch.d as {
@@ -425,26 +429,7 @@
         }, 10_000);
       }
     } else if (dispatch.t === 'READ_STATE_UPDATE') {
-      const update = dispatch.d as {
-        channel_id: string;
-        channel_domain: string;
-        last_message_id: string;
-        last_message_domain: string;
-        mention_count: number;
-      };
-      setReadStates(
-        readStates.map((state) =>
-          state.channel_id === update.channel_id && state.channel_domain === update.channel_domain
-            ? {
-                ...state,
-                read_message_id: update.last_message_id,
-                read_message_domain: update.last_message_domain,
-                mention_count: update.mention_count,
-                unread: false
-              }
-            : state
-        )
-      );
+      setReadStates(applyReadStateDispatch(readStates, dispatch.d as ReadStateDispatch));
     } else if (dispatch.t === 'CALL_CREATE' || dispatch.t === 'CALL_RING') {
       const call = dispatch.d as CallState;
       if (isCurrentChannel(call.channel_id, call.channel_domain)) {
@@ -1179,10 +1164,20 @@
     editingMessage = null;
     composerDraftBeforeEdit = null;
     if (message.delivery_status === 'failed') {
-      content = message.content ?? '';
-      composerCursor = content.length;
-      if (!content) error = 'Reattach this message’s files before sending it again.';
-      void tick().then(() => composerInput?.focus());
+      if (message.attachments?.length || !message.content) {
+        content = message.content ?? '';
+        composerCursor = content.length;
+        error = 'Reattach this message’s files before retrying.';
+        void tick().then(() => composerInput?.focus());
+        return;
+      }
+      void send(
+        pendingMessageSend(
+          message.content,
+          [],
+          message.mention_user_refs.map((reference) => entityRef(reference))
+        )
+      );
       return;
     }
     let draft = message.client_nonce ? pendingSends.get(message.client_nonce) : undefined;
@@ -1253,23 +1248,32 @@
     <a
       class="spine-home active"
       href={resolve('/home')}
-      aria-label="Home"
+      aria-label={homeUnreadCount ? `Home, ${homeUnreadCount} unread direct messages` : 'Home'}
       aria-current="page"
       title="Home"
     >
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M4 10.5 12 4l8 6.5v8a1.5 1.5 0 0 1-1.5 1.5h-4v-6h-5v6h-4A1.5 1.5 0 0 1 4 18.5z" />
       </svg>
+      {#if homeUnreadCount}
+        <small class="rail-unread">{compactBadgeCount(homeUnreadCount)}</small>
+      {/if}
     </a>
     <div class="spine-separator" aria-hidden="true"></div>
     {#each guilds as item (entityKey(item))}
+      {@const mentionCount = guildMentionCount(readStates, item)}
       <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- guildPath calls resolve before substituting typed parameters -->
-      <a href={guildLandingPath(item)} aria-label={item.name} title={item.name}>
+      <a
+        href={guildLandingPath(item)}
+        aria-label={mentionCount ? `${item.name}, ${mentionCount} mentions` : item.name}
+        title={item.name}
+      >
         {#if item.icon_hash}
           <img src={assetUrl(item.icon_hash, 'thumbnail_128', item)} alt="" />
         {:else}
           {item.name.slice(0, 2).toUpperCase()}
         {/if}
+        {#if mentionCount}<small class="rail-unread">{compactBadgeCount(mentionCount)}</small>{/if}
       </a>
     {/each}
   </nav>

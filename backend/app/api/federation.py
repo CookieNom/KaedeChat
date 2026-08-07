@@ -101,6 +101,7 @@ from app.federation.history import (
     history_export_page,
 )
 from app.federation.network import FederationNetworkError, normalize_domain
+from app.federation.presence import receive_presence
 from app.federation.relationships import RelationshipApplication, apply_relationship_event
 from app.federation.replication import (
     advance_channel_cursor,
@@ -120,6 +121,7 @@ from app.federation.schemas import (
     GuildProxyRequest,
     InboxResult,
     InviteResolveRequest,
+    PresenceFederationRequest,
     RemoteUserProfile,
 )
 from app.federation.security import (
@@ -1642,6 +1644,27 @@ async def federation_user_lookup(
     return profile_from_user(user)
 
 
+@router.post("/_kaede/v1/presence", status_code=204)
+async def federation_presence_update(
+    payload: PresenceFederationRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    """Accept a signed, expiring presence projection from the user's home."""
+
+    require_guild_federation_access(principal)
+    await enforce_federation_route_rate_limit(
+        redis, principal.origin, "presence", capacity=300, refill_per_minute=300
+    )
+    if payload.user_domain != principal.origin:
+        raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
+    if not await receive_presence(session, redis, settings, payload):
+        raise HTTPException(status_code=409, detail={"code": "KAED_PRESENCE_STALE_OR_UNKNOWN"})
+    return Response(status_code=204)
+
+
 @router.get("/_kaede/v1/media/{attachment_id}/{variant}")
 async def federation_media_get(
     attachment_id: Snowflake,
@@ -1725,10 +1748,12 @@ async def federation_media_get(
     if variant != "original":
         raw = attachment.variants.get(variant)
         if not isinstance(raw, dict) or not isinstance(raw.get("object_key"), str):
-            raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
-        bucket = settings.media_derived_bucket
-        key = raw["object_key"]
-        content_type = str(raw.get("content_type", "application/octet-stream"))
+            if content_type not in {"image/gif", "image/jpeg", "image/png", "image/webp"}:
+                raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+        else:
+            bucket = settings.media_derived_bucket
+            key = raw["object_key"]
+            content_type = str(raw.get("content_type", "application/octet-stream"))
     try:
         body = await S3Storage(settings).get(
             bucket, key, max_bytes=settings.media_max_attachment_bytes

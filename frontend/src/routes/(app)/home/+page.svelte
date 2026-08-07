@@ -3,16 +3,30 @@
   import { page } from '$app/state';
   import { api, ApiError } from '$lib/api/client';
   import { firstNavigableChannel } from '$lib/chat/channels';
+  import { invitedChannel, loadInvitePreview } from '$lib/chat/invite-preview';
   import { filterDmFriends, friendsWithoutVisibleDm } from '$lib/chat/dm-picker';
   import { normalizeInviteReference } from '$lib/chat/invites';
   import { entityKey, entityRef, sameEntity } from '$lib/chat/refs';
-  import type { Channel, Guild, ReadStateStatus, Relationship, UserSummary } from '$lib/chat/types';
+  import type {
+    Channel,
+    Guild,
+    Message,
+    ReadStateStatus,
+    Relationship,
+    UserSummary
+  } from '$lib/chat/types';
   import { GATEWAY_SESSION_RESET_EVENT, type Dispatch } from '$lib/gateway/client';
   import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
   import { DispatchReplayBuffer, type DispatchBatch } from '$lib/gateway/recovery';
   import { lastVisitedChannel } from '$lib/navigation/history';
   import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
   import { assetUrl } from '$lib/media/assets';
+  import {
+    compactBadgeCount,
+    directMessageUnreadCount,
+    guildMentionCount
+  } from '$lib/notifications/counts';
+  import { applyIncomingMessage, applyReadStateDispatch } from '$lib/notifications/read-state';
   import UserProfileCard from '$lib/components/UserProfileCard.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import { onMount, tick } from 'svelte';
@@ -51,6 +65,7 @@
   const blockedUsers = $derived(relationships.filter((item) => item.type === 'blocked'));
   const newDmFriends = $derived(friendsWithoutVisibleDm(relationships, directMessages));
   const filteredNewDmFriends = $derived(filterDmFriends(newDmFriends, handle));
+  const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
 
   function openNavigation() {
     navigationOpen = true;
@@ -109,39 +124,9 @@
         last_message_domain: string | null;
         mention_count: number;
       };
-      readStates = readStates.map((state) =>
-        state.channel_id === update.channel_id && state.channel_domain === update.channel_domain
-          ? {
-              ...state,
-              read_message_id: update.last_message_id ?? state.read_message_id,
-              read_message_domain: update.last_message_domain ?? state.read_message_domain,
-              mention_count: update.mention_count,
-              unread: update.last_message_id === null ? state.unread : false
-            }
-          : state
-      );
+      readStates = applyReadStateDispatch(readStates, update);
     } else if (dispatch.t === 'MESSAGE_CREATE') {
-      const message = dispatch.d as {
-        channel_id: string;
-        channel_domain: string;
-        id: string;
-        origin_domain: string;
-        author_id: string;
-        author_domain: string;
-      };
-      const authoredByMe =
-        currentUser?.id === message.author_id &&
-        currentUser.origin_domain === message.author_domain;
-      readStates = readStates.map((state) =>
-        state.channel_id === message.channel_id && state.channel_domain === message.channel_domain
-          ? {
-              ...state,
-              last_message_id: message.id,
-              last_message_domain: message.origin_domain,
-              unread: authoredByMe ? state.unread : true
-            }
-          : state
-      );
+      readStates = applyIncomingMessage(readStates, dispatch.d as Message, currentUser);
     } else if (dispatch.t === 'CHANNEL_CREATE') {
       const channel = dispatch.d as Channel;
       if (channel.type === 1 && !directMessages.some((item) => sameEntity(item, channel))) {
@@ -191,12 +176,7 @@
   }
 
   function guildUnread(guild: Guild): number {
-    return readStates
-      .filter(
-        (state) =>
-          state.guild_id === guild.id && state.guild_domain === guild.origin_domain && state.unread
-      )
-      .reduce((total, state) => total + Math.max(1, state.mention_count), 0);
+    return guildMentionCount(readStates, guild);
   }
 
   onMount(() => {
@@ -442,6 +422,8 @@
     busy = true;
     error = '';
     try {
+      const preview = await loadInvitePreview(inviteReference);
+      if (generation !== loadGeneration) return;
       const guild = await api<Guild>(`/invites/${encodeURIComponent(inviteReference)}`, {
         method: 'POST'
       });
@@ -451,7 +433,7 @@
       guilds = loadedGuilds;
       guildRevision += 1;
       const joined = guilds.find((item) => sameEntity(item, guild));
-      const channel = firstNavigableChannel(joined?.channels);
+      const channel = joined ? invitedChannel(joined, preview.channel_id) : null;
       if (joined && channel) window.location.assign(guildChannelPath(joined, channel));
     } catch (caught) {
       if (generation !== loadGeneration) return;
@@ -535,21 +517,29 @@
     <a
       class="spine-home active"
       href={resolve('/home')}
-      aria-label="Home"
+      aria-label={homeUnreadCount ? `Home, ${homeUnreadCount} unread direct messages` : 'Home'}
       aria-current="page"
       title="Home"
     >
       <Icon name="home" />
+      {#if homeUnreadCount}
+        <small class="rail-unread">{compactBadgeCount(homeUnreadCount)}</small>
+      {/if}
     </a>
     <div class="spine-separator" aria-hidden="true"></div>
     {#each guilds as guild (entityKey(guild))}
-      <a href={guildLandingPath(guild)} aria-label={guild.name} title={guild.name}>
+      {@const mentionCount = guildUnread(guild)}
+      <a
+        href={guildLandingPath(guild)}
+        aria-label={mentionCount ? `${guild.name}, ${mentionCount} mentions` : guild.name}
+        title={guild.name}
+      >
         {#if guild.icon_hash}
           <img src={assetUrl(guild.icon_hash, 'thumbnail_128', guild)} alt="" />
         {:else}
           {guild.name.slice(0, 2).toUpperCase()}
         {/if}
-        {#if guildUnread(guild)}<small class="rail-unread">{guildUnread(guild)}</small>{/if}
+        {#if mentionCount}<small class="rail-unread">{compactBadgeCount(mentionCount)}</small>{/if}
       </a>
     {/each}
   </nav>
@@ -1060,6 +1050,7 @@
     user={profilePopover.user}
     x={profilePopover.x}
     y={profilePopover.y}
+    isSelf={Boolean(currentUser && entityKey(currentUser) === entityKey(profilePopover.user))}
     onClose={() => (profilePopover = null)}
     onMessage={(user) => {
       profilePopover = null;
