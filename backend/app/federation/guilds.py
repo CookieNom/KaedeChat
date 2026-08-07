@@ -604,12 +604,20 @@ async def apply_guild_redaction_event(
     locked.sync_status = "ready"
 
 
-def _event_ref(raw: object, label: str) -> tuple[int, str]:
+def _event_ref(
+    raw: object,
+    label: str,
+    *,
+    default_origin_domain: str | None = None,
+) -> tuple[int, str]:
     if not isinstance(raw, dict):
         raise ValueError(f"{label} reference is invalid")
+    raw_origin = raw.get("origin_domain")
+    if "origin_domain" not in raw and default_origin_domain is not None:
+        raw_origin = default_origin_domain
     return (
         database_snowflake(raw.get("id"), f"{label} id"),
-        normalize_domain(str(raw.get("origin_domain", ""))),
+        normalize_domain(str(raw_origin or "")),
     )
 
 
@@ -678,7 +686,14 @@ async def apply_guild_mutation_event(
 
     if event_type == "guild.update":
         raw = content.get("guild")
-        if not isinstance(raw, dict) or _event_ref(raw, "guild") != (
+        # Early asset-only guild updates omitted ``origin_domain``. The signed
+        # envelope and context have already bound this mutation to ``locked``,
+        # so allow that legacy omission while keeping explicit domains strict.
+        if not isinstance(raw, dict) or _event_ref(
+            raw,
+            "guild",
+            default_origin_domain=locked.origin_domain,
+        ) != (
             locked.id,
             locked.origin_domain,
         ):

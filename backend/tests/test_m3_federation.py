@@ -36,6 +36,8 @@ from app.federation.delivery import (
 from app.federation.events import ensure_queue_destination
 from app.federation.guilds import (
     GUILD_MUTATION_EVENT_TYPES,
+    _event_ref,
+    apply_guild_mutation_event,
     fetch_guild_snapshot,
     guild_event_channel_ref,
     guild_event_requires_snapshot,
@@ -261,6 +263,99 @@ def test_complete_guild_mutation_registry_and_snapshot_fences() -> None:
     }
     assert guild_event_requires_snapshot(event)
     assert guild_event_channel_ref(event) == (42, "alpha.localhost")
+
+
+def test_legacy_guild_update_reference_inherits_only_a_missing_authoritative_domain() -> None:
+    assert _event_ref(
+        {"id": "42"},
+        "guild",
+        default_origin_domain="alpha.localhost",
+    ) == (42, "alpha.localhost")
+    assert _event_ref(
+        {"id": "42", "origin_domain": "alpha.localhost"},
+        "guild",
+        default_origin_domain="alpha.localhost",
+    ) == (42, "alpha.localhost")
+
+    with pytest.raises(FederationNetworkError, match="invalid federation domain"):
+        _event_ref(
+            {"id": "42", "origin_domain": "bad/domain"},
+            "guild",
+            default_origin_domain="alpha.localhost",
+        )
+    with pytest.raises(FederationNetworkError, match="invalid federation domain"):
+        _event_ref(
+            {"id": "42", "origin_domain": None},
+            "guild",
+            default_origin_domain="alpha.localhost",
+        )
+
+
+@pytest.mark.asyncio
+async def test_legacy_asset_update_applies_and_unblocks_the_guild_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    purge_history = AsyncMock(return_value=0)
+    monkeypatch.setattr(
+        "app.federation.history.purge_ineligible_federated_history",
+        purge_history,
+    )
+    guild = SimpleNamespace(
+        id=42,
+        origin_domain="alpha.localhost",
+        last_event_seq=26,
+        next_event_seq=27,
+        sync_status="stale",
+        permission_generation=0,
+        name="Example guild",
+        description=None,
+        icon_hash=None,
+        banner_hash=None,
+        federated_history_policy="disabled",
+        history_policy_generation=0,
+    )
+    actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=guild),
+        get=AsyncMock(return_value=actor),
+    )
+    event = {
+        "type": "guild.update",
+        "context": {
+            "guild_id": "42",
+            "guild_domain": "alpha.localhost",
+            "seq": "27",
+        },
+        "actor": {"id": "7", "domain": "alpha.localhost"},
+        "content": {
+            "guild": {
+                "id": "42",
+                "icon_hash": "a" * 64,
+            }
+        },
+    }
+
+    dispatch = await apply_guild_mutation_event(
+        cast(Any, session),
+        settings(domain="beta.localhost"),
+        cast(Any, guild),
+        event,
+    )
+
+    assert dispatch == (
+        "GUILD_UPDATE",
+        {
+            "guild_id": "42",
+            "guild_domain": "alpha.localhost",
+            "id": "42",
+            "icon_hash": "a" * 64,
+        },
+    )
+    assert guild.icon_hash == "a" * 64
+    assert guild.last_event_seq == 27
+    assert guild.next_event_seq == 28
+    assert guild.sync_status == "ready"
+    purge_history.assert_awaited_once()
 
 
 def test_snapshot_rate_scope_is_bound_to_the_structural_revision() -> None:
