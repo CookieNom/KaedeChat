@@ -281,6 +281,27 @@ async def require_permissions(
 ) -> int:
     permissions = await get_permissions(session, redis, guild, actor, channel=channel)
     if permissions & needed != needed:
+        member = await session.get(
+            GuildMember,
+            (guild.id, guild.origin_domain, actor.id, actor.origin_domain),
+        )
+        now = datetime.now(UTC)
+        if member is not None and (
+            member.timeout_indefinite
+            or (member.timeout_until is not None and member.timeout_until > now)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "MEMBER_TIMED_OUT",
+                    "message": "You are currently timed out in this guild.",
+                    "timeout_until": (
+                        member.timeout_until.isoformat() if member.timeout_until else None
+                    ),
+                    "timeout_indefinite": member.timeout_indefinite,
+                    "reason": member.timeout_reason,
+                },
+            )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "MISSING_PERMISSIONS", "permissions": str(int(needed))},

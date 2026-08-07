@@ -64,6 +64,13 @@
     expires_at: string | null;
   }
 
+  type MemberModerationAction = 'timeout' | 'untimeout' | 'kick' | 'ban';
+
+  interface MemberModerationDialog {
+    action: MemberModerationAction;
+    member: MemberSummary;
+  }
+
   interface ChannelOverwrite {
     target_id: string;
     target_domain: string;
@@ -90,24 +97,6 @@
     | {
         kind: 'invite';
         target: InviteSummary;
-        title: string;
-        description: string;
-        confirmLabel: string;
-      }
-    | {
-        kind: 'member-kick';
-        target: MemberSummary;
-        reason: string;
-        title: string;
-        description: string;
-        confirmLabel: string;
-      }
-    | {
-        kind: 'member-ban';
-        target: MemberSummary;
-        reason: string;
-        expiresAt: string | null;
-        deleteMessageSeconds: number;
         title: string;
         description: string;
         confirmLabel: string;
@@ -145,6 +134,7 @@
   type GuildAssetKind = 'icon' | 'banner';
   type GuildAssetStage = 'uploading' | 'scanning';
 
+  const MEMBER_PAGE_SIZE = 25;
   const acceptedImageTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
   const channelOnly = $derived(Boolean(page.params.channelId));
   const guildId = $derived(page.params.guildId ?? '');
@@ -155,13 +145,20 @@
   let members = $state<MemberSummary[]>([]);
   let membersHaveMore = $state(false);
   let membersLoadingMore = $state(false);
+  let memberPage = $state(0);
   let bans = $state<BanSummary[]>([]);
   let instanceBans = $state<InstanceBanSummary[]>([]);
-  let moderationTarget = $state('');
   let moderationReason = $state('');
   let timeoutDuration = $state('3600');
   let banDuration = $state('permanent');
   let banDeleteSeconds = $state('0');
+  let memberModerationDialog = $state<MemberModerationDialog | null>(null);
+  let memberModerationBusy = $state(false);
+  let memberModerationElement = $state<HTMLElement | null>(null);
+  let memberModerationCancel = $state<HTMLButtonElement | null>(null);
+  let memberModerationPreviousFocus: HTMLElement | null = null;
+  let memberModerationController: AbortController | null = null;
+  let memberModerationGeneration = 0;
   let instanceBanDomain = $state('');
   let instanceBanReason = $state('');
   let instanceBanDuration = $state('permanent');
@@ -309,15 +306,15 @@
   const canTimeoutMembers = $derived(isLocalGuild && hasPermission(Permission.MODERATE_MEMBERS));
   const canBanInstances = $derived(isLocalGuild && hasPermission(Permission.BAN_INSTANCES));
   const canModerateMembers = $derived(canKickMembers || canBanMembers || canTimeoutMembers);
-  const moderatableMembers = $derived(
-    members.filter(
-      (member) =>
-        entityRef(member.user) !== currentUserRef &&
-        !(member.user.id === guild?.owner_id && member.user.origin_domain === guild?.origin_domain)
-    )
+  const visibleMembers = $derived(
+    members.slice(memberPage * MEMBER_PAGE_SIZE, (memberPage + 1) * MEMBER_PAGE_SIZE)
   );
-  const selectedModerationMember = $derived(
-    members.find((member) => entityRef(member.user) === moderationTarget) ?? null
+  const memberPageCount = $derived(
+    Math.max(1, Math.ceil(members.length / MEMBER_PAGE_SIZE) + (membersHaveMore ? 1 : 0))
+  );
+  const memberHasPreviousPage = $derived(memberPage > 0);
+  const memberHasNextPage = $derived(
+    (memberPage + 1) * MEMBER_PAGE_SIZE < members.length || membersHaveMore
   );
   const canCreateInvites = $derived(isLocalGuild && hasPermission(Permission.CREATE_INVITE));
   const canAccessInvites = $derived(canManageGuild || canCreateInvites);
@@ -661,12 +658,14 @@
       const optional: Promise<unknown>[] = [];
       if (local && (administrator || Boolean(permissions & Permission.VIEW_CHANNEL))) {
         optional.push(
-          api<MemberSummary[]>(`/guilds/${encodeURIComponent(targetGuild)}/members?limit=101`, {
-            signal
-          }).then((value) => {
+          api<MemberSummary[]>(
+            `/guilds/${encodeURIComponent(targetGuild)}/members?limit=${MEMBER_PAGE_SIZE + 1}`,
+            { signal }
+          ).then((value) => {
             if (generation === loadGeneration) {
-              members = value.slice(0, 100);
-              membersHaveMore = value.length > 100;
+              members = value.slice(0, MEMBER_PAGE_SIZE);
+              membersHaveMore = value.length > MEMBER_PAGE_SIZE;
+              memberPage = 0;
             }
           })
         );
@@ -1264,15 +1263,6 @@
       succeeded = await deleteConfirmedRole(confirmation.target);
     } else if (confirmation.kind === 'invite') {
       succeeded = await revokeConfirmedInvite(confirmation.target);
-    } else if (confirmation.kind === 'member-kick') {
-      succeeded = await kickConfirmedMember(confirmation.target, confirmation.reason);
-    } else if (confirmation.kind === 'member-ban') {
-      succeeded = await banConfirmedMember(
-        confirmation.target,
-        confirmation.reason,
-        confirmation.expiresAt,
-        confirmation.deleteMessageSeconds
-      );
     } else if (confirmation.kind === 'instance-ban') {
       succeeded = await banConfirmedFederatedInstance(
         confirmation.domain,
@@ -1292,9 +1282,7 @@
 
   function destructiveBusyLabel(confirmation: DestructiveConfirmation): string {
     if (confirmation.kind === 'invite') return 'Revoking…';
-    if (confirmation.kind === 'member-kick') return 'Kicking…';
-    if (confirmation.kind === 'member-ban' || confirmation.kind === 'instance-ban')
-      return 'Banning…';
+    if (confirmation.kind === 'instance-ban') return 'Banning…';
     if (confirmation.kind === 'guild-leave') return 'Leaving…';
     if (confirmation.kind === 'guild-transfer') return 'Transferring…';
     return 'Deleting…';
@@ -1410,135 +1398,194 @@
     return new Date(Date.now() + Number(duration) * 1000).toISOString();
   }
 
-  function kickSelectedMember() {
-    const member = selectedModerationMember;
-    if (!canKickMembers || !member) return;
-    const name = member.user.display_name ?? member.user.username;
-    void openDestructiveConfirmation({
-      kind: 'member-kick',
-      target: member,
-      reason: moderationReason,
-      title: `Kick ${name}?`,
-      description: `${name} will be removed from the guild immediately. They can return with a valid invite unless they are also banned.`,
-      confirmLabel: 'Kick member'
-    });
+  function isModeratableMember(member: MemberSummary): boolean {
+    return (
+      entityRef(member.user) !== currentUserRef &&
+      !(member.user.id === guild?.owner_id && member.user.origin_domain === guild?.origin_domain)
+    );
   }
 
-  function kickConfirmedMember(member: MemberSummary, reason: string) {
-    return run(async (targetGuild, generation) => {
-      await api(
-        `/guilds/${encodeURIComponent(targetGuild)}/members/${encodeURIComponent(entityRef(member.user))}`,
-        {
-          method: 'DELETE',
-          headers: reason ? { 'X-Audit-Log-Reason': reason } : undefined
-        }
-      );
-      if (generation !== loadGeneration) return;
-      members = members.filter((item) => entityKey(item.user) !== entityKey(member.user));
-      moderationTarget = '';
-      moderationReason = '';
-      notice = `${member.user.display_name ?? member.user.username} was kicked.`;
-    });
+  function memberModerationTitle(dialog: MemberModerationDialog): string {
+    const name =
+      dialog.member.nickname ?? dialog.member.user.display_name ?? dialog.member.user.username;
+    if (dialog.action === 'untimeout') return `Remove ${name}'s timeout?`;
+    return `${dialog.action.slice(0, 1).toUpperCase()}${dialog.action.slice(1)} ${name}?`;
   }
 
-  function timeoutSelectedMember() {
-    const member = selectedModerationMember;
-    if (!canTimeoutMembers || !member) return;
-    const permanent = timeoutDuration === 'permanent';
-    return run(async (targetGuild, generation) => {
-      const updated = await api<MemberSummary>(
-        `/guilds/${encodeURIComponent(targetGuild)}/members/${encodeURIComponent(entityRef(member.user))}`,
-        {
-          method: 'PATCH',
-          headers: moderationReason ? { 'X-Audit-Log-Reason': moderationReason } : undefined,
-          body: JSON.stringify({
-            timeout_until: permanent ? null : expiryFor(timeoutDuration),
-            timeout_indefinite: permanent
-          })
-        }
-      );
-      if (generation !== loadGeneration) return;
-      members = members.map((item) =>
-        entityKey(item.user) === entityKey(member.user) ? updated : item
-      );
-      moderationReason = '';
-      notice = `${member.user.display_name ?? member.user.username} was timed out${permanent ? ' indefinitely' : ''}.`;
-    });
+  function memberModerationDescription(dialog: MemberModerationDialog): string {
+    if (dialog.action === 'timeout')
+      return 'They will be unable to send messages, react, speak, or use other interactive guild features until the timeout ends.';
+    if (dialog.action === 'untimeout')
+      return 'They will immediately regain the actions allowed by their roles and channel permissions.';
+    if (dialog.action === 'kick')
+      return 'They will be removed immediately, but may return using another valid invite.';
+    return 'They will be removed and unable to rejoin until this ban expires or is removed.';
   }
 
-  function removeSelectedTimeout() {
-    const member = selectedModerationMember;
-    if (!canTimeoutMembers || !member) return;
-    return run(async (targetGuild, generation) => {
-      const updated = await api<MemberSummary>(
-        `/guilds/${encodeURIComponent(targetGuild)}/members/${encodeURIComponent(entityRef(member.user))}`,
-        {
-          method: 'PATCH',
-          headers: moderationReason ? { 'X-Audit-Log-Reason': moderationReason } : undefined,
-          body: JSON.stringify({ timeout_until: null, timeout_indefinite: false })
-        }
-      );
-      if (generation !== loadGeneration) return;
-      members = members.map((item) =>
-        entityKey(item.user) === entityKey(member.user) ? updated : item
-      );
-      moderationReason = '';
-      notice = `Timeout removed for ${member.user.display_name ?? member.user.username}.`;
-    });
-  }
-
-  function banSelectedMember() {
-    const member = selectedModerationMember;
-    if (!canBanMembers || !member) return;
-    const name = member.user.display_name ?? member.user.username;
-    const expiresAt = expiryFor(banDuration);
-    const deleteMessageSeconds = Number(banDeleteSeconds);
-    void openDestructiveConfirmation({
-      kind: 'member-ban',
-      target: member,
-      reason: moderationReason,
-      expiresAt,
-      deleteMessageSeconds,
-      title: `Ban ${name}?`,
-      description: `${name} will be removed and unable to rejoin${expiresAt ? ` until ${formatDateTime(expiresAt)}` : ' until the ban is removed'}. ${deleteMessageSeconds ? 'Recent messages within the selected interval will be deleted.' : 'Existing messages will remain.'}`,
-      confirmLabel: 'Ban member'
-    });
-  }
-
-  function banConfirmedMember(
+  async function openMemberModeration(
     member: MemberSummary,
-    reason: string,
-    expiresAt: string | null,
-    deleteMessageSeconds: number
+    action: MemberModerationAction,
+    invoker: HTMLElement
   ) {
-    return run(async (targetGuild, generation) => {
-      await api(
-        `/guilds/${encodeURIComponent(targetGuild)}/bans/${encodeURIComponent(entityRef(member.user))}`,
-        {
-          method: 'PUT',
-          headers: reason ? { 'X-Audit-Log-Reason': reason } : undefined,
-          body: JSON.stringify({
-            reason: reason || null,
-            expires_at: expiresAt,
-            delete_message_seconds: deleteMessageSeconds
-          })
-        }
-      );
-      if (generation !== loadGeneration) return;
-      members = members.filter((item) => entityKey(item.user) !== entityKey(member.user));
-      bans = [
-        {
-          user: member.user,
-          reason: reason || null,
-          created_at: new Date().toISOString(),
-          expires_at: expiresAt
-        },
-        ...bans.filter((item) => entityKey(item.user) !== entityKey(member.user))
-      ];
-      moderationTarget = '';
-      moderationReason = '';
-      notice = `${member.user.display_name ?? member.user.username} was banned.`;
+    if (!isModeratableMember(member) || memberModerationBusy) return;
+    if (action === 'timeout' || action === 'untimeout') {
+      if (!canTimeoutMembers) return;
+    } else if (action === 'kick') {
+      if (!canKickMembers) return;
+    } else if (!canBanMembers) return;
+    memberModerationPreviousFocus = invoker;
+    moderationReason = '';
+    timeoutDuration = '3600';
+    banDuration = 'permanent';
+    banDeleteSeconds = '0';
+    error = '';
+    notice = '';
+    memberModerationDialog = { action, member };
+    await tick();
+    memberModerationCancel?.focus();
+  }
+
+  function closeMemberModeration() {
+    const previousFocus = memberModerationPreviousFocus;
+    memberModerationGeneration += 1;
+    memberModerationController?.abort();
+    memberModerationController = null;
+    memberModerationBusy = false;
+    memberModerationDialog = null;
+    memberModerationElement = null;
+    memberModerationCancel = null;
+    moderationReason = '';
+    error = '';
+    memberModerationPreviousFocus = null;
+    void tick().then(() => {
+      if (previousFocus?.isConnected) previousFocus.focus();
     });
+  }
+
+  function memberModerationKeydown(event: KeyboardEvent) {
+    if (!memberModerationDialog || !memberModerationElement) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMemberModeration();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(
+      memberModerationElement.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    );
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1) ?? first;
+    if (!memberModerationElement.contains(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function clampMemberPage() {
+    memberPage = Math.min(
+      memberPage,
+      Math.max(0, Math.ceil(members.length / MEMBER_PAGE_SIZE) - 1)
+    );
+  }
+
+  async function submitMemberModeration() {
+    const dialog = memberModerationDialog;
+    if (!dialog || memberModerationBusy) return;
+    const targetGuild = guildId;
+    const routeGeneration = loadGeneration;
+    const requestGeneration = ++memberModerationGeneration;
+    const controller = new AbortController();
+    memberModerationController = controller;
+    memberModerationBusy = true;
+    error = '';
+    notice = '';
+    const reason = moderationReason.trim();
+    const headers = reason ? { 'X-Audit-Log-Reason': reason } : undefined;
+    const memberPath = `/guilds/${encodeURIComponent(targetGuild)}/members/${encodeURIComponent(entityRef(dialog.member.user))}`;
+    const stillCurrent = () =>
+      requestGeneration === memberModerationGeneration &&
+      routeGeneration === loadGeneration &&
+      targetGuild === guildId;
+    try {
+      if (dialog.action === 'timeout' || dialog.action === 'untimeout') {
+        const indefinite = dialog.action === 'timeout' && timeoutDuration === 'permanent';
+        const updated = await api<MemberSummary>(memberPath, {
+          method: 'PATCH',
+          headers,
+          signal: controller.signal,
+          body: JSON.stringify({
+            timeout_until:
+              dialog.action === 'timeout' && !indefinite ? expiryFor(timeoutDuration) : null,
+            timeout_indefinite: indefinite
+          })
+        });
+        if (!stillCurrent()) return;
+        members = members.map((item) =>
+          entityKey(item.user) === entityKey(dialog.member.user) ? updated : item
+        );
+        notice =
+          dialog.action === 'timeout'
+            ? `${dialog.member.user.display_name ?? dialog.member.user.username} was timed out${indefinite ? ' indefinitely' : ''}.`
+            : `Timeout removed for ${dialog.member.user.display_name ?? dialog.member.user.username}.`;
+      } else if (dialog.action === 'kick') {
+        await api(memberPath, { method: 'DELETE', headers, signal: controller.signal });
+        if (!stillCurrent()) return;
+        members = members.filter((item) => entityKey(item.user) !== entityKey(dialog.member.user));
+        clampMemberPage();
+        notice = `${dialog.member.user.display_name ?? dialog.member.user.username} was kicked.`;
+      } else {
+        const expiresAt = expiryFor(banDuration);
+        await api(
+          `/guilds/${encodeURIComponent(targetGuild)}/bans/${encodeURIComponent(entityRef(dialog.member.user))}`,
+          {
+            method: 'PUT',
+            headers,
+            signal: controller.signal,
+            body: JSON.stringify({
+              reason: reason || null,
+              expires_at: expiresAt,
+              delete_message_seconds: Number(banDeleteSeconds)
+            })
+          }
+        );
+        if (!stillCurrent()) return;
+        members = members.filter((item) => entityKey(item.user) !== entityKey(dialog.member.user));
+        clampMemberPage();
+        bans = [
+          {
+            user: dialog.member.user,
+            reason: reason || null,
+            created_at: new Date().toISOString(),
+            expires_at: expiresAt
+          },
+          ...bans.filter((item) => entityKey(item.user) !== entityKey(dialog.member.user))
+        ];
+        notice = `${dialog.member.user.display_name ?? dialog.member.user.username} was banned.`;
+      }
+      if (stillCurrent()) closeMemberModeration();
+    } catch (caught) {
+      if (!stillCurrent() || controller.signal.aborted) return;
+      error =
+        caught instanceof ApiError ? caught.message : 'The moderation action could not be applied.';
+    } finally {
+      if (requestGeneration === memberModerationGeneration) {
+        memberModerationController = null;
+        memberModerationBusy = false;
+      }
+    }
   }
 
   function unbanUser(ban: BanSummary) {
@@ -1609,28 +1656,41 @@
     });
   }
 
-  async function loadMoreMembers() {
-    if (membersLoadingMore || !membersHaveMore || !members.length) return;
+  async function loadMoreMembers(): Promise<boolean> {
+    if (membersLoadingMore || !membersHaveMore || !members.length) return false;
     const targetGuild = guildId;
     const generation = loadGeneration;
     const after = entityRef(members[members.length - 1].user);
     membersLoadingMore = true;
     try {
       const page = await api<MemberSummary[]>(
-        `/guilds/${encodeURIComponent(targetGuild)}/members?limit=101&after=${encodeURIComponent(after)}`
+        `/guilds/${encodeURIComponent(targetGuild)}/members?limit=${MEMBER_PAGE_SIZE + 1}&after=${encodeURIComponent(after)}`
       );
-      if (generation !== loadGeneration || targetGuild !== guildId) return;
-      const next = page.slice(0, 100);
+      if (generation !== loadGeneration || targetGuild !== guildId) return false;
+      const next = page.slice(0, MEMBER_PAGE_SIZE);
       const existing = new Set(members.map((member) => entityKey(member.user)));
       members = [...members, ...next.filter((member) => !existing.has(entityKey(member.user)))];
-      membersHaveMore = page.length > 100;
+      membersHaveMore = page.length > MEMBER_PAGE_SIZE;
+      return next.length > 0;
     } catch (caught) {
       if (generation === loadGeneration && targetGuild === guildId) {
         error = caught instanceof ApiError ? caught.message : 'Could not load more members.';
       }
+      return false;
     } finally {
       if (generation === loadGeneration && targetGuild === guildId) membersLoadingMore = false;
     }
+  }
+
+  function showPreviousMemberPage() {
+    if (memberPage > 0 && !membersLoadingMore) memberPage -= 1;
+  }
+
+  async function showNextMemberPage() {
+    if (!memberHasNextPage || membersLoadingMore) return;
+    const nextStart = (memberPage + 1) * MEMBER_PAGE_SIZE;
+    if (nextStart >= members.length && !(await loadMoreMembers())) return;
+    if (nextStart < members.length) memberPage += 1;
   }
 
   $effect(() => {
@@ -1645,9 +1705,17 @@
     members = [];
     membersHaveMore = false;
     membersLoadingMore = false;
+    memberPage = 0;
     bans = [];
     instanceBans = [];
-    moderationTarget = '';
+    memberModerationGeneration += 1;
+    memberModerationController?.abort();
+    memberModerationController = null;
+    memberModerationDialog = null;
+    memberModerationBusy = false;
+    memberModerationElement = null;
+    memberModerationCancel = null;
+    memberModerationPreviousFocus = null;
     invites = [];
     createdInvite = null;
     selectedChannel = null;
@@ -2911,163 +2979,8 @@
               <p>{members.length} loaded member{members.length === 1 ? '' : 's'} in this guild.</p>
             </div>
           </div>
-          {#if canModerateMembers}
-            <div class="settings-card moderation-console">
-              <div class="settings-list-heading">
-                <div>
-                  <strong>Member moderation</strong>
-                  <p>Actions are recorded in the audit log and enforced across federated copies.</p>
-                </div>
-              </div>
-              <div class="moderation-fields">
-                <label class="form-field">
-                  <span>Member</span>
-                  <select bind:value={moderationTarget} disabled={busy}>
-                    <option value="">Choose a member</option>
-                    {#each moderatableMembers as member (entityKey(member.user))}
-                      <option value={entityRef(member.user)}>
-                        {member.nickname ?? member.user.display_name ?? member.user.username} ·
-                        {member.user.handle}
-                      </option>
-                    {/each}
-                  </select>
-                </label>
-                <label class="form-field moderation-reason-field">
-                  <span>Reason <small>optional</small></span>
-                  <input
-                    bind:value={moderationReason}
-                    maxlength="512"
-                    placeholder="Visible in the guild audit log"
-                    disabled={busy}
-                  />
-                </label>
-              </div>
-              {#if selectedModerationMember}
-                <div class="moderation-target-summary">
-                  <span class="avatar avatar-medium">
-                    {#if selectedModerationMember.user.avatar_hash}
-                      <img
-                        src={assetUrl(
-                          selectedModerationMember.user.avatar_hash,
-                          'thumbnail_128',
-                          selectedModerationMember.user
-                        )}
-                        alt=""
-                      />
-                    {:else}
-                      {selectedModerationMember.user.username.slice(0, 1).toUpperCase()}
-                    {/if}
-                  </span>
-                  <div>
-                    <strong
-                      >{selectedModerationMember.nickname ??
-                        selectedModerationMember.user.display_name ??
-                        selectedModerationMember.user.username}</strong
-                    >
-                    <small>{selectedModerationMember.user.handle}</small>
-                  </div>
-                  {#if selectedModerationMember.timeout_indefinite}
-                    <span class="sanction-badge">Timed out indefinitely</span>
-                  {:else if selectedModerationMember.timeout_until}
-                    <span class="sanction-badge"
-                      >Timed out until {formatDateTime(
-                        selectedModerationMember.timeout_until
-                      )}</span
-                    >
-                  {/if}
-                </div>
-                <div class="moderation-action-grid">
-                  {#if canTimeoutMembers}
-                    <div class="moderation-action-card">
-                      <div>
-                        <strong>Timeout</strong>
-                        <p>Restricts sending, reacting, speaking, and other interactive actions.</p>
-                      </div>
-                      <select
-                        bind:value={timeoutDuration}
-                        disabled={busy}
-                        aria-label="Timeout duration"
-                      >
-                        <option value="600">10 minutes</option>
-                        <option value="3600">1 hour</option>
-                        <option value="86400">1 day</option>
-                        <option value="604800">7 days</option>
-                        <option value="2419200">28 days</option>
-                        <option value="permanent">Indefinite</option>
-                      </select>
-                      <div class="button-row">
-                        <button
-                          class="secondary-button"
-                          type="button"
-                          disabled={busy}
-                          onclick={() => void timeoutSelectedMember()}>Apply timeout</button
-                        >
-                        {#if selectedModerationMember.timeout_indefinite || selectedModerationMember.timeout_until}
-                          <button
-                            class="secondary-button"
-                            type="button"
-                            disabled={busy}
-                            onclick={() => void removeSelectedTimeout()}>Remove timeout</button
-                          >
-                        {/if}
-                      </div>
-                    </div>
-                  {/if}
-                  {#if canBanMembers}
-                    <div class="moderation-action-card danger-card">
-                      <div>
-                        <strong>Ban</strong>
-                        <p>Removes the member and prevents rejoining until the ban expires.</p>
-                      </div>
-                      <div class="moderation-inline-selects">
-                        <label>
-                          <span>Duration</span>
-                          <select bind:value={banDuration} disabled={busy}>
-                            <option value="3600">1 hour</option>
-                            <option value="86400">1 day</option>
-                            <option value="604800">7 days</option>
-                            <option value="2592000">30 days</option>
-                            <option value="permanent">Permanent</option>
-                          </select>
-                        </label>
-                        <label>
-                          <span>Delete messages</span>
-                          <select bind:value={banDeleteSeconds} disabled={busy}>
-                            <option value="0">None</option>
-                            <option value="3600">Previous hour</option>
-                            <option value="86400">Previous day</option>
-                            <option value="604800">Previous 7 days</option>
-                          </select>
-                        </label>
-                      </div>
-                      <button
-                        class="danger-button"
-                        type="button"
-                        disabled={busy}
-                        onclick={() => void banSelectedMember()}>Ban member</button
-                      >
-                    </div>
-                  {/if}
-                  {#if canKickMembers}
-                    <div class="moderation-action-card">
-                      <div>
-                        <strong>Kick</strong>
-                        <p>Removes the member without preventing them from using another invite.</p>
-                      </div>
-                      <button
-                        class="secondary-button"
-                        type="button"
-                        disabled={busy}
-                        onclick={() => void kickSelectedMember()}>Kick member</button
-                      >
-                    </div>
-                  {/if}
-                </div>
-              {/if}
-            </div>
-          {/if}
           <div class="settings-card member-management-list">
-            {#each members as member (entityKey(member.user))}
+            {#each visibleMembers as member (entityKey(member.user))}
               <article class="member-management-row">
                 <span class="avatar avatar-medium">
                   {#if member.user.avatar_hash}
@@ -3099,6 +3012,55 @@
                     </label>
                   {/each}
                 </div>
+                <div class="member-management-actions">
+                  {#if member.timeout_indefinite}
+                    <span class="sanction-badge">Timed out indefinitely</span>
+                  {:else if member.timeout_until}
+                    <span class="sanction-badge"
+                      >Timed out until {formatDateTime(member.timeout_until)}</span
+                    >
+                  {/if}
+                  {#if canModerateMembers && isModeratableMember(member)}
+                    {#if canTimeoutMembers}
+                      <button
+                        class="secondary-button small-button"
+                        type="button"
+                        disabled={busy || memberModerationBusy}
+                        onclick={(event) =>
+                          void openMemberModeration(
+                            member,
+                            member.timeout_indefinite || member.timeout_until
+                              ? 'untimeout'
+                              : 'timeout',
+                            event.currentTarget
+                          )}
+                      >
+                        {member.timeout_indefinite || member.timeout_until
+                          ? 'Remove timeout'
+                          : 'Timeout'}
+                      </button>
+                    {/if}
+                    {#if canKickMembers}
+                      <button
+                        class="secondary-button small-button"
+                        type="button"
+                        disabled={busy || memberModerationBusy}
+                        onclick={(event) =>
+                          void openMemberModeration(member, 'kick', event.currentTarget)}
+                        >Kick</button
+                      >
+                    {/if}
+                    {#if canBanMembers}
+                      <button
+                        class="danger-text-button small-button"
+                        type="button"
+                        disabled={busy || memberModerationBusy}
+                        onclick={(event) =>
+                          void openMemberModeration(member, 'ban', event.currentTarget)}>Ban</button
+                      >
+                    {/if}
+                  {/if}
+                </div>
               </article>
             {:else}
               <div class="empty-state compact-empty">
@@ -3107,15 +3069,28 @@
                 <p>Member information may be temporarily unavailable.</p>
               </div>
             {/each}
-            {#if membersHaveMore}
-              <button
-                class="secondary-button settings-load-more"
-                type="button"
-                disabled={membersLoadingMore}
-                onclick={loadMoreMembers}
-              >
-                {membersLoadingMore ? 'Loading…' : 'Load more members'}
-              </button>
+            {#if members.length}
+              <nav class="member-pagination" aria-label="Guild member pages">
+                <button
+                  class="secondary-button small-button"
+                  type="button"
+                  disabled={!memberHasPreviousPage || membersLoadingMore}
+                  onclick={showPreviousMemberPage}>Previous</button
+                >
+                <span>
+                  Page {memberPage + 1}{membersHaveMore
+                    ? ` of at least ${memberPageCount}`
+                    : ` of ${memberPageCount}`}
+                </span>
+                <button
+                  class="secondary-button small-button"
+                  type="button"
+                  disabled={!memberHasNextPage || membersLoadingMore}
+                  onclick={() => void showNextMemberPage()}
+                >
+                  {membersLoadingMore ? 'Loading…' : 'Next'}
+                </button>
+              </nav>
             {/if}
           </div>
           {#if canBanMembers}
@@ -3457,6 +3432,141 @@
     {/if}
   </section>
 </main>
+
+{#if memberModerationDialog}
+  <div class="channel-dialog-layer">
+    <button
+      class="channel-dialog-backdrop"
+      type="button"
+      aria-label="Cancel moderation action"
+      onclick={closeMemberModeration}
+    ></button>
+    <div
+      bind:this={memberModerationElement}
+      class="channel-dialog confirmation-dialog member-moderation-dialog"
+      role="dialog"
+      tabindex="-1"
+      aria-modal="true"
+      aria-labelledby="member-moderation-title"
+      aria-describedby="member-moderation-description"
+      aria-busy={memberModerationBusy}
+      onkeydown={memberModerationKeydown}
+    >
+      <header>
+        <div>
+          <p>Member moderation</p>
+          <h2 id="member-moderation-title">{memberModerationTitle(memberModerationDialog)}</h2>
+        </div>
+        <button type="button" aria-label="Cancel" onclick={closeMemberModeration}>×</button>
+      </header>
+      <form
+        onsubmit={(event) => {
+          event.preventDefault();
+          void submitMemberModeration();
+        }}
+      >
+        <div class="moderation-dialog-member">
+          <span class="avatar avatar-medium">
+            {#if memberModerationDialog.member.user.avatar_hash}
+              <img
+                src={assetUrl(
+                  memberModerationDialog.member.user.avatar_hash,
+                  'thumbnail_128',
+                  memberModerationDialog.member.user
+                )}
+                alt=""
+              />
+            {:else}
+              {memberModerationDialog.member.user.username.slice(0, 1).toUpperCase()}
+            {/if}
+          </span>
+          <div>
+            <strong
+              >{memberModerationDialog.member.nickname ??
+                memberModerationDialog.member.user.display_name ??
+                memberModerationDialog.member.user.username}</strong
+            >
+            <small>{memberModerationDialog.member.user.handle}</small>
+          </div>
+        </div>
+        <p id="member-moderation-description" class="confirmation-copy">
+          {memberModerationDescription(memberModerationDialog)}
+        </p>
+        {#if memberModerationDialog.action === 'timeout'}
+          <label class="channel-dialog-field">
+            Duration
+            <select bind:value={timeoutDuration} disabled={memberModerationBusy}>
+              <option value="600">10 minutes</option>
+              <option value="3600">1 hour</option>
+              <option value="86400">1 day</option>
+              <option value="604800">7 days</option>
+              <option value="2419200">28 days</option>
+              <option value="permanent">Indefinite</option>
+            </select>
+          </label>
+        {:else if memberModerationDialog.action === 'ban'}
+          <div class="moderation-inline-selects">
+            <label class="channel-dialog-field">
+              Duration
+              <select bind:value={banDuration} disabled={memberModerationBusy}>
+                <option value="3600">1 hour</option>
+                <option value="86400">1 day</option>
+                <option value="604800">7 days</option>
+                <option value="2592000">30 days</option>
+                <option value="permanent">Permanent</option>
+              </select>
+            </label>
+            <label class="channel-dialog-field">
+              Delete messages
+              <select bind:value={banDeleteSeconds} disabled={memberModerationBusy}>
+                <option value="0">None</option>
+                <option value="3600">Previous hour</option>
+                <option value="86400">Previous day</option>
+                <option value="604800">Previous 7 days</option>
+              </select>
+            </label>
+          </div>
+        {/if}
+        <label class="channel-dialog-field">
+          Reason <span class="field-optional">Optional</span>
+          <textarea
+            bind:value={moderationReason}
+            maxlength="512"
+            rows="3"
+            placeholder="Visible in the guild audit log"
+            disabled={memberModerationBusy}
+          ></textarea>
+        </label>
+        {#if error}<p class="form-error" role="alert">{error}</p>{/if}
+        <footer>
+          <button
+            bind:this={memberModerationCancel}
+            class="secondary-button"
+            type="button"
+            onclick={closeMemberModeration}>Cancel</button
+          >
+          <button
+            class={memberModerationDialog.action === 'untimeout'
+              ? 'primary-button'
+              : 'danger-button'}
+            type="submit"
+            disabled={memberModerationBusy}
+          >
+            {memberModerationBusy
+              ? 'Applying…'
+              : memberModerationDialog.action === 'untimeout'
+                ? 'Remove timeout'
+                : memberModerationDialog.action === 'timeout'
+                  ? 'Apply timeout'
+                  : memberModerationDialog.action === 'kick'
+                    ? 'Kick member'
+                    : 'Ban member'}
+          </button>
+        </footer>
+      </form>
+    </div>
+  </div>
+{/if}
 
 {#if destructiveConfirmation}
   <div class="channel-dialog-layer">

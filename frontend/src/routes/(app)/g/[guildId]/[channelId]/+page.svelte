@@ -27,6 +27,7 @@
     compareMessages,
     failPendingMessage,
     mergeMessageSnapshot,
+    messageDeliveryFailure,
     reconcileMessage
   } from '$lib/chat/reconcile';
   import { compareEntityRefs, entityKey, entityRef, matchesEntityRef } from '$lib/chat/refs';
@@ -177,6 +178,8 @@
   let moderationDuration = $state('86400');
   let moderationBusy = $state(false);
   let moderationError = $state('');
+  let moderationController: AbortController | null = null;
+  let moderationGeneration = 0;
   let presencePreference = $state<'online' | 'idle' | 'dnd' | 'invisible'>('online');
   let voiceOccupancy = $state<Record<string, VoiceOccupant[]>>({});
   let voiceOccupancyVersion = 0;
@@ -1001,6 +1004,21 @@
     return guildModerationActions(guild, currentUser, user, members);
   }
 
+  function formatTimeoutFailure(failure: ApiError): string {
+    const reason = typeof failure.detail.reason === 'string' ? failure.detail.reason.trim() : '';
+    const indefinite = failure.detail.timeout_indefinite === true;
+    const until =
+      typeof failure.detail.timeout_until === 'string'
+        ? new Date(failure.detail.timeout_until)
+        : null;
+    const duration = indefinite
+      ? 'indefinitely'
+      : until && !Number.isNaN(until.valueOf())
+        ? `until ${until.toLocaleString()}`
+        : 'in this guild';
+    return `You are timed out ${duration}.${reason ? ` Reason: ${reason}` : ''}`;
+  }
+
   function requestModeration(user: UserSummary, action: 'kick' | 'timeout' | 'ban') {
     if (!moderationActionsFor(user).some((candidate) => candidate.id === action)) return;
     moderationReason = '';
@@ -1010,14 +1028,27 @@
   }
 
   function closeModerationDialog() {
-    if (moderationBusy) return;
+    moderationGeneration += 1;
+    moderationController?.abort();
+    moderationController = null;
+    moderationBusy = false;
     moderationDialog = null;
     moderationError = '';
+  }
+
+  function moderationDialogKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeModerationDialog();
   }
 
   async function confirmModeration() {
     if (!guild || !moderationDialog || moderationBusy) return;
     const request = moderationDialog;
+    const requestGeneration = ++moderationGeneration;
+    const controller = new AbortController();
+    moderationController = controller;
     moderationBusy = true;
     moderationError = '';
     const headers = moderationReason.trim()
@@ -1027,7 +1058,13 @@
     const userRef = encodeURIComponent(entityRef(request.user));
     try {
       if (request.action === 'kick') {
-        await api(`/guilds/${guildRef}/members/${userRef}`, { method: 'DELETE', headers });
+        await api(`/guilds/${guildRef}/members/${userRef}`, {
+          method: 'DELETE',
+          headers,
+          signal: controller.signal
+        });
+        if (requestGeneration !== moderationGeneration) return;
+        moderationDialog = null;
         setMembers(members.filter((member) => entityKey(member.user) !== entityKey(request.user)));
       } else if (request.action === 'ban') {
         const expiresAt =
@@ -1037,18 +1074,22 @@
         await api(`/guilds/${guildRef}/bans/${userRef}`, {
           method: 'PUT',
           headers,
+          signal: controller.signal,
           body: JSON.stringify({
             reason: moderationReason.trim() || null,
             expires_at: expiresAt,
             delete_message_seconds: 0
           })
         });
+        if (requestGeneration !== moderationGeneration) return;
+        moderationDialog = null;
         setMembers(members.filter((member) => entityKey(member.user) !== entityKey(request.user)));
       } else {
         const indefinite = moderationDuration === 'permanent';
         const updated = await api<GuildMemberSummary>(`/guilds/${guildRef}/members/${userRef}`, {
           method: 'PATCH',
           headers,
+          signal: controller.signal,
           body: JSON.stringify({
             timeout_until: indefinite
               ? null
@@ -1056,18 +1097,23 @@
             timeout_indefinite: indefinite
           })
         });
+        if (requestGeneration !== moderationGeneration) return;
+        moderationDialog = null;
         setMembers(
           members.map((member) =>
             entityKey(member.user) === entityKey(updated.user) ? updated : member
           )
         );
       }
-      moderationDialog = null;
     } catch (caught) {
+      if (requestGeneration !== moderationGeneration || controller.signal.aborted) return;
       moderationError =
         caught instanceof ApiError ? caught.message : 'The moderation action could not be applied.';
     } finally {
-      moderationBusy = false;
+      if (requestGeneration === moderationGeneration) {
+        moderationController = null;
+        moderationBusy = false;
+      }
     }
   }
 
@@ -1204,16 +1250,27 @@
         channel_domain: string;
         client_nonce: string;
         code: string;
+        reason?: string | null;
+        timeout_until?: string | null;
+        timeout_indefinite?: boolean;
       };
       if (isCurrentChannel(rejected.channel_id, rejected.channel_domain)) {
+        const failure = messageDeliveryFailure(rejected);
         setMessages(
           messages.map((item) =>
             item.client_nonce === rejected.client_nonce
-              ? { ...item, queued: false, pending: false, failed: true }
+              ? {
+                  ...item,
+                  queued: false,
+                  pending: false,
+                  failed: true,
+                  failure_reason: failure.reason,
+                  retryable: failure.retryable
+                }
               : item
           )
         );
-        error = `Queued message rejected: ${rejected.code}`;
+        error = failure.reason ?? `Queued message rejected: ${rejected.code}`;
       }
     } else if (dispatch.t === 'TYPING_START') {
       const started = dispatch.d as {
@@ -1475,6 +1532,12 @@
       channelOrderStatus = '';
       mobileNavigationOpen = false;
       profile = null;
+      moderationGeneration += 1;
+      moderationController?.abort();
+      moderationController = null;
+      moderationDialog = null;
+      moderationBusy = false;
+      moderationError = '';
       voiceOccupancy = {};
       voiceOccupancyVersion += 1;
       voiceRefreshSequence += 1;
@@ -1762,8 +1825,8 @@
           channel_id: channel.id,
           channel_domain: channel.origin_domain,
           author_id: 'me',
-          author_domain: '',
-          author: null,
+          author_domain: currentUser?.origin_domain ?? localDomain,
+          author: currentUser,
           content: draft.content,
           message_type: 0,
           flags: 0,
@@ -1817,7 +1880,14 @@
     } catch (caught) {
       if (generation !== loadGeneration || routeChannel !== channelId) return;
       const stillPending = messages.some((item) => item.client_nonce === nonce && item.pending);
-      setMessages(failPendingMessage(messages, nonce));
+      const timeoutFailure = caught instanceof ApiError && caught.code === 'MEMBER_TIMED_OUT';
+      const timeoutReason = timeoutFailure ? formatTimeoutFailure(caught) : undefined;
+      setMessages(
+        failPendingMessage(messages, nonce, {
+          reason: timeoutReason,
+          retryable: !timeoutFailure
+        })
+      );
       if (stillPending) {
         if (caught instanceof ApiError && caught.code === 'ATTACHMENT_ALREADY_USED') {
           pendingSends.set(nonce, discardAttachments(draft));
@@ -1825,7 +1895,9 @@
           error =
             'Those files were already used by another message. Reattach them before retrying.';
         } else {
-          error = caught instanceof ApiError ? caught.message : 'Message failed to send.';
+          error =
+            timeoutReason ??
+            (caught instanceof ApiError ? caught.message : 'Message failed to send.');
         }
       }
     } finally {
@@ -2749,15 +2821,16 @@
       class="channel-dialog-backdrop"
       type="button"
       aria-label="Cancel moderation action"
-      disabled={moderationBusy}
       onclick={closeModerationDialog}
     ></button>
     <div
       class="channel-dialog confirmation-dialog"
       role="alertdialog"
+      tabindex="-1"
       aria-modal="true"
       aria-labelledby="moderation-dialog-title"
       aria-busy={moderationBusy}
+      onkeydown={moderationDialogKeydown}
     >
       <header>
         <div>
@@ -2798,15 +2871,13 @@
         {/if}
         <label class="channel-dialog-field">
           Reason <span class="field-optional">Optional</span>
-          <textarea bind:value={moderationReason} maxlength="512" rows="3"></textarea>
+          <textarea bind:value={moderationReason} maxlength="512" rows="3" disabled={moderationBusy}
+          ></textarea>
         </label>
         {#if moderationError}<p class="form-error" role="alert">{moderationError}</p>{/if}
         <footer>
-          <button
-            class="secondary-button"
-            type="button"
-            disabled={moderationBusy}
-            onclick={closeModerationDialog}>Cancel</button
+          <button class="secondary-button" type="button" onclick={closeModerationDialog}
+            >Cancel</button
           >
           <button class="danger-button" type="submit" disabled={moderationBusy}>
             {moderationBusy ? 'Applying…' : 'Confirm'}

@@ -784,6 +784,7 @@ async def moderation_expiry_sweep_in_session(
             raise RuntimeError("local guild owner is unavailable for timeout expiry")
         member.timeout_until = None
         member.timeout_indefinite = False
+        member.timeout_reason = None
         member.member_version += 1
         await queue_guild_mutation(
             session,
@@ -800,6 +801,7 @@ async def moderation_expiry_sweep_in_session(
                     "nickname": member.nickname,
                     "timeout_until": None,
                     "timeout_indefinite": False,
+                    "timeout_reason": None,
                     "voice_flags": member.voice_flags,
                     "member_version": str(member.member_version),
                 }
@@ -821,6 +823,7 @@ async def moderation_expiry_sweep_in_session(
                 "user_domain": member.user_domain,
                 "timeout_until": None,
                 "timeout_indefinite": False,
+                "timeout_reason": None,
             },
         )
     return {

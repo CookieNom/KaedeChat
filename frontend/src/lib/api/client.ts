@@ -2,7 +2,8 @@ export class ApiError extends Error {
   constructor(
     readonly code: string,
     message: string,
-    readonly status: number
+    readonly status: number,
+    readonly detail: Record<string, unknown> = {}
   ) {
     super(message);
   }
@@ -130,7 +131,8 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new ApiError(
       detail.code ?? 'REQUEST_FAILED',
       detail.message ?? 'Request failed',
-      response.status
+      response.status,
+      typeof detail === 'object' && detail !== null ? detail : {}
     );
   }
   if (response.status === 204) return undefined as T;

@@ -94,6 +94,8 @@ export interface Message {
   pending?: boolean;
   queued?: boolean;
   failed?: boolean;
+  failure_reason?: string;
+  retryable?: boolean;
 }
 
 export interface Attachment {
@@ -128,6 +130,9 @@ export interface GuildMemberSummary {
   user: UserSummary;
   nickname: string | null;
   role_ids: string[];
+  timeout_until?: string | null;
+  timeout_indefinite?: boolean;
+  timeout_reason?: string | null;
   presence?: PresenceStatus;
 }
 

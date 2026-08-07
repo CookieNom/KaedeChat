@@ -984,6 +984,14 @@ async def apply_guild_mutation_event(
         if timeout_indefinite and member.timeout_until is not None:
             raise ValueError("member timeout modes conflict")
         member.timeout_indefinite = timeout_indefinite
+        timeout_reason = raw.get("timeout_reason")
+        if timeout_reason is not None and (
+            not isinstance(timeout_reason, str) or len(timeout_reason) > 512
+        ):
+            raise ValueError("member timeout reason is invalid")
+        if timeout_reason is not None and not (timeout_indefinite or member.timeout_until):
+            raise ValueError("member timeout reason exists without an active timeout")
+        member.timeout_reason = timeout_reason
         voice_flags = raw.get("voice_flags")
         if voice_flags is not None:
             if isinstance(voice_flags, bool) or not isinstance(voice_flags, int) or voice_flags < 0:
@@ -1651,6 +1659,15 @@ def validate_guild_snapshot(
             raise ValueError("guild snapshot member indefinite timeout is invalid")
         if timeout_indefinite and timeout_until is not None:
             raise ValueError("guild snapshot member timeout modes conflict")
+        timeout_reason = raw.get("timeout_reason")
+        if timeout_reason is not None and (
+            not isinstance(timeout_reason, str) or len(timeout_reason) > 512
+        ):
+            raise ValueError("guild snapshot member timeout reason is invalid")
+        if timeout_reason is not None and not (timeout_indefinite or timeout_until):
+            raise ValueError(
+                "guild snapshot member timeout reason exists without an active timeout"
+            )
         voice_flags = raw.get("voice_flags")
         if isinstance(voice_flags, bool) or not isinstance(voice_flags, int) or voice_flags < 0:
             raise ValueError("guild snapshot member voice flags are invalid")
@@ -1996,6 +2013,7 @@ def guild_snapshot_payload(
                     member.timeout_until.isoformat() if member.timeout_until else None
                 ),
                 "timeout_indefinite": member.timeout_indefinite,
+                "timeout_reason": member.timeout_reason,
                 "voice_flags": member.voice_flags,
                 "member_version": str(member.member_version),
             }
@@ -2217,6 +2235,7 @@ async def apply_guild_snapshot(
             datetime.fromisoformat(str(raw["timeout_until"])) if raw.get("timeout_until") else None
         )
         loaded_member.timeout_indefinite = bool(raw.get("timeout_indefinite", False))
+        loaded_member.timeout_reason = raw.get("timeout_reason")
         loaded_member.voice_flags = int(raw.get("voice_flags", 0))
         loaded_member.member_version = int(raw.get("member_version", 1))
     await session.flush()

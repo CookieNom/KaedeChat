@@ -85,6 +85,7 @@ def test_guild_sanctions_have_expiry_and_instance_scope() -> None:
     instance_bans = Base.metadata.tables["guild_instance_bans"]
 
     assert members.c.timeout_indefinite.nullable is False
+    assert members.c.timeout_reason.type.length == 512
     assert bans.c.expires_at.nullable is True
     assert "ck_bans_expiry_after_creation" in constraint_names("bans")
     assert "ix_bans_expiry" in {index.name for index in bans.indexes}

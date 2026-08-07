@@ -8,6 +8,30 @@ export interface MessageDeliveryUpdate {
   channel_domain: string;
   status: 'delivered' | 'failed';
   code?: string;
+  reason?: string | null;
+  timeout_until?: string | null;
+  timeout_indefinite?: boolean;
+}
+
+export function messageDeliveryFailure(
+  update: Pick<MessageDeliveryUpdate, 'code' | 'reason' | 'timeout_until' | 'timeout_indefinite'>
+): { reason?: string; retryable: boolean } {
+  if (update.code === 'MEMBER_TIMED_OUT') {
+    const until = update.timeout_until ? new Date(update.timeout_until) : null;
+    const duration = update.timeout_indefinite
+      ? 'indefinitely'
+      : until && !Number.isNaN(until.valueOf())
+        ? `until ${until.toLocaleString()}`
+        : 'in this guild';
+    return {
+      reason: `You are timed out ${duration}.${update.reason ? ` Reason: ${update.reason}` : ''}`,
+      retryable: false
+    };
+  }
+  if (update.code === 'MISSING_PERMISSIONS') {
+    return { reason: 'You no longer have permission to send messages here.', retryable: false };
+  }
+  return { retryable: true };
 }
 
 export function compareMessages(left: Message, right: Message): number {
@@ -31,9 +55,21 @@ export function reconcileMessage(existing: Message[], incoming: Message, limit =
   return next.sort(compareMessages).slice(-limit);
 }
 
-export function failPendingMessage(existing: Message[], nonce: string): Message[] {
+export function failPendingMessage(
+  existing: Message[],
+  nonce: string,
+  failure: { reason?: string; retryable?: boolean } = {}
+): Message[] {
   return existing.map((item) =>
-    item.client_nonce === nonce && item.pending ? { ...item, pending: false, failed: true } : item
+    item.client_nonce === nonce && item.pending
+      ? {
+          ...item,
+          pending: false,
+          failed: true,
+          failure_reason: failure.reason,
+          retryable: failure.retryable ?? true
+        }
+      : item
   );
 }
 
@@ -80,10 +116,13 @@ export function applyMessageDeliveryUpdate(
       return message;
     }
     matched = true;
+    const failure = messageDeliveryFailure(update);
     return {
       ...message,
       delivery_status: update.status,
-      failed: update.status === 'failed'
+      failed: update.status === 'failed',
+      failure_reason: update.status === 'failed' ? failure.reason : undefined,
+      retryable: update.status === 'failed' ? failure.retryable : undefined
     };
   });
   return { messages, matched };

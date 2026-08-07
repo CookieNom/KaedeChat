@@ -381,9 +381,11 @@
       <div class="message-meta-actions">
         {#if message.edited_at}<small>(edited)</small>{/if}
         {#if message.failed || message.delivery_status === 'failed'}
-          <small class="delivery-failed" role="status"> Message not delivered. </small>
+          <small class="delivery-failed" role="status">
+            {message.failure_reason ?? 'Message not delivered.'}
+          </small>
         {/if}
-        {#if (message.failed || message.delivery_status === 'failed') && onRetry}
+        {#if (message.failed || message.delivery_status === 'failed') && onRetry && message.retryable !== false}
           <button type="button" onclick={() => onRetry?.(message)}>Retry</button>
         {:else if message.queued}
           <small>Queued for the guild home ⏱</small>

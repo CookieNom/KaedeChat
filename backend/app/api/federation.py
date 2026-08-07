@@ -1285,10 +1285,35 @@ async def process_event(
                 target_user,
             ):
                 raise ValueError("write rejection has no matching queued local write")
+            rejection_code = str(envelope.content["code"])
+            if not 1 <= len(rejection_code) <= 64:
+                raise ValueError("write rejection code is invalid")
+            timeout_reason = envelope.content.get("reason")
+            timeout_until = envelope.content.get("timeout_until")
+            timeout_indefinite = envelope.content.get("timeout_indefinite", False)
+            if rejection_code == "MEMBER_TIMED_OUT":
+                if timeout_reason is not None and (
+                    not isinstance(timeout_reason, str) or len(timeout_reason) > 512
+                ):
+                    raise ValueError("write rejection timeout reason is invalid")
+                if timeout_until is not None:
+                    parsed_timeout = datetime.fromisoformat(str(timeout_until))
+                    if parsed_timeout.tzinfo is None:
+                        raise ValueError("write rejection timeout lacks a timezone")
+                if not isinstance(timeout_indefinite, bool):
+                    raise ValueError("write rejection timeout mode is invalid")
+            else:
+                timeout_reason = None
+                timeout_until = None
+                timeout_indefinite = False
             rejection_payload = {
                 "channel_id": str(envelope.content["channel_id"]),
+                "channel_domain": envelope.origin,
                 "client_nonce": client_nonce,
-                "code": str(envelope.content["code"]),
+                "code": rejection_code,
+                "reason": timeout_reason,
+                "timeout_until": timeout_until,
+                "timeout_indefinite": timeout_indefinite,
             }
         elif envelope.type == "media.delete":
             attachment_origin = normalize_domain(str(envelope.content.get("origin_domain", "")))
@@ -1568,6 +1593,17 @@ async def process_event(
                             if isinstance(rejection_detail, dict) and rejection_detail.get("code")
                             else "FEDERATED_WRITE_REJECTED"
                         )
+                        timeout_context: dict[str, object] = (
+                            {
+                                "reason": rejection_detail.get("reason"),
+                                "timeout_until": rejection_detail.get("timeout_until"),
+                                "timeout_indefinite": rejection_detail.get(
+                                    "timeout_indefinite", False
+                                ),
+                            }
+                            if code == "MEMBER_TIMED_OUT" and isinstance(rejection_detail, dict)
+                            else {}
+                        )
                         rejected = await build_envelope(
                             session,
                             settings,
@@ -1581,6 +1617,7 @@ async def process_event(
                                 "channel_id": str(envelope.content.get("channel_id", "")),
                                 "client_nonce": str(envelope.content.get("client_nonce", "")),
                                 "code": code,
+                                **timeout_context,
                             },
                             context={
                                 "guild_id": str(guild.id),

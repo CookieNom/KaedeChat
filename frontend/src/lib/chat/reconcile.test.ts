@@ -52,6 +52,20 @@ describe('chat completion races', () => {
     });
   });
 
+  it('retains an actionable failure reason and can disable futile retries', () => {
+    const failed = failPendingMessage([message('pending-a', 'a', true)], 'a', {
+      reason: 'You are timed out until tomorrow. Reason: spam',
+      retryable: false
+    })[0];
+
+    expect(failed).toMatchObject({
+      pending: false,
+      failed: true,
+      failure_reason: 'You are timed out until tomorrow. Reason: spam',
+      retryable: false
+    });
+  });
+
   it('does not regress a terminal delivery update when the original POST response arrives later', () => {
     const delivered = { ...message('12', 'a'), delivery_status: 'delivered' as const };
     const originalResponse = { ...message('12', 'a'), delivery_status: 'pending' as const };
@@ -120,5 +134,24 @@ describe('chat completion races', () => {
     const applied = applyMessageDeliveryUpdate([message('12', 'a')], update);
     expect(applied.matched).toBe(true);
     expect(applied.messages[0]).toMatchObject({ delivery_status: 'failed', failed: true });
+  });
+
+  it('turns an asynchronous timeout rejection into a non-retryable explanation', () => {
+    const applied = applyMessageDeliveryUpdate([message('12', 'a')], {
+      message_id: '12',
+      message_domain: 'chat.example',
+      channel_id: '1',
+      channel_domain: 'chat.example',
+      status: 'failed',
+      code: 'MEMBER_TIMED_OUT',
+      timeout_indefinite: true,
+      reason: 'Repeated spam'
+    });
+
+    expect(applied.messages[0]).toMatchObject({
+      failed: true,
+      failure_reason: 'You are timed out indefinitely. Reason: Repeated spam',
+      retryable: false
+    });
   });
 });

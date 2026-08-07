@@ -243,6 +243,8 @@ async def update_member_voice_moderation(
                     "timeout_until": (
                         member.timeout_until.isoformat() if member.timeout_until else None
                     ),
+                    "timeout_indefinite": member.timeout_indefinite,
+                    "timeout_reason": member.timeout_reason,
                     "voice_flags": member.voice_flags,
                     "member_version": str(member.member_version),
                 }

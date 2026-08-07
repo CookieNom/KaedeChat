@@ -162,6 +162,7 @@ async def update_member(
             needed |= Permission.MODERATE_MEMBERS
         await require_permissions(session, redis, guild, auth.user, needed)
     values = payload.model_dump(exclude_unset=True)
+    timeout_changed = bool({"timeout_until", "timeout_indefinite"} & payload.model_fields_set)
     timeout = values.get("timeout_until")
     timeout_indefinite = values.get("timeout_indefinite")
     if timeout_indefinite is True and timeout is not None:
@@ -182,6 +183,11 @@ async def update_member(
         else:
             values["timeout_until"] = timeout.astimezone(UTC)
             values["timeout_indefinite"] = False
+    if timeout_changed:
+        timed_out = bool(values.get("timeout_indefinite", member.timeout_indefinite)) or bool(
+            values.get("timeout_until", member.timeout_until)
+        )
+        values["timeout_reason"] = audit_reason(reason) if timed_out else None
     changes: list[dict[str, object]] = []
     for field, value in values.items():
         old = getattr(member, field)
@@ -204,6 +210,7 @@ async def update_member(
                         member.timeout_until.isoformat() if member.timeout_until else None
                     ),
                     "timeout_indefinite": member.timeout_indefinite,
+                    "timeout_reason": member.timeout_reason,
                     "member_version": str(member.member_version),
                 }
             },

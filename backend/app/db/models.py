@@ -527,6 +527,7 @@ class GuildMember(Base, TimestampMixin):
     timeout_indefinite: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false(), nullable=False
     )
+    timeout_reason: Mapped[str | None] = mapped_column(String(512))
     voice_flags: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     member_version: Mapped[int] = mapped_column(BigInteger, server_default="1", nullable=False)
     __table_args__ = (

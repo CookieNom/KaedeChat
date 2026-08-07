@@ -1,4 +1,12 @@
-from app.chat.permissions import PermissionOverwrite, resolve_permissions
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from fastapi import HTTPException
+
+from app.chat import permissions as permission_service
+from app.chat.permissions import PermissionOverwrite, require_permissions, resolve_permissions
 from app.core.permissions import ALL_PERMISSIONS, Permission
 
 DOMAIN = "alpha.localhost"
@@ -96,3 +104,65 @@ def test_everyone_overwrite_uses_guild_domain_for_remote_member() -> None:
         timed_out=False,
     )
     assert result == Permission.VIEW_CHANNEL
+
+
+@pytest.mark.asyncio
+async def test_timeout_denial_explains_expiry_and_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    expiry = datetime.now(UTC) + timedelta(hours=1)
+    guild = SimpleNamespace(id=10, origin_domain=DOMAIN)
+    actor = SimpleNamespace(id=22, origin_domain=DOMAIN)
+    member = SimpleNamespace(
+        timeout_until=expiry,
+        timeout_indefinite=False,
+        timeout_reason="Repeated spam",
+    )
+    session = AsyncMock()
+    session.get.return_value = member
+    monkeypatch.setattr(permission_service, "get_permissions", AsyncMock(return_value=0))
+
+    with pytest.raises(HTTPException) as caught:
+        await require_permissions(
+            session,
+            AsyncMock(),
+            guild,
+            actor,
+            Permission.SEND_MESSAGES,
+        )
+
+    assert caught.value.status_code == 403
+    assert caught.value.detail == {
+        "code": "MEMBER_TIMED_OUT",
+        "message": "You are currently timed out in this guild.",
+        "timeout_until": expiry.isoformat(),
+        "timeout_indefinite": False,
+        "reason": "Repeated spam",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ordinary_permission_denial_does_not_leak_timeout_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = SimpleNamespace(id=10, origin_domain=DOMAIN)
+    actor = SimpleNamespace(id=22, origin_domain=DOMAIN)
+    session = AsyncMock()
+    session.get.return_value = SimpleNamespace(
+        timeout_until=None,
+        timeout_indefinite=False,
+        timeout_reason=None,
+    )
+    monkeypatch.setattr(permission_service, "get_permissions", AsyncMock(return_value=0))
+
+    with pytest.raises(HTTPException) as caught:
+        await require_permissions(
+            session,
+            AsyncMock(),
+            guild,
+            actor,
+            Permission.SEND_MESSAGES,
+        )
+
+    assert caught.value.detail == {
+        "code": "MISSING_PERMISSIONS",
+        "permissions": str(int(Permission.SEND_MESSAGES)),
+    }

@@ -222,7 +222,9 @@ explicitly indefinite. These sanctions are owned and evaluated by the guild home
 Remote writes include `(origin,client_nonce)`. The remote instance performs an
 advisory check and proxies to the home for an authoritative check. A response
 within 10 seconds is relayed. Unreachable writes return `202 {"status":"queued"}`.
-Later rejection emits `message.send_rejected` with channel, nonce, and stable code.
+Later rejection emits `message.send_rejected` with channel, nonce, and stable code. A
+`MEMBER_TIMED_OUT` rejection also carries the timeout expiry or indefinite marker and the
+user-visible moderation reason so the sender's home instance can explain the denial.
 No server-side optimistic echo is generated.
 
 When home is unavailable, replicas stay mounted and readable and emit availability

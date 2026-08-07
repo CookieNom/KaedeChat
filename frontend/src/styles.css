@@ -3581,7 +3581,7 @@ progress {
 
 .member-management-row {
   display: grid;
-  grid-template-columns: auto minmax(145px, 0.45fr) minmax(0, 1fr);
+  grid-template-columns: auto minmax(145px, 0.45fr) minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.8rem;
   padding: 0.9rem 1rem;
@@ -3644,6 +3644,50 @@ progress {
   color: var(--purple);
   border-color: color-mix(in srgb, var(--purple) 45%, var(--line));
   background: var(--purple-soft);
+}
+
+.member-management-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.member-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  border-top: 1px solid var(--line-soft);
+  padding: 0.85rem 1rem;
+}
+
+.member-pagination span {
+  min-width: 8.5rem;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  text-align: center;
+}
+
+.moderation-dialog-member {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.moderation-dialog-member > div {
+  display: grid;
+  min-width: 0;
+}
+
+.moderation-dialog-member small {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.member-moderation-dialog .confirmation-copy {
+  margin: 0;
 }
 
 .moderation-console,
@@ -6201,6 +6245,10 @@ progress {
   }
 
   .member-role-tags {
+    justify-content: flex-start;
+  }
+
+  .member-management-actions {
     justify-content: flex-start;
   }
 
