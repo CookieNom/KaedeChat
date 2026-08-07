@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
@@ -55,6 +56,7 @@ from app.federation.history import (
     request_and_import_history,
 )
 from app.federation.network import normalize_domain
+from app.federation.presence import fanout_presence
 from app.federation.users import refresh_remote_user
 from app.media.jobs import (
     enforce_remote_cache_limit,
@@ -66,7 +68,9 @@ from app.media.jobs import (
     sweep_staging_objects,
 )
 from app.media.service import attachment_payload
+from app.voice.background import replicate_room
 from app.voice.cleanup import cleanup_orphaned_dm_rooms
+from app.voice.rooms import parse_room_name
 
 configure_logging(os.environ.get("KAEDE_LOG_LEVEL", "INFO"))
 broker_url = os.environ.get("KAEDE_DRAGONFLY_URL")
@@ -107,6 +111,80 @@ async def voice_call_room_gc() -> int:
         return await cleanup_orphaned_dm_rooms(redis, settings)
     finally:
         await redis.aclose()
+
+
+@broker.task(task_name="voice.replicate_room", retry_on_error=True, max_retries=3)
+@observed_job("voice.replicate_room")
+async def voice_replicate_room(room: str) -> int:
+    """Immediately copy an authoritative guild room snapshot to member homes."""
+
+    settings = get_settings()
+    kind, _, _ = parse_room_name(room)
+    if not settings.voice_enabled or kind != "g":
+        return 0
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        return await replicate_room(redis, sessionmaker, settings, room)
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
+@broker.task(task_name="federation.presence_fanout", retry_on_error=True, max_retries=2)
+@observed_job("federation.presence_fanout")
+async def federation_presence_fanout(
+    user_id: int,
+    user_domain: str,
+    status: str,
+    generation: int,
+) -> int:
+    """Sign ephemeral presence inside the worker's federation trust boundary."""
+
+    settings = get_settings()
+    user_domain = normalize_domain(user_domain)
+    if (
+        user_domain != settings.domain
+        or status not in {"online", "idle", "dnd", "offline"}
+        or not 0 <= user_id <= (1 << 63) - 1
+        or generation <= 0
+    ):
+        return 0
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        current_generation = await redis.get(f"presence:generation:{user_domain}:{user_id}")
+        if current_generation is None or int(current_generation) != generation:
+            return 0
+        raw_state = await redis.get(f"presence:{user_domain}:{user_id}")
+        if not presence_fanout_state_is_current(raw_state, status, generation):
+            return 0
+        async with sessionmaker() as session:
+            user = await session.get(User, (user_id, user_domain))
+            if user is None or not user.is_local:
+                return 0
+        await fanout_presence(sessionmaker, settings, user, status)
+        return 1
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
+def presence_fanout_state_is_current(
+    raw_state: str | bytes | None,
+    status: str,
+    generation: int,
+) -> bool:
+    if raw_state is None:
+        return status == "offline"
+    try:
+        state = json.loads(raw_state)
+        stored_status = str(state["status"])
+        stored_generation = int(state["generation"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    visible_status = "offline" if stored_status == "invisible" else stored_status
+    return stored_generation == generation and visible_status == status
 
 
 async def project_message_record(

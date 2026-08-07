@@ -25,14 +25,28 @@ from app.chat.guild_revision import (
 from app.chat.hierarchy import highest_role, require_can_manage_member, require_can_manage_role
 from app.chat.payloads import channel_payload, guild_payload, role_payload
 from app.chat.permissions import get_permissions, require_permissions
-from app.chat.schemas import ChannelCreate, GuildCreate, OverwritePut, RoleCreate
+from app.chat.schemas import (
+    ChannelCreate,
+    GuildCreate,
+    GuildNotificationSettingsUpdate,
+    OverwritePut,
+    RoleCreate,
+)
 from app.core.permission_contract import required_permissions
 from app.core.permissions import Permission
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.types import EntityRef, EntityReference, EntityReferenceLike
-from app.db.models import Channel, ChannelOverwrite, Guild, GuildMember, Role, User
+from app.db.models import (
+    Channel,
+    ChannelOverwrite,
+    Guild,
+    GuildMember,
+    GuildNotificationSetting,
+    Role,
+    User,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["guilds"])
 log = structlog.get_logger()
@@ -388,6 +402,103 @@ async def get_guild(
         ],
         "roles": [role_payload(role) for role in roles],
     }
+
+
+def guild_notification_settings_payload(
+    setting: GuildNotificationSetting,
+) -> dict[str, str]:
+    return {
+        "guild_id": str(setting.guild_id),
+        "guild_domain": setting.guild_domain,
+        "level": setting.level,
+    }
+
+
+@router.get("/users/@me/guild-notification-settings")
+async def list_guild_notification_settings(
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, str]]:
+    settings = await session.scalars(
+        select(GuildNotificationSetting)
+        .where(
+            GuildNotificationSetting.user_id == auth.user.id,
+            GuildNotificationSetting.user_domain == auth.user.origin_domain,
+        )
+        .order_by(
+            GuildNotificationSetting.guild_domain,
+            GuildNotificationSetting.guild_id,
+        )
+    )
+    return [guild_notification_settings_payload(setting) for setting in settings]
+
+
+@router.get("/guilds/{guild_id}/notification-settings")
+async def get_guild_notification_settings(
+    guild_id: EntityRef,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    guild_number, guild_domain = guild_id.resolve(settings.domain)
+    membership = await session.get(
+        GuildMember,
+        (guild_number, guild_domain, auth.user.id, auth.user.origin_domain),
+    )
+    if membership is None:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    preference = await session.get(
+        GuildNotificationSetting,
+        (auth.user.id, auth.user.origin_domain, guild_number, guild_domain),
+    )
+    if preference is None:
+        return {
+            "guild_id": str(guild_number),
+            "guild_domain": guild_domain,
+            "level": "mentions",
+        }
+    return guild_notification_settings_payload(preference)
+
+
+@router.put("/guilds/{guild_id}/notification-settings")
+async def put_guild_notification_settings(
+    guild_id: EntityRef,
+    payload: GuildNotificationSettingsUpdate,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    guild_number, guild_domain = guild_id.resolve(settings.domain)
+    membership = await session.scalar(
+        select(GuildMember)
+        .where(
+            GuildMember.guild_id == guild_number,
+            GuildMember.guild_domain == guild_domain,
+            GuildMember.user_id == auth.user.id,
+            GuildMember.user_domain == auth.user.origin_domain,
+        )
+        .with_for_update()
+    )
+    if membership is None:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    preference = await session.get(
+        GuildNotificationSetting,
+        (auth.user.id, auth.user.origin_domain, guild_number, guild_domain),
+    )
+    if preference is None:
+        preference = GuildNotificationSetting(
+            user_id=auth.user.id,
+            user_domain=auth.user.origin_domain,
+            user_is_local=True,
+            guild_id=guild_number,
+            guild_domain=guild_domain,
+            level=payload.level,
+        )
+        session.add(preference)
+    else:
+        preference.level = payload.level
+    await session.commit()
+    return guild_notification_settings_payload(preference)
 
 
 @router.post("/guilds/{guild_id}/channels", status_code=status.HTTP_201_CREATED)

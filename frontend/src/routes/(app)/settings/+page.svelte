@@ -133,7 +133,7 @@
   }
 
   function actionError(caught: unknown, fallback: string) {
-    error = caught instanceof ApiError ? caught.message : fallback;
+    error = caught instanceof ApiError || caught instanceof Error ? caught.message : fallback;
   }
 
   async function savePreferences() {
@@ -312,6 +312,7 @@
       };
       browserNotificationsDraft = browserNotificationsFromSettings(updated.notification_settings);
       browserNotifications.apply(updated.notification_settings);
+      browserNotifications.markPromptHandled();
       notice = `Browser notifications ${browserNotificationsDraft ? 'enabled' : 'disabled'}.`;
     } catch (caught) {
       if (controller.signal.aborted || generation !== lifecycle) return;
@@ -786,8 +787,9 @@
               <span>
                 <strong>Browser notifications</strong>
                 <small>
-                  Notify you about direct messages and mentions while Kaede is in the background.
-                  Your browser will ask for permission before this is enabled.
+                  Notify you about direct messages and messages allowed by each guild’s notification
+                  setting while Kaede is in the background. Your browser will ask for permission
+                  before this is enabled.
                 </small>
               </span>
               <input

@@ -37,6 +37,7 @@ from app.core.logging import configure_logging
 from app.core.permissions import Permission
 from app.core.proxy import resolve_client_ip
 from app.core.settings import get_settings
+from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityReference, validate_entity_reference
 from app.db.models import (
     Channel,
@@ -49,7 +50,7 @@ from app.db.models import (
 )
 from app.db.models import Session as AuthSession
 from app.db.session import create_engine_and_sessionmaker
-from app.federation.presence import fanout_presence
+from app.tasks import federation_presence_fanout
 from app.voice.rooms import parse_room_name, participant_identity
 from app.voice.state import update_self_flags
 
@@ -68,19 +69,23 @@ AUTH_REVALIDATION_SECONDS = 30.0
 PRESENCE_REAPER_LEASE_SECONDS = 15
 CONNECTION_OWNER_TTL_SECONDS = 90
 USER_SESSION_LIMIT = 8
-presence_fanout_tasks: set[asyncio.Task[None]] = set()
+presence_fanout_tasks: set[asyncio.Task[bool]] = set()
 
 
-def schedule_presence_fanout(
-    sessionmaker: async_sessionmaker[AsyncSession], user: User, status: str
-) -> None:
+def schedule_presence_fanout(user: User, status: str, generation: int) -> None:
     task = asyncio.create_task(
-        fanout_presence(sessionmaker, settings, user, status),
+        enqueue_best_effort(
+            federation_presence_fanout,
+            user.id,
+            user.origin_domain,
+            status,
+            generation,
+        ),
         name=f"presence-fanout:{user.origin_domain}:{user.id}",
     )
     presence_fanout_tasks.add(task)
 
-    def finished(completed: asyncio.Task[None]) -> None:
+    def finished(completed: asyncio.Task[bool]) -> None:
         presence_fanout_tasks.discard(completed)
         if not completed.cancelled() and completed.exception() is not None:
             log.warning("presence_fanout_failed", error_type=type(completed.exception()).__name__)
@@ -573,8 +578,13 @@ async def presence_reaper(redis: Redis, sessionmaker: async_sessionmaker[AsyncSe
                             generation=generation,
                         )
                         delivered = delivered and projected
-                    if delivered:
-                        await finalize_expired_presence(redis, handle, generation, now)
+                    if delivered and await finalize_expired_presence(
+                        redis, handle, generation, now
+                    ):
+                        async with sessionmaker() as session:
+                            user = await session.get(User, (user_id, domain))
+                        if user is not None:
+                            schedule_presence_fanout(user, "offline", generation)
                     if not still_leader:
                         break
             await asyncio.sleep(5)
@@ -1724,7 +1734,7 @@ async def fanout_loop(
                         nx=True,
                     )
                     if visible_status is not None and refresh_claimed:
-                        schedule_presence_fanout(sessionmaker, user, visible_status)
+                        schedule_presence_fanout(user, visible_status, renewed)
                 await websocket.send_json({"op": GatewayOp.HEARTBEAT_ACK, "d": None})
             elif op == GatewayOp.PRESENCE_UPDATE:
                 raw_data = payload.get("d") or {}
@@ -1752,7 +1762,7 @@ async def fanout_loop(
                             user_id=user.id,
                             generation=generation,
                         )
-                schedule_presence_fanout(sessionmaker, user, visible_status)
+                schedule_presence_fanout(user, visible_status, generation)
             elif op == GatewayOp.VOICE_STATE_UPDATE:
                 raw_data = payload.get("d")
                 if not isinstance(raw_data, dict) or set(raw_data) != {"self_mute", "self_deaf"}:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pyotp
@@ -15,20 +14,12 @@ from app.email.backends import OutboundEmail
 from app.email.outbox import drain_email_outbox
 from app.main import app
 from app.tasks import purge_unverified_accounts_in_session
+from scripts.email_tokens import token_from_email
 
 
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
-
-
-def token_from_email(text: str) -> str:
-    url = text.rsplit(" ", 1)[-1]
-    parsed = urlparse(url)
-    values = parse_qs(parsed.fragment).get("token")
-    if not values:
-        raise RuntimeError(f"email did not contain a token: {text}")
-    return values[0]
 
 
 async def verify() -> None:

@@ -1,6 +1,7 @@
 import base64
 import gzip
 import json
+import socket
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -54,6 +55,7 @@ from app.federation.network import (
     peer_base_url,
     peer_key_needs_refresh,
     public_address,
+    public_addresses,
     retire_omitted_peer_keys,
 )
 from app.federation.replication import resolve_delegated_profile, validate_snowflake_timestamp
@@ -598,6 +600,15 @@ def test_ssrf_guard_rejects_non_public_addresses(address: str) -> None:
 )
 def test_ssrf_guard_accepts_globally_routable_addresses(address: str) -> None:
     assert public_address(address)
+
+
+@pytest.mark.asyncio
+async def test_peer_dns_failure_is_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = SimpleNamespace(getaddrinfo=AsyncMock(side_effect=socket.gaierror()))
+    monkeypatch.setattr("app.federation.network.asyncio.get_running_loop", lambda: loop)
+
+    with pytest.raises(FederationNetworkError, match="DNS resolution"):
+        await public_addresses("missing.example")
 
 
 @pytest.mark.asyncio

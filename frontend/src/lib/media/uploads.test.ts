@@ -73,4 +73,17 @@ describe('media upload contracts', () => {
     await expect(request).rejects.toMatchObject({ name: 'AbortError' });
     expect(FakeXMLHttpRequest.latest?.aborted).toBe(true);
   });
+
+  it('identifies the unreachable public media endpoint', async () => {
+    vi.stubGlobal('XMLHttpRequest', FakeXMLHttpRequest as unknown as typeof XMLHttpRequest);
+    const request = uploadObject(
+      ticket(),
+      new File(['content'], 'paper.png', { type: 'image/png' }),
+      vi.fn()
+    );
+
+    FakeXMLHttpRequest.latest?.onerror?.();
+
+    await expect(request).rejects.toThrow('Could not reach media storage at media.alpha.localhost');
+  });
 });

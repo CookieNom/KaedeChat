@@ -165,7 +165,10 @@ class PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
 
 async def public_addresses(domain: str) -> set[str]:
     loop = asyncio.get_running_loop()
-    records = await loop.getaddrinfo(domain, 443, type=socket.SOCK_STREAM)
+    try:
+        records = await loop.getaddrinfo(domain, 443, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise FederationNetworkError("peer DNS resolution failed") from exc
     addresses = {record[4][0] for record in records}
     if not addresses or any(not public_address(address) for address in addresses):
         raise FederationNetworkError("peer resolved to a prohibited address")

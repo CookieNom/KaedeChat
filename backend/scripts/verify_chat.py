@@ -5,7 +5,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 from fastapi.testclient import TestClient
 
@@ -16,18 +16,12 @@ from app.email.backends import OutboundEmail
 from app.email.outbox import drain_email_outbox
 from app.gateway import app as gateway_app
 from app.main import app as api_app
+from scripts.email_tokens import token_from_email
 
 
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
-
-
-def token_from_email(text: str) -> str:
-    values = parse_qs(urlparse(text.rsplit(" ", 1)[-1]).fragment).get("token")
-    if not values:
-        raise RuntimeError("email did not contain a token")
-    return values[0]
 
 
 def register(

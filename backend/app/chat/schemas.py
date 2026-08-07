@@ -59,6 +59,10 @@ class GuildUpdate(RequestModel):
         return self
 
 
+class GuildNotificationSettingsUpdate(RequestModel):
+    level: Literal["all", "mentions", "none"]
+
+
 class ChannelCreate(RequestModel):
     name: str = Field(min_length=1, max_length=100)
     type: int = Field(default=0)

@@ -1484,6 +1484,32 @@ progress {
   white-space: nowrap;
 }
 
+.sidebar-heading:has(.guild-quick-invite) {
+  min-height: 92px;
+  padding-block: 0.65rem;
+}
+
+.guild-quick-invite {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.28rem;
+  border: 0;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+.guild-quick-invite:hover,
+.guild-quick-invite:focus-visible {
+  color: var(--accent-text);
+}
+
 .home-brand {
   justify-content: flex-start;
 }
@@ -3497,6 +3523,36 @@ progress {
   font-weight: 500;
 }
 
+.notification-level-row {
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.notification-level-row:hover {
+  background: var(--surface-hover);
+}
+
+.notification-level-row.selected {
+  background: var(--accent-soft);
+}
+
+.notification-level-row input[type='radio'] {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+
+.notification-level-list + .settings-helper {
+  margin-top: 0.8rem;
+}
+
+.notification-level-list + .settings-helper a {
+  color: var(--accent-text);
+}
+
 .permission-matrix {
   display: grid;
   gap: 0.8rem;
@@ -5302,6 +5358,49 @@ progress {
 
 .confirmation-dialog {
   width: min(440px, 100%);
+}
+
+.quick-invite-dialog {
+  width: min(500px, 100%);
+}
+
+.quick-invite-content {
+  display: grid;
+  gap: 1rem;
+  padding: 1.2rem;
+}
+
+.quick-invite-content > p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.quick-invite-status {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  padding: 0.8rem;
+  color: var(--text-muted) !important;
+  background: var(--surface-subtle);
+}
+
+.quick-invite-link {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  margin-top: 0.4rem;
+}
+
+.quick-invite-link input {
+  min-width: 0;
+  font-family: var(--font-mono);
+}
+
+.quick-invite-link button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
 }
 
 .confirmation-copy {

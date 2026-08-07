@@ -611,6 +611,60 @@ async def verify() -> None:
         replica = await beta.get(f"/api/v1/guilds/{guild_ref}", headers=bob)
         require(replica.status_code == 200, f"replicated guild unavailable: {replica.text}")
         require(entity_ref(replica.json()) == guild_ref, "wrong guild replica identity")
+
+        # Presence originates in the gateway, but the worker owns federation
+        # signing material. Exercise that boundary over the real broker and
+        # confirm the remote member home projects the resulting live event.
+        async with (
+            connect("ws://beta-gateway:8001/gateway?v=1&encoding=json") as beta_socket,
+            connect("ws://alpha-gateway:8001/gateway?v=1&encoding=json") as alpha_socket,
+        ):
+            beta_hello = json.loads(await beta_socket.recv())
+            require(beta_hello["op"] == 10, "Beta presence gateway HELLO missing")
+            await beta_socket.send(
+                json.dumps(
+                    {
+                        "op": 2,
+                        "d": {"token": bob["Authorization"].removeprefix("Bearer ")},
+                    }
+                )
+            )
+            beta_ready = json.loads(await beta_socket.recv())
+            require(beta_ready.get("t") == "READY", "Beta presence gateway READY missing")
+
+            alpha_hello = json.loads(await alpha_socket.recv())
+            require(alpha_hello["op"] == 10, "Alpha presence gateway HELLO missing")
+            await alpha_socket.send(
+                json.dumps(
+                    {
+                        "op": 2,
+                        "d": {"token": alice["Authorization"].removeprefix("Bearer ")},
+                    }
+                )
+            )
+            alpha_ready = json.loads(await alpha_socket.recv())
+            require(alpha_ready.get("t") == "READY", "Alpha presence gateway READY missing")
+            await alpha_socket.send(json.dumps({"op": 3, "d": {"status": "idle"}}))
+
+            deadline = time.monotonic() + 20
+            federated_presence_arrived = False
+            while time.monotonic() < deadline:
+                remaining = max(0.1, deadline - time.monotonic())
+                dispatch = json.loads(await asyncio.wait_for(beta_socket.recv(), timeout=remaining))
+                data = dispatch.get("d", {})
+                if (
+                    dispatch.get("t") == "PRESENCE_UPDATE"
+                    and data.get("user_id") == "9000000000001"
+                    and data.get("user_domain") == "alpha.localhost"
+                    and data.get("status") == "idle"
+                ):
+                    federated_presence_arrived = True
+                    break
+            require(
+                federated_presence_arrived,
+                "signed presence did not cross the gateway/worker federation boundary",
+            )
+
         beta_before_opt_in = await beta.get(
             f"/api/v1/channels/{channel_ref}/messages",
             headers=bob,

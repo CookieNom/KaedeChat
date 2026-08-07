@@ -21,6 +21,7 @@ def test_complete_v1_schema_is_registered() -> None:
         "guild_history_exports",
         "guild_history_export_channels",
         "guild_members",
+        "guild_notification_settings",
         "roles",
         "member_roles",
         "channels",
@@ -51,6 +52,30 @@ def test_complete_v1_schema_is_registered() -> None:
         "instance_blocks",
     }
     assert required == set(Base.metadata.tables)
+
+
+def test_guild_notification_settings_are_membership_scoped() -> None:
+    table = Base.metadata.tables["guild_notification_settings"]
+    assert tuple(table.primary_key.columns.keys()) == (
+        "user_id",
+        "user_domain",
+        "guild_id",
+        "guild_domain",
+    )
+    membership = foreign_key_for_columns(
+        "guild_notification_settings",
+        ("guild_id", "guild_domain", "user_id", "user_domain"),
+    )
+    assert tuple(element.target_fullname for element in membership.elements) == (
+        "guild_members.guild_id",
+        "guild_members.guild_domain",
+        "guild_members.user_id",
+        "guild_members.user_domain",
+    )
+    assert membership.ondelete == "CASCADE"
+    assert "ck_guild_notification_settings_notification_level_value" in constraint_names(
+        "guild_notification_settings"
+    )
 
 
 def test_email_outbox_contains_only_encrypted_delivery_content() -> None:

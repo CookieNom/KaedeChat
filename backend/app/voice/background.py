@@ -43,56 +43,96 @@ return redis.call('DEL', KEYS[1])
 """
 
 
-async def _replicate_room(
+async def replicate_room(
+    redis: Redis,
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: Settings,
     room: str,
-    occupants: list[Occupant],
-    generated_at: int,
-) -> None:
+    *,
+    wait_seconds: float = 5,
+) -> int:
+    """Serialize and replicate the newest room state across API/worker processes."""
+
     kind, guild_id, _ = parse_room_name(room)
     if kind != "g":
-        return
-    async with sessionmaker() as session:
-        destinations = set(
-            await session.scalars(
-                select(GuildMember.user_domain).where(
-                    GuildMember.guild_id == guild_id,
-                    GuildMember.guild_domain == settings.domain,
-                    GuildMember.user_domain != settings.domain,
+        return 0
+    owner = secrets.token_urlsafe(24)
+    lease_key = f"voice:replication-lock:{settings.domain}:{room}"
+    deadline = time.monotonic() + wait_seconds
+    while not await redis.set(lease_key, owner, ex=30, nx=True):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("voice replication lease remained busy")
+        await asyncio.sleep(0.1)
+    try:
+        # Read after acquiring the lease. Every queued transition therefore
+        # sends the latest state, even when workers execute join/leave tasks in
+        # a different order from their LiveKit webhooks.
+        occupants = await room_occupants(redis, settings.domain, room)
+        generated_at = int(time.time())
+        await redis.set(
+            room_state_key("heartbeat", settings.domain, room),
+            str(generated_at),
+            ex=300,
+        )
+        async with sessionmaker() as session:
+            destinations = set(
+                await session.scalars(
+                    select(GuildMember.user_domain).where(
+                        GuildMember.guild_id == guild_id,
+                        GuildMember.guild_domain == settings.domain,
+                        GuildMember.user_domain != settings.domain,
+                    )
                 )
             )
-        )
-    payload = {
-        "guild_id": str(guild_id),
-        "room": room,
-        "generated_at": generated_at,
-        "participants": [asdict(item) for item in occupants],
-    }
-    for destination in sorted(destinations):
-        try:
-            async with sessionmaker() as session:
-                response = await signed_request(
-                    session,
-                    settings,
-                    "POST",
-                    destination,
-                    "/_kaede/v1/voice/state",
-                    payload=payload,
-                    request_timeout=5,
-                    max_response_bytes=16 * 1024,
-                )
-                if response.status_code == 204:
-                    await session.commit()
-                else:
-                    await session.rollback()
-                    log.warning(
-                        "voice_heartbeat_rejected",
-                        destination=destination,
-                        status_code=response.status_code,
+        payload = {
+            "guild_id": str(guild_id),
+            "room": room,
+            "generated_at": generated_at,
+            "participants": [asdict(item) for item in occupants],
+        }
+
+        async def deliver(destination: str) -> None:
+            try:
+                async with sessionmaker() as session:
+                    response = await signed_request(
+                        session,
+                        settings,
+                        "POST",
+                        destination,
+                        "/_kaede/v1/voice/state",
+                        payload=payload,
+                        request_timeout=5,
+                        max_response_bytes=16 * 1024,
                     )
-        except FederationNetworkError:
-            log.warning("voice_heartbeat_unreachable", destination=destination)
+                    if response.status_code == 204:
+                        await session.commit()
+                    else:
+                        await session.rollback()
+                        log.warning(
+                            "voice_heartbeat_rejected",
+                            destination=destination,
+                            status_code=response.status_code,
+                        )
+            except FederationNetworkError:
+                log.warning("voice_heartbeat_unreachable", destination=destination)
+
+        ordered = sorted(destinations)
+        for offset in range(0, len(ordered), 8):
+            renewed = await cast(Any, redis.eval)(
+                RENEW_LEASE_LUA,
+                1,
+                lease_key,
+                owner,
+                "30",
+            )
+            if int(renewed) != 1:
+                raise RuntimeError("voice replication lease was lost")
+            await asyncio.gather(
+                *(deliver(destination) for destination in ordered[offset : offset + 8])
+            )
+        return len(occupants)
+    finally:
+        await cast(Any, redis.eval)(RELEASE_LEASE_LUA, 1, lease_key, owner)
 
 
 async def _publish_local_room_snapshot(
@@ -247,12 +287,11 @@ async def voice_coordinator(
                                     occupants,
                                     generated_at,
                                 )
-                                await _replicate_room(
+                                await replicate_room(
+                                    redis,
                                     sessionmaker,
                                     settings,
                                     room,
-                                    occupants,
-                                    generated_at,
                                 )
                         last_heartbeat = now
                     await asyncio.sleep(5)

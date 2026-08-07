@@ -7,6 +7,7 @@ import pytest
 from app.db.models import Guild, User
 from app.federation import presence
 from app.federation.schemas import PresenceFederationRequest
+from app.tasks import presence_fanout_state_is_current
 
 
 class PresenceSession:
@@ -98,3 +99,14 @@ async def test_remote_presence_rejects_expired_projection(
     assert not await presence.receive_presence(  # type: ignore[arg-type]
         object(), object(), object(), payload
     )
+
+
+def test_presence_worker_drops_stale_fanout_and_accepts_final_offline_state() -> None:
+    current = '{"status":"online","generation":4,"expires_at":1090}'
+    invisible = '{"status":"invisible","generation":5,"expires_at":1090}'
+
+    assert presence_fanout_state_is_current(current, "online", 4)
+    assert not presence_fanout_state_is_current(current, "online", 3)
+    assert presence_fanout_state_is_current(invisible, "offline", 5)
+    assert presence_fanout_state_is_current(None, "offline", 6)
+    assert not presence_fanout_state_is_current(None, "online", 6)

@@ -4,7 +4,7 @@ import io
 import logging
 from collections.abc import Callable
 from typing import cast
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import httpx
 from fastapi.testclient import TestClient
@@ -16,6 +16,7 @@ from app.email.backends import OutboundEmail
 from app.email.outbox import drain_email_outbox
 from app.main import app
 from app.media.jobs import process_attachment_record, purge_local_attachment
+from scripts.email_tokens import token_from_email
 
 _png_buffer = io.BytesIO()
 Image.new("RGB", (16, 16), (181, 57, 34)).save(_png_buffer, format="PNG")
@@ -26,13 +27,6 @@ EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
-
-
-def token_from_email(text: str) -> str:
-    values = parse_qs(urlparse(text.rsplit(" ", 1)[-1]).fragment).get("token")
-    if not values:
-        raise RuntimeError("email did not contain a token")
-    return values[0]
 
 
 def register(

@@ -538,6 +538,30 @@ class GuildMember(Base, TimestampMixin):
     )
 
 
+class GuildNotificationSetting(Base, LocalUserMixin, TimestampMixin):
+    __tablename__ = "guild_notification_settings"
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    level: Mapped[str] = mapped_column(
+        String(16), default="mentions", server_default="mentions", nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "user_domain", "guild_id", "guild_domain"),
+        *LocalUserMixin.locality_constraints("guild_notification_settings"),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain", "user_id", "user_domain"],
+            [
+                "guild_members.guild_id",
+                "guild_members.guild_domain",
+                "guild_members.user_id",
+                "guild_members.user_domain",
+            ],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("level IN ('all','mentions','none')", name="notification_level_value"),
+    )
+
+
 class Role(Base, FederatedIdMixin, TimestampMixin):
     __tablename__ = "roles"
     guild_id: Mapped[int] = mapped_column(BigInteger)

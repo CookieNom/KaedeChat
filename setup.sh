@@ -998,6 +998,9 @@ fi
   printf 'Validate:\n  make env-check\n  make generated-compose-check\n\n'
   printf 'Internal Caddy edge: 127.0.0.1:%s\n' "$EDGE_PORT"
   printf 'Selected storage: %s\nSelected email: %s\n' "$STORAGE" "$EMAIL"
+  if [[ $STORAGE == garage ]]; then
+    printf '\nRequired media origin: create public DNS for media.%s, include it in the TLS certificate, and enable the generated nginx media virtual host. Browser uploads and every Garage-backed image depend on this origin.\n' "$DOMAIN"
+  fi
   if [[ $HOST_NGINX == true ]]; then
     printf '\nHost nginx: review deploy/generated/kaede.nginx.conf, which references your existing TLS files. No certificate was generated. Install the config manually, run nginx -t, then reload nginx yourself.\n'
   fi
@@ -1109,4 +1112,7 @@ STAGE_DIR=
 
 printf '\n%sConfiguration ready.%s\n' "$C_GREEN" "$C_RESET"
 printf 'Review deploy/generated/README.txt, then run: make env-check\n'
+if [[ $STORAGE == garage ]]; then
+  printf 'Before uploading media, verify DNS and TLS for media.%s.\n' "$DOMAIN"
+fi
 printf 'A private rollback copy is in %s\n' "${BACKUP_DIR#"$ROOT/"}"

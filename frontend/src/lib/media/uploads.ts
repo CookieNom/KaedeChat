@@ -20,6 +20,14 @@ export interface PendingUpload {
   error?: string;
 }
 
+function storageEndpoint(ticket: UploadTicket): string {
+  try {
+    return new URL(ticket.upload_url).host;
+  } catch {
+    return 'the configured media host';
+  }
+}
+
 export function uploadObject(
   ticket: UploadTicket,
   file: File,
@@ -51,7 +59,14 @@ export function uploadObject(
       if (request.status >= 200 && request.status < 300) finish(() => resolve());
       else finish(() => reject(new Error(`Object upload failed (${request.status})`)));
     };
-    request.onerror = () => finish(() => reject(new Error('Object upload was interrupted')));
+    request.onerror = () =>
+      finish(() =>
+        reject(
+          new Error(
+            `Could not reach media storage at ${storageEndpoint(ticket)}. Check its DNS, TLS, and CORS configuration.`
+          )
+        )
+      );
     request.ontimeout = () => finish(() => reject(new Error('Object upload timed out')));
     request.onabort = () =>
       finish(() => reject(new DOMException('Upload cancelled', 'AbortError')));

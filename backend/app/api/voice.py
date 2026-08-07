@@ -28,6 +28,7 @@ from app.chat.permissions import get_permissions, require_permissions
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
+from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef
 from app.db.models import GuildMember, User
 from app.federation.client import signed_request
@@ -650,6 +651,13 @@ async def livekit_webhook(
             **({"state": asdict(occupant)} if event_type == "participant_joined" else {}),
         },
     )
+    if kind == "g":
+        # Keep LiveKit's webhook response independent from peer latency while
+        # ensuring remote member homes see joins and leaves immediately. The
+        # 30-second coordinator heartbeat remains the recovery path.
+        from app.tasks import voice_replicate_room
+
+        await enqueue_best_effort(voice_replicate_room, room)
     return await completed()
 
 

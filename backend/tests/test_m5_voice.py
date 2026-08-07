@@ -211,6 +211,7 @@ async def test_track_webhook_cannot_evict_a_joined_participant(monkeypatch: Any)
 async def test_participant_left_does_not_require_join_metadata(monkeypatch: Any) -> None:
     removed: list[tuple[str, str, str]] = []
     published: list[tuple[str, str, dict[str, object]]] = []
+    queued: list[str] = []
 
     async def remove(_redis: object, authority: str, room: str, identity: str) -> None:
         removed.append((authority, room, identity))
@@ -218,12 +219,17 @@ async def test_participant_left_does_not_require_join_metadata(monkeypatch: Any)
     async def publish(_redis: object, topic: str, event: str, payload: dict[str, object]) -> None:
         published.append((topic, event, payload))
 
+    async def enqueue(_task: object, room: str) -> bool:
+        queued.append(room)
+        return True
+
     monkeypatch.setattr(
         "app.api.voice.receive_webhook",
         lambda *_args: webhook_event("participant_left"),
     )
     monkeypatch.setattr("app.api.voice.remove_occupant", remove)
     monkeypatch.setattr("app.api.voice.publish_ephemeral", publish)
+    monkeypatch.setattr("app.api.voice.enqueue_best_effort", enqueue)
 
     response = await livekit_webhook(
         request=webhook_request(),
@@ -237,6 +243,7 @@ async def test_participant_left_does_not_require_join_metadata(monkeypatch: Any)
     assert removed == [("alpha.localhost", "g.12.34", "78@alpha.localhost")]
     assert published[0][1] == "VOICE_STATE_UPDATE"
     assert published[0][2]["connected"] is False
+    assert queued == ["g.12.34"]
 
 
 async def test_voice_coordinator_publishes_scoped_local_snapshots(monkeypatch: Any) -> None:

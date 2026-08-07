@@ -83,6 +83,10 @@
   import { onMount, tick, untrack } from 'svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
+  interface CreatedInvite {
+    code: string;
+  }
+
   const guildId = $derived(page.params.guildId ?? '');
   const channelId = $derived(page.params.channelId ?? '');
   const localDomain = typeof window === 'undefined' ? '' : window.location.hostname;
@@ -144,6 +148,14 @@
   let channelDeleteCancel = $state<HTMLButtonElement | null>(null);
   let channelDeleteReturnFocus: HTMLElement | null = null;
   let channelDeleteGeneration = 0;
+  let inviteDialogOpen = $state(false);
+  let inviteDialogBusy = $state(false);
+  let inviteDialogError = $state('');
+  let inviteLink = $state('');
+  let inviteDialogElement = $state<HTMLElement | null>(null);
+  let inviteDialogClose = $state<HTMLButtonElement | null>(null);
+  let inviteDialogReturnFocus: HTMLElement | null = null;
+  let inviteDialogGeneration = 0;
   let draggedChannelKey = $state<string | null>(null);
   let dragOverChannelKey = $state<string | null>(null);
   let reorderingChannels = $state(false);
@@ -198,6 +210,11 @@
       return false;
     }
   }
+  const canCreateCurrentChannelInvite = $derived(
+    Boolean(
+      channel && channel.type !== 4 && channelHasPermission(channel, Permission.CREATE_INVITE)
+    )
+  );
   const timeline = $derived(
     buildTimeline(
       messages,
@@ -468,6 +485,100 @@
     const first = focusable[0];
     const last = focusable.at(-1) ?? first;
     if (!channelDialogElement.contains(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  async function openQuickInvite(invoker: HTMLElement) {
+    if (!guild || !channel || !canCreateCurrentChannelInvite || inviteDialogBusy) return;
+    const targetGuild = entityRef(guild);
+    const targetChannel = channel;
+    const routeGeneration = loadGeneration;
+    const dialogGeneration = ++inviteDialogGeneration;
+    inviteDialogReturnFocus = mobileNavigationOpen ? mobileNavigationToggle : invoker;
+    if (mobileNavigationOpen) closeMobileNavigation(false);
+    inviteDialogOpen = true;
+    inviteDialogBusy = true;
+    inviteDialogError = '';
+    inviteLink = '';
+    await tick();
+    inviteDialogClose?.focus();
+    try {
+      const created = await api<CreatedInvite>(
+        `/guilds/${encodeURIComponent(targetGuild)}/invites`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ channel_id: targetChannel.id })
+        }
+      );
+      if (
+        dialogGeneration !== inviteDialogGeneration ||
+        routeGeneration !== loadGeneration ||
+        !inviteDialogOpen
+      )
+        return;
+      inviteLink = `${window.location.origin}/invite/${created.code}`;
+    } catch (caught) {
+      if (dialogGeneration !== inviteDialogGeneration || !inviteDialogOpen) return;
+      inviteDialogError =
+        caught instanceof ApiError ? caught.message : 'Could not create an invite.';
+    } finally {
+      if (dialogGeneration === inviteDialogGeneration) inviteDialogBusy = false;
+    }
+  }
+
+  function closeQuickInvite(restoreFocus = true) {
+    const returnFocus = inviteDialogReturnFocus;
+    inviteDialogGeneration += 1;
+    inviteDialogOpen = false;
+    inviteDialogBusy = false;
+    inviteDialogError = '';
+    inviteLink = '';
+    inviteDialogElement = null;
+    inviteDialogClose = null;
+    inviteDialogReturnFocus = null;
+    if (restoreFocus && returnFocus?.isConnected) {
+      void tick().then(() => returnFocus.focus());
+    }
+  }
+
+  async function copyQuickInvite() {
+    if (!inviteLink) return;
+    try {
+      await navigator.clipboard.writeText(inviteLink);
+      closeQuickInvite();
+    } catch {
+      inviteDialogError = 'Clipboard access was denied. Select and copy the link manually.';
+    }
+  }
+
+  function inviteDialogKeydown(event: KeyboardEvent) {
+    if (!inviteDialogOpen || !inviteDialogElement) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeQuickInvite();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(
+      inviteDialogElement.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    );
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1) ?? first;
+    if (!inviteDialogElement.contains(document.activeElement)) {
       event.preventDefault();
       (event.shiftKey ? last : first).focus();
     } else if (event.shiftKey && document.activeElement === first) {
@@ -1264,6 +1375,14 @@
       channelDeleteDialog = null;
       channelDeleteCancel = null;
       channelDeleteReturnFocus = null;
+      inviteDialogGeneration += 1;
+      inviteDialogOpen = false;
+      inviteDialogBusy = false;
+      inviteDialogError = '';
+      inviteLink = '';
+      inviteDialogElement = null;
+      inviteDialogClose = null;
+      inviteDialogReturnFocus = null;
       draggedChannelKey = null;
       dragOverChannelKey = null;
       channelReorderGeneration += 1;
@@ -1887,6 +2006,10 @@
 <svelte:window
   onclick={() => closeChannelMenu(false)}
   onkeydown={(event) => {
+    if (inviteDialogOpen) {
+      inviteDialogKeydown(event);
+      return;
+    }
     if (channelDeleteTarget) {
       channelDeleteDialogKeydown(event);
       return;
@@ -2013,6 +2136,15 @@
         <div>
           <p>Guild</p>
           <h2>{guild?.name ?? 'Loading…'}</h2>
+          {#if canCreateCurrentChannelInvite}
+            <button
+              class="guild-quick-invite"
+              type="button"
+              onclick={(event) => void openQuickInvite(event.currentTarget)}
+            >
+              <Icon name="plus" size={13} strokeWidth={2.2} />Invite people
+            </button>
+          {/if}
         </div>
         <div class="mobile-sidebar-tools">
           {#if guild}
@@ -2634,6 +2766,61 @@
         <span>Create category</span>
       </button>
     {/if}
+  </div>
+{/if}
+
+{#if inviteDialogOpen}
+  <div class="channel-dialog-layer">
+    <button
+      class="channel-dialog-backdrop"
+      type="button"
+      aria-label="Close invite dialog"
+      onclick={() => closeQuickInvite()}
+    ></button>
+    <div
+      bind:this={inviteDialogElement}
+      class="channel-dialog quick-invite-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="quick-invite-title"
+      aria-busy={inviteDialogBusy}
+    >
+      <header>
+        <div>
+          <p>Invite people</p>
+          <h2 id="quick-invite-title">Invite people to {guild?.name}</h2>
+        </div>
+        <button
+          bind:this={inviteDialogClose}
+          type="button"
+          aria-label="Close"
+          onclick={() => closeQuickInvite()}>×</button
+        >
+      </header>
+      <div class="quick-invite-content">
+        <p>
+          This link opens <strong>#{channel?.name}</strong> after the person joins. It expires in 24 hours.
+        </p>
+        {#if inviteDialogBusy}
+          <p class="quick-invite-status" role="status">Creating a secure invite…</p>
+        {:else if inviteLink}
+          <label class="channel-dialog-field">
+            Invite link
+            <div class="quick-invite-link">
+              <input
+                value={inviteLink}
+                readonly
+                onclick={(event) => event.currentTarget.select()}
+              />
+              <button class="primary-button" type="button" onclick={() => void copyQuickInvite()}>
+                <Icon name="copy" size={16} />Copy
+              </button>
+            </div>
+          </label>
+        {/if}
+        {#if inviteDialogError}<p class="form-error" role="alert">{inviteDialogError}</p>{/if}
+      </div>
+    </div>
   </div>
 {/if}
 

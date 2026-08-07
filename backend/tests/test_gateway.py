@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -329,6 +330,32 @@ async def test_presence_heartbeat_atomically_supersedes_old_expiration(
     assert await gateway.finalize_expired_presence(  # type: ignore[arg-type]
         redis, "alpha.test:7", 3, 1140
     )
+
+
+@pytest.mark.asyncio
+async def test_presence_fanout_is_queued_without_signing_in_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued: list[tuple[object, ...]] = []
+
+    async def enqueue(_task: object, *args: object, **_kwargs: object) -> bool:
+        queued.append(args)
+        return True
+
+    monkeypatch.setattr(gateway, "enqueue_best_effort", enqueue)
+    user = User(
+        id=7,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        email="maple@example.com",
+        password_hash="hash",
+    )
+
+    gateway.schedule_presence_fanout(user, "online", 4)
+    await asyncio.gather(*list(gateway.presence_fanout_tasks))
+
+    assert queued == [(7, "alpha.test", "online", 4)]
 
 
 @pytest.mark.asyncio

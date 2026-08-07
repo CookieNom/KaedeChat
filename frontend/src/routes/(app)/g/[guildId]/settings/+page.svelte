@@ -10,6 +10,11 @@
   import { PERMISSION_METADATA, Permission } from '$lib/generated/permissions';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
+  import {
+    browserNotifications,
+    type GuildNotificationLevel,
+    type GuildNotificationPreference
+  } from '$lib/notifications/browser.svelte';
   import { guildChannelPath, type ChannelSettingsPanel } from '$lib/navigation/routes';
   import { formatDateTime } from '$lib/ui/locale';
   import { tick } from 'svelte';
@@ -105,6 +110,7 @@
   let name = $state('');
   let description = $state('');
   let guildHistoryPolicy = $state<'disabled' | 'full_retained'>('disabled');
+  let guildNotificationLevel = $state<GuildNotificationLevel>('mentions');
 
   let selectedChannel = $state<Channel | null>(null);
   let channelName = $state('');
@@ -475,6 +481,23 @@
     });
   }
 
+  function saveGuildNotificationLevel(level: GuildNotificationLevel) {
+    if (!guild || level === guildNotificationLevel) return;
+    return run(async (guildRef, generation) => {
+      const updated = await api<GuildNotificationPreference>(
+        `/guilds/${encodeURIComponent(guildRef)}/notification-settings`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ level })
+        }
+      );
+      if (generation !== loadGeneration || !guild) return;
+      guildNotificationLevel = updated.level;
+      browserNotifications.setGuildPreference(guild, updated.level);
+      notice = 'Notification settings saved.';
+    });
+  }
+
   function selectRole(role: Role, force = false) {
     if (busy && !force) return;
     selectedRole = role;
@@ -497,9 +520,13 @@
   ) {
     loading = true;
     try {
-      const [loaded, currentUser] = await Promise.all([
+      const [loaded, currentUser, notificationSettings] = await Promise.all([
         api<GuildView>(`/guilds/${encodeURIComponent(targetGuild)}`, { signal }),
-        api<UserSummary>('/users/@me', { signal })
+        api<UserSummary>('/users/@me', { signal }),
+        api<GuildNotificationPreference>(
+          `/guilds/${encodeURIComponent(targetGuild)}/notification-settings`,
+          { signal }
+        )
       ]);
       if (generation !== loadGeneration || targetGuild !== guildId) return;
       localDomain = currentUser.origin_domain;
@@ -507,6 +534,7 @@
       name = loaded.name;
       description = loaded.description ?? '';
       guildHistoryPolicy = loaded.federated_history_policy ?? 'disabled';
+      guildNotificationLevel = notificationSettings.level;
       const requestedChannel = loaded.channels?.find(
         (channel) => entityRef(channel) === targetChannel
       );
@@ -1294,6 +1322,8 @@
         </span>
       </div>
       <nav aria-label="Guild settings sections">
+        <p>Personal</p>
+        <a href="#notifications"><Icon name="bell" size={18} />Notifications</a>
         <p>Guild</p>
         <a href="#overview"><Icon name="server" size={18} />Overview</a>
         {#if canManageRoles}
@@ -1351,6 +1381,77 @@
       </section>
     {:else}
       {#if !channelOnly}
+        <section id="notifications" class="settings-section">
+          <div class="settings-section-heading">
+            <span class="section-icon"><Icon name="bell" /></span>
+            <div>
+              <h2>Notifications</h2>
+              <p>Choose which messages from this guild can send you a browser notification.</p>
+            </div>
+          </div>
+          <div class="settings-card">
+            <div class="toggle-list notification-level-list">
+              <label
+                class:selected={guildNotificationLevel === 'all'}
+                class="toggle-row notification-level-row"
+              >
+                <span>
+                  <strong>All messages</strong>
+                  <small>Notify you whenever a message is sent in a channel you can see.</small>
+                </span>
+                <input
+                  type="radio"
+                  name="guild-notification-level"
+                  value="all"
+                  checked={guildNotificationLevel === 'all'}
+                  disabled={busy}
+                  onchange={() => void saveGuildNotificationLevel('all')}
+                />
+              </label>
+              <label
+                class:selected={guildNotificationLevel === 'mentions'}
+                class="toggle-row notification-level-row"
+              >
+                <span>
+                  <strong>Mentions only</strong>
+                  <small>Notify you only when a message directly mentions you.</small>
+                </span>
+                <input
+                  type="radio"
+                  name="guild-notification-level"
+                  value="mentions"
+                  checked={guildNotificationLevel === 'mentions'}
+                  disabled={busy}
+                  onchange={() => void saveGuildNotificationLevel('mentions')}
+                />
+              </label>
+              <label
+                class:selected={guildNotificationLevel === 'none'}
+                class="toggle-row notification-level-row"
+              >
+                <span>
+                  <strong>Nothing</strong>
+                  <small>Do not send browser notifications for messages in this guild.</small>
+                </span>
+                <input
+                  type="radio"
+                  name="guild-notification-level"
+                  value="none"
+                  checked={guildNotificationLevel === 'none'}
+                  disabled={busy}
+                  onchange={() => void saveGuildNotificationLevel('none')}
+                />
+              </label>
+            </div>
+            <p class="settings-helper">
+              Browser notifications must also be enabled in <a
+                href={resolve('/settings#notifications')}>User Settings</a
+              >. This preference will also be available to desktop and mobile clients when those
+              clients are introduced.
+            </p>
+          </div>
+        </section>
+
         <section id="overview" class="settings-section">
           <div class="settings-section-heading">
             <span class="section-icon"><Icon name="server" /></span>
