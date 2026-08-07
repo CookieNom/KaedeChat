@@ -1534,7 +1534,8 @@ progress {
 
 .sidebar-section-heading button,
 .sidebar-create-link,
-.home-sidebar-heading a {
+.home-sidebar-heading a,
+.home-sidebar-heading button {
   display: grid;
   width: 32px;
   height: 32px;
@@ -1549,9 +1550,51 @@ progress {
 
 .sidebar-section-heading button:hover,
 .sidebar-create-link:hover,
-.home-sidebar-heading a:hover {
+.home-sidebar-heading a:hover,
+.home-sidebar-heading button:hover {
   color: var(--text);
   background: var(--surface-hover);
+}
+
+.action-dialog {
+  width: min(470px, calc(100vw - 32px));
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  color: var(--text);
+  background: var(--surface-raised);
+  box-shadow: 0 28px 90px rgb(0 0 0 / 55%);
+}
+
+.action-dialog::backdrop {
+  background: rgb(8 7 6 / 68%);
+  backdrop-filter: blur(5px);
+}
+
+.action-dialog form {
+  display: grid;
+  gap: 20px;
+  padding: 24px;
+}
+
+.action-dialog header,
+.action-dialog footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.action-dialog header h2,
+.action-dialog header p {
+  margin: 0;
+}
+
+.action-dialog footer {
+  justify-content: flex-end;
+  padding-top: 4px;
 }
 
 .channel-tree,
@@ -2028,7 +2071,7 @@ progress {
 
 .quick-action-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.8rem;
   align-items: start;
 }
@@ -2109,6 +2152,150 @@ progress {
 
 .quick-action-card form .primary-button {
   width: 100%;
+}
+
+.friends-hero {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 2rem;
+  border-bottom: 1px solid var(--line);
+  padding: 0.6rem 0 2rem;
+}
+
+.friends-hero h1 {
+  margin: 0.4rem 0 0.55rem;
+  font-size: clamp(2.5rem, 5vw, 4.5rem);
+  line-height: 1;
+  letter-spacing: -0.055em;
+}
+
+.friends-hero > div:first-child > p:last-child {
+  color: var(--text-soft);
+}
+
+.friend-summary {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.55rem;
+}
+
+.friend-summary span {
+  display: grid;
+  min-width: 86px;
+  gap: 0.1rem;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  padding: 0.7rem 0.8rem;
+  color: var(--text-muted);
+  background: var(--surface);
+  font-size: 0.66rem;
+  text-transform: capitalize;
+}
+
+.friend-summary strong {
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 1rem;
+}
+
+.friend-add-panel {
+  display: grid;
+  grid-template-columns: auto minmax(220px, 0.8fr) minmax(340px, 1.2fr);
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 1.15rem;
+  background: linear-gradient(120deg, var(--accent-soft), transparent 42%), var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.friend-add-icon {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 15px;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.friend-add-panel h2 {
+  margin-top: 0.1rem;
+  font-size: 1.05rem;
+}
+
+.friend-add-panel > div > p:last-child {
+  margin-top: 0.25rem;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.friend-add-panel code {
+  color: var(--text-soft);
+  font-size: 0.68rem;
+}
+
+.friend-add-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.65rem;
+}
+
+.friend-add-form .form-field {
+  min-width: 0;
+}
+
+.relationship-section {
+  padding-top: 1.5rem;
+}
+
+.blocked-relationships {
+  margin-top: 1.5rem;
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+}
+
+.blocked-relationships > summary {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: 0.45rem;
+  border-radius: 9px;
+  padding: 0.45rem 0.55rem;
+  color: var(--text-muted);
+  font-size: 0.73rem;
+  font-weight: 680;
+  cursor: pointer;
+  list-style: none;
+}
+
+.blocked-relationships > summary::-webkit-details-marker {
+  display: none;
+}
+
+.blocked-relationships > summary:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.blocked-relationships > summary small {
+  font-family: var(--font-mono);
+}
+
+.blocked-relationships > summary .ui-icon {
+  transition: transform 140ms ease;
+}
+
+.blocked-relationships[open] > summary .ui-icon {
+  transform: rotate(180deg);
+}
+
+.blocked-relationships > .relationship-list {
+  margin-top: 0.75rem;
 }
 
 .relationship-list,
@@ -5231,6 +5418,14 @@ progress {
     min-height: 68px;
   }
 
+  .friend-add-panel {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .friend-add-form {
+    grid-column: 2;
+  }
+
   .settings-content {
     padding-right: 1.5rem;
   }
@@ -5467,6 +5662,24 @@ progress {
     align-items: start;
   }
 
+  .friends-hero {
+    display: grid;
+    align-items: start;
+  }
+
+  .friend-summary {
+    width: 100%;
+  }
+
+  .friend-summary span {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .friend-add-form {
+    grid-column: 1 / -1;
+  }
+
   .home-hero h1 {
     font-size: clamp(2.2rem, 11vw, 3.6rem);
   }
@@ -5568,6 +5781,23 @@ progress {
   .two-column-fields,
   .theme-picker,
   .quick-action-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .friend-summary {
+    gap: 0.35rem;
+  }
+
+  .friend-summary span {
+    padding: 0.55rem;
+  }
+
+  .friend-add-panel {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 0.9rem;
+  }
+
+  .friend-add-form {
     grid-template-columns: 1fr;
   }
 

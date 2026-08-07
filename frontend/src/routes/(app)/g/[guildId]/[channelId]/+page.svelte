@@ -58,6 +58,7 @@
   import UserProfileCard from '$lib/components/UserProfileCard.svelte';
   import VirtualMessageList from '$lib/components/VirtualMessageList.svelte';
   import { uploadChannelFile, type PendingUpload } from '$lib/media/uploads';
+  import { assetUrl } from '$lib/media/assets';
   import {
     channelSettingsPath,
     directMessagePath,
@@ -1940,7 +1941,10 @@
           >
             <span class="voice-member-avatar">
               {#if voiceMember.user.avatar_hash}
-                <img src={`/media/assets/${voiceMember.user.avatar_hash}/thumbnail_128`} alt="" />
+                <img
+                  src={assetUrl(voiceMember.user.avatar_hash, 'thumbnail_128', voiceMember.user)}
+                  alt=""
+                />
               {:else}
                 {(
                   voiceMember.nickname ??
@@ -1990,7 +1994,7 @@
         title={item.name}
       >
         {#if item.icon_hash}
-          <img src={`/media/assets/${item.icon_hash}/thumbnail_128`} alt="" />
+          <img src={assetUrl(item.icon_hash, 'thumbnail_128', item)} alt="" />
         {:else}
           {item.name.slice(0, 2).toUpperCase()}
         {/if}
@@ -2261,7 +2265,7 @@
     <div class="sidebar-user-dock">
       <span class="avatar avatar-small">
         {#if currentUser?.avatar_hash}
-          <img src={`/media/assets/${currentUser.avatar_hash}/thumbnail_128`} alt="" />
+          <img src={assetUrl(currentUser.avatar_hash, 'thumbnail_128', currentUser)} alt="" />
         {:else}
           {currentUser?.username.slice(0, 1).toUpperCase() ?? 'K'}
         {/if}

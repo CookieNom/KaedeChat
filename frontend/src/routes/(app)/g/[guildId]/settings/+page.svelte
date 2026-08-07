@@ -9,6 +9,7 @@
   import Toast from '$lib/components/Toast.svelte';
   import { PERMISSION_METADATA, Permission } from '$lib/generated/permissions';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
+  import { assetUrl } from '$lib/media/assets';
   import { guildChannelPath, type ChannelSettingsPanel } from '$lib/navigation/routes';
   import { formatDateTime } from '$lib/ui/locale';
   import { tick } from 'svelte';
@@ -1282,7 +1283,7 @@
       <div class="settings-account-mini">
         <span class="avatar avatar-small guild-avatar">
           {#if guild?.icon_hash}
-            <img src={`/media/assets/${guild.icon_hash}/thumbnail_128`} alt="" />
+            <img src={assetUrl(guild.icon_hash, 'thumbnail_128', guild)} alt="" />
           {:else}
             {guild?.name.slice(0, 2).toUpperCase() ?? '—'}
           {/if}
@@ -1370,7 +1371,7 @@
           <div class="profile-card">
             <div class="profile-banner">
               {#if guild.banner_hash}
-                <img src={`/media/assets/${guild.banner_hash}/original`} alt="" />
+                <img src={assetUrl(guild.banner_hash, 'original', guild)} alt="" />
               {:else}
                 <span aria-hidden="true"></span>
               {/if}
@@ -1378,7 +1379,7 @@
             <div class="profile-card-body">
               <span class="avatar avatar-large guild-avatar">
                 {#if guild.icon_hash}
-                  <img src={`/media/assets/${guild.icon_hash}/thumbnail_128`} alt="" />
+                  <img src={assetUrl(guild.icon_hash, 'thumbnail_128', guild)} alt="" />
                 {:else}
                   {guild.name.slice(0, 2).toUpperCase()}
                 {/if}
@@ -1773,7 +1774,11 @@
                                 <span class="permission-target-avatar">
                                   {#if member.user.avatar_hash}
                                     <img
-                                      src={`/media/assets/${member.user.avatar_hash}/thumbnail_128`}
+                                      src={assetUrl(
+                                        member.user.avatar_hash,
+                                        'thumbnail_128',
+                                        member.user
+                                      )}
                                       alt=""
                                     />
                                   {:else}
@@ -2372,7 +2377,10 @@
               <article class="member-management-row">
                 <span class="avatar avatar-medium">
                   {#if member.user.avatar_hash}
-                    <img src={`/media/assets/${member.user.avatar_hash}/thumbnail_128`} alt="" />
+                    <img
+                      src={assetUrl(member.user.avatar_hash, 'thumbnail_128', member.user)}
+                      alt=""
+                    />
                   {:else}
                     {member.user.username.slice(0, 1).toUpperCase()}
                   {/if}

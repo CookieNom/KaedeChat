@@ -41,6 +41,7 @@ from app.db.models import (
 )
 from app.federation.client import signed_request
 from app.federation.network import FederationNetworkError, normalize_domain
+from app.federation.relationships import queue_friend_profile_updates
 from app.media.processing import (
     IMAGE_TYPES,
     MediaValidationError,
@@ -64,7 +65,7 @@ from app.media.service import (
     finalize_attachment,
 )
 from app.media.storage import S3Storage, StorageError
-from app.tasks import media_cache_gc, media_local_purge, media_process
+from app.tasks import federation_deliver, media_cache_gc, media_local_purge, media_process
 
 router = APIRouter(tags=["media"])
 REMOTE_MEDIA_FETCH_CONCURRENCY = 8
@@ -243,6 +244,7 @@ async def commit_user_asset(
     field = "avatar_hash" if kind == "avatar" else "banner_hash"
     setattr(user, field, attachment.content_sha256)
     user.profile_version += 1
+    destinations = await queue_friend_profile_updates(session, settings, user)
     await session.commit()
     rendered = attachment_payload(attachment)
     await publish_dispatch(
@@ -251,6 +253,8 @@ async def commit_user_asset(
         "USER_UPDATE",
         user_payload(user),
     )
+    for destination in destinations:
+        await enqueue_best_effort(federation_deliver, destination)
     if previous is not None:
         await enqueue_best_effort(media_local_purge, previous.id, previous.origin_domain)
     return rendered

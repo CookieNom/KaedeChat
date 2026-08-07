@@ -1,7 +1,9 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
+  import { page } from '$app/state';
   import { api, ApiError } from '$lib/api/client';
   import { firstNavigableChannel } from '$lib/chat/channels';
+  import { normalizeInviteReference } from '$lib/chat/invites';
   import { entityKey, entityRef, sameEntity } from '$lib/chat/refs';
   import type { Channel, Guild, ReadStateStatus, Relationship, UserSummary } from '$lib/chat/types';
   import { GATEWAY_SESSION_RESET_EVENT, type Dispatch } from '$lib/gateway/client';
@@ -9,6 +11,8 @@
   import { DispatchReplayBuffer, type DispatchBatch } from '$lib/gateway/recovery';
   import { lastVisitedChannel } from '$lib/navigation/history';
   import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
+  import { assetUrl } from '$lib/media/assets';
+  import UserProfileCard from '$lib/components/UserProfileCard.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import { onMount, tick } from 'svelte';
 
@@ -30,12 +34,20 @@
   let navigationDrawer: HTMLElement | null = null;
   let navigationToggle: HTMLButtonElement | null = null;
   let navigationClose: HTMLButtonElement | null = null;
+  let messageDialog = $state<HTMLDialogElement | null>(null);
+  let messageDialogError = $state('');
+  let profilePopover = $state<{ user: UserSummary; x: number; y: number } | null>(null);
   let loadGeneration = 0;
   let snapshotGeneration = 0;
   let guildRevision = 0;
   let relationshipRevision = 0;
   let lastVisited = $state<string | null>(null);
   const dispatches = new DispatchReplayBuffer<Dispatch>();
+  const friendsView = $derived(page.url.pathname.replace(/\/+$/, '').endsWith('/home/friends'));
+  const friends = $derived(relationships.filter((item) => item.type === 'friend'));
+  const incomingRequests = $derived(relationships.filter((item) => item.type === 'pending_in'));
+  const outgoingRequests = $derived(relationships.filter((item) => item.type === 'pending_out'));
+  const blockedUsers = $derived(relationships.filter((item) => item.type === 'blocked'));
 
   function openNavigation() {
     navigationOpen = true;
@@ -274,7 +286,7 @@
       if (caught instanceof ApiError && caught.status === 401) {
         window.location.replace(resolve('/login'));
       } else if (!recovering || !error) {
-        error = 'Could not load your guilds.';
+        error = 'Could not load your home data.';
       }
       loading = false;
     }
@@ -361,40 +373,63 @@
     }
   }
 
-  async function openDirectMessage() {
-    if (busy) return;
+  async function openDirectMessage(targetHandle = handle) {
+    if (busy || !targetHandle.trim()) return;
     const generation = loadGeneration;
     busy = true;
     error = '';
+    messageDialogError = '';
     notice = '';
     try {
       const result = await api<
         Channel | { status: 'queued'; operation_id: string; pair_key: string }
       >('/users/@me/channels', {
         method: 'POST',
-        body: JSON.stringify({ handle })
+        body: JSON.stringify({ handle: targetHandle.trim() })
       });
       if (generation !== loadGeneration) return;
       if ('status' in result) {
         notice = 'The recipient’s instance is unavailable. Your request is safely queued.';
+        messageDialog?.close();
         return;
       }
+      messageDialog?.close();
       window.location.assign(directMessagePath(result));
     } catch (caught) {
       if (generation !== loadGeneration) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not open the conversation.';
+      const message =
+        caught instanceof ApiError ? caught.message : 'Could not open the conversation.';
+      if (messageDialog?.open) messageDialogError = message;
+      else error = message;
     } finally {
       if (generation === loadGeneration) busy = false;
     }
   }
 
+  function showNewMessageDialog() {
+    handle = '';
+    messageDialogError = '';
+    messageDialog?.showModal();
+    void tick().then(() => messageDialog?.querySelector<HTMLInputElement>('input')?.focus());
+  }
+
+  function showProfile(user: UserSummary, event: MouseEvent) {
+    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    profilePopover = { user, x: bounds.right + 8, y: bounds.top };
+  }
+
   async function joinGuild() {
     if (busy) return;
+    const inviteReference = normalizeInviteReference(invite);
+    if (!inviteReference) {
+      error = 'Enter an invite code or a complete Kaede invite link.';
+      return;
+    }
     const generation = loadGeneration;
     busy = true;
     error = '';
     try {
-      const guild = await api<Guild>(`/invites/${encodeURIComponent(invite.trim())}`, {
+      const guild = await api<Guild>(`/invites/${encodeURIComponent(inviteReference)}`, {
         method: 'POST'
       });
       if (generation !== loadGeneration) return;
@@ -416,7 +451,70 @@
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- route helpers resolve the typed template before substituting encoded parameters -->
 
-<svelte:head><title>Home · Kaede Chat</title></svelte:head>
+{#snippet relationshipRow(relationship: Relationship)}
+  <article>
+    <span class="avatar avatar-medium">
+      {#if relationship.type === 'friend' && relationship.user.avatar_hash}
+        <img
+          src={assetUrl(relationship.user.avatar_hash, 'thumbnail_128', relationship.user)}
+          alt=""
+          referrerpolicy="no-referrer"
+        />
+      {:else}
+        {relationship.user.username.slice(0, 1).toUpperCase()}
+      {/if}
+    </span>
+    <span class="relationship-copy">
+      <strong>{relationship.user.display_name ?? relationship.user.username}</strong>
+      <small>{relationship.user.custom_status?.trim() || relationship.user.handle}</small>
+    </span>
+    {#if relationship.type === 'pending_in'}
+      <button
+        class="primary-button small-button"
+        disabled={relationshipBusy}
+        onclick={() => updateRelationship(relationship.user, 'accept')}>Accept</button
+      >
+      <button
+        class="secondary-button small-button"
+        disabled={relationshipBusy}
+        onclick={() => updateRelationship(relationship.user, 'remove')}>Ignore</button
+      >
+    {:else if relationship.type === 'friend'}
+      <button
+        class="secondary-button small-button"
+        onclick={(event) => showProfile(relationship.user, event)}
+      >
+        <Icon name="user" size={15} />View profile
+      </button>
+      <button
+        class="secondary-button small-button"
+        disabled={busy}
+        onclick={() => openDirectMessage(relationship.user.handle)}
+      >
+        <Icon name="message" size={15} />Message
+      </button>
+      <button
+        class="secondary-button small-button"
+        disabled={relationshipBusy}
+        onclick={() => updateRelationship(relationship.user, 'remove')}>Remove</button
+      >
+    {:else}
+      <button
+        class="secondary-button small-button"
+        disabled={relationshipBusy}
+        onclick={() =>
+          updateRelationship(
+            relationship.user,
+            relationship.type === 'blocked' ? 'unblock' : 'remove'
+          )}
+      >
+        {relationship.type === 'blocked' ? 'Unblock' : 'Cancel request'}
+      </button>
+    {/if}
+  </article>
+{/snippet}
+
+<svelte:head><title>{friendsView ? 'Friends' : 'Home'} · Kaede Chat</title></svelte:head>
 <svelte:window onkeydown={navigationKeydown} />
 
 <main class="home-app">
@@ -434,7 +532,7 @@
     {#each guilds as guild (entityKey(guild))}
       <a href={guildLandingPath(guild)} aria-label={guild.name} title={guild.name}>
         {#if guild.icon_hash}
-          <img src={`/media/assets/${guild.icon_hash}/thumbnail_128`} alt="" />
+          <img src={assetUrl(guild.icon_hash, 'thumbnail_128', guild)} alt="" />
         {:else}
           {guild.name.slice(0, 2).toUpperCase()}
         {/if}
@@ -474,14 +572,23 @@
       </button>
     </header>
     <nav class="home-nav" aria-label="Home">
-      <a class="active" href={resolve('/home')} aria-current="page"
-        ><Icon name="home" size={18} />Overview</a
+      <a
+        class:active={!friendsView}
+        href={resolve('/home')}
+        aria-current={!friendsView ? 'page' : undefined}><Icon name="home" size={18} />Overview</a
       >
-      <a href="#people"><Icon name="users" size={18} />Friends & requests</a>
+      <a
+        class:active={friendsView}
+        href={resolve('/home/friends')}
+        aria-current={friendsView ? 'page' : undefined}
+        ><Icon name="users" size={18} />Friends & requests</a
+      >
     </nav>
     <div class="home-sidebar-heading">
       <span>Direct messages</span>
-      <a href="#new-message" aria-label="Start a direct message"><Icon name="plus" size={17} /></a>
+      <button type="button" aria-label="Start a direct message" onclick={showNewMessageDialog}
+        ><Icon name="plus" size={17} /></button
+      >
     </div>
     <nav class="home-dm-list" aria-label="Direct messages">
       {#each directMessages as channel (entityKey(channel))}
@@ -489,7 +596,7 @@
         <a href={directMessagePath(channel)} onclick={() => closeNavigation(false)}>
           <span class="avatar avatar-small">
             {#if recipient?.avatar_hash}
-              <img src={`/media/assets/${recipient.avatar_hash}/thumbnail_128`} alt="" />
+              <img src={assetUrl(recipient.avatar_hash, 'thumbnail_128', recipient)} alt="" />
             {:else}
               {recipient?.username.slice(0, 1).toUpperCase() ?? '?'}
             {/if}
@@ -507,7 +614,7 @@
     <div class="sidebar-user-dock">
       <span class="avatar avatar-small">
         {#if currentUser?.avatar_hash}
-          <img src={`/media/assets/${currentUser.avatar_hash}/thumbnail_128`} alt="" />
+          <img src={assetUrl(currentUser.avatar_hash, 'thumbnail_128', currentUser)} alt="" />
         {:else}
           {currentUser?.username.slice(0, 1).toUpperCase() ?? 'K'}
         {/if}
@@ -534,7 +641,14 @@
       >
         <span></span><span></span><span></span>
       </button>
-      <div><strong>Home</strong><span>Your conversations and communities</span></div>
+      <div>
+        <strong>{friendsView ? 'Friends' : 'Home'}</strong>
+        <span
+          >{friendsView
+            ? 'Friends and pending requests'
+            : 'Your conversations and communities'}</span
+        >
+      </div>
       <div class="home-topbar-actions">
         <button
           class="icon-button"
@@ -552,20 +666,36 @@
     </header>
 
     <div class="home-scroll" aria-busy={loading}>
-      <section class="home-hero">
-        <div>
-          <p class="eyebrow">Welcome back</p>
-          <h1>
-            {currentUser?.display_name ?? currentUser?.username ?? 'Your place'}, all in one place.
-          </h1>
-          <p>Pick up a conversation, return to a guild, or start something new.</p>
-        </div>
-        {#if lastVisited}
-          <a class="primary-button" href={lastVisited}>
-            Continue where you left off <Icon name="chevron-right" size={17} />
-          </a>
-        {/if}
-      </section>
+      {#if friendsView}
+        <section class="friends-hero">
+          <div>
+            <p class="eyebrow">Your people</p>
+            <h1>Friends</h1>
+            <p>Manage connections and requests across this instance and the fediverse.</p>
+          </div>
+          <div class="friend-summary" aria-label="Relationship summary">
+            <span><strong>{friends.length}</strong> friends</span>
+            <span><strong>{incomingRequests.length}</strong> incoming</span>
+            <span><strong>{outgoingRequests.length}</strong> sent</span>
+          </div>
+        </section>
+      {:else}
+        <section class="home-hero">
+          <div>
+            <p class="eyebrow">Welcome back</p>
+            <h1>
+              {currentUser?.display_name ?? currentUser?.username ?? 'Your place'}, all in one
+              place.
+            </h1>
+            <p>Pick up a conversation, return to a guild, or start something new.</p>
+          </div>
+          {#if lastVisited}
+            <a class="primary-button" href={lastVisited}>
+              Continue where you left off <Icon name="chevron-right" size={17} />
+            </a>
+          {/if}
+        </section>
+      {/if}
 
       {#if error}
         <div class="notice-banner error-banner home-error-banner" role="alert">
@@ -581,220 +711,292 @@
         </div>
       {/if}
 
-      <section class="home-section">
-        <div class="home-section-heading">
-          <div>
-            <p>Guilds</p>
-            <h2>Your communities</h2>
+      {#if !friendsView}
+        <section class="home-section">
+          <div class="home-section-heading">
+            <div>
+              <p>Guilds</p>
+              <h2>Your communities</h2>
+            </div>
+            <span>{guilds.length}</span>
           </div>
-          <span>{guilds.length}</span>
-        </div>
-        {#if loading}
-          <div class="guild-grid skeleton-grid" aria-hidden="true">
-            <span></span><span></span><span></span>
-          </div>
-        {:else if guilds.length}
-          <div class="guild-grid">
-            {#each guilds as guild (entityKey(guild))}
-              <a class="guild-card" href={guildLandingPath(guild)}>
-                <span class="guild-card-icon">
-                  {#if guild.icon_hash}
-                    <img src={`/media/assets/${guild.icon_hash}/thumbnail_128`} alt="" />
+          {#if loading}
+            <div class="guild-grid skeleton-grid" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+          {:else if guilds.length}
+            <div class="guild-grid">
+              {#each guilds as guild (entityKey(guild))}
+                <a class="guild-card" href={guildLandingPath(guild)}>
+                  <span class="guild-card-icon">
+                    {#if guild.icon_hash}
+                      <img src={assetUrl(guild.icon_hash, 'thumbnail_128', guild)} alt="" />
+                    {:else}
+                      {guild.name.slice(0, 2).toUpperCase()}
+                    {/if}
+                  </span>
+                  <span class="guild-card-copy">
+                    <strong>{guild.name}</strong>
+                    <small>{guild.origin_domain}</small>
+                    {#if guild.description}<p>{guild.description}</p>{/if}
+                  </span>
+                  {#if guild.unavailable}
+                    <small class="status-chip">Unavailable</small>
+                  {:else if guildUnread(guild)}
+                    <small class="unread-badge">{guildUnread(guild)}</small>
                   {:else}
-                    {guild.name.slice(0, 2).toUpperCase()}
+                    <Icon name="chevron-right" size={18} />
                   {/if}
-                </span>
-                <span class="guild-card-copy">
-                  <strong>{guild.name}</strong>
-                  <small>{guild.origin_domain}</small>
-                  {#if guild.description}<p>{guild.description}</p>{/if}
-                </span>
-                {#if guild.unavailable}
-                  <small class="status-chip">Unavailable</small>
-                {:else if guildUnread(guild)}
-                  <small class="unread-badge">{guildUnread(guild)}</small>
-                {:else}
-                  <Icon name="chevron-right" size={18} />
-                {/if}
-              </a>
+                </a>
+              {/each}
+            </div>
+          {:else}
+            <div class="empty-state">
+              <span><Icon name="server" size={26} /></span>
+              <h3>No guilds yet</h3>
+              <p>Create a home for your community or join one with an invite.</p>
+            </div>
+          {/if}
+        </section>
+
+        <section class="home-section">
+          <div class="home-section-heading">
+            <div>
+              <p>Quick actions</p>
+              <h2>Start something</h2>
+            </div>
+          </div>
+          <div class="quick-action-grid">
+            <details id="new-message" class="quick-action-card">
+              <summary>
+                <span class="quick-action-icon green"><Icon name="message" /></span>
+                <span
+                  ><strong>New message</strong><small>Reach someone by federated handle</small
+                  ></span
+                >
+                <Icon name="chevron-down" size={17} />
+              </summary>
+              <form
+                onsubmit={(event) => {
+                  event.preventDefault();
+                  void openDirectMessage();
+                }}
+              >
+                <label class="form-field compact-field">
+                  <span>User handle</span>
+                  <input bind:value={handle} placeholder="friend@example.net" required />
+                </label>
+                <button class="primary-button" disabled={busy}>Start conversation</button>
+              </form>
+            </details>
+
+            <details class="quick-action-card">
+              <summary>
+                <span class="quick-action-icon orange"><Icon name="globe" /></span>
+                <span
+                  ><strong>Join a guild</strong><small>Use a local or federated invite</small></span
+                >
+                <Icon name="chevron-down" size={17} />
+              </summary>
+              <form
+                onsubmit={(event) => {
+                  event.preventDefault();
+                  void joinGuild();
+                }}
+              >
+                <label class="form-field compact-field">
+                  <span>Invite code</span>
+                  <input bind:value={invite} placeholder="Ab12Cd34@example.net" required />
+                </label>
+                <button class="primary-button" disabled={busy}>Join guild</button>
+              </form>
+            </details>
+
+            <details class="quick-action-card">
+              <summary>
+                <span class="quick-action-icon purple"><Icon name="plus" /></span>
+                <span
+                  ><strong>Create a guild</strong><small
+                    >Make a new community on this instance</small
+                  ></span
+                >
+                <Icon name="chevron-down" size={17} />
+              </summary>
+              <form
+                onsubmit={(event) => {
+                  event.preventDefault();
+                  void createGuild();
+                }}
+              >
+                <label class="form-field compact-field">
+                  <span>Guild name</span>
+                  <input bind:value={name} minlength="2" maxlength="100" required />
+                </label>
+                <button class="primary-button" disabled={busy}>
+                  {busy ? 'Creating…' : 'Create guild'}
+                </button>
+              </form>
+            </details>
+          </div>
+        </section>
+      {/if}
+
+      {#if friendsView}
+        <section class="friend-add-panel">
+          <span class="friend-add-icon"><Icon name="users" size={22} /></span>
+          <div>
+            <p class="eyebrow">Add a friend</p>
+            <h2>Connect by federated username</h2>
+            <p>Use a full username such as <code>@friend@example.net</code>.</p>
+          </div>
+          <form
+            class="friend-add-form"
+            onsubmit={(event) => {
+              event.preventDefault();
+              void requestFriendship();
+            }}
+          >
+            <label class="form-field compact-field">
+              <span>Federated username</span>
+              <input
+                bind:value={friendHandle}
+                placeholder={`@friend@${currentUser?.origin_domain ?? 'example.net'}`}
+                autocomplete="off"
+                required
+              />
+            </label>
+            <button class="primary-button" disabled={busy}>
+              {busy ? 'Sending…' : 'Send request'}
+            </button>
+          </form>
+        </section>
+
+        {#if incomingRequests.length}
+          <section class="home-section relationship-section">
+            <div class="home-section-heading">
+              <div>
+                <p>Pending</p>
+                <h2>Incoming requests</h2>
+              </div>
+              <span>{incomingRequests.length}</span>
+            </div>
+            <div class="relationship-list">
+              {#each incomingRequests as relationship (entityKey(relationship.user))}
+                {@render relationshipRow(relationship)}
+              {/each}
+            </div>
+          </section>
+        {/if}
+
+        {#if outgoingRequests.length}
+          <section class="home-section relationship-section">
+            <div class="home-section-heading">
+              <div>
+                <p>Pending</p>
+                <h2>Sent requests</h2>
+              </div>
+              <span>{outgoingRequests.length}</span>
+            </div>
+            <div class="relationship-list">
+              {#each outgoingRequests as relationship (entityKey(relationship.user))}
+                {@render relationshipRow(relationship)}
+              {/each}
+            </div>
+          </section>
+        {/if}
+
+        <section class="home-section relationship-section">
+          <div class="home-section-heading">
+            <div>
+              <p>People</p>
+              <h2>All friends</h2>
+            </div>
+            <span>{friends.length}</span>
+          </div>
+          <div class="relationship-list">
+            {#each friends as relationship (entityKey(relationship.user))}
+              {@render relationshipRow(relationship)}
+            {:else}
+              <div class="empty-state compact-empty">
+                <span><Icon name="users" /></span>
+                <h3>No friends yet</h3>
+                <p>Send a request using someone’s full federated username.</p>
+              </div>
             {/each}
           </div>
-        {:else}
-          <div class="empty-state">
-            <span><Icon name="server" size={26} /></span>
-            <h3>No guilds yet</h3>
-            <p>Create a home for your community or join one with an invite.</p>
-          </div>
-        {/if}
-      </section>
+        </section>
 
-      <section class="home-section">
-        <div class="home-section-heading">
-          <div>
-            <p>Quick actions</p>
-            <h2>Start something</h2>
-          </div>
-        </div>
-        <div class="quick-action-grid">
-          <details id="new-message" class="quick-action-card">
+        {#if blockedUsers.length}
+          <details class="blocked-relationships">
             <summary>
-              <span class="quick-action-icon green"><Icon name="message" /></span>
-              <span
-                ><strong>New message</strong><small>Reach someone by federated handle</small></span
-              >
-              <Icon name="chevron-down" size={17} />
+              <span>Blocked users</span><small>{blockedUsers.length}</small><Icon
+                name="chevron-down"
+                size={16}
+              />
             </summary>
-            <form
-              onsubmit={(event) => {
-                event.preventDefault();
-                void openDirectMessage();
-              }}
-            >
-              <label class="form-field compact-field">
-                <span>User handle</span>
-                <input bind:value={handle} placeholder="friend@example.net" required />
-              </label>
-              <button class="primary-button" disabled={busy}>Start conversation</button>
-            </form>
-          </details>
-
-          <details class="quick-action-card">
-            <summary>
-              <span class="quick-action-icon green"><Icon name="users" /></span>
-              <span><strong>Add a friend</strong><small>Connect by federated username</small></span>
-              <Icon name="chevron-down" size={17} />
-            </summary>
-            <form
-              onsubmit={(event) => {
-                event.preventDefault();
-                void requestFriendship();
-              }}
-            >
-              <label class="form-field compact-field">
-                <span>Federated username</span>
-                <input
-                  bind:value={friendHandle}
-                  placeholder={`@friend@${currentUser?.origin_domain ?? 'example.net'}`}
-                  required
-                />
-              </label>
-              <button class="primary-button" disabled={busy}>Send friend request</button>
-            </form>
-          </details>
-
-          <details class="quick-action-card">
-            <summary>
-              <span class="quick-action-icon orange"><Icon name="globe" /></span>
-              <span
-                ><strong>Join a guild</strong><small>Use a local or federated invite</small></span
-              >
-              <Icon name="chevron-down" size={17} />
-            </summary>
-            <form
-              onsubmit={(event) => {
-                event.preventDefault();
-                void joinGuild();
-              }}
-            >
-              <label class="form-field compact-field">
-                <span>Invite code</span>
-                <input bind:value={invite} placeholder="Ab12Cd34@example.net" required />
-              </label>
-              <button class="primary-button" disabled={busy}>Join guild</button>
-            </form>
-          </details>
-
-          <details class="quick-action-card">
-            <summary>
-              <span class="quick-action-icon purple"><Icon name="plus" /></span>
-              <span
-                ><strong>Create a guild</strong><small>Make a new community on this instance</small
-                ></span
-              >
-              <Icon name="chevron-down" size={17} />
-            </summary>
-            <form
-              onsubmit={(event) => {
-                event.preventDefault();
-                void createGuild();
-              }}
-            >
-              <label class="form-field compact-field">
-                <span>Guild name</span>
-                <input bind:value={name} minlength="2" maxlength="100" required />
-              </label>
-              <button class="primary-button" disabled={busy}>
-                {busy ? 'Creating…' : 'Create guild'}
-              </button>
-            </form>
-          </details>
-        </div>
-      </section>
-
-      <section id="people" class="home-section">
-        <div class="home-section-heading">
-          <div>
-            <p>People</p>
-            <h2>Friends & requests</h2>
-          </div>
-          <span>{relationships.length}</span>
-        </div>
-        <div class="relationship-list">
-          {#each relationships as relationship (`${relationship.type}:${entityKey(relationship.user)}`)}
-            <article>
-              <span class="avatar avatar-medium">
-                {#if relationship.user.avatar_hash}
-                  <img
-                    src={`/media/assets/${relationship.user.avatar_hash}/thumbnail_128`}
-                    alt=""
-                  />
-                {:else}
-                  {relationship.user.username.slice(0, 1).toUpperCase()}
-                {/if}
-              </span>
-              <span class="relationship-copy">
-                <strong>{relationship.user.display_name ?? relationship.user.username}</strong>
-                <small>{relationship.user.custom_status?.trim() || relationship.user.handle}</small>
-              </span>
-              <span class="status-chip">{relationship.type.replace('_', ' ')}</span>
-              {#if relationship.type === 'pending_in'}
-                <button
-                  class="primary-button small-button"
-                  disabled={relationshipBusy}
-                  onclick={() => updateRelationship(relationship.user, 'accept')}>Accept</button
-                >
-                <button
-                  class="secondary-button small-button"
-                  disabled={relationshipBusy}
-                  onclick={() => updateRelationship(relationship.user, 'remove')}>Ignore</button
-                >
-              {:else}
-                <button
-                  class="secondary-button small-button"
-                  disabled={relationshipBusy}
-                  onclick={() =>
-                    updateRelationship(
-                      relationship.user,
-                      relationship.type === 'blocked' ? 'unblock' : 'remove'
-                    )}
-                >
-                  {relationship.type === 'blocked'
-                    ? 'Unblock'
-                    : relationship.type === 'pending_out'
-                      ? 'Cancel request'
-                      : 'Remove'}
-                </button>
-              {/if}
-            </article>
-          {:else}
-            <div class="empty-state compact-empty">
-              <span><Icon name="users" /></span>
-              <h3>No connections yet</h3>
-              <p>People you connect with will appear here.</p>
+            <div class="relationship-list">
+              {#each blockedUsers as relationship (entityKey(relationship.user))}
+                {@render relationshipRow(relationship)}
+              {/each}
             </div>
-          {/each}
-        </div>
-      </section>
+          </details>
+        {/if}
+      {/if}
     </div>
   </section>
 </main>
+
+<dialog
+  bind:this={messageDialog}
+  class="action-dialog"
+  onclose={() => {
+    handle = '';
+    messageDialogError = '';
+  }}
+>
+  <form
+    method="dialog"
+    onsubmit={(event) => {
+      event.preventDefault();
+      void openDirectMessage();
+    }}
+  >
+    <header>
+      <div>
+        <p class="eyebrow">Direct message</p>
+        <h2>Start a conversation</h2>
+      </div>
+      <button
+        class="icon-button"
+        type="button"
+        aria-label="Close"
+        onclick={() => messageDialog?.close()}>×</button
+      >
+    </header>
+    <label class="form-field">
+      <span>Federated username</span>
+      <input bind:value={handle} placeholder="@friend@example.net" autocomplete="off" required />
+      <small>Enter a complete username, including the home instance.</small>
+    </label>
+    {#if messageDialogError}<p class="form-error" role="alert">{messageDialogError}</p>{/if}
+    <footer>
+      <button class="secondary-button" type="button" onclick={() => messageDialog?.close()}
+        >Cancel</button
+      >
+      <button class="primary-button" disabled={busy}>{busy ? 'Opening…' : 'Message'}</button>
+    </footer>
+  </form>
+</dialog>
+
+{#if profilePopover}
+  <UserProfileCard
+    user={profilePopover.user}
+    x={profilePopover.x}
+    y={profilePopover.y}
+    onClose={() => (profilePopover = null)}
+    onMessage={(user) => {
+      profilePopover = null;
+      void openDirectMessage(user.handle);
+    }}
+  />
+{/if}

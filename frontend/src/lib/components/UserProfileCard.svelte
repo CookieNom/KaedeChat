@@ -2,6 +2,7 @@
   import { resolve } from '$app/paths';
   import { entityRef } from '$lib/chat/refs';
   import type { PresenceStatus, UserSummary } from '$lib/chat/types';
+  import { assetUrl } from '$lib/media/assets';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import { onMount, tick } from 'svelte';
@@ -79,7 +80,7 @@
 >
   <div class="user-popover-banner">
     {#if user.banner_hash}
-      <img src={`/media/assets/${user.banner_hash}/thumbnail_512`} alt="" />
+      <img src={assetUrl(user.banner_hash, 'thumbnail_512', user)} alt="" />
     {/if}
     <button class="user-popover-close" type="button" aria-label="Close profile" onclick={onClose}>
       <span aria-hidden="true">×</span>
@@ -90,7 +91,7 @@
     <div class="user-popover-avatar-wrap">
       <span class="user-popover-avatar" aria-hidden="true">
         {#if user.avatar_hash}
-          <img src={`/media/assets/${user.avatar_hash}/thumbnail_128`} alt="" />
+          <img src={assetUrl(user.avatar_hash, 'thumbnail_128', user)} alt="" />
         {:else}
           {user.username.slice(0, 1).toUpperCase()}
         {/if}

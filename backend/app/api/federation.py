@@ -730,6 +730,7 @@ async def process_event(
             "relationship.request",
             "relationship.accept",
             "relationship.remove",
+            "relationship.profile",
         }:
             relationship_application = await apply_relationship_event(
                 session,

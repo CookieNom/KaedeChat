@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { assetUrl } from '$lib/media/assets';
   import { groupGuildMembers, memberDisplayName } from '$lib/chat/members';
   import type { GuildMemberSummary, PresenceStatus, UserSummary } from '$lib/chat/types';
   import Icon from './Icon.svelte';
@@ -31,7 +32,7 @@
   >
     <span class="roster-avatar" aria-hidden="true">
       {#if member.user.avatar_hash}
-        <img src={`/media/assets/${member.user.avatar_hash}/thumbnail_128`} alt="" />
+        <img src={assetUrl(member.user.avatar_hash, 'thumbnail_128', member.user)} alt="" />
       {:else}
         {displayName.slice(0, 1).toUpperCase()}
       {/if}

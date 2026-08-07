@@ -105,6 +105,7 @@ accept the following exact names:
 | `relationship.request` | A user's home sends a versioned actor profile and an unguessable request correlation ID to the target user's home. |
 | `relationship.accept` | The target user's home accepts only the exact still-pending correlation ID. Late acceptance cannot recreate cancelled or blocked state. |
 | `relationship.remove` | A user's home removes friendship or pending state at the peer. The sender never reveals whether the local reason was removal or blocking. |
+| `relationship.profile` | A user's home sends a versioned profile update to an accepted remote friend. The receiver applies it only while the exact friendship is still active. |
 | `dm.open.request` | A participant asks the deterministic DM authority to open a conversation asynchronously. |
 | `dm.conversation.create` | The deterministic authority announces the converged conversation and its two participants. |
 | `dm.open.rejected` | The authority rejects a previously queued open request with a stable code. |

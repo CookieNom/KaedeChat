@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.privacy import lock_relationship_pair, relationship
@@ -42,6 +43,46 @@ def relationship_event_content(
     return content
 
 
+async def queue_friend_profile_updates(
+    session: AsyncSession,
+    settings: Settings,
+    actor: User,
+) -> set[str]:
+    """Queue an authoritative profile update for every accepted remote friend."""
+
+    targets = (
+        await session.execute(
+            select(Relationship.target_id, Relationship.target_domain).where(
+                Relationship.user_id == actor.id,
+                Relationship.user_domain == actor.origin_domain,
+                Relationship.type == "friend",
+                Relationship.target_domain != settings.domain,
+            )
+        )
+    ).all()
+    destinations: set[str] = set()
+    for target_id, target_domain in targets:
+        envelope = await build_envelope(
+            session,
+            settings,
+            "relationship.profile",
+            actor,
+            {
+                "actor": profile_from_user(actor),
+                "target": {"id": str(target_id), "domain": target_domain},
+            },
+        )
+        await queue_event(
+            session,
+            settings,
+            target_domain,
+            envelope,
+            discover_destination=False,
+        )
+        destinations.add(target_domain)
+    return destinations
+
+
 async def apply_relationship_event(
     session: AsyncSession,
     settings: Settings,
@@ -58,6 +99,19 @@ async def apply_relationship_event(
     recipient = await session.get(User, (int(content.target.id), settings.domain))
     if recipient is None or not recipient.is_local:
         raise ValueError("relationship event target does not exist")
+
+    if envelope.type == "relationship.profile":
+        actor = await session.get(User, (int(content.actor.id), content.actor.origin_domain))
+        if actor is None or actor.is_local:
+            raise ValueError("relationship profile references an unknown remote user")
+        await lock_relationship_pair(session, recipient, actor)
+        current = await relationship(session, recipient, actor)
+        if current is None or current.type != "friend":
+            # A delayed event cannot restore profile state after friendship ends.
+            return RelationshipApplication(recipient, actor)
+        actor = await upsert_remote_user(session, settings, content.actor)
+        return RelationshipApplication(recipient, actor, "friend")
+
     actor = await upsert_remote_user(session, settings, content.actor)
     if (actor.id, actor.origin_domain) == (recipient.id, recipient.origin_domain):
         raise ValueError("a user cannot create a relationship with itself")

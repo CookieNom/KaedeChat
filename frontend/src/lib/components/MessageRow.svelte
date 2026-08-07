@@ -14,11 +14,14 @@
 <script lang="ts">
   import type { Message, PresenceStatus, UserSummary } from '$lib/chat/types';
   import { entityRef } from '$lib/chat/refs';
+  import { inviteReferencesInMessage } from '$lib/chat/invites';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import { preferredLocale } from '$lib/ui/locale';
+  import { assetUrl } from '$lib/media/assets';
   import { onDestroy, tick } from 'svelte';
   import Markdown from './Markdown.svelte';
+  import InviteEmbed from './InviteEmbed.svelte';
 
   let {
     message,
@@ -59,6 +62,9 @@
     canEdit && !message.deleted_at && !message.pending && !message.queued
   );
   const menuAvailable = $derived(!message.pending && !message.queued);
+  const inviteReferences = $derived(
+    message.content ? inviteReferencesInMessage(message.content) : []
+  );
 
   function authorName(): string {
     return (
@@ -305,7 +311,11 @@
   >
     {#if !compact && (message.webhook?.avatar_hash || message.author?.avatar_hash)}
       <img
-        src={`/media/assets/${message.webhook?.avatar_hash ?? message.author?.avatar_hash}/thumbnail_128`}
+        src={assetUrl(
+          message.webhook?.avatar_hash ?? message.author?.avatar_hash ?? '',
+          'thumbnail_128',
+          message.author?.origin_domain ?? message.origin_domain
+        )}
         alt=""
       />
     {:else}
@@ -333,6 +343,9 @@
       <p class="message-removed">Message removed</p>
     {:else if message.content}
       <Markdown content={message.content} {mentionUsers} />
+      {#each inviteReferences as reference (reference)}
+        <InviteEmbed {reference} />
+      {/each}
     {/if}
     {#if !message.deleted_at && message.attachments?.length}
       <div class="message-attachments">

@@ -14,9 +14,12 @@ from app.chat.privacy import lock_dm_privacy
 from app.chat.schemas import ProfilePatch
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
+from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityReference, validate_entity_reference
 from app.db.models import Channel, DMParticipant, Guild, GuildMember, ReadState, User, UserSettings
+from app.federation.relationships import queue_friend_profile_updates
 from app.federation.users import resolve_handle
+from app.tasks import federation_deliver
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
@@ -59,6 +62,7 @@ async def patch_me(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     user = await session.scalar(
         select(User)
@@ -75,6 +79,7 @@ async def patch_me(
         for field, value in values.items():
             setattr(user, field, value)
         user.profile_version += 1
+        destinations = await queue_friend_profile_updates(session, settings, user)
         await session.commit()
         await publish_dispatch(
             redis,
@@ -82,6 +87,8 @@ async def patch_me(
             "USER_UPDATE",
             user_payload(user),
         )
+        for destination in destinations:
+            await enqueue_best_effort(federation_deliver, destination)
     return await get_me(auth)
 
 
