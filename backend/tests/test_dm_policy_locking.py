@@ -11,13 +11,14 @@ from app.api.calls import require_call_policy
 from app.api.channels import require_dm_send
 from app.chat.channel_access import ChannelAccess
 from app.chat.privacy import (
+    can_direct_message,
     dm_privacy_lock_id,
     lock_dm_policy,
     relationship_pair_lock_id,
     share_guild,
 )
 from app.core.settings import Settings
-from app.db.models import User
+from app.db.models import Relationship, User
 
 
 def user(user_id: int, domain: str) -> User:
@@ -69,6 +70,43 @@ async def test_shared_guild_policy_share_locks_both_memberships() -> None:
     statement = scalar.await_args.args[0]
     sql = str(statement.compile(dialect=postgresql.dialect()))
     assert "FOR SHARE OF guild_members_1, guild_members_2" in sql
+
+
+@pytest.mark.asyncio
+async def test_shared_guild_policy_always_allows_accepted_friends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sender = user(10, "beta.localhost")
+    recipient = user(20, "alpha.localhost")
+    session = cast(
+        AsyncSession,
+        SimpleNamespace(scalar=AsyncMock(return_value=SimpleNamespace(dm_privacy="shared_guild"))),
+    )
+    relation = Relationship(type="friend")
+    shared_guild = AsyncMock(return_value=False)
+    monkeypatch.setattr("app.chat.privacy.blocked_between", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.chat.privacy.relationship", AsyncMock(return_value=relation))
+    monkeypatch.setattr("app.chat.privacy.share_guild", shared_guild)
+
+    assert await can_direct_message(session, sender, recipient)
+    shared_guild.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shared_guild_policy_rejects_unrelated_users_without_a_shared_guild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sender = user(10, "beta.localhost")
+    recipient = user(20, "alpha.localhost")
+    session = cast(
+        AsyncSession,
+        SimpleNamespace(scalar=AsyncMock(return_value=SimpleNamespace(dm_privacy="shared_guild"))),
+    )
+    monkeypatch.setattr("app.chat.privacy.blocked_between", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.chat.privacy.relationship", AsyncMock(return_value=None))
+    monkeypatch.setattr("app.chat.privacy.share_guild", AsyncMock(return_value=False))
+
+    assert not await can_direct_message(session, sender, recipient)
 
 
 @pytest.mark.asyncio

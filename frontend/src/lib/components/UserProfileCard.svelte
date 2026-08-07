@@ -66,7 +66,7 @@
   onkeydown={(event) => {
     if (event.key === 'Escape') onClose();
   }}
-  onclick={(event) => {
+  onpointerdown={(event) => {
     if (popover && !popover.contains(event.target as Node)) onClose();
   }}
 />

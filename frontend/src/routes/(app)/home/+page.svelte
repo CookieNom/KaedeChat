@@ -3,6 +3,7 @@
   import { page } from '$app/state';
   import { api, ApiError } from '$lib/api/client';
   import { firstNavigableChannel } from '$lib/chat/channels';
+  import { filterDmFriends, friendsWithoutVisibleDm } from '$lib/chat/dm-picker';
   import { normalizeInviteReference } from '$lib/chat/invites';
   import { entityKey, entityRef, sameEntity } from '$lib/chat/refs';
   import type { Channel, Guild, ReadStateStatus, Relationship, UserSummary } from '$lib/chat/types';
@@ -48,6 +49,8 @@
   const incomingRequests = $derived(relationships.filter((item) => item.type === 'pending_in'));
   const outgoingRequests = $derived(relationships.filter((item) => item.type === 'pending_out'));
   const blockedUsers = $derived(relationships.filter((item) => item.type === 'blocked'));
+  const newDmFriends = $derived(friendsWithoutVisibleDm(relationships, directMessages));
+  const filteredNewDmFriends = $derived(filterDmFriends(newDmFriends, handle));
 
   function openNavigation() {
     navigationOpen = true;
@@ -398,7 +401,12 @@
     } catch (caught) {
       if (generation !== loadGeneration) return;
       const message =
-        caught instanceof ApiError ? caught.message : 'Could not open the conversation.';
+        caught instanceof ApiError &&
+        (caught.code === 'CANNOT_DM_USER' || caught.code === 'DM_PRIVACY_REJECTED')
+          ? 'This person’s privacy settings do not allow a direct message.'
+          : caught instanceof ApiError
+            ? caught.message
+            : 'Could not open the conversation.';
       if (messageDialog?.open) messageDialogError = message;
       else error = message;
     } finally {
@@ -411,6 +419,11 @@
     messageDialogError = '';
     messageDialog?.showModal();
     void tick().then(() => messageDialog?.querySelector<HTMLInputElement>('input')?.focus());
+  }
+
+  function selectMessageFriend(user: UserSummary) {
+    handle = user.handle;
+    messageDialogError = '';
   }
 
   function showProfile(user: UserSummary, event: MouseEvent) {
@@ -948,7 +961,7 @@
 
 <dialog
   bind:this={messageDialog}
-  class="action-dialog"
+  class="action-dialog dm-picker-dialog"
   onclose={() => {
     handle = '';
     messageDialogError = '';
@@ -974,10 +987,64 @@
       >
     </header>
     <label class="form-field">
-      <span>Federated username</span>
-      <input bind:value={handle} placeholder="@friend@example.net" autocomplete="off" required />
-      <small>Enter a complete username, including the home instance.</small>
+      <span>Username or friend</span>
+      <input
+        bind:value={handle}
+        placeholder="@friend@example.net"
+        autocomplete="off"
+        aria-controls="new-dm-friends"
+        oninput={() => (messageDialogError = '')}
+        required
+      />
+      <small>Enter a complete federated username, or select a friend below.</small>
     </label>
+    <section class="dm-friend-picker" aria-labelledby="dm-friend-picker-heading">
+      <div class="dm-friend-picker-heading">
+        <strong id="dm-friend-picker-heading">Friends without a visible conversation</strong>
+        <small>{filteredNewDmFriends.length}</small>
+      </div>
+      <div id="new-dm-friends" class="dm-friend-results">
+        {#each filteredNewDmFriends as friend (entityKey(friend))}
+          <button
+            type="button"
+            class:selected={handle.trim().replace(/^@/, '').toLocaleLowerCase() ===
+              friend.handle.replace(/^@/, '').toLocaleLowerCase()}
+            aria-pressed={handle.trim().replace(/^@/, '').toLocaleLowerCase() ===
+              friend.handle.replace(/^@/, '').toLocaleLowerCase()}
+            onclick={() => selectMessageFriend(friend)}
+          >
+            <span class="avatar avatar-small">
+              {#if friend.avatar_hash}
+                <img
+                  src={assetUrl(friend.avatar_hash, 'thumbnail_128', friend)}
+                  alt=""
+                  referrerpolicy="no-referrer"
+                />
+              {:else}
+                {friend.username.slice(0, 1).toUpperCase()}
+              {/if}
+            </span>
+            <span>
+              <strong>{friend.display_name ?? friend.username}</strong>
+              <small>@{friend.handle.replace(/^@/, '')}</small>
+            </span>
+            <Icon name="message" size={17} />
+          </button>
+        {:else}
+          <div class="dm-friend-empty">
+            {#if handle.trim()}
+              <strong>No friends match that search.</strong>
+              <small>You can still message the complete federated username above.</small>
+            {:else if newDmFriends.length === 0}
+              <strong>Every friend already has a visible conversation.</strong>
+              <small>You can still enter any federated username above.</small>
+            {:else}
+              <strong>No friends available.</strong>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    </section>
     {#if messageDialogError}<p class="form-error" role="alert">{messageDialogError}</p>{/if}
     <footer>
       <button class="secondary-button" type="button" onclick={() => messageDialog?.close()}

@@ -134,9 +134,11 @@ async def can_direct_message(session: AsyncSession, sender: User, recipient: Use
         return False
     if settings.dm_privacy == "everyone":
         return True
+    relation = await relationship(session, recipient, sender)
+    if relation is not None and relation.type == "friend":
+        return True
     if settings.dm_privacy == "friends":
-        relation = await relationship(session, recipient, sender)
-        return relation is not None and relation.type == "friend"
+        return False
     return await share_guild(session, sender, recipient)
 
 

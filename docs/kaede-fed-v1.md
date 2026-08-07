@@ -280,7 +280,9 @@ concurrent opens on that key. Same-instance pairs mint locally.
 DM events are stored on both participants' instances. The sending instance persists
 outbox state and publishes pending/delivered/failed gateway updates; message history
 reconstructs that sender-side state from the retained event/outbox records after reconnect. The recipient
-instance enforces `everyone`, `shared_guild`, or `friends` privacy during ingest.
+instance enforces `everyone`, `shared_guild`, or `friends` privacy during ingest. Accepted
+friends are allowed by every mode; `shared_guild` additionally permits users who share an
+accessible guild, while `friends` permits no other users.
 Cross-instance read receipts and group DMs are not part of v1.
 
 ## 7. Federation routes

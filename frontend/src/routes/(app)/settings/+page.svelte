@@ -729,7 +729,7 @@
             >
             <select bind:value={settings.dm_privacy} disabled={busy}>
               <option value="everyone">Anyone on a known instance</option>
-              <option value="shared_guild">People who share a guild with me</option>
+              <option value="shared_guild">Friends and people who share a guild with me</option>
               <option value="friends">Friends only</option>
             </select>
           </label>
