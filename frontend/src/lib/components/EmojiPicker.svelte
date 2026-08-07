@@ -1,7 +1,7 @@
 <script lang="ts">
   import {
     emojiCategories,
-    unicodeEmojis,
+    loadUnicodeEmojis,
     type CustomEmojiOption,
     type EmojiOption
   } from '$lib/chat/emojis';
@@ -19,6 +19,10 @@
   let query = $state('');
   let category = $state<EmojiOption['category']>('people');
   let searchInput = $state<HTMLInputElement | null>(null);
+  let unicodeEmojis = $state<EmojiOption[]>([]);
+  let loading = $state(true);
+  let loadFailed = $state(false);
+  let visibleLimit = $state(240);
   const normalizedQuery = $derived(query.trim().toLowerCase());
   const matchingUnicode = $derived(
     unicodeEmojis.filter(
@@ -29,13 +33,26 @@
             emoji.keywords.some((keyword) => keyword.includes(normalizedQuery))))
     )
   );
+  const visibleUnicode = $derived(matchingUnicode.slice(0, visibleLimit));
   const matchingCustom = $derived(
     customEmojis.filter(
       (emoji) => !normalizedQuery || emoji.name.toLowerCase().includes(normalizedQuery)
     )
   );
 
-  onMount(() => searchInput?.focus());
+  onMount(() => {
+    searchInput?.focus();
+    void loadUnicodeEmojis()
+      .then((emojis) => {
+        unicodeEmojis = emojis;
+      })
+      .catch(() => {
+        loadFailed = true;
+      })
+      .finally(() => {
+        loading = false;
+      });
+  });
 </script>
 
 <div class="emoji-picker" role="dialog" aria-modal="false" aria-label="Choose an emoji">
@@ -47,7 +64,12 @@
   </header>
   <label class="emoji-search">
     <span class="visually-hidden">Search emoji</span>
-    <input bind:this={searchInput} bind:value={query} placeholder="Search emoji" />
+    <input
+      bind:this={searchInput}
+      bind:value={query}
+      oninput={() => (visibleLimit = 240)}
+      placeholder="Search emoji"
+    />
   </label>
   <nav aria-label="Emoji categories">
     {#if customEmojis.length}
@@ -62,6 +84,7 @@
         onclick={() => {
           category = item.id;
           query = '';
+          visibleLimit = 240;
         }}>{item.icon}</button
       >
     {/each}
@@ -82,14 +105,25 @@
         ? 'Search results'
         : emojiCategories.find((item) => item.id === category)?.label}
     </h3>
-    <div class="emoji-grid">
-      {#each matchingUnicode as emoji (`${emoji.category}:${emoji.name}`)}
-        <button type="button" title={`:${emoji.name}:`} onclick={() => onSelect(emoji.value)}
-          >{emoji.value}</button
-        >
-      {/each}
-    </div>
-    {#if !matchingCustom.length && !matchingUnicode.length}<p>No emoji found.</p>{/if}
+    {#if loading}
+      <p>Loading emoji…</p>
+    {:else if loadFailed}
+      <p>Could not load emoji.</p>
+    {:else}
+      <div class="emoji-grid">
+        {#each visibleUnicode as emoji (emoji.value)}
+          <button type="button" title={emoji.name} onclick={() => onSelect(emoji.value)}
+            >{emoji.value}</button
+          >
+        {/each}
+      </div>
+      {#if matchingUnicode.length > visibleUnicode.length}
+        <button class="show-more" type="button" onclick={() => (visibleLimit += 240)}>
+          Show more emoji
+        </button>
+      {/if}
+      {#if !matchingCustom.length && !matchingUnicode.length}<p>No emoji found.</p>{/if}
+    {/if}
   </div>
   <footer>
     <span aria-hidden="true">{matchingUnicode[0]?.value ?? '😀'}</span>
@@ -196,6 +230,14 @@
   .emoji-results p {
     color: var(--text-muted);
     text-align: center;
+  }
+  .show-more {
+    display: block;
+    margin: 10px auto 2px;
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    font-weight: 750;
   }
   footer {
     justify-content: flex-start;

@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "dompurify": "3.4.12",
+    "emojibase-data": "17.0.0",
     "marked": "18.0.6",
     "livekit-client": "^2.20.1"
   },
