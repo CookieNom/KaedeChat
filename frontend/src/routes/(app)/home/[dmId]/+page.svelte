@@ -42,6 +42,7 @@
     type Completion
   } from '$lib/components/ComposerAutocomplete.svelte';
   import Icon from '$lib/components/Icon.svelte';
+  import EmojiPicker from '$lib/components/EmojiPicker.svelte';
   import GifPicker from '$lib/components/GifPicker.svelte';
   import MessageRow from '$lib/components/MessageRow.svelte';
   import PresencePicker from '$lib/components/PresencePicker.svelte';
@@ -83,6 +84,7 @@
   let content = $state('');
   let gifPickerEnabled = $state(false);
   let gifPickerOpen = $state(false);
+  let emojiPickerOpen = $state(false);
   let error = $state('');
   let busy = $state(false);
   let channelReady = $state(false);
@@ -521,7 +523,23 @@
   function chooseGif(gif: GifResult) {
     if (busy || !channelReady || !channel || editingMessage) return;
     gifPickerOpen = false;
+    emojiPickerOpen = false;
     void send(pendingMessageSend(gif.url, [], []));
+  }
+
+  function chooseEmoji(value: string) {
+    if (busy || !channelReady || !channel) return;
+    const start = composerInput?.selectionStart ?? composerCursor;
+    const end = composerInput?.selectionEnd ?? start;
+    const next = `${content.slice(0, start)}${value}${content.slice(end)}`;
+    if (next.length > 4000) return;
+    content = next;
+    composerCursor = start + value.length;
+    emojiPickerOpen = false;
+    void tick().then(() => {
+      composerInput?.focus();
+      composerInput?.setSelectionRange(composerCursor, composerCursor);
+    });
   }
 
   $effect(() => {
@@ -1613,7 +1631,24 @@
             disabled={busy || !channelReady || !channel}
             aria-label="Choose a GIF"
             aria-expanded={gifPickerOpen}
-            onclick={() => (gifPickerOpen = !gifPickerOpen)}>GIF</button
+            onclick={() => {
+              gifPickerOpen = !gifPickerOpen;
+              emojiPickerOpen = false;
+            }}>GIF</button
+          >
+        {/if}
+        {#if !editingMessage}
+          <button
+            class="emoji-button"
+            class:active={emojiPickerOpen}
+            type="button"
+            disabled={busy || !channelReady || !channel}
+            aria-label="Choose an emoji"
+            aria-expanded={emojiPickerOpen}
+            onclick={() => {
+              emojiPickerOpen = !emojiPickerOpen;
+              gifPickerOpen = false;
+            }}>☺</button
           >
         {/if}
         <small class="composer-count">{content.length}/4000</small>
@@ -1636,6 +1671,9 @@
       </form>
       {#if gifPickerOpen}
         <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
+      {/if}
+      {#if emojiPickerOpen}
+        <EmojiPicker onSelect={chooseEmoji} onClose={() => (emojiPickerOpen = false)} />
       {/if}
       {#if uploads.length && !editingMessage}
         <UploadPreviewTray {uploads} onRemove={removeUpload} />

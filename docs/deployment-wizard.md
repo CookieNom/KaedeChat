@@ -20,7 +20,7 @@ The wizard asks about:
   referencing operator-supplied TLS certificate and private-key paths;
 - bundled Garage, AWS S3, Backblaze B2, Cloudflare R2, or generic S3 storage;
 - Mailtrap API, Mailtrap SMTP, AWS SES SMTP, generic SMTP, or no email;
-- optional KLIPY GIF search and Cloudflare Turnstile registration protection;
+- optional KLIPY GIF search and Cloudflare Turnstile registration/adaptive sign-in protection;
 - optional LiveKit voice/video and observability services; and
 - worker counts, upload limits, and non-conflicting host ports.
 
@@ -74,7 +74,7 @@ Kaede, and Kaede returns a bounded, validated list of provider-hosted media.
 Turnstile requires the widget's public site key and private secret. The wizard
 stores the latter under Cloudflare's `TURNSTILE_SECRET` name and never prints
 either private credential. Registration validation binds successful tokens to
-the instance hostname and the `turnstile-spin-v2` action.
+the instance hostname and distinct `kaede-register` or `kaede-login` action.
 
 ## After setup
 

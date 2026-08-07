@@ -3,6 +3,7 @@
   import { api, ApiError } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import { safeReturnPath } from '$lib/auth/return-path';
+  import TurnstileWidget from '$lib/components/TurnstileWidget.svelte';
   import { onMount, tick } from 'svelte';
 
   interface LoginResult {
@@ -17,6 +18,11 @@
   let error = $state('');
   let busy = $state(false);
   let recoveryEnabled = $state<boolean | null>(null);
+  let turnstileEnabled = $state(false);
+  let turnstileSiteKey = $state<string | null>(null);
+  let turnstileRequired = $state(false);
+  let turnstileToken = $state<string | null>(null);
+  let turnstileWidget = $state<TurnstileWidget | null>(null);
   let codeInput = $state<HTMLInputElement | null>(null);
 
   onMount(() => {
@@ -24,6 +30,8 @@
     void loadAuthConfiguration(controller.signal)
       .then((configuration) => {
         recoveryEnabled = configuration.password_recovery_enabled;
+        turnstileEnabled = configuration.turnstile.enabled;
+        turnstileSiteKey = configuration.turnstile.site_key;
       })
       .catch(() => {
         // Keep the recovery link when capability discovery is temporarily
@@ -46,7 +54,11 @@
       } else {
         const result = await api<LoginResult>('/auth/login', {
           method: 'POST',
-          body: JSON.stringify({ identifier, password })
+          body: JSON.stringify({
+            identifier,
+            password,
+            ...(turnstileRequired ? { turnstile_token: turnstileToken } : {})
+          })
         });
         if (result.mfa_required) {
           ticket = result.mfa_ticket ?? null;
@@ -63,7 +75,23 @@
       sessionStorage.removeItem('kaede.return-to');
       window.location.replace(safeReturnPath(returnTo, window.location.origin) ?? resolve('/home'));
     } catch (caught) {
-      error = caught instanceof ApiError ? caught.message : 'Could not sign in.';
+      if (caught instanceof ApiError) {
+        error = caught.message;
+        const needsChallenge =
+          turnstileEnabled &&
+          (caught.detail.turnstile_required === true ||
+            caught.code === 'TURNSTILE_REQUIRED' ||
+            caught.code === 'TURNSTILE_INVALID');
+        if (needsChallenge) {
+          const alreadyVisible = turnstileRequired;
+          turnstileRequired = true;
+          turnstileToken = null;
+          await tick();
+          if (alreadyVisible) turnstileWidget?.reset();
+        }
+      } else {
+        error = 'Could not sign in.';
+      }
     } finally {
       busy = false;
     }
@@ -115,9 +143,20 @@
         disabled={busy}
       /></label
     >
+    {#if turnstileRequired && turnstileSiteKey}
+      <div class="adaptive-challenge">
+        <p class="field-note">Please verify this sign-in attempt before trying again.</p>
+        <TurnstileWidget
+          bind:this={turnstileWidget}
+          siteKey={turnstileSiteKey}
+          action="kaede-login"
+          onToken={(token) => (turnstileToken = token)}
+        />
+      </div>
+    {/if}
   {/if}
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-  <button class="primary-button" disabled={busy}
+  <button class="primary-button" disabled={busy || (turnstileRequired && !turnstileToken)}
     >{busy ? 'One moment…' : ticket ? 'Verify' : 'Sign in'}</button
   >
 </form>

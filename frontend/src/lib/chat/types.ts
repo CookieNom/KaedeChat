@@ -45,6 +45,7 @@ export interface Guild {
   owner_id: string;
   owner_domain?: string;
   permissions?: string;
+  actor_highest_role_id?: string;
   permission_generation: string;
   federated_history_policy?: 'disabled' | 'full_retained';
   history_policy_generation?: string;

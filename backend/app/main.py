@@ -25,6 +25,7 @@ from app.api.gifs import router as gifs_router
 from app.api.guild_lifecycle import router as guild_lifecycle_router
 from app.api.guilds import router as guilds_router
 from app.api.invites import router as invites_router
+from app.api.link_previews import router as link_previews_router
 from app.api.management import router as management_router
 from app.api.media import router as media_router
 from app.api.moderation import router as moderation_router
@@ -109,6 +110,7 @@ app.include_router(channels_router)
 app.include_router(calls_router)
 app.include_router(dms_router)
 app.include_router(invites_router)
+app.include_router(link_previews_router)
 app.include_router(management_router)
 app.include_router(media_router)
 app.include_router(moderation_router)

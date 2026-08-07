@@ -14,7 +14,7 @@ from app.core.settings import Settings, get_settings
 
 router = APIRouter(prefix="/api/v1/gifs", tags=["gifs"])
 KLIPY_API_ROOT = "https://api.klipy.com/api/v1"
-KLIPY_MEDIA_HOST = "media.klipy.com"
+KLIPY_MEDIA_HOSTS = frozenset({"media.klipy.com", "static.klipy.com"})
 MAX_UPSTREAM_BYTES = 2 * 1024 * 1024
 
 
@@ -49,7 +49,7 @@ def _safe_media_url(value: object) -> str | None:
         return None
     if (
         url.scheme != "https"
-        or url.host != KLIPY_MEDIA_HOST
+        or url.host not in KLIPY_MEDIA_HOSTS
         or url.userinfo
         or url.port not in {None, 443}
     ):

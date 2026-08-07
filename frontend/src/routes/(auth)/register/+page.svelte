@@ -163,6 +163,7 @@
       <TurnstileWidget
         bind:this={turnstileWidget}
         siteKey={turnstileSiteKey}
+        action="kaede-register"
         onToken={(token) => (turnstileToken = token)}
       />
     {/if}

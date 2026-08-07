@@ -67,5 +67,7 @@ def test_rate_limit_matrix_covers_every_normative_expensive_route() -> None:
         "upload_ticket",
         "remote_media_fetch",
         "gif_search",
+        "link_preview",
+        "link_preview_media",
     }
     assert all(item.limit > 0 and item.period_seconds > 0 for item in CLIENT_RATE_LIMITS.values())

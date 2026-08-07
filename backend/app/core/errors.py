@@ -43,6 +43,11 @@ API_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 
 
 def apply_response_cache_policy(path: str, response: Response) -> None:
+    if path.startswith("/api/v1/link-previews/media/") and response.status_code == 200:
+        response.headers["Cache-Control"] = "private, max-age=900"
+        if "Pragma" in response.headers:
+            del response.headers["Pragma"]
+        return
     if path in PUBLIC_CACHE_PATHS and response.status_code == 200:
         response.headers["Cache-Control"] = "public, max-age=300, must-revalidate"
         if "Pragma" in response.headers:

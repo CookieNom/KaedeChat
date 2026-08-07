@@ -222,7 +222,23 @@ async def update_member_voice_moderation(
         needed |= Permission.DEAFEN_MEMBERS
     if not needed:
         raise HTTPException(status_code=400, detail={"code": "VOICE_NO_CHANGES"})
-    await require_permissions(session, redis, guild, auth.user, needed)
+    identity = participant_identity(user_id, user_domain)
+    room_raw = await redis.get(f"voice:user-room:{identity}")
+    moderation_channel = None
+    if room_raw is not None:
+        room = room_raw.decode() if isinstance(room_raw, bytes) else str(room_raw)
+        kind, room_guild_id, room_channel_id = parse_room_name(room)
+        if kind != "g" or room_guild_id != guild.id:
+            raise HTTPException(status_code=409, detail={"code": "VOICE_NOT_IN_GUILD"})
+        moderation_channel, moderation_guild = await load_voice_channel(
+            session, room_channel_id, guild.origin_domain
+        )
+        if (moderation_guild.id, moderation_guild.origin_domain) != (
+            guild.id,
+            guild.origin_domain,
+        ):
+            raise HTTPException(status_code=409, detail={"code": "VOICE_NOT_IN_GUILD"})
+    await require_permissions(session, redis, guild, auth.user, needed, channel=moderation_channel)
     member = await require_can_manage_member(session, guild, auth.user, user_id, user_domain)
     flags = member.voice_flags & VOICE_FLAG_MASK
     if payload.server_mute is not None:
@@ -278,8 +294,6 @@ async def update_member_voice_moderation(
         # Release the guild lock before contacting Redis or LiveKit even when
         # the requested state is already current.
         await session.commit()
-    identity = participant_identity(user_id, user_domain)
-    room_raw = await redis.get(f"voice:user-room:{identity}")
     if room_raw is not None:
         room = room_raw.decode() if isinstance(room_raw, bytes) else str(room_raw)
         await bump_generation(redis, settings.domain, room, identity)
@@ -325,16 +339,28 @@ async def disconnect_member_voice(
     from app.api.guilds import local_guild
 
     guild = await local_guild(session, settings, guild_ref, for_update=True)
-    await require_permissions(session, redis, guild, auth.user, Permission.MOVE_MEMBERS)
     user_id, user_domain = user_ref.resolve(settings.domain)
     await require_can_manage_member(session, guild, auth.user, user_id, user_domain)
     identity = participant_identity(user_id, user_domain)
     room_raw = await redis.get(f"voice:user-room:{identity}")
     if room_raw is not None:
         room = room_raw.decode() if isinstance(room_raw, bytes) else str(room_raw)
-        kind, room_guild_id, _ = parse_room_name(room)
+        kind, room_guild_id, room_channel_id = parse_room_name(room)
         if kind != "g" or room_guild_id != guild.id:
             raise HTTPException(status_code=409, detail={"code": "VOICE_NOT_IN_GUILD"})
+        source_channel, source_guild = await load_voice_channel(
+            session, room_channel_id, guild.origin_domain
+        )
+        if (source_guild.id, source_guild.origin_domain) != (guild.id, guild.origin_domain):
+            raise HTTPException(status_code=409, detail={"code": "VOICE_NOT_IN_GUILD"})
+        await require_permissions(
+            session,
+            redis,
+            guild,
+            auth.user,
+            Permission.MOVE_MEMBERS,
+            channel=source_channel,
+        )
         await add_audit_entry(
             session,
             snowflake,
@@ -353,6 +379,7 @@ async def disconnect_member_voice(
             log.warning("voice_disconnect_control_failed", room=room, identity=identity)
         await remove_occupant(redis, settings.domain, room, identity)
     else:
+        await require_permissions(session, redis, guild, auth.user, Permission.MOVE_MEMBERS)
         await session.commit()
     return Response(status_code=204)
 
@@ -372,7 +399,6 @@ async def move_member_voice(
     from app.api.guilds import local_guild
 
     guild = await local_guild(session, settings, guild_ref, for_update=True)
-    await require_permissions(session, redis, guild, auth.user, Permission.MOVE_MEMBERS)
     user_id, user_domain = user_ref.resolve(settings.domain)
     await require_can_manage_member(session, guild, auth.user, user_id, user_domain)
     target_id, target_domain = payload.channel_id.resolve(settings.domain)
@@ -398,6 +424,27 @@ async def move_member_voice(
     kind, source_guild_id, source_channel_id = parse_room_name(source_room)
     if kind != "g" or source_guild_id != guild.id:
         raise HTTPException(status_code=409, detail={"code": "VOICE_NOT_IN_GUILD"})
+    source_channel, source_guild = await load_voice_channel(
+        session, source_channel_id, guild.origin_domain
+    )
+    if (source_guild.id, source_guild.origin_domain) != (guild.id, guild.origin_domain):
+        raise HTTPException(status_code=409, detail={"code": "VOICE_NOT_IN_GUILD"})
+    await require_permissions(
+        session,
+        redis,
+        guild,
+        auth.user,
+        Permission.MOVE_MEMBERS,
+        channel=source_channel,
+    )
+    await require_permissions(
+        session,
+        redis,
+        guild,
+        auth.user,
+        Permission.MOVE_MEMBERS,
+        channel=target_channel,
+    )
     if source_room == f"g.{guild.id}.{target_channel.id}":
         return Response(status_code=204)
     await add_audit_entry(

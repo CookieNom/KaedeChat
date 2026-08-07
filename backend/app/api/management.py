@@ -33,7 +33,7 @@ from app.chat.hierarchy import (
     highest_role,
     require_can_manage_member,
     require_can_manage_role,
-    role_rank,
+    role_reorder_allowed,
 )
 from app.chat.payloads import channel_payload, guild_payload, member_payload, role_payload
 from app.chat.permissions import require_permissions
@@ -499,26 +499,36 @@ async def reorder_roles(
             .where(
                 Role.guild_id == guild.id,
                 Role.guild_domain == guild.origin_domain,
-                Role.id.in_([item.id for item in payload.roles]),
             )
             .with_for_update()
         )
     )
-    if len(roles) != len(payload.roles) or any(role.id == guild.id for role in roles):
-        raise HTTPException(status_code=404, detail={"code": "ROLE_NOT_FOUND"})
+    movable_roles = [role for role in roles if role.id != guild.id]
+    requested_ids = {item.id for item in payload.roles}
+    if requested_ids != {role.id for role in movable_roles}:
+        raise HTTPException(status_code=400, detail={"code": "ROLE_ORDER_INCOMPLETE"})
+    expected_positions = set(range(1, len(movable_roles) + 1))
+    if {item.position for item in payload.roles} != expected_positions:
+        raise HTTPException(status_code=400, detail={"code": "ROLE_ORDER_NOT_CONTIGUOUS"})
     by_id = {role.id: role for role in roles}
+    actor_is_owner = (guild.owner_id, guild.owner_domain) == (
+        auth.user.id,
+        auth.user.origin_domain,
+    )
+    actor_role = (
+        None
+        if actor_is_owner
+        else await highest_role(session, guild, auth.user.id, auth.user.origin_domain)
+    )
     changes: list[dict[str, object]] = []
     changed: list[Role] = []
     for item in payload.roles:
         role = by_id[item.id]
-        require_current_version(role.updated_at, item.version)
-        await require_can_manage_role(session, guild, auth.user, role)
-        if (guild.owner_id, guild.owner_domain) != (auth.user.id, auth.user.origin_domain):
-            actor_role = await highest_role(session, guild, auth.user.id, auth.user.origin_domain)
-            if (item.position, -role.id) >= role_rank(actor_role):
-                raise HTTPException(status_code=403, detail={"code": "ROLE_HIERARCHY"})
         if role.position == item.position:
             continue
+        require_current_version(role.updated_at, item.version)
+        if actor_role is not None and not role_reorder_allowed(actor_role, role, item.position):
+            raise HTTPException(status_code=403, detail={"code": "ROLE_HIERARCHY"})
         changes.append(
             {"key": str(role.id), "old_value": role.position, "new_value": item.position}
         )
@@ -558,7 +568,7 @@ async def reorder_roles(
                 "GUILD_ROLE_UPDATE",
                 role_payload(role),
             )
-    return [role_payload(role) for role in roles]
+    return [role_payload(by_id[item.id]) for item in payload.roles]
 
 
 @router.patch("/{guild_id}/roles/{role_id}")
@@ -588,15 +598,8 @@ async def update_role(
         and (payload.permissions ^ role.permissions) & ~actor_permissions
     ):
         raise HTTPException(status_code=403, detail={"code": "CANNOT_MANAGE_PERMISSIONS"})
-    if role.id == guild.id and payload.position is not None:
-        raise HTTPException(status_code=400, detail={"code": "EVERYONE_POSITION_IMMUTABLE"})
-    if payload.position is not None and (guild.owner_id, guild.owner_domain) != (
-        auth.user.id,
-        auth.user.origin_domain,
-    ):
-        actor_role = await highest_role(session, guild, auth.user.id, auth.user.origin_domain)
-        if (payload.position, -role.id) >= role_rank(actor_role):
-            raise HTTPException(status_code=403, detail={"code": "ROLE_HIERARCHY"})
+    if payload.position is not None:
+        raise HTTPException(status_code=400, detail={"code": "ROLE_POSITION_BATCH_REQUIRED"})
     changes: list[dict[str, object]] = []
     for field, value in payload.model_dump(exclude_unset=True).items():
         old = getattr(role, field)

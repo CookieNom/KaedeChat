@@ -117,7 +117,8 @@ configuration without exposing the instance master key to the gateway.
 Optional interaction services are disabled by default. Set
 `KAEDE_KLIPY_ENABLED=true` with a private `KAEDE_KLIPY_API_KEY` to expose the GIF
 picker. Set `KAEDE_TURNSTILE_ENABLED=true`, `KAEDE_TURNSTILE_SITE_KEY`, and the
-private `TURNSTILE_SECRET` to require Turnstile during registration. The API key
+private `TURNSTILE_SECRET` to require Turnstile during registration and after a
+failed sign-in attempt. The API key
 and Turnstile secret belong only in backend environments; neither is included
 in public configuration responses.
 

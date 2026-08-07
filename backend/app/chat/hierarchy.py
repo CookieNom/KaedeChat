@@ -67,6 +67,12 @@ def role_rank(role: Role) -> tuple[int, int]:
     return role.position, -role.id
 
 
+def role_reorder_allowed(actor_role: Role, target_role: Role, new_position: int) -> bool:
+    """Return whether an actor can move a role without crossing its own hierarchy ceiling."""
+
+    return role_rank(target_role) < role_rank(actor_role) and new_position < actor_role.position
+
+
 async def highest_role(session: AsyncSession, guild: Guild, user_id: int, user_domain: str) -> Role:
     roles = await member_roles(session, guild, user_id, user_domain)
     return max(roles, key=role_rank)

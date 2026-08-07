@@ -49,11 +49,26 @@
   let relationshipError = $state('');
   let roleBusy = $state<string | null>(null);
   let roleError = $state('');
+  let rolePickerOpen = $state(false);
+  let roleSearch = $state('');
   const assignedRoles = $derived(
     roles
       .filter((role) => roleIds.includes(role.id))
       .sort((left, right) => right.position - left.position)
   );
+  const availableRoles = $derived(
+    manageableRoles.filter(
+      (role) =>
+        !roleIds.includes(role.id) &&
+        role.name.toLowerCase().includes(roleSearch.trim().toLowerCase())
+    )
+  );
+
+  function roleIsManageable(role: Role): boolean {
+    return manageableRoles.some(
+      (candidate) => candidate.id === role.id && candidate.origin_domain === role.origin_domain
+    );
+  }
   const statusLabel = $derived(
     presence === 'dnd'
       ? 'Do not disturb'
@@ -145,13 +160,15 @@
   }
 
   async function changeRole(role: Role, enabled: boolean) {
-    if (!onRoleChange || roleBusy) return;
+    if (!onRoleChange || roleBusy) return false;
     roleBusy = role.id;
     roleError = '';
     try {
       await onRoleChange(user, role, enabled);
+      return true;
     } catch (caught) {
       roleError = caught instanceof ApiError ? caught.message : 'Could not update this role.';
+      return false;
     } finally {
       roleBusy = null;
     }
@@ -246,38 +263,82 @@
 
       {#if assignedRoles.length || manageableRoles.length}
         <section class="user-popover-roles" aria-labelledby="user-popover-roles-heading">
-          <h3 id="user-popover-roles-heading">Roles</h3>
-          {#if assignedRoles.length}
-            <div class="user-role-tags">
-              {#each assignedRoles as role (role.id + '@' + role.origin_domain)}
-                <span>
-                  <i style={`--role-color: #${role.color.toString(16).padStart(6, '0')}`}></i>
-                  {role.name}
-                </span>
-              {/each}
-            </div>
-          {:else}
-            <p class="user-role-empty">No assigned roles</p>
-          {/if}
-          {#if manageableRoles.length && onRoleChange}
-            <details class="user-role-editor">
-              <summary>Manage roles</summary>
+          <div class="user-role-heading">
+            <h3 id="user-popover-roles-heading">Roles</h3>
+            {#if manageableRoles.length && onRoleChange}
+              <button
+                class="user-role-add"
+                type="button"
+                aria-label="Add role"
+                aria-expanded={rolePickerOpen}
+                title="Add role"
+                onclick={(event) => {
+                  event.stopPropagation();
+                  rolePickerOpen = !rolePickerOpen;
+                  roleSearch = '';
+                }}>+</button
+              >
+            {/if}
+          </div>
+          <div class="user-role-tags">
+            {#each assignedRoles as role (role.id + '@' + role.origin_domain)}
+              <span>
+                <i style={`--role-color: #${role.color.toString(16).padStart(6, '0')}`}></i>
+                {role.name}
+                {#if roleIsManageable(role) && onRoleChange}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${role.name}`}
+                    title={`Remove ${role.name}`}
+                    disabled={roleBusy !== null}
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      void changeRole(role, false);
+                    }}>×</button
+                  >
+                {/if}
+              </span>
+            {/each}
+            {#if !assignedRoles.length}<span class="user-role-empty">No assigned roles</span>{/if}
+          </div>
+          {#if rolePickerOpen && onRoleChange}
+            <div
+              class="user-role-picker"
+              role="dialog"
+              tabindex="-1"
+              aria-label="Add a role"
+              onpointerdown={(event) => event.stopPropagation()}
+            >
+              <input
+                bind:value={roleSearch}
+                type="search"
+                placeholder="Search roles"
+                aria-label="Search roles"
+              />
               <div>
-                {#each manageableRoles as role (role.id + '@' + role.origin_domain)}
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={roleIds.includes(role.id)}
-                      disabled={roleBusy !== null}
-                      onchange={(event) => void changeRole(role, event.currentTarget.checked)}
-                    />
+                {#each availableRoles as role (role.id + '@' + role.origin_domain)}
+                  <button
+                    type="button"
+                    disabled={roleBusy !== null}
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      void changeRole(role, true).then((saved) => {
+                        if (saved) {
+                          rolePickerOpen = false;
+                          roleSearch = '';
+                        }
+                      });
+                    }}
+                  >
                     <i style={`--role-color: #${role.color.toString(16).padStart(6, '0')}`}></i>
                     <span>{role.name}</span>
                     {#if roleBusy === role.id}<small>Saving…</small>{/if}
-                  </label>
+                  </button>
+                {:else}
+                  <p>No matching roles available.</p>
                 {/each}
               </div>
-            </details>
+            </div>
           {/if}
           {#if roleError}<p class="user-popover-error" role="alert">{roleError}</p>{/if}
         </section>
@@ -559,6 +620,32 @@
     text-transform: uppercase;
   }
 
+  .user-role-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .user-role-add {
+    display: grid;
+    width: 24px;
+    height: 24px;
+    place-items: center;
+    border: 0;
+    border-radius: 7px;
+    padding: 0;
+    color: var(--text-muted);
+    background: transparent;
+    font-size: 1.15rem;
+    cursor: pointer;
+  }
+
+  .user-role-add:hover,
+  .user-role-add[aria-expanded='true'] {
+    color: var(--text);
+    background: var(--surface-hover);
+  }
+
   .user-role-tags {
     display: flex;
     flex-wrap: wrap;
@@ -577,8 +664,27 @@
     font-size: 0.68rem;
   }
 
+  .user-role-tags span > button {
+    display: grid;
+    width: 16px;
+    height: 16px;
+    place-items: center;
+    border: 0;
+    border-radius: 50%;
+    padding: 0;
+    color: var(--text-muted);
+    background: transparent;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .user-role-tags span > button:hover {
+    color: var(--text);
+    background: var(--surface-hover);
+  }
+
   .user-role-tags i,
-  .user-role-editor label > i {
+  .user-role-picker button > i {
     width: 8px;
     height: 8px;
     flex: 0 0 auto;
@@ -587,44 +693,68 @@
   }
 
   .user-role-empty {
+    border-style: dashed !important;
     margin: 0;
     color: var(--text-muted);
     font-size: 0.72rem;
   }
 
-  .user-role-editor summary {
-    width: fit-content;
-    color: var(--accent);
-    font-size: 0.72rem;
-    font-weight: 750;
+  .user-role-picker {
+    display: grid;
+    gap: 8px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 8px;
+    background: var(--surface-overlay, var(--surface-raised));
+    box-shadow: var(--shadow-md);
+  }
+
+  .user-role-picker > input {
+    width: 100%;
+    min-height: 36px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0 10px;
+    color: var(--text);
+    background: var(--surface-inset);
+  }
+
+  .user-role-picker > div {
+    display: grid;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+
+  .user-role-picker button {
+    display: grid;
+    min-height: 38px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    border: 0;
+    border-radius: 8px;
+    padding: 7px 8px;
+    color: var(--text-soft);
+    background: transparent;
+    font-size: 0.74rem;
+    text-align: left;
     cursor: pointer;
   }
 
-  .user-role-editor > div {
-    display: grid;
-    max-height: 150px;
-    gap: 2px;
-    overflow-y: auto;
-    margin-top: 7px;
-  }
-
-  .user-role-editor label {
-    display: grid;
-    grid-template-columns: auto auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 8px;
-    border-radius: 8px;
-    padding: 7px;
-    font-size: 0.74rem;
-  }
-
-  .user-role-editor label:hover {
+  .user-role-picker button:hover {
+    color: var(--text);
     background: var(--surface-subtle);
   }
 
-  .user-role-editor small {
+  .user-role-picker small,
+  .user-role-picker p {
+    margin: 0;
     color: var(--text-muted);
     font-size: 0.63rem;
+  }
+
+  .user-role-picker p {
+    padding: 10px 8px;
   }
 
   .user-popover-actions {

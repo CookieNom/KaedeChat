@@ -3474,11 +3474,150 @@ progress {
   min-height: 42px;
 }
 
-.color-input {
-  width: 100%;
-  min-height: 42px;
-  padding: 0.25rem;
+.role-item[draggable='true'] {
+  cursor: grab;
+}
+
+.role-item[draggable='true']:active {
+  cursor: grabbing;
+}
+
+.role-item.drag-over {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--accent-soft);
+}
+
+.role-item.role-locked .role-drag-handle {
+  visibility: hidden;
+}
+
+.role-drag-handle {
+  width: 14px;
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.role-name-fields {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.role-color-field {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+.role-color-field legend {
+  padding: 0;
+  font-size: 0.77rem;
+  font-weight: 750;
+}
+.role-color-field > small {
+  margin-top: -0.5rem;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+}
+.role-color-controls {
+  display: grid;
+  grid-template-columns: 72px 72px minmax(0, 1fr);
+  gap: 0.6rem;
+  align-items: stretch;
+}
+.role-color-default,
+.role-color-custom {
+  position: relative;
+  display: grid;
+  height: 70px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  background: var(--surface-subtle);
   cursor: pointer;
+}
+.role-color-default > span {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 9px;
+  color: #172027;
+  background: #a9b7c2;
+  font-size: 1.15rem;
+}
+.role-color-default small,
+.role-color-custom small {
+  font-size: 0.6rem;
+  font-weight: 700;
+}
+.role-color-custom input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.role-color-custom > span {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--selected-role-color);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 20%);
+}
+.role-color-default.selected,
+.role-color-custom.selected,
+.role-color-swatches button.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.role-color-swatches {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(22px, 1fr));
+  gap: 0.42rem;
+  align-content: center;
+}
+.role-color-swatches button {
+  min-width: 22px;
+  aspect-ratio: 1;
+  border: 0;
+  border-radius: 7px;
+  background: var(--swatch);
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 12%);
+}
+.role-color-swatches button:hover {
+  transform: scale(1.1);
+}
+.role-color-hex {
+  display: flex;
+  width: min(180px, 100%);
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-subtle);
+}
+.role-color-hex span {
+  padding-left: 0.65rem;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+}
+.role-color-hex input {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  box-shadow: none;
+}
+.role-color-field:disabled {
+  opacity: 0.58;
 }
 
 .toggle-list {
@@ -4574,7 +4713,7 @@ progress {
 .composer {
   display: grid;
   min-height: 54px;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
   align-items: end;
   gap: 0.3rem;
   border: 1px solid var(--line);
@@ -4606,6 +4745,7 @@ progress {
 
 .attach-button,
 .gif-button,
+.emoji-button,
 .send-button {
   display: grid;
   width: 42px;
@@ -4633,7 +4773,9 @@ progress {
 }
 
 .gif-button:hover:not(:disabled),
-.gif-button.active {
+.gif-button.active,
+.emoji-button:hover:not(:disabled),
+.emoji-button.active {
   color: var(--accent-text);
   background: var(--accent-soft);
 }
@@ -4649,6 +4791,7 @@ progress {
 
 .attach-button:disabled,
 .gif-button:disabled,
+.emoji-button:disabled,
 .send-button:disabled {
   cursor: not-allowed;
   opacity: 0.42;
@@ -4681,6 +4824,27 @@ progress {
 
 .gif-picker > header {
   border-bottom: 1px solid var(--line-soft);
+}
+
+.gif-tabs {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.gif-tabs button {
+  border: 0;
+  border-radius: 8px;
+  padding: 0.45rem 0.65rem;
+  color: var(--text-muted);
+  background: transparent;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.gif-tabs button.active {
+  color: var(--text);
+  background: var(--surface-subtle);
 }
 
 .gif-picker > footer {
@@ -4727,14 +4891,24 @@ progress {
   cursor: pointer;
 }
 
-.gif-result img {
+.gif-select {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.gif-select img {
   width: 100%;
   height: 100%;
   min-height: 130px;
   object-fit: cover;
 }
 
-.gif-result span {
+.gif-select span {
   position: absolute;
   right: 0;
   bottom: 0;
@@ -4748,6 +4922,36 @@ progress {
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.gif-favorite {
+  position: absolute;
+  z-index: 1;
+  top: 0.4rem;
+  right: 0.4rem;
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 20%);
+  border-radius: 999px;
+  color: white;
+  background: rgb(0 0 0 / 65%);
+  opacity: 0;
+  cursor: pointer;
+  transition:
+    opacity 120ms ease,
+    color 120ms ease;
+}
+
+.gif-result:hover .gif-favorite,
+.gif-favorite:focus-visible,
+.gif-favorite.active {
+  opacity: 1;
+}
+
+.gif-favorite.active {
+  color: #ffd76a;
 }
 
 .gif-state {
@@ -4806,6 +5010,18 @@ progress {
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: 0.61rem;
+}
+
+.slowmode-indicator {
+  align-self: center;
+  border-radius: 999px;
+  padding: 0.28rem 0.45rem;
+  color: var(--warning-text, var(--text));
+  background: color-mix(in srgb, var(--warning, #d49a27) 18%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 750;
+  white-space: nowrap;
 }
 
 .composer-disabled {
@@ -5049,6 +5265,14 @@ progress {
 .voice-channel-members button:hover {
   color: var(--text);
   background: var(--surface-hover);
+}
+
+.voice-channel-members button[draggable='true'] {
+  cursor: grab;
+}
+
+.voice-channel-members button[draggable='true']:active {
+  cursor: grabbing;
 }
 .voice-channel-members button > span:nth-child(2) {
   overflow: hidden;
@@ -6441,7 +6665,16 @@ progress {
   }
 
   .composer {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  }
+
+  .role-color-controls {
+    grid-template-columns: repeat(2, 72px);
+  }
+
+  .role-color-swatches {
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(9, minmax(22px, 1fr));
   }
 
   .gif-picker {

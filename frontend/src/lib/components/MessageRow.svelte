@@ -16,6 +16,7 @@
   import { entityRef } from '$lib/chat/refs';
   import { inviteReferencesInMessage } from '$lib/chat/invites';
   import { klipyGifUrl } from '$lib/chat/gifs';
+  import { previewableLink } from '$lib/chat/links';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { DISMISS_FLOATING_LAYERS_EVENT, dismissFloatingLayers } from '$lib/ui/floating-layers';
   import { portal } from '$lib/ui/portal';
@@ -25,6 +26,7 @@
   import { onDestroy, tick } from 'svelte';
   import Markdown from './Markdown.svelte';
   import InviteEmbed from './InviteEmbed.svelte';
+  import LinkPreview from './LinkPreview.svelte';
 
   let {
     message,
@@ -72,6 +74,7 @@
     message.content ? inviteReferencesInMessage(message.content) : []
   );
   const gifUrl = $derived(klipyGifUrl(message.content));
+  const linkPreviewUrl = $derived(previewableLink(message.content));
 
   function authorName(): string {
     return (
@@ -371,6 +374,9 @@
       {#each inviteReferences as reference (reference)}
         <InviteEmbed {reference} />
       {/each}
+      {#if linkPreviewUrl && (message.flags & 4) === 0}
+        <LinkPreview url={linkPreviewUrl} />
+      {/if}
     {/if}
     {#if !message.deleted_at && message.attachments?.length}
       <div class="message-attachments">

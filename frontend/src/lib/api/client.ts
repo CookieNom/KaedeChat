@@ -16,10 +16,15 @@ const ERROR_MESSAGES: Record<string, string> = {
   ROLE_HIERARCHY: 'That member or role is higher than your highest role.',
   OWNER_IMMUNE: "The guild owner can't be moderated or have their roles changed.",
   CANNOT_MANAGE_SELF: "You can't use that action on yourself.",
+  ROLE_ORDER_INCOMPLETE:
+    'The role list changed while you were reordering it. Reload and try again.',
+  ROLE_ORDER_NOT_CONTIGUOUS: 'The role order is invalid. Reload and try again.',
+  ROLE_POSITION_BATCH_REQUIRED: 'Reorder roles by dragging them in the role list.',
   TARGET_CANNOT_CONNECT: "That member doesn't have permission to join this voice channel.",
   VOICE_NOT_CONNECTED: 'That member is no longer connected to voice.',
   VOICE_DISABLED: 'Voice is disabled on this instance.',
-  VOICE_HOME_UNREACHABLE: 'The voice server is temporarily unavailable. Try again shortly.'
+  VOICE_HOME_UNREACHABLE: 'The voice server is temporarily unavailable. Try again shortly.',
+  SLOWMODE_RATE_LIMITED: 'Slow mode is active. Wait before sending another message.'
 };
 
 function readableErrorMessage(

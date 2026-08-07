@@ -145,6 +145,19 @@ class LoginLimiter:
         )
         return account_lock is not None or ip_lock is not None
 
+    @staticmethod
+    def _challenge_key(account_key: str, ip: str) -> str:
+        return f"auth:turnstile:login:{account_key}:{token_key(ip)}"
+
+    async def challenge_required(self, account_key: str, ip: str) -> bool:
+        return await self.redis.get(self._challenge_key(account_key, ip)) is not None
+
+    async def require_challenge(self, account_key: str, ip: str) -> None:
+        await self.redis.set(self._challenge_key(account_key, ip), "1", ex=900)
+
+    async def clear_challenge(self, account_key: str, ip: str) -> None:
+        await self.redis.delete(self._challenge_key(account_key, ip))
+
     async def failure(self, account_key: str, ip: str) -> None:
         await cast(
             Awaitable[object],

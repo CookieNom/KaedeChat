@@ -91,9 +91,9 @@ async def require_channel_permissions(
     access: ChannelAccess,
     actor: User,
     permissions: Permission,
-) -> None:
+) -> int:
     if access.guild is not None:
-        await require_permissions(
+        return await require_permissions(
             session,
             redis,
             access.guild,
@@ -101,6 +101,12 @@ async def require_channel_permissions(
             permissions,
             channel=access.channel,
         )
+    return int(Permission.EMBED_LINKS | Permission.ATTACH_FILES | Permission.SEND_MESSAGES)
+
+
+async def slowmode_retry_after_ms(redis: Redis, key: str) -> int:
+    remaining = await redis.pttl(key)
+    return max(1000, int(remaining) if isinstance(remaining, int) else 1000)
 
 
 async def require_dm_send(session: AsyncSession, access: ChannelAccess, actor: User) -> None:
@@ -371,7 +377,7 @@ async def create_message(
     needed = required_permissions("message.create")
     if payload.attachment_ids:
         needed |= Permission.ATTACH_FILES
-    await require_channel_permissions(
+    actor_permissions = await require_channel_permissions(
         session,
         redis,
         access,
@@ -442,14 +448,24 @@ async def create_message(
             raise HTTPException(status_code=409, detail={"code": "ATTACHMENT_ALREADY_USED"})
         message_attachments.append(attachment)
     if access.guild is not None and channel.rate_limit_per_user:
+        slowmode_key = (
+            f"slowmode:{channel.origin_domain}:{channel.id}:"
+            f"{auth.user.origin_domain}:{auth.user.id}"
+        )
         allowed = await redis.set(
-            f"slowmode:{channel.origin_domain}:{channel.id}:{auth.user.origin_domain}:{auth.user.id}",
+            slowmode_key,
             "1",
             ex=channel.rate_limit_per_user,
             nx=True,
         )
         if not allowed:
-            raise HTTPException(status_code=429, detail={"code": "SLOWMODE_RATE_LIMITED"})
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "SLOWMODE_RATE_LIMITED",
+                    "retry_after_ms": await slowmode_retry_after_ms(redis, slowmode_key),
+                },
+            )
     if access.guild is not None and access.guild.origin_domain != settings.domain:
         if payload.client_nonce is None:
             raise HTTPException(
@@ -604,6 +620,7 @@ async def create_message(
                     referenced.origin_domain if referenced is not None else None
                 ),
                 mention_user_refs=mention_refs,
+                flags=(0 if actor_permissions & Permission.EMBED_LINKS else 4),
             )
             .returning(Message)
         )

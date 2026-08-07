@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -12,7 +13,7 @@ from starlette.requests import Request
 
 import app.api.auth as auth_api
 from app.api.dependencies import AuthenticatedUser
-from app.auth.schemas import MfaCodeRequest
+from app.auth.schemas import LoginRequest, MfaCodeRequest
 from app.auth.service import (
     FAILURE_WINDOW_SCRIPT,
     INCREMENT_WITH_EXPIRY_SCRIPT,
@@ -120,7 +121,7 @@ class FakeRedis:
         return value
 
 
-def auth_settings() -> Settings:
+def auth_settings(*, turnstile: bool = False) -> Settings:
     secret_key = base64.urlsafe_b64encode(bytes(range(32))).decode()
     return Settings(
         domain="alpha.test",
@@ -128,6 +129,9 @@ def auth_settings() -> Settings:
         secret_key=secret_key,
         database_url="postgresql+asyncpg://test:test@postgres/test",
         dragonfly_url="redis://dragonfly:6379/0",
+        turnstile_enabled=turnstile,
+        turnstile_site_key="0x4AAAAAAExampleSiteKey" if turnstile else None,
+        turnstile_secret="0x4AAAAAAExampleSecret" if turnstile else None,
     )
 
 
@@ -174,6 +178,88 @@ async def test_login_limiter_locks_after_five_account_failures() -> None:
     assert await limiter.is_locked("account", "127.0.0.1")
     await limiter.success("account")
     assert not await limiter.is_locked("account", "127.0.0.1")
+
+
+@pytest.mark.asyncio
+async def test_login_limiter_turnstile_challenge_is_scoped_and_clearable() -> None:
+    redis = FakeRedis()
+    limiter = LoginLimiter(redis)  # type: ignore[arg-type]
+
+    await limiter.require_challenge("account", "127.0.0.1")
+
+    assert await limiter.challenge_required("account", "127.0.0.1")
+    assert not await limiter.challenge_required("other", "127.0.0.1")
+    assert not await limiter.challenge_required("account", "127.0.0.2")
+    await limiter.clear_challenge("account", "127.0.0.1")
+    assert not await limiter.challenge_required("account", "127.0.0.1")
+
+
+@pytest.mark.asyncio
+async def test_failed_login_requires_turnstile_on_the_next_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = FakeRedis()
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=None)
+    monkeypatch.setattr(auth_api, "verify_submitted_password", AsyncMock(return_value=False))
+    payload = LoginRequest(identifier="missing", password="incorrect")
+
+    with pytest.raises(HTTPException) as first_error:
+        await auth_api.login(
+            payload,
+            source_request(),
+            session,  # type: ignore[arg-type]
+            redis,  # type: ignore[arg-type]
+            auth_settings(turnstile=True),
+        )
+
+    assert first_error.value.status_code == 401
+    assert first_error.value.detail["turnstile_required"] is True
+
+    with pytest.raises(HTTPException) as second_error:
+        await auth_api.login(
+            payload,
+            source_request(),
+            session,  # type: ignore[arg-type]
+            redis,  # type: ignore[arg-type]
+            auth_settings(turnstile=True),
+        )
+
+    assert second_error.value.status_code == 403
+    assert second_error.value.detail["code"] == "TURNSTILE_REQUIRED"
+    assert session.scalar.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_password_rearms_challenge_after_valid_turnstile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = FakeRedis()
+    limiter = LoginLimiter(redis)  # type: ignore[arg-type]
+    admission_key = hashlib.sha256(b"missing").hexdigest()
+    await limiter.require_challenge(admission_key, "192.0.2.10")
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=None)
+    verify_turnstile = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth_api, "verify_turnstile_token", verify_turnstile)
+    monkeypatch.setattr(auth_api, "verify_submitted_password", AsyncMock(return_value=False))
+
+    with pytest.raises(HTTPException) as error:
+        await auth_api.login(
+            LoginRequest(
+                identifier="missing",
+                password="incorrect",
+                turnstile_token="single-use-token",
+            ),
+            source_request(),
+            session,  # type: ignore[arg-type]
+            redis,  # type: ignore[arg-type]
+            auth_settings(turnstile=True),
+        )
+
+    assert error.value.status_code == 401
+    assert await limiter.challenge_required(admission_key, "192.0.2.10")
+    assert verify_turnstile.await_args.kwargs["action"] == auth_api.LOGIN_ACTION
 
 
 @pytest.mark.asyncio

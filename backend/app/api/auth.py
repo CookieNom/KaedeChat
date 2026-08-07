@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import NoReturn
 
 import pyotp
 from cryptography.exceptions import InvalidTag
@@ -68,7 +69,12 @@ from app.auth.service import (
     verify_mfa_code,
 )
 from app.auth.tokens import AccessTokenStore, LoginLimiter
-from app.auth.turnstile import TurnstileUnavailableError, verify_turnstile_token
+from app.auth.turnstile import (
+    LOGIN_ACTION,
+    REGISTER_ACTION,
+    TurnstileUnavailableError,
+    verify_turnstile_token,
+)
 from app.core.proxy import resolve_client_ip
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
@@ -81,8 +87,11 @@ from app.tasks import email_outbox_drain
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
-def auth_error(code: str, message: str, status_code: int) -> HTTPException:
-    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+def auth_error(code: str, message: str, status_code: int, **details: object) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message, **details},
+    )
 
 
 def mfa_rate_limited() -> HTTPException:
@@ -129,6 +138,26 @@ async def hash_submitted_password(password: str) -> str:
         return await hash_password_async(password)
     except PasswordHashBusy:
         raise password_work_busy() from None
+
+
+async def reject_invalid_login(
+    limiter: LoginLimiter,
+    admission_key: str,
+    ip: str,
+    *,
+    turnstile_enabled: bool,
+    failed_account_key: str | None = None,
+) -> NoReturn:
+    if failed_account_key is not None:
+        await limiter.failure(failed_account_key, ip)
+    if turnstile_enabled:
+        await limiter.require_challenge(admission_key, ip)
+    raise auth_error(
+        "INVALID_CREDENTIALS",
+        "Invalid credentials",
+        401,
+        turnstile_required=turnstile_enabled,
+    )
 
 
 async def lock_current_session(session: AsyncSession, auth: AuthenticatedUser, user: User) -> bool:
@@ -245,6 +274,7 @@ async def register(
                 settings,
                 payload.turnstile_token,
                 client_ip(request, settings),
+                action=REGISTER_ACTION,
             )
         except TurnstileUnavailableError as exc:
             raise auth_error(
@@ -393,8 +423,46 @@ async def login(
             detail={"code": "LOGIN_RATE_LIMITED", "message": "Too many login attempts"},
             headers={"Retry-After": "5"},
         )
+    challenge_required = settings.turnstile_enabled and await limiter.challenge_required(
+        admission_key, ip
+    )
+    if challenge_required:
+        if payload.turnstile_token is None:
+            raise auth_error(
+                "TURNSTILE_REQUIRED",
+                "Complete the verification challenge before trying again",
+                403,
+                turnstile_required=True,
+            )
+        try:
+            verified = await verify_turnstile_token(
+                settings,
+                payload.turnstile_token,
+                ip,
+                action=LOGIN_ACTION,
+            )
+        except TurnstileUnavailableError as exc:
+            raise auth_error(
+                "TURNSTILE_UNAVAILABLE",
+                "Verification is temporarily unavailable; try again",
+                503,
+                turnstile_required=True,
+            ) from exc
+        if not verified:
+            raise auth_error(
+                "TURNSTILE_INVALID",
+                "Verification expired or was unsuccessful; try again",
+                403,
+                turnstile_required=True,
+            )
+        await limiter.clear_challenge(admission_key, ip)
     if await limiter.is_locked(admission_key, ip):
-        raise auth_error("INVALID_CREDENTIALS", "Invalid credentials", 401)
+        await reject_invalid_login(
+            limiter,
+            admission_key,
+            ip,
+            turnstile_enabled=settings.turnstile_enabled,
+        )
     handle_username: str | None = None
     if "@" in identifier:
         candidate_username, candidate_domain = identifier.rsplit("@", 1)
@@ -415,13 +483,23 @@ async def login(
     )
     account_key = hashlib.sha256(account_identity.encode()).hexdigest()
     if await limiter.is_locked(account_key, ip):
-        raise auth_error("INVALID_CREDENTIALS", "Invalid credentials", 401)
+        await reject_invalid_login(
+            limiter,
+            admission_key,
+            ip,
+            turnstile_enabled=settings.turnstile_enabled,
+        )
     password_valid = await verify_submitted_password(
         payload.password, user.password_hash if user else None
     )
     if user is None or not password_valid:
-        await limiter.failure(account_key, ip)
-        raise auth_error("INVALID_CREDENTIALS", "Invalid credentials", 401)
+        await reject_invalid_login(
+            limiter,
+            admission_key,
+            ip,
+            turnstile_enabled=settings.turnstile_enabled,
+            failed_account_key=account_key,
+        )
     verified_hash = user.password_hash
     locked_user = await session.scalar(
         select(User)
@@ -433,13 +511,25 @@ async def login(
         locked_user.password_hash != verified_hash
         and not await verify_submitted_password(payload.password, locked_user.password_hash)
     ):
-        await limiter.failure(account_key, ip)
-        raise auth_error("INVALID_CREDENTIALS", "Invalid credentials", 401)
+        await reject_invalid_login(
+            limiter,
+            admission_key,
+            ip,
+            turnstile_enabled=settings.turnstile_enabled,
+            failed_account_key=account_key,
+        )
     user = locked_user
     if user.disabled_at is not None:
-        await limiter.failure(account_key, ip)
-        raise auth_error("INVALID_CREDENTIALS", "Invalid credentials", 401)
+        await reject_invalid_login(
+            limiter,
+            admission_key,
+            ip,
+            turnstile_enabled=settings.turnstile_enabled,
+            failed_account_key=account_key,
+        )
     await limiter.success(account_key)
+    if settings.turnstile_enabled:
+        await limiter.clear_challenge(admission_key, ip)
     if email_verification_required(user, settings):
         raise auth_error("EMAIL_NOT_VERIFIED", "Verify your email before signing in", 403)
     if user.totp_secret_encrypted is not None:

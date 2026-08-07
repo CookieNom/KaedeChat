@@ -208,6 +208,9 @@
   let roleMentionable = $state(false);
   let newRoleName = $state('');
   let roleEditorTab = $state<'display' | 'permissions' | 'members'>('display');
+  let draggedRoleKey = $state<string | null>(null);
+  let roleDropKey = $state<string | null>(null);
+  let reorderingRoles = $state(false);
 
   let inviteChannel = $state('');
   let inviteMaxAge = $state('86400');
@@ -301,6 +304,55 @@
   );
   const canManageChannels = $derived(isLocalGuild && hasPermission(Permission.MANAGE_CHANNELS));
   const canManageRoles = $derived(isLocalGuild && hasPermission(Permission.MANAGE_ROLES));
+  const actorHighestRole = $derived(
+    guild?.roles?.find((role) => role.id === guild?.actor_highest_role_id) ?? null
+  );
+
+  function roleRank(role: Role): [number, bigint] {
+    return [role.position, -BigInt(role.id)];
+  }
+
+  function compareRoleRank(left: Role, right: Role): number {
+    const [leftPosition, leftId] = roleRank(left);
+    const [rightPosition, rightId] = roleRank(right);
+    return leftPosition - rightPosition || (leftId < rightId ? -1 : leftId > rightId ? 1 : 0);
+  }
+
+  function canManageRole(role: Role): boolean {
+    if (!canManageRoles) return false;
+    if (isGuildOwner) return true;
+    return Boolean(actorHighestRole && compareRoleRank(actorHighestRole, role) > 0);
+  }
+
+  function canReorderRole(role: Role): boolean {
+    return Boolean(guild && role.id !== guild.id && canManageRole(role));
+  }
+
+  function highestRoleFor(member: MemberSummary): Role | null {
+    if (!guild) return null;
+    return (
+      (guild.roles ?? [])
+        .filter((role) => role.id === guild?.id || member.role_ids.includes(role.id))
+        .sort(compareRoleRank)
+        .at(-1) ?? null
+    );
+  }
+
+  function canManageMember(member: MemberSummary): boolean {
+    if (!guild || !canManageRoles || entityRef(member.user) === currentUserRef) return false;
+    if (
+      member.user.id === guild.owner_id &&
+      member.user.origin_domain === (guild.owner_domain ?? guild.origin_domain)
+    )
+      return false;
+    if (isGuildOwner) return true;
+    const targetHighest = highestRoleFor(member);
+    return Boolean(
+      actorHighestRole && targetHighest && compareRoleRank(actorHighestRole, targetHighest) > 0
+    );
+  }
+
+  const canManageSelectedRole = $derived(Boolean(selectedRole && canManageRole(selectedRole)));
   const canViewMembers = $derived(isLocalGuild && hasPermission(Permission.VIEW_CHANNEL));
   const canKickMembers = $derived(isLocalGuild && hasPermission(Permission.KICK_MEMBERS));
   const canBanMembers = $derived(isLocalGuild && hasPermission(Permission.BAN_MEMBERS));
@@ -386,6 +438,39 @@
 
   function roleColorValue(color: number): string {
     return `#${color.toString(16).padStart(6, '0')}`;
+  }
+
+  const roleColorPalette = [
+    '#1abc9c',
+    '#2ecc71',
+    '#3498db',
+    '#9b59b6',
+    '#e91e63',
+    '#f1c40f',
+    '#e67e22',
+    '#e74c3c',
+    '#11806a',
+    '#1f8b4c',
+    '#206694',
+    '#71368a',
+    '#ad1457',
+    '#c27c0e',
+    '#a84300',
+    '#992d22',
+    '#95a5a6',
+    '#607d8b'
+  ];
+
+  function setRoleColor(value: string) {
+    if (/^#[0-9a-f]{6}$/i.test(value)) roleColor = value.toLowerCase();
+  }
+
+  function normalizeRoleColorInput(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const candidate = input.value.trim();
+    if (/^#?[0-9a-f]{6}$/i.test(candidate))
+      setRoleColor(candidate.startsWith('#') ? candidate : `#${candidate}`);
+    input.value = roleColor;
   }
 
   function roleContrastColor(color: string): '#111111' | '#ffffff' {
@@ -1061,7 +1146,19 @@
         body: JSON.stringify({ name: newRoleName, permissions: '0' })
       });
       if (generation !== loadGeneration || targetGuild !== guildId) return;
-      if (guild) guild = { ...guild, roles: [...(guild.roles ?? []), role] };
+      if (guild) {
+        guild = {
+          ...guild,
+          roles: [
+            ...(guild.roles ?? []).map((existing) =>
+              existing.id === guild?.id
+                ? existing
+                : { ...existing, position: existing.position + 1 }
+            ),
+            role
+          ]
+        };
+      }
       newRoleName = '';
       selectRole(role, true);
       notice = 'Role created. Configure its permissions before assigning it.';
@@ -1069,7 +1166,7 @@
   }
 
   function saveRole() {
-    if (!canManageRoles || !selectedRole) return;
+    if (!canManageSelectedRole || !selectedRole) return;
     const target = selectedRole;
     return run(async (targetGuild, generation) => {
       const updated = await api<Role>(
@@ -1100,44 +1197,119 @@
     });
   }
 
-  function moveSelectedRole(direction: -1 | 1) {
-    if (!guild || !selectedRole || selectedRole.id === guild.id || busy) return;
-    const ordered = [...(guild.roles ?? [])]
+  function orderedRoles(): Role[] {
+    return [...(guild?.roles ?? [])]
       .filter((role) => role.id !== guild?.id)
-      .sort((left, right) => right.position - left.position || left.id.localeCompare(right.id));
-    const index = ordered.findIndex((role) => entityKey(role) === entityKey(selectedRole!));
-    const swapIndex = index + direction;
-    if (index < 0 || swapIndex < 0 || swapIndex >= ordered.length) return;
-    const current = ordered[index];
-    const adjacent = ordered[swapIndex];
-    if (!current.version || !adjacent.version) {
+      .sort((left, right) => compareRoleRank(right, left));
+  }
+
+  function roleDragStart(event: DragEvent, role: Role) {
+    if (!canReorderRole(role) || busy || reorderingRoles) {
+      event.preventDefault();
+      return;
+    }
+    draggedRoleKey = entityKey(role);
+    event.dataTransfer?.setData('application/x-kaede-role', draggedRoleKey);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+
+  function roleDragOver(event: DragEvent, role: Role) {
+    if (!draggedRoleKey || busy || reorderingRoles || role.id === guild?.id) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    roleDropKey = entityKey(role);
+  }
+
+  function roleDragEnd() {
+    draggedRoleKey = null;
+    roleDropKey = null;
+  }
+
+  async function roleDrop(event: DragEvent, target: Role) {
+    if (!guild || !draggedRoleKey || busy || reorderingRoles || target.id === guild.id) return;
+    event.preventDefault();
+    const previous = guild.roles ?? [];
+    const ordered = orderedRoles();
+    const sourceIndex = ordered.findIndex((role) => entityKey(role) === draggedRoleKey);
+    const targetIndex = ordered.findIndex((role) => entityKey(role) === entityKey(target));
+    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+      roleDragEnd();
+      return;
+    }
+    const [moved] = ordered.splice(sourceIndex, 1);
+    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const after = event.clientY > bounds.top + bounds.height / 2;
+    let insertion = targetIndex + (after ? 1 : 0);
+    if (sourceIndex < targetIndex) insertion -= 1;
+    ordered.splice(Math.max(0, insertion), 0, moved);
+    const positioned = ordered.map((role, index) => ({
+      ...role,
+      position: ordered.length - index
+    }));
+    const previousByKey = new Map(previous.map((role) => [entityKey(role), role]));
+    const changed = positioned.filter(
+      (role) => previousByKey.get(entityKey(role))?.position !== role.position
+    );
+    if (!changed.length || changed.some((role) => !canReorderRole(role))) {
+      roleDragEnd();
+      error = 'You can only reorder roles below your highest role.';
+      return;
+    }
+    roleDragEnd();
+    await persistRoleOrder(previous, positioned);
+  }
+
+  async function persistRoleOrder(previous: Role[], ordered: Role[]) {
+    if (!guild || busy || reorderingRoles) return;
+    if (ordered.some((role) => !role.version)) {
       error = 'Role versions are unavailable. Reload settings before reordering roles.';
       return;
     }
-    return run(async (targetGuild, generation) => {
+    const targetGuild = guildId;
+    const generation = loadGeneration;
+    const defaultRole = previous.find((role) => role.id === guild?.id);
+    guild = { ...guild, roles: defaultRole ? [defaultRole, ...ordered] : ordered };
+    busy = true;
+    reorderingRoles = true;
+    error = '';
+    notice = 'Saving role order…';
+    try {
       const updated = await api<Role[]>(`/guilds/${encodeURIComponent(targetGuild)}/roles`, {
         method: 'PATCH',
         body: JSON.stringify({
-          roles: [
-            { id: current.id, position: adjacent.position, version: current.version },
-            { id: adjacent.id, position: current.position, version: adjacent.version }
-          ]
+          roles: ordered.map((role) => ({
+            id: role.id,
+            position: role.position,
+            version: role.version
+          }))
         })
       });
       if (generation !== loadGeneration || targetGuild !== guildId || !guild) return;
-      const byKey = new Map(updated.map((role) => [entityKey(role), role]));
+      const savedByKey = new Map(updated.map((role) => [entityKey(role), role]));
       guild = {
         ...guild,
-        roles: guild.roles?.map((role) => byKey.get(entityKey(role)) ?? role)
+        roles: (guild.roles ?? []).map((role) => savedByKey.get(entityKey(role)) ?? role)
       };
-      const selected = byKey.get(entityKey(current)) ?? current;
-      selectRole(selected, true);
-      notice = 'Role order updated.';
-    });
+      if (selectedRole) {
+        const selected = guild.roles?.find((role) => entityKey(role) === entityKey(selectedRole!));
+        if (selected) selectRole(selected, true);
+      }
+      notice = 'Role order saved.';
+    } catch (caught) {
+      if (generation !== loadGeneration || targetGuild !== guildId || !guild) return;
+      guild = { ...guild, roles: previous };
+      error = caught instanceof ApiError ? caught.message : 'Could not save the role order.';
+      notice = '';
+    } finally {
+      if (generation === loadGeneration && targetGuild === guildId) {
+        busy = false;
+        reorderingRoles = false;
+      }
+    }
   }
 
   function deleteRole() {
-    if (!canManageRoles || !selectedRole || !guild || selectedRole.id === guild.id) return;
+    if (!canManageSelectedRole || !selectedRole || !guild || selectedRole.id === guild.id) return;
     const target = selectedRole;
     void openDestructiveConfirmation({
       kind: 'role',
@@ -1374,7 +1546,7 @@
   }
 
   function toggleMemberRole(member: MemberSummary, role: Role, enabled: boolean) {
-    if (!canManageRoles) return;
+    if (!canManageRole(role) || !canManageMember(member)) return;
     return run(async (targetGuild, generation) => {
       await api(
         `/guilds/${encodeURIComponent(targetGuild)}/members/${encodeURIComponent(entityRef(member.user))}/roles/${encodeURIComponent(entityRef(role))}`,
@@ -2734,11 +2906,20 @@
               {#each [...(guild.roles ?? [])].sort((a, b) => b.position - a.position) as role (entityKey(role))}
                 <button
                   class:active={selectedRole && entityKey(selectedRole) === entityKey(role)}
+                  class:drag-over={roleDropKey === entityKey(role)}
+                  class:role-locked={!canManageRole(role)}
                   class="settings-list-item role-item"
                   type="button"
                   disabled={busy}
+                  draggable={canReorderRole(role) && !busy && !reorderingRoles}
+                  ondragstart={(event) => roleDragStart(event, role)}
+                  ondragover={(event) => roleDragOver(event, role)}
+                  ondragleave={() => (roleDropKey = null)}
+                  ondrop={(event) => void roleDrop(event, role)}
+                  ondragend={roleDragEnd}
                   onclick={() => selectRole(role)}
                 >
+                  <span class="role-drag-handle" aria-hidden="true">⠿</span>
                   <svg class="role-color-dot" viewBox="0 0 10 10" aria-hidden="true">
                     <circle cx="5" cy="5" r="5" fill={roleColorValue(role.color)} />
                   </svg>
@@ -2815,43 +2996,81 @@
                     <div class="role-order-controls">
                       <div>
                         <strong>Role position</strong>
-                        <small>Higher roles can manage lower roles and members.</small>
+                        <small
+                          >Drag roles in the list to reorder them. Changes save automatically, and
+                          you can only move roles below your highest role.</small
+                        >
                       </div>
-                      <button
-                        class="secondary-button"
-                        type="button"
-                        disabled={busy || selectedRole.id === guild.id}
-                        aria-label="Move role higher"
-                        onclick={() => void moveSelectedRole(-1)}>Move up</button
-                      >
-                      <button
-                        class="secondary-button"
-                        type="button"
-                        disabled={busy || selectedRole.id === guild.id}
-                        aria-label="Move role lower"
-                        onclick={() => void moveSelectedRole(1)}>Move down</button
-                      >
                     </div>
-                    <div class="two-column-fields">
+                    <div class="two-column-fields role-name-fields">
                       <label class="form-field compact-field">
                         <span>Name</span>
                         <input
                           bind:value={roleName}
                           maxlength="100"
                           required
-                          disabled={busy || selectedRole.id === guild.id}
-                        />
-                      </label>
-                      <label class="form-field compact-field">
-                        <span>Color</span>
-                        <input
-                          class="color-input"
-                          bind:value={roleColor}
-                          type="color"
-                          disabled={busy || selectedRole.id === guild.id}
+                          disabled={busy || selectedRole.id === guild.id || !canManageSelectedRole}
                         />
                       </label>
                     </div>
+                    <fieldset
+                      class="role-color-field"
+                      disabled={busy || selectedRole.id === guild.id || !canManageSelectedRole}
+                    >
+                      <legend>Role color</legend>
+                      <small>Members use the color of their highest displayed role.</small>
+                      <div class="role-color-controls">
+                        <button
+                          class="role-color-default"
+                          class:selected={roleColor === '#000000'}
+                          type="button"
+                          aria-label="Use the default role color"
+                          aria-pressed={roleColor === '#000000'}
+                          onclick={() => setRoleColor('#000000')}
+                          ><span>✓</span><small>Default</small></button
+                        >
+                        <label
+                          class="role-color-custom"
+                          class:selected={!roleColorPalette.includes(roleColor) &&
+                            roleColor !== '#000000'}
+                        >
+                          <input
+                            bind:value={roleColor}
+                            type="color"
+                            aria-label="Choose a custom role color"
+                          />
+                          <span style={`--selected-role-color: ${roleColor}`}></span>
+                          <small>Custom</small>
+                        </label>
+                        <div class="role-color-swatches">
+                          {#each roleColorPalette as color (color)}
+                            <button
+                              class:selected={roleColor === color}
+                              type="button"
+                              style={`--swatch: ${color}`}
+                              aria-label={`Use role color ${color}`}
+                              aria-pressed={roleColor === color}
+                              onclick={() => setRoleColor(color)}
+                            ></button>
+                          {/each}
+                        </div>
+                      </div>
+                      <label class="role-color-hex">
+                        <span>Hex</span>
+                        <input
+                          value={roleColor}
+                          maxlength="7"
+                          pattern="#?[0-9a-fA-F]{6}"
+                          onblur={normalizeRoleColorInput}
+                          onkeydown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.preventDefault();
+                              normalizeRoleColorInput(event);
+                            }
+                          }}
+                        />
+                      </label>
+                    </fieldset>
                     <div class="toggle-list">
                       <label class="toggle-row">
                         <span
@@ -2862,7 +3081,7 @@
                         <input
                           type="checkbox"
                           bind:checked={roleHoist}
-                          disabled={busy || selectedRole.id === guild.id}
+                          disabled={busy || selectedRole.id === guild.id || !canManageSelectedRole}
                         />
                       </label>
                       <label class="toggle-row">
@@ -2874,7 +3093,7 @@
                         <input
                           type="checkbox"
                           bind:checked={roleMentionable}
-                          disabled={busy || selectedRole.id === guild.id}
+                          disabled={busy || selectedRole.id === guild.id || !canManageSelectedRole}
                         />
                       </label>
                     </div>
@@ -2905,7 +3124,9 @@
                               <input
                                 type="checkbox"
                                 checked={permissionChecked(permission[2])}
-                                disabled={busy || !hasPermission(permission[2])}
+                                disabled={busy ||
+                                  !canManageSelectedRole ||
+                                  !hasPermission(permission[2])}
                                 onchange={(event) =>
                                   togglePermission(permission[2], event.currentTarget.checked)}
                               />
@@ -2933,7 +3154,10 @@
                           <input
                             type="checkbox"
                             checked={member.role_ids.includes(selectedRole.id)}
-                            disabled={busy || selectedRole.id === guild.id}
+                            disabled={busy ||
+                              selectedRole.id === guild.id ||
+                              !canManageSelectedRole ||
+                              !canManageMember(member)}
                             onchange={(event) =>
                               void toggleMemberRole(
                                 member,
@@ -2956,7 +3180,7 @@
                     </div>
                   {/if}
                   <div class="form-actions spread-actions">
-                    {#if selectedRole.id !== guild.id}
+                    {#if selectedRole.id !== guild.id && canManageSelectedRole}
                       <button
                         class="danger-text-button"
                         type="button"
@@ -2968,7 +3192,9 @@
                     {:else}
                       <span class="field-hint">The default role cannot be deleted.</span>
                     {/if}
-                    <button class="primary-button" disabled={busy}>Save role</button>
+                    <button class="primary-button" disabled={busy || !canManageSelectedRole}
+                      >Save role</button
+                    >
                   </div>
                 </form>
               {/if}

@@ -56,6 +56,7 @@
     type Completion
   } from '$lib/components/ComposerAutocomplete.svelte';
   import GuildMemberRoster from '$lib/components/GuildMemberRoster.svelte';
+  import EmojiPicker from '$lib/components/EmojiPicker.svelte';
   import GifPicker from '$lib/components/GifPicker.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import MessageRow from '$lib/components/MessageRow.svelte';
@@ -116,6 +117,9 @@
   let content = $state('');
   let gifPickerEnabled = $state(false);
   let gifPickerOpen = $state(false);
+  let emojiPickerOpen = $state(false);
+  let slowmodeRemaining = $state(0);
+  let slowmodeTimer: number | null = null;
   let error = $state('');
   let busy = $state(false);
   let channelReady = $state(false);
@@ -191,6 +195,21 @@
   let voiceOccupancy = $state<Record<string, VoiceOccupant[]>>({});
   let voiceOccupancyVersion = 0;
   let voiceRefreshSequence = 0;
+  let draggedVoiceMember = $state<{
+    occupant: VoiceOccupant;
+    user: UserSummary;
+    source: Channel;
+  } | null>(null);
+  let voiceDropChannelKey = $state<string | null>(null);
+  let voiceMemberMenu = $state<{
+    occupant: VoiceOccupant;
+    user: UserSummary;
+    source: Channel;
+    x: number;
+    y: number;
+  } | null>(null);
+  let voiceMemberMenuElement = $state<HTMLElement | null>(null);
+  let voiceModerationBusy = $state(false);
   const uploadControllers = new SvelteMap<string, AbortController>();
   const pendingSends = new SvelteMap<string, PendingMessageSend>();
   const collapsedCategories = new SvelteSet<string>();
@@ -820,6 +839,10 @@
   }
 
   function channelDragOver(event: DragEvent, target: Channel | null) {
+    if (draggedVoiceMember) {
+      voiceChannelDragOver(event, target);
+      return;
+    }
     if (!draggedChannelKey || !canManageChannels || reorderingChannels) return;
     const dragged = guild?.channels?.find((item) => entityKey(item) === draggedChannelKey);
     if (!dragged || (dragged.type === 4 && target && target.type !== 4)) return;
@@ -829,6 +852,10 @@
   }
 
   async function channelDrop(event: DragEvent, target: Channel | null) {
+    if (draggedVoiceMember) {
+      await voiceChannelDrop(event, target);
+      return;
+    }
     if (!draggedChannelKey || !guild || !canManageChannels || reorderingChannels) return;
     event.preventDefault();
     const dragged = guild.channels?.find((item) => entityKey(item) === draggedChannelKey);
@@ -1030,28 +1057,38 @@
     return assigned.sort(compareRoleRank).at(-1);
   }
 
-  function manageableRolesFor(user: UserSummary): Role[] {
-    if (!guild || !currentUser || !canManageRoles) return [];
-    if (entityKey(user) === entityKey(currentUser)) return [];
+  function actorOutranks(user: UserSummary): boolean {
+    if (!guild || !currentUser || entityKey(user) === entityKey(currentUser)) return false;
     if (
       user.id === guild.owner_id &&
       user.origin_domain === (guild.owner_domain ?? guild.origin_domain)
     )
-      return [];
-    const targetMember = memberFor(user.id, user.origin_domain);
-    const actorMember = memberFor(currentUser.id, currentUser.origin_domain);
-    if (!targetMember || !actorMember) return [];
+      return false;
     const actorIsOwner =
       currentUser.id === guild.owner_id &&
       currentUser.origin_domain === (guild.owner_domain ?? guild.origin_domain);
-    const actorHighest = highestRoleFor(actorMember);
+    if (actorIsOwner) return true;
+    const targetMember = memberFor(user.id, user.origin_domain);
+    const actorMember = memberFor(currentUser.id, currentUser.origin_domain);
+    const actorHighest =
+      highestRoleFor(actorMember) ??
+      (guild.roles ?? []).find((role) => role.id === guild?.actor_highest_role_id);
     const targetHighest = highestRoleFor(targetMember);
-    if (
-      !actorIsOwner &&
-      (!actorHighest || !targetHighest || compareRoleRank(actorHighest, targetHighest) <= 0)
-    ) {
-      return [];
-    }
+    return Boolean(
+      actorHighest && targetHighest && compareRoleRank(actorHighest, targetHighest) > 0
+    );
+  }
+
+  function manageableRolesFor(user: UserSummary): Role[] {
+    if (!guild || !currentUser || !canManageRoles) return [];
+    const actorMember = memberFor(currentUser.id, currentUser.origin_domain);
+    if (!actorOutranks(user)) return [];
+    const actorIsOwner =
+      currentUser.id === guild.owner_id &&
+      currentUser.origin_domain === (guild.owner_domain ?? guild.origin_domain);
+    const actorHighest =
+      highestRoleFor(actorMember) ??
+      (guild.roles ?? []).find((role) => role.id === guild?.actor_highest_role_id);
     return (guild.roles ?? [])
       .filter(
         (role) =>
@@ -1090,6 +1127,164 @@
 
   function occupantsFor(target: Channel): VoiceOccupant[] {
     return voiceOccupancy[entityKey(target)] ?? [];
+  }
+
+  function canMoveVoiceMember(user: UserSummary, source: Channel): boolean {
+    return Boolean(
+      guild &&
+      guild.origin_domain === localDomain &&
+      channelHasPermission(source, Permission.MOVE_MEMBERS) &&
+      actorOutranks(user)
+    );
+  }
+
+  function canMoveVoiceMemberTo(
+    user: UserSummary,
+    source: Channel,
+    target: Channel | null
+  ): target is Channel {
+    return Boolean(
+      target &&
+      target.type === 2 &&
+      entityKey(target) !== entityKey(source) &&
+      canMoveVoiceMember(user, source) &&
+      channelHasPermission(target, Permission.MOVE_MEMBERS)
+    );
+  }
+
+  function voiceMemberDragStart(
+    event: DragEvent,
+    occupant: VoiceOccupant,
+    user: UserSummary,
+    source: Channel
+  ) {
+    event.stopPropagation();
+    if (!canMoveVoiceMember(user, source) || voiceModerationBusy) {
+      event.preventDefault();
+      return;
+    }
+    closeChannelMenu(false);
+    closeVoiceMemberMenu();
+    draggedVoiceMember = { occupant, user, source };
+    event.dataTransfer?.setData('application/x-kaede-voice-member', occupant.identity);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+
+  function voiceMemberDragEnd() {
+    draggedVoiceMember = null;
+    voiceDropChannelKey = null;
+  }
+
+  function voiceChannelDragOver(event: DragEvent, target: Channel | null) {
+    const dragged = draggedVoiceMember;
+    if (!dragged || !canMoveVoiceMemberTo(dragged.user, dragged.source, target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    voiceDropChannelKey = entityKey(target);
+  }
+
+  async function voiceChannelDrop(event: DragEvent, target: Channel | null) {
+    const dragged = draggedVoiceMember;
+    if (!dragged || !guild || !canMoveVoiceMemberTo(dragged.user, dragged.source, target)) {
+      voiceMemberDragEnd();
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    voiceMemberDragEnd();
+    voiceModerationBusy = true;
+    error = '';
+    try {
+      await api(
+        `/guilds/${encodeURIComponent(entityRef(guild))}/members/${encodeURIComponent(entityRef(dragged.user))}/voice/move`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ channel_id: entityRef(target) })
+        }
+      );
+      const withoutMember = applyVoiceStateUpdate(voiceOccupancy, guild.channels ?? [], {
+        user_id: dragged.user.id,
+        user_domain: dragged.user.origin_domain,
+        channel_id: dragged.source.id,
+        channel_domain: dragged.source.origin_domain,
+        connected: false
+      });
+      voiceOccupancy = applyVoiceStateUpdate(withoutMember, guild.channels ?? [], {
+        user_id: dragged.user.id,
+        user_domain: dragged.user.origin_domain,
+        channel_id: target.id,
+        channel_domain: target.origin_domain,
+        connected: true,
+        state: { ...dragged.occupant, channel_id: target.id }
+      });
+      voiceOccupancyVersion += 1;
+    } catch (caught) {
+      error = caught instanceof ApiError ? caught.message : 'Could not move this voice member.';
+    } finally {
+      voiceModerationBusy = false;
+    }
+  }
+
+  function openVoiceMemberMenu(
+    event: MouseEvent,
+    occupant: VoiceOccupant,
+    user: UserSummary,
+    source: Channel
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    dismissFloatingLayers();
+    closeChannelMenu(false);
+    profile = null;
+    voiceMemberMenu = { occupant, user, source, x: event.clientX, y: event.clientY };
+    void tick().then(() => {
+      if (voiceMemberMenu && voiceMemberMenuElement) {
+        placeContextMenu(voiceMemberMenuElement, voiceMemberMenu.x, voiceMemberMenu.y);
+        voiceMemberMenuElement.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+      }
+    });
+  }
+
+  function closeVoiceMemberMenu() {
+    voiceMemberMenu = null;
+  }
+
+  function viewVoiceMemberProfile(menu: NonNullable<typeof voiceMemberMenu>) {
+    const anchor = voiceMemberMenuElement;
+    const bounds = anchor?.getBoundingClientRect();
+    closeVoiceMemberMenu();
+    profile = {
+      user: menu.user,
+      x: bounds?.right ?? window.innerWidth / 2,
+      y: bounds?.top ?? window.innerHeight / 2
+    };
+  }
+
+  async function disconnectVoiceMember(menu: NonNullable<typeof voiceMemberMenu>) {
+    if (!guild || !canMoveVoiceMember(menu.user, menu.source) || voiceModerationBusy) return;
+    closeVoiceMemberMenu();
+    voiceModerationBusy = true;
+    error = '';
+    try {
+      await api(
+        `/guilds/${encodeURIComponent(entityRef(guild))}/members/${encodeURIComponent(entityRef(menu.user))}/voice`,
+        { method: 'DELETE' }
+      );
+      voiceOccupancy = applyVoiceStateUpdate(voiceOccupancy, guild.channels ?? [], {
+        user_id: menu.user.id,
+        user_domain: menu.user.origin_domain,
+        channel_id: menu.source.id,
+        channel_domain: menu.source.origin_domain,
+        connected: false
+      });
+      voiceOccupancyVersion += 1;
+    } catch (caught) {
+      error =
+        caught instanceof ApiError ? caught.message : 'Could not disconnect this voice member.';
+    } finally {
+      voiceModerationBusy = false;
+    }
   }
 
   function openProfile(user: UserSummary, event: MouseEvent) {
@@ -1566,6 +1761,7 @@
       closeChannelMenu(false);
       profile = null;
       gifPickerOpen = false;
+      emojiPickerOpen = false;
     };
     gateway = client;
     const featureController = new AbortController();
@@ -1623,6 +1819,7 @@
       client.removeEventListener(GATEWAY_SESSION_RESET_EVENT, sessionReset);
       if (gateway === client) gateway = null;
       if (typingTimer) window.clearTimeout(typingTimer);
+      if (slowmodeTimer) window.clearInterval(slowmodeTimer);
       resetUploads();
     };
   });
@@ -1630,7 +1827,65 @@
   function chooseGif(gif: GifResult) {
     if (busy || !channelReady || !channel || !canSendMessages || editingMessage) return;
     gifPickerOpen = false;
+    emojiPickerOpen = false;
     void send(pendingMessageSend(gif.url, [], []));
+  }
+
+  function chooseEmoji(value: string) {
+    if (busy || !channelReady || !channel || !canSendMessages) return;
+    const start = composerInput?.selectionStart ?? composerCursor;
+    const end = composerInput?.selectionEnd ?? start;
+    const next = `${content.slice(0, start)}${value}${content.slice(end)}`;
+    if (next.length > 4000) return;
+    content = next;
+    composerCursor = start + value.length;
+    emojiPickerOpen = false;
+    void tick().then(() => {
+      composerInput?.focus();
+      composerInput?.setSelectionRange(composerCursor, composerCursor);
+    });
+  }
+
+  function startSlowmode(milliseconds: number) {
+    const deadline = Date.now() + Math.max(1000, milliseconds);
+    try {
+      localStorage.setItem(
+        `kaede.slowmode.${currentUser ? entityRef(currentUser) : 'unknown'}.${channelId}`,
+        String(deadline)
+      );
+    } catch {
+      // Slow mode remains accurate in memory when browser storage is unavailable.
+    }
+    if (slowmodeTimer) window.clearInterval(slowmodeTimer);
+    const update = () => {
+      slowmodeRemaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      if (slowmodeRemaining === 0 && slowmodeTimer) {
+        window.clearInterval(slowmodeTimer);
+        slowmodeTimer = null;
+        try {
+          localStorage.removeItem(
+            `kaede.slowmode.${currentUser ? entityRef(currentUser) : 'unknown'}.${channelId}`
+          );
+        } catch {
+          // Nothing else is required when browser storage is unavailable.
+        }
+      }
+    };
+    update();
+    slowmodeTimer = window.setInterval(update, 250);
+  }
+
+  function restoreSlowmode(targetChannel: string) {
+    try {
+      const stored = Number(
+        localStorage.getItem(
+          `kaede.slowmode.${currentUser ? entityRef(currentUser) : 'unknown'}.${targetChannel}`
+        )
+      );
+      if (Number.isFinite(stored) && stored > Date.now()) startSlowmode(stored - Date.now());
+    } catch {
+      // An unavailable local store only removes the refresh-time hint.
+    }
   }
 
   $effect(() => {
@@ -1652,6 +1907,9 @@
       composerDraftBeforeEdit = null;
       channelMenu = null;
       channelMenuReturnFocus = null;
+      if (slowmodeTimer) window.clearInterval(slowmodeTimer);
+      slowmodeTimer = null;
+      slowmodeRemaining = 0;
       channelDialogOpen = false;
       channelDialogTarget = null;
       channelDialogReturnFocus = null;
@@ -1716,6 +1974,7 @@
     if (canSendMessages && canAttachFiles) return;
     untrack(() => {
       gifPickerOpen = false;
+      emojiPickerOpen = false;
       if (!canAttachFiles && uploads.length) resetUploads();
     });
   });
@@ -1789,6 +2048,7 @@
       forgetConfirmedSends();
       if (dispatchBuffer === buffered) dispatchBuffer = null;
       channelReady = true;
+      restoreSlowmode(targetChannel);
       acknowledgeLatestIfVisible();
     } catch (caught) {
       if (
@@ -1949,6 +2209,7 @@
       error = 'You do not have permission to send messages in this channel.';
       return;
     }
+    if (!editingMessage && slowmodeRemaining > 0) return;
     if (busy || !channelReady || !channel) return;
     const attachmentIds = retry
       ? retry.attachmentIds
@@ -2029,15 +2290,38 @@
           )
         );
         clearSubmittedUploads(draft.attachmentIds);
+        if (channel.rate_limit_per_user > 0) startSlowmode(channel.rate_limit_per_user * 1000);
         return;
       }
       reconcile(saved);
       clearSubmittedUploads(draft.attachmentIds);
+      if (channel.rate_limit_per_user > 0) startSlowmode(channel.rate_limit_per_user * 1000);
       await acknowledge(saved);
     } catch (caught) {
       if (generation !== loadGeneration || routeChannel !== channelId) return;
       const stillPending = messages.some((item) => item.client_nonce === nonce && item.pending);
       const timeoutFailure = caught instanceof ApiError && caught.code === 'MEMBER_TIMED_OUT';
+      const slowmodeFailure = caught instanceof ApiError && caught.code === 'SLOWMODE_RATE_LIMITED';
+      if (slowmodeFailure) {
+        const retryAfter = Number(caught.detail.retry_after_ms);
+        startSlowmode(
+          Number.isFinite(retryAfter) ? retryAfter : channel.rate_limit_per_user * 1000
+        );
+        pendingSends.delete(nonce);
+        setMessages(
+          existing
+            ? messages.map((item) =>
+                item.client_nonce === nonce ? { ...item, pending: false } : item
+              )
+            : messages.filter((item) => item.client_nonce !== nonce)
+        );
+        if (!retry && draft.content) {
+          content = draft.content;
+          composerCursor = content.length;
+        }
+        error = '';
+        return;
+      }
       const timeoutReason = timeoutFailure ? formatTimeoutFailure(caught) : undefined;
       setMessages(
         failPendingMessage(messages, nonce, {
@@ -2318,7 +2602,10 @@
 
 <svelte:head><title>{channel?.name ?? 'Channel'} · Kaede Chat</title></svelte:head>
 <svelte:window
-  onclick={() => closeChannelMenu(false)}
+  onclick={() => {
+    closeChannelMenu(false);
+    closeVoiceMemberMenu();
+  }}
   onkeydown={(event) => {
     if (moderationDialog && event.key === 'Escape') {
       event.preventDefault();
@@ -2365,8 +2652,12 @@
         {#if voiceMember}
           <button
             type="button"
+            draggable={canMoveVoiceMember(voiceMember.user, target) && !voiceModerationBusy}
             title={`${voiceMember.user.handle}${occupant.self_mute || occupant.server_mute ? ' · muted' : ''}`}
-            oncontextmenu={(event) => openProfile(voiceMember.user, event)}
+            ondragstart={(event) => voiceMemberDragStart(event, occupant, voiceMember.user, target)}
+            ondragend={voiceMemberDragEnd}
+            oncontextmenu={(event) =>
+              openVoiceMemberMenu(event, occupant, voiceMember.user, target)}
             onclick={(event) => openProfile(voiceMember.user, event)}
           >
             <span class="voice-member-avatar">
@@ -2601,7 +2892,8 @@
                   <div class="channel-row">
                     <a
                       class:active={matchesEntityRef(channelId, item, localDomain)}
-                      class:drag-over={dragOverChannelKey === entityKey(item)}
+                      class:drag-over={dragOverChannelKey === entityKey(item) ||
+                        voiceDropChannelKey === entityKey(item)}
                       draggable={canManageChannels && !reorderingChannels}
                       href={guild ? guildChannelPath(guild, item) : resolve('/home')}
                       aria-haspopup="menu"
@@ -2663,7 +2955,8 @@
               <div class="channel-row">
                 <a
                   class:active={matchesEntityRef(channelId, item, localDomain)}
-                  class:drag-over={dragOverChannelKey === entityKey(item)}
+                  class:drag-over={dragOverChannelKey === entityKey(item) ||
+                    voiceDropChannelKey === entityKey(item)}
                   draggable={canManageChannels && !reorderingChannels}
                   href={guild ? guildChannelPath(guild, item) : resolve('/home')}
                   aria-haspopup="menu"
@@ -2940,13 +3233,37 @@
                 disabled={busy || !channelReady || !channel}
                 aria-label="Choose a GIF"
                 aria-expanded={gifPickerOpen}
-                onclick={() => (gifPickerOpen = !gifPickerOpen)}>GIF</button
+                onclick={() => {
+                  gifPickerOpen = !gifPickerOpen;
+                  emojiPickerOpen = false;
+                }}>GIF</button
               >
             {/if}
-            <small class="composer-count">{content.length}/4000</small>
+            {#if !editingMessage}
+              <button
+                class="emoji-button"
+                class:active={emojiPickerOpen}
+                type="button"
+                disabled={busy || !channelReady || !channel}
+                aria-label="Choose an emoji"
+                aria-expanded={emojiPickerOpen}
+                onclick={() => {
+                  emojiPickerOpen = !emojiPickerOpen;
+                  gifPickerOpen = false;
+                }}>☺</button
+              >
+            {/if}
+            {#if slowmodeRemaining > 0}
+              <small class="slowmode-indicator" role="status" title="Slow mode is active"
+                >⏱ {slowmodeRemaining}s</small
+              >
+            {:else}
+              <small class="composer-count">{content.length}/4000</small>
+            {/if}
             <button
               class="send-button"
               disabled={busy ||
+                slowmodeRemaining > 0 ||
                 !channelReady ||
                 !channel ||
                 uploads.some((item) => item.status === 'uploading') ||
@@ -2963,6 +3280,9 @@
           </form>
           {#if gifPickerOpen}
             <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
+          {/if}
+          {#if emojiPickerOpen}
+            <EmojiPicker onSelect={chooseEmoji} onClose={() => (emojiPickerOpen = false)} />
           {/if}
           {#if uploads.length && !editingMessage}
             <UploadPreviewTray {uploads} onRemove={removeUpload} />
@@ -3082,6 +3402,42 @@
         </footer>
       </form>
     </div>
+  </div>
+{/if}
+
+{#if voiceMemberMenu}
+  <div
+    use:portal
+    bind:this={voiceMemberMenuElement}
+    class="channel-context-menu voice-member-context-menu"
+    role="menu"
+    tabindex="-1"
+    aria-label={`Voice actions for ${voiceMemberMenu.user.display_name ?? voiceMemberMenu.user.username}`}
+    oncontextmenu={(event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    }}
+  >
+    <button
+      type="button"
+      role="menuitem"
+      tabindex="-1"
+      onclick={() => viewVoiceMemberProfile(voiceMemberMenu!)}
+    >
+      <span>View profile</span>
+    </button>
+    {#if canMoveVoiceMember(voiceMemberMenu.user, voiceMemberMenu.source)}
+      <button
+        class="danger-item menu-separator"
+        type="button"
+        role="menuitem"
+        tabindex="-1"
+        disabled={voiceModerationBusy}
+        onclick={() => void disconnectVoiceMember(voiceMemberMenu!)}
+      >
+        <span>Disconnect from voice</span>
+      </button>
+    {/if}
   </div>
 {/if}
 

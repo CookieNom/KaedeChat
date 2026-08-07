@@ -34,6 +34,8 @@ CLIENT_RATE_LIMITS = {
     "upload_ticket": ClientRateLimit("upload-ticket", 10, 60),
     "remote_media_fetch": ClientRateLimit("remote-media-fetch", 10, 60),
     "gif_search": ClientRateLimit("gif-search", 30, 60),
+    "link_preview": ClientRateLimit("link-preview", 30, 60),
+    "link_preview_media": ClientRateLimit("link-preview-media", 120, 60),
 }
 
 # Integer milli-tokens and Dragonfly's own clock make this bucket atomic and

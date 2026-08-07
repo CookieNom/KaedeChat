@@ -7,7 +7,8 @@ import httpx
 from app.core.settings import Settings
 
 VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-EXPECTED_ACTION = "turnstile-spin-v2"
+REGISTER_ACTION = "kaede-register"
+LOGIN_ACTION = "kaede-login"
 
 
 class TurnstileUnavailableError(RuntimeError):
@@ -38,6 +39,7 @@ async def verify_turnstile_token(
     token: str,
     remote_ip: str,
     *,
+    action: str,
     client: httpx.AsyncClient | None = None,
 ) -> bool:
     """Verify a single-use Turnstile token and bind it to this form and host."""
@@ -70,6 +72,4 @@ async def verify_turnstile_token(
     finally:
         if owns_client:
             await client.aclose()
-    return (
-        result.success and result.action == EXPECTED_ACTION and result.hostname == settings.domain
-    )
+    return result.success and result.action == action and result.hostname == settings.domain

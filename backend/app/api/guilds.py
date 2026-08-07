@@ -391,9 +391,11 @@ async def get_guild(
         .order_by(Role.position, Role.id)
     )
     permissions = await get_permissions(session, redis, guild, auth.user)
+    actor_highest_role = await highest_role(session, guild, auth.user.id, auth.user.origin_domain)
     return {
         **guild_payload(guild),
         "permissions": str(int(permissions)),
+        "actor_highest_role_id": str(actor_highest_role.id),
         "channels": [
             await channel_payload_for(session, redis, guild, auth.user, channel)
             for channel in channels
@@ -589,16 +591,23 @@ async def create_role(
     )
     if payload.permissions & ~actor_permissions:
         raise HTTPException(status_code=403, detail={"code": "CANNOT_GRANT_PERMISSIONS"})
-    position = await session.scalar(
-        select(func.coalesce(func.max(Role.position), 0)).where(
-            Role.guild_id == guild.id, Role.guild_domain == guild.origin_domain
+    existing_roles = list(
+        await session.scalars(
+            select(Role)
+            .where(
+                Role.guild_id == guild.id,
+                Role.guild_domain == guild.origin_domain,
+                Role.id != guild.id,
+            )
+            .with_for_update()
         )
     )
     role_id = await snowflake.mint()
-    role_position = int(position or 0) + 1
-    if (guild.owner_id, guild.owner_domain) != (auth.user.id, auth.user.origin_domain):
-        actor_role = await highest_role(session, guild, auth.user.id, auth.user.origin_domain)
-        role_position = min(role_position, actor_role.position)
+    # New roles start directly above @everyone. Shift the existing numeric
+    # positions without changing their relative hierarchy, which keeps role
+    # positions unique and avoids ever creating a role at the actor's rank.
+    for existing_role in existing_roles:
+        existing_role.position += 1
     role = Role(
         id=role_id,
         origin_domain=settings.domain,
@@ -607,7 +616,7 @@ async def create_role(
         name=payload.name,
         permissions=payload.permissions,
         color=payload.color,
-        position=role_position,
+        position=1,
         hoist=payload.hoist,
         mentionable=payload.mentionable,
     )
@@ -632,8 +641,17 @@ async def create_role(
         target_ref={"id": str(role.id)},
     )
     await session.commit()
+    for existing_role in existing_roles:
+        await session.refresh(existing_role)
     await wake_queued_guild_federation(guild)
     result = role_payload(role)
+    for existing_role in existing_roles:
+        await publish_dispatch(
+            redis,
+            guild_topic(settings.domain, guild.id),
+            "GUILD_ROLE_UPDATE",
+            role_payload(existing_role),
+        )
     await publish_dispatch(
         redis, guild_topic(settings.domain, guild.id), "GUILD_ROLE_CREATE", result
     )

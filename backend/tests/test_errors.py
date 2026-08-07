@@ -118,3 +118,8 @@ def test_cache_policy_prevents_sensitive_response_storage() -> None:
     failed_public = JSONResponse({"error": True}, status_code=503)
     apply_response_cache_policy("/_kaede/v1/keys", failed_public)
     assert failed_public.headers["Cache-Control"] == "no-store"
+
+    preview_media = JSONResponse({"ok": True})
+    apply_response_cache_policy("/api/v1/link-previews/media/abc", preview_media)
+    assert preview_media.headers["Cache-Control"] == "private, max-age=900"
+    assert "Pragma" not in preview_media.headers

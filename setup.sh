@@ -790,7 +790,7 @@ else
 fi
 
 section 'Interaction services' \
-  'KLIPY adds a GIF picker. Cloudflare Turnstile can protect new-account registration.'
+  'KLIPY adds a GIF picker. Cloudflare Turnstile protects registration and suspicious sign-ins.'
 if confirm 'Enable the KLIPY GIF picker?' "$([[ $(old KAEDE_KLIPY_ENABLED false) == true ]] && printf true || printf false)"; then
   KLIPY_ENABLED=true
   if [[ -n ${OLD[KAEDE_KLIPY_API_KEY]-} ]] && confirm 'Reuse existing KLIPY API key?' true; then
@@ -803,7 +803,7 @@ else
   KLIPY_API_KEY=
 fi
 
-if confirm 'Enable Cloudflare Turnstile for registration?' "$([[ $(old KAEDE_TURNSTILE_ENABLED false) == true ]] && printf true || printf false)"; then
+if confirm 'Enable Cloudflare Turnstile for registration and adaptive sign-in checks?' "$([[ $(old KAEDE_TURNSTILE_ENABLED false) == true ]] && printf true || printf false)"; then
   TURNSTILE_ENABLED=true
   TURNSTILE_SITE_KEY=$(prompt_text 'Turnstile site key' "$(old KAEDE_TURNSTILE_SITE_KEY '')")
   [[ $TURNSTILE_SITE_KEY =~ ^[A-Za-z0-9_-]{8,128}$ ]] || die 'invalid Turnstile site key'

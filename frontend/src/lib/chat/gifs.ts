@@ -21,7 +21,7 @@ export function klipyGifUrl(content: string | null): string | null {
     const url = new URL(candidate);
     if (
       url.protocol !== 'https:' ||
-      url.hostname !== 'media.klipy.com' ||
+      !['media.klipy.com', 'static.klipy.com'].includes(url.hostname) ||
       url.username ||
       url.password ||
       (url.port && url.port !== '443')

@@ -6,6 +6,9 @@ describe('klipyGifUrl', () => {
     expect(klipyGifUrl('https://media.klipy.com/example/reaction.gif')).toBe(
       'https://media.klipy.com/example/reaction.gif'
     );
+    expect(klipyGifUrl('https://static.klipy.com/ii/example/reaction.webp')).toBe(
+      'https://static.klipy.com/ii/example/reaction.webp'
+    );
   });
 
   it('rejects mixed message content and untrusted origins', () => {

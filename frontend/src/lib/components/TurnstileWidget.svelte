@@ -7,8 +7,12 @@
     remove: (widgetId: string) => void;
   }
 
-  const SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
-  let { siteKey, onToken }: { siteKey: string; onToken: (token: string | null) => void } = $props();
+  const SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+  let {
+    siteKey,
+    action,
+    onToken
+  }: { siteKey: string; action: string; onToken: (token: string | null) => void } = $props();
   let container = $state<HTMLDivElement | null>(null);
   let widgetId: string | null = null;
   let cancelled = false;
@@ -48,7 +52,7 @@
         if (cancelled || !container || !turnstile) return;
         widgetId = turnstile.render(container, {
           sitekey: siteKey,
-          action: 'turnstile-spin-v2',
+          action,
           theme: 'auto',
           callback: (token: string) => onToken(token),
           'expired-callback': () => onToken(null),

@@ -1079,7 +1079,7 @@ async def process_event(
             needed = Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES
             if raw_attachments:
                 needed |= Permission.ATTACH_FILES
-            await require_permissions(
+            actor_permissions = await require_permissions(
                 session,
                 redis,
                 guild,
@@ -1151,11 +1151,15 @@ async def process_event(
                         nx=True,
                     )
                     if not allowed:
+                        slowmode_key = (
+                            f"slowmode:{channel.origin_domain}:{channel.id}:"
+                            f"{actor.origin_domain}:{actor.id}"
+                        )
                         raise HTTPException(
                             status_code=429,
                             detail={
                                 "code": "SLOWMODE_RATE_LIMITED",
-                                "retry_after_ms": channel.rate_limit_per_user * 1000,
+                                "retry_after_ms": max(1000, await redis.pttl(slowmode_key)),
                             },
                         )
                 home_message = Message(
@@ -1175,6 +1179,7 @@ async def process_event(
                         referenced_message.origin_domain if referenced_message is not None else None
                     ),
                     mention_user_refs=mention_refs,
+                    flags=(0 if actor_permissions & Permission.EMBED_LINKS else 4),
                 )
                 session.add(home_message)
                 await session.flush()
@@ -2657,7 +2662,7 @@ async def federation_guild_proxy(
     needed = Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES
     if payload.attachments:
         needed |= Permission.ATTACH_FILES
-    await require_permissions(
+    actor_permissions = await require_permissions(
         session,
         redis,
         guild,
@@ -2698,8 +2703,11 @@ async def federation_guild_proxy(
         ) != (channel.id, channel.origin_domain):
             raise HTTPException(status_code=400, detail={"code": "INVALID_MESSAGE_REFERENCE"})
     if channel.rate_limit_per_user:
+        slowmode_key = (
+            f"slowmode:{channel.origin_domain}:{channel.id}:{actor.origin_domain}:{actor.id}"
+        )
         allowed = await redis.set(
-            (f"slowmode:{channel.origin_domain}:{channel.id}:{actor.origin_domain}:{actor.id}"),
+            slowmode_key,
             "1",
             ex=channel.rate_limit_per_user,
             nx=True,
@@ -2709,7 +2717,7 @@ async def federation_guild_proxy(
                 status_code=429,
                 detail={
                     "code": "SLOWMODE_RATE_LIMITED",
-                    "retry_after_ms": channel.rate_limit_per_user * 1000,
+                    "retry_after_ms": max(1000, await redis.pttl(slowmode_key)),
                 },
             )
     message = Message(
@@ -2731,6 +2739,7 @@ async def federation_guild_proxy(
             guild,
             [item.resolve(principal.origin) for item in payload.mention_user_ids],
         ),
+        flags=(0 if actor_permissions & Permission.EMBED_LINKS else 4),
     )
     session.add(message)
     await session.flush()

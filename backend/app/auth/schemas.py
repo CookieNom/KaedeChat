@@ -28,6 +28,7 @@ class LoginRequest(BaseModel):
     identifier: str = Field(min_length=2, max_length=320)
     password: str = Field(min_length=1, max_length=256)
     device_name: str | None = Field(default=None, max_length=100)
+    turnstile_token: str | None = Field(default=None, min_length=1, max_length=2048)
 
 
 class TokenResponse(BaseModel):
