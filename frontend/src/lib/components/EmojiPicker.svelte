@@ -89,7 +89,12 @@
       >
     {/each}
   </nav>
-  <div class="emoji-results" aria-live="polite">
+  <div
+    class="emoji-results"
+    role="region"
+    aria-label="Emoji results"
+    aria-live="polite"
+  >
     {#if matchingCustom.length}
       <h3>Guild emoji</h3>
       <div class="emoji-grid custom-emojis">
@@ -138,8 +143,9 @@
     bottom: calc(100% + 10px);
     z-index: 25;
     display: grid;
+    grid-template-rows: auto auto auto minmax(0, 1fr) auto;
     width: min(390px, calc(100vw - 28px));
-    max-height: min(520px, 65vh);
+    height: min(520px, 65dvh);
     overflow: hidden;
     border: 1px solid var(--line);
     border-radius: 18px;
@@ -164,9 +170,15 @@
   }
   nav {
     display: flex;
+    min-width: 0;
     gap: 3px;
+    overflow-x: auto;
     padding: 0 12px 9px;
     border-bottom: 1px solid var(--line-soft);
+    scrollbar-width: none;
+  }
+  nav::-webkit-scrollbar {
+    display: none;
   }
   nav button,
   .emoji-custom-tab {
@@ -189,9 +201,13 @@
     font-weight: 800;
   }
   .emoji-results {
-    min-height: 230px;
+    min-height: 0;
     overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 12px 14px;
+    scrollbar-gutter: stable;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
   }
   .emoji-results h3 {
     margin: 3px 0 8px;
@@ -258,6 +274,7 @@
       bottom: 82px;
       left: 8px;
       width: auto;
+      height: min(520px, calc(100dvh - 98px));
     }
   }
 </style>
