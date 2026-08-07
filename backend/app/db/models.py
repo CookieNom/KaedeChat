@@ -524,6 +524,9 @@ class GuildMember(Base, TimestampMixin):
     nickname: Mapped[str | None] = mapped_column(String(100))
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     timeout_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    timeout_indefinite: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     voice_flags: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     member_version: Mapped[int] = mapped_column(BigInteger, server_default="1", nullable=False)
     __table_args__ = (
@@ -583,7 +586,7 @@ class Role(Base, FederatedIdMixin, TimestampMixin):
         CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
         CheckConstraint("position >= 0", name="nonnegative_position"),
         CheckConstraint("permissions >= 0", name="nonnegative_permissions"),
-        CheckConstraint("(permissions & ~1103806065919) = 0", name="known_permission_mask"),
+        CheckConstraint("(permissions & ~3302829321471) = 0", name="known_permission_mask"),
         CheckConstraint("color BETWEEN 0 AND 16777215", name="color_range"),
         Index("ix_roles_guild_position", "guild_id", "guild_domain", "position"),
     )
@@ -803,7 +806,7 @@ class ChannelOverwrite(Base):
         CheckConstraint("target_type IN ('role','member')", name="target_type"),
         CheckConstraint("allow >= 0 AND deny >= 0", name="nonnegative_masks"),
         CheckConstraint("(allow & deny) = 0", name="disjoint_masks"),
-        CheckConstraint("((allow | deny) & ~1103806065919) = 0", name="known_permission_masks"),
+        CheckConstraint("((allow | deny) & ~3302829321471) = 0", name="known_permission_masks"),
     )
 
 
@@ -1370,6 +1373,7 @@ class Ban(Base):
     actor_id: Mapped[int] = mapped_column(BigInteger)
     actor_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         PrimaryKeyConstraint("guild_id", "guild_domain", "user_id", "user_domain"),
         ForeignKeyConstraint(
@@ -1377,6 +1381,36 @@ class Ban(Base):
         ),
         ForeignKeyConstraint(["user_id", "user_domain"], ["users.id", "users.origin_domain"]),
         ForeignKeyConstraint(["actor_id", "actor_domain"], ["users.id", "users.origin_domain"]),
+        CheckConstraint(
+            "expires_at IS NULL OR expires_at > created_at", name="expiry_after_creation"
+        ),
+        Index("ix_bans_expiry", "expires_at"),
+    )
+
+
+class GuildInstanceBan(Base):
+    __tablename__ = "guild_instance_bans"
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    instance_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    reason: Mapped[str | None] = mapped_column(String(512))
+    actor_id: Mapped[int] = mapped_column(BigInteger)
+    actor_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        PrimaryKeyConstraint("guild_id", "guild_domain", "instance_domain"),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain"], ["guilds.id", "guilds.origin_domain"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(["instance_domain"], ["instances.domain"]),
+        ForeignKeyConstraint(["actor_id", "actor_domain"], ["users.id", "users.origin_domain"]),
+        CheckConstraint(
+            "expires_at IS NULL OR expires_at > created_at", name="expiry_after_creation"
+        ),
+        Index("ix_guild_instance_bans_expiry", "expires_at"),
     )
 
 

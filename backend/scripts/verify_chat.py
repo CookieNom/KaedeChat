@@ -339,6 +339,32 @@ def verify() -> None:
             json={"timeout_until": None},
         )
         require(cleared.status_code == 200, "timeout could not be cleared")
+        indefinite_timeout = api.patch(
+            f"/api/v1/guilds/{guild_id}/members/{charlie_id}",
+            headers=bob_headers,
+            json={"timeout_indefinite": True},
+        )
+        require(
+            indefinite_timeout.status_code == 200
+            and indefinite_timeout.json()["timeout_indefinite"] is True
+            and indefinite_timeout.json()["timeout_until"] is None,
+            f"indefinite timeout failed: {indefinite_timeout.text}",
+        )
+        indefinitely_timed_out_send = api.post(
+            f"/api/v1/channels/{channel_id}/messages",
+            headers=charlie_headers,
+            json={"content": "This should be blocked indefinitely."},
+        )
+        require(
+            indefinitely_timed_out_send.status_code == 403,
+            "indefinitely timed-out member sent a message",
+        )
+        indefinite_cleared = api.patch(
+            f"/api/v1/guilds/{guild_id}/members/{charlie_id}",
+            headers=bob_headers,
+            json={"timeout_until": None, "timeout_indefinite": False},
+        )
+        require(indefinite_cleared.status_code == 200, "indefinite timeout could not be cleared")
 
         before = api.get(f"/api/v1/guilds/{guild_id}", headers=alice_headers).json()
         with gateway.websocket_connect(
@@ -656,12 +682,17 @@ def verify() -> None:
         banned = api.put(
             f"/api/v1/guilds/{guild_id}/bans/{charlie_id}",
             headers={**bob_headers, "X-Audit-Log-Reason": "Acceptance test"},
-            json={"delete_message_seconds": 0},
+            json={
+                "delete_message_seconds": 0,
+                "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
         )
         require(banned.status_code == 204, f"ban failed: {banned.text}")
         bans = api.get(f"/api/v1/guilds/{guild_id}/bans", headers=bob_headers)
         require(
-            bans.status_code == 200 and bans.json()[0]["user"]["id"] == charlie_id,
+            bans.status_code == 200
+            and bans.json()[0]["user"]["id"] == charlie_id
+            and bans.json()[0]["expires_at"] is not None,
             "ban list failed",
         )
         blocked_invite = api.post(
@@ -680,6 +711,63 @@ def verify() -> None:
         require(kicked.status_code == 204, "kick failed")
         audit = api.get(f"/api/v1/guilds/{guild_id}/audit-logs", headers=bob_headers)
         require(audit.status_code == 200 and len(audit.json()) >= 8, "audit log failed")
+
+        lifecycle_created = api.post(
+            "/api/v1/guilds", headers=bob_headers, json={"name": "Lifecycle House"}
+        )
+        require(lifecycle_created.status_code == 201, "lifecycle guild creation failed")
+        lifecycle_guild = lifecycle_created.json()
+        lifecycle_id = lifecycle_guild["id"]
+        lifecycle_channel_id = lifecycle_guild["channels"][0]["id"]
+        lifecycle_invite = api.post(
+            f"/api/v1/guilds/{lifecycle_id}/invites",
+            headers=bob_headers,
+            json={"channel_id": lifecycle_channel_id},
+        )
+        lifecycle_join = api.post(
+            f"/api/v1/invites/{lifecycle_invite.json()['code']}", headers=alice_headers
+        )
+        require(
+            lifecycle_invite.status_code == 201 and lifecycle_join.status_code == 200,
+            "lifecycle guild invite or join failed",
+        )
+        owner_leave = api.delete(f"/api/v1/guilds/{lifecycle_id}/members/@me", headers=bob_headers)
+        require(owner_leave.status_code == 409, "guild owner was allowed to leave directly")
+        lifecycle_current = api.get(f"/api/v1/guilds/{lifecycle_id}", headers=bob_headers).json()
+        ownership_transfer = api.put(
+            f"/api/v1/guilds/{lifecycle_id}/owner",
+            headers=versioned_headers(bob_headers, lifecycle_current),
+            json={"owner_id": alice_id},
+        )
+        require(
+            ownership_transfer.status_code == 200
+            and ownership_transfer.json()["owner_id"] == alice_id,
+            f"guild ownership transfer failed: {ownership_transfer.text}",
+        )
+        lifecycle_audit = api.get(
+            f"/api/v1/guilds/{lifecycle_id}/audit-logs", headers=alice_headers
+        )
+        require(
+            lifecycle_audit.status_code == 200
+            and any(item["action_type"] == 27 for item in lifecycle_audit.json()),
+            "guild ownership transfer was not audited",
+        )
+        lifecycle_left = api.delete(
+            f"/api/v1/guilds/{lifecycle_id}/members/@me", headers=bob_headers
+        )
+        require(lifecycle_left.status_code == 204, "former owner could not leave guild")
+        lifecycle_for_delete = api.get(
+            f"/api/v1/guilds/{lifecycle_id}", headers=alice_headers
+        ).json()
+        lifecycle_deleted = api.delete(
+            f"/api/v1/guilds/{lifecycle_id}",
+            headers=versioned_headers(alice_headers, lifecycle_for_delete),
+        )
+        lifecycle_missing = api.get(f"/api/v1/guilds/{lifecycle_id}", headers=alice_headers)
+        require(
+            lifecycle_deleted.status_code == 204 and lifecycle_missing.status_code == 404,
+            f"guild deletion failed: {lifecycle_deleted.text}",
+        )
 
 
 def main() -> None:

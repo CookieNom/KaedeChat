@@ -177,7 +177,9 @@ async def calculate_permissions(
             )
             for item in rows
         ]
-    timed_out = member.timeout_until is not None and member.timeout_until > datetime.now(UTC)
+    timed_out = member.timeout_indefinite or (
+        member.timeout_until is not None and member.timeout_until > datetime.now(UTC)
+    )
     return (
         resolve_permissions(
             owner=guild.owner_id == actor.id and guild.owner_domain == actor.origin_domain,
@@ -251,10 +253,17 @@ async def get_permissions(
         permissions, _ = await calculate_permissions(session, guild, actor, channel=channel)
         return permissions
     try:
-        permissions, _ = await calculate_permissions(session, guild, actor, channel=channel)
+        permissions, calculated_member = await calculate_permissions(
+            session, guild, actor, channel=channel
+        )
+        cache_ttl = 300
+        if calculated_member.timeout_until is not None and not calculated_member.timeout_indefinite:
+            remaining = int((calculated_member.timeout_until - datetime.now(UTC)).total_seconds())
+            if remaining > 0:
+                cache_ttl = max(1, min(cache_ttl, remaining))
         pipeline = redis.pipeline(transaction=True)
-        pipeline.set(key, str(permissions), ex=300)
-        pipeline.set(stale_key, str(permissions), ex=305)
+        pipeline.set(key, str(permissions), ex=cache_ttl)
+        pipeline.set(stale_key, str(permissions), ex=cache_ttl + 5)
         await pipeline.execute()
         return permissions
     finally:

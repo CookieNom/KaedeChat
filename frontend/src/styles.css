@@ -3646,6 +3646,130 @@ progress {
   background: var(--purple-soft);
 }
 
+.moderation-console,
+.sanction-list,
+.instance-ban-card {
+  display: grid;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.moderation-fields,
+.instance-ban-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(240px, 1.3fr);
+  gap: 0.8rem;
+}
+
+.moderation-target-summary,
+.sanction-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.moderation-target-summary > div,
+.sanction-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.moderation-target-summary small,
+.sanction-row small,
+.sanction-row > div > span,
+.sanction-row > span {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.sanction-badge {
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line));
+  border-radius: 999px;
+  padding: 0.35rem 0.55rem;
+  color: var(--warning);
+  font-size: 0.66rem;
+  font-weight: 750;
+}
+
+.moderation-action-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(225px, 1fr));
+  gap: 0.75rem;
+}
+
+.moderation-action-card {
+  display: grid;
+  align-content: space-between;
+  gap: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 0.9rem;
+  background: var(--surface-subtle);
+}
+
+.moderation-action-card p,
+.settings-list-heading p,
+.federation-warning p {
+  margin: 0.2rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.moderation-inline-selects {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.moderation-inline-selects label {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.sanction-list {
+  padding: 1rem;
+}
+
+.sanction-row {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 0.8rem;
+}
+
+.federation-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+  border-radius: var(--radius-md);
+  padding: 0.85rem;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface-subtle));
+}
+
+.federation-warning p {
+  color: var(--text-muted);
+}
+
+.instance-ban-form {
+  grid-template-columns: minmax(180px, 0.8fr) minmax(130px, 0.45fr) minmax(200px, 1fr) auto;
+  align-items: end;
+}
+
+.embedded-list {
+  margin-top: 0.25rem;
+  padding: 0;
+}
+
+.instance-sanction-row {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
 .member-role-tags input:focus-visible + span {
   outline: 3px solid var(--focus);
   outline-offset: 2px;
@@ -4021,6 +4145,7 @@ progress {
 }
 
 .message-row.compact .message-avatar {
+  height: 0;
   visibility: hidden;
 }
 
@@ -4077,6 +4202,7 @@ progress {
   width: 100%;
   height: 100%;
   border-radius: inherit;
+  clip-path: circle(50%);
   object-fit: cover;
 }
 
@@ -4737,6 +4863,7 @@ progress {
   width: 100%;
   height: 100%;
   border-radius: inherit;
+  clip-path: circle(50%);
   object-fit: cover;
 }
 .voice-member-avatar .presence-dot {
@@ -4765,6 +4892,12 @@ progress {
   font: inherit;
   font-weight: 750;
   cursor: pointer;
+}
+
+.channel-title .profile-title-button {
+  justify-self: start;
+  max-width: 100%;
+  text-align: left;
 }
 
 .profile-title-button:hover {
@@ -4964,6 +5097,7 @@ progress {
 .permission-target-avatar img {
   width: 100%;
   height: 100%;
+  clip-path: circle(50%);
   object-fit: cover;
 }
 
@@ -6051,6 +6185,18 @@ progress {
   .quick-create,
   .invite-create,
   .member-management-row {
+    grid-template-columns: 1fr;
+  }
+
+  .moderation-fields,
+  .moderation-target-summary,
+  .sanction-row,
+  .instance-ban-form,
+  .instance-sanction-row {
+    grid-template-columns: 1fr;
+  }
+
+  .moderation-inline-selects {
     grid-template-columns: 1fr;
   }
 

@@ -793,13 +793,13 @@ section 'Runtime sizing' 'Defaults are appropriate for a small instance and can 
 if confirm 'Customize worker counts and media limits?' false; then
   API_WORKERS=$(prompt_text 'API workers (1-64)' "$(old KAEDE_API_WORKERS 4)")
   GATEWAY_WORKERS=$(prompt_text 'Gateway replicas (1-64)' "$(old KAEDE_GATEWAY_WORKERS 2)")
-  ATTACHMENT_MIB=$(prompt_text 'Maximum attachment size in MiB' "$(( $(old_uint KAEDE_MEDIA_MAX_ATTACHMENT_BYTES 104857600) / 1048576 ))")
-  USER_QUOTA_MIB=$(prompt_text 'Per-user media quota in MiB' "$(( $(old_uint KAEDE_MEDIA_USER_QUOTA_BYTES 5368709120) / 1048576 ))")
+  ATTACHMENT_MIB=$(prompt_text 'Maximum attachment size in MiB' "$(( $(old_uint KAEDE_MEDIA_MAX_ATTACHMENT_BYTES 15728640) / 1048576 ))")
+  USER_QUOTA_MIB=$(prompt_text 'Per-user media quota in MiB' "$(( $(old_uint KAEDE_MEDIA_USER_QUOTA_BYTES 10737418240) / 1048576 ))")
 else
   API_WORKERS=$(old KAEDE_API_WORKERS 4)
   GATEWAY_WORKERS=$(old KAEDE_GATEWAY_WORKERS 2)
-  ATTACHMENT_MIB=$(( $(old_uint KAEDE_MEDIA_MAX_ATTACHMENT_BYTES 104857600) / 1048576 ))
-  USER_QUOTA_MIB=$(( $(old_uint KAEDE_MEDIA_USER_QUOTA_BYTES 5368709120) / 1048576 ))
+  ATTACHMENT_MIB=$(( $(old_uint KAEDE_MEDIA_MAX_ATTACHMENT_BYTES 15728640) / 1048576 ))
+  USER_QUOTA_MIB=$(( $(old_uint KAEDE_MEDIA_USER_QUOTA_BYTES 10737418240) / 1048576 ))
 fi
 [[ $API_WORKERS =~ ^[0-9]+$ ]] && ((API_WORKERS >= 1 && API_WORKERS <= 64)) || die 'API workers must be 1-64'
 [[ $GATEWAY_WORKERS =~ ^[0-9]+$ ]] && ((GATEWAY_WORKERS >= 1 && GATEWAY_WORKERS <= 64)) || die 'gateway replicas must be 1-64'
@@ -986,7 +986,7 @@ if [[ $HOST_NGINX == true ]]; then
     -e "s|/etc/letsencrypt/live/$DOMAIN/fullchain\.pem|$(sed_escape "$CERT_PATH")|g" \
     -e "s|/etc/letsencrypt/live/$DOMAIN/privkey\.pem|$(sed_escape "$KEY_PATH")|g" \
     -e "s|replace-with-kaede-edge-secret|$EDGE_SECRET|g" \
-    -e "s|client_max_body_size 101m;|client_max_body_size $((ATTACHMENT_MIB + 1))m;|g" \
+    -e "s|client_max_body_size 16m;|client_max_body_size $((ATTACHMENT_MIB + 1))m;|g" \
     "$HOST_STAGE" > "$STAGE_DIR/generated/kaede.nginx.conf"
   rm -f "$HOST_STAGE"
   chmod 600 "$STAGE_DIR/generated/kaede.nginx.conf"

@@ -16,6 +16,7 @@ from taskiq import SimpleRetryMiddleware
 from taskiq_redis import RedisStreamBroker
 
 from app.chat.events import guild_topic, publish_dispatch, user_topic
+from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
 from app.chat.payloads import guild_payload, render_message_payload
 from app.core.cache_warmup import warm_identify_cache
 from app.core.logging import configure_logging
@@ -26,12 +27,14 @@ from app.db.models import (
     Attachment,
     AuditLogEntry,
     AuthEvent,
+    Ban,
     Channel,
     DMParticipant,
     FederatedHistoryMessage,
     Guild,
     GuildEvent,
     GuildHistoryImport,
+    GuildInstanceBan,
     GuildMember,
     Message,
     MessageProjection,
@@ -67,6 +70,7 @@ from app.media.jobs import (
     sweep_orphan_uploads,
     sweep_staging_objects,
 )
+from app.media.processing import IMAGE_PIPELINE_VERSION
 from app.media.service import attachment_payload
 from app.voice.background import replicate_room
 from app.voice.cleanup import cleanup_orphaned_dm_rooms
@@ -671,7 +675,16 @@ async def media_processing_sweep() -> int:
                         Attachment.origin_domain == settings.domain,
                         Attachment.finalized_at.is_not(None),
                         Attachment.deleted_at.is_(None),
-                        Attachment.scan_status.in_(("pending", "failed")),
+                        or_(
+                            Attachment.scan_status.in_(("pending", "failed")),
+                            and_(
+                                Attachment.scan_status == "clean",
+                                Attachment.detected_content_type.in_(("image/gif", "image/webp")),
+                                Attachment.variants["thumbnail_128"]["processing_version"]
+                                .as_integer()
+                                .is_distinct_from(IMAGE_PIPELINE_VERSION),
+                            ),
+                        ),
                     )
                     .order_by(Attachment.finalized_at, Attachment.id)
                     .limit(100)
@@ -696,7 +709,7 @@ async def media_orphan_gc() -> int:
         await engine.dispose()
 
 
-@broker.task(task_name="media.cache_gc", schedule=[{"cron": "23 * * * *"}])
+@broker.task(task_name="media.cache_gc", schedule=[{"cron": "*/5 * * * *"}])
 @observed_job("media.cache_gc")
 async def media_cache_gc() -> int:
     settings = get_settings()
@@ -705,6 +718,129 @@ async def media_cache_gc() -> int:
         async with sessionmaker() as session:
             return await enforce_remote_cache_limit(session, settings)
     finally:
+        await engine.dispose()
+
+
+async def moderation_expiry_sweep_in_session(
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """Expire sanctions without making authorization depend on this scheduler."""
+
+    current = now or datetime.now(UTC)
+    expired_bans = int(
+        getattr(
+            await session.execute(delete(Ban).where(Ban.expires_at <= current)),
+            "rowcount",
+            0,
+        )
+        or 0
+    )
+    expired_instance_bans = int(
+        getattr(
+            await session.execute(
+                delete(GuildInstanceBan).where(GuildInstanceBan.expires_at <= current)
+            ),
+            "rowcount",
+            0,
+        )
+        or 0
+    )
+    members = list(
+        await session.scalars(
+            select(GuildMember)
+            .join(
+                Guild,
+                (Guild.id == GuildMember.guild_id)
+                & (Guild.origin_domain == GuildMember.guild_domain),
+            )
+            .where(
+                Guild.origin_domain == settings.domain,
+                GuildMember.timeout_indefinite.is_(False),
+                GuildMember.timeout_until <= current,
+            )
+            .order_by(GuildMember.timeout_until)
+            .limit(500)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    touched: list[tuple[Guild, GuildMember]] = []
+    for member in members:
+        guild = await session.scalar(
+            select(Guild)
+            .where(
+                Guild.id == member.guild_id,
+                Guild.origin_domain == member.guild_domain,
+            )
+            .with_for_update()
+        )
+        if guild is None:
+            continue
+        owner = await session.get(User, (guild.owner_id, guild.owner_domain))
+        if owner is None or not owner.is_local:
+            raise RuntimeError("local guild owner is unavailable for timeout expiry")
+        member.timeout_until = None
+        member.timeout_indefinite = False
+        member.member_version += 1
+        await queue_guild_mutation(
+            session,
+            settings,
+            guild,
+            owner,
+            "guild.member.update",
+            {
+                "member": {
+                    "user": {
+                        "id": str(member.user_id),
+                        "origin_domain": member.user_domain,
+                    },
+                    "nickname": member.nickname,
+                    "timeout_until": None,
+                    "timeout_indefinite": False,
+                    "voice_flags": member.voice_flags,
+                    "member_version": str(member.member_version),
+                }
+            },
+            snapshot_required=True,
+        )
+        touched.append((guild, member))
+    await session.commit()
+    for guild, member in touched:
+        await wake_queued_guild_federation(guild)
+        await publish_dispatch(
+            redis,
+            guild_topic(guild.origin_domain, guild.id),
+            "GUILD_MEMBER_UPDATE",
+            {
+                "guild_id": str(guild.id),
+                "guild_domain": guild.origin_domain,
+                "user_id": str(member.user_id),
+                "user_domain": member.user_domain,
+                "timeout_until": None,
+                "timeout_indefinite": False,
+            },
+        )
+    return {
+        "bans": expired_bans,
+        "instance_bans": expired_instance_bans,
+        "timeouts": len(touched),
+    }
+
+
+@broker.task(task_name="moderation.expiry_sweep", schedule=[{"cron": "* * * * *"}])
+@observed_job("moderation.expiry_sweep")
+async def moderation_expiry_sweep() -> dict[str, int]:
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        async with sessionmaker() as session:
+            return await moderation_expiry_sweep_in_session(session, redis, settings)
+    finally:
+        await redis.aclose()
         await engine.dispose()
 
 

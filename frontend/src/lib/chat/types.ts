@@ -43,6 +43,7 @@ export interface Guild {
   description: string | null;
   icon_hash: string | null;
   owner_id: string;
+  owner_domain?: string;
   permissions?: string;
   permission_generation: string;
   federated_history_policy?: 'disabled' | 'full_retained';

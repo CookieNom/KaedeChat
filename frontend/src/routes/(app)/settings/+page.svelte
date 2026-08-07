@@ -5,6 +5,7 @@
   import type { UserSummary } from '$lib/chat/types';
   import Icon from '$lib/components/Icon.svelte';
   import Toast from '$lib/components/Toast.svelte';
+  import { assetUrl } from '$lib/media/assets';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
   import {
     browserNotifications,
@@ -523,7 +524,7 @@
     <div class="settings-account-mini">
       <span class="avatar avatar-small">
         {#if profile?.avatar_hash}
-          <img src={`/media/assets/${profile.avatar_hash}/thumbnail_128`} alt="" />
+          <img src={assetUrl(profile.avatar_hash, 'thumbnail_128')} alt="" />
         {:else}
           {profile?.username.slice(0, 1).toUpperCase() ?? 'K'}
         {/if}
@@ -591,7 +592,7 @@
         <div class="profile-card">
           <div class="profile-banner">
             {#if profile?.banner_hash}
-              <img src={`/media/assets/${profile.banner_hash}/original`} alt="" />
+              <img src={assetUrl(profile.banner_hash, 'original')} alt="" />
             {:else}
               <span aria-hidden="true"></span>
             {/if}
@@ -599,7 +600,7 @@
           <div class="profile-card-body">
             <span class="avatar avatar-large">
               {#if profile?.avatar_hash}
-                <img src={`/media/assets/${profile.avatar_hash}/thumbnail_128`} alt="Your avatar" />
+                <img src={assetUrl(profile.avatar_hash, 'thumbnail_128')} alt="Your avatar" />
               {:else}
                 {profile?.username.slice(0, 1).toUpperCase() ?? 'K'}
               {/if}

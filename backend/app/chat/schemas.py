@@ -63,6 +63,10 @@ class GuildNotificationSettingsUpdate(RequestModel):
     level: Literal["all", "mentions", "none"]
 
 
+class GuildOwnershipTransfer(RequestModel):
+    owner_id: EntityRef
+
+
 class ChannelCreate(RequestModel):
     name: str = Field(min_length=1, max_length=100)
     type: int = Field(default=0)
@@ -315,6 +319,7 @@ class InviteCreate(RequestModel):
 class MemberUpdate(RequestModel):
     nickname: str | None = Field(default=None, max_length=100)
     timeout_until: datetime | None = None
+    timeout_indefinite: bool = False
 
     @model_validator(mode="after")
     def at_least_one_change(self) -> MemberUpdate:
@@ -326,6 +331,12 @@ class MemberUpdate(RequestModel):
 class BanCreate(RequestModel):
     reason: str | None = Field(default=None, max_length=512)
     delete_message_seconds: int = Field(default=0, ge=0, le=604_800)
+    expires_at: datetime | None = None
+
+
+class InstanceBanCreate(RequestModel):
+    reason: str | None = Field(default=None, max_length=512)
+    expires_at: datetime | None = None
 
 
 class RelationshipRequest(RequestModel):

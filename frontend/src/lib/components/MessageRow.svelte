@@ -16,6 +16,7 @@
   import { entityRef } from '$lib/chat/refs';
   import { inviteReferencesInMessage } from '$lib/chat/invites';
   import { placeContextMenu } from '$lib/ui/context-menu';
+  import { portal } from '$lib/ui/portal';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import { preferredLocale } from '$lib/ui/locale';
   import { assetUrl } from '$lib/media/assets';
@@ -33,7 +34,9 @@
     onDelete,
     onMessageAuthor,
     onRetry,
-    onViewProfile
+    onViewProfile,
+    moderationActions = [],
+    onModerate
   }: {
     message: Message;
     compact?: boolean;
@@ -45,6 +48,8 @@
     onMessageAuthor?: (message: Message) => void;
     onRetry?: (message: Message) => void;
     onViewProfile?: (message: Message, event: MouseEvent) => void;
+    moderationActions?: Array<{ id: 'kick' | 'timeout' | 'ban'; label: string }>;
+    onModerate?: (user: UserSummary, action: 'kick' | 'timeout' | 'ban') => void;
   } = $props();
 
   let menuOpen = $state(false);
@@ -168,6 +173,13 @@
     event.stopPropagation();
     closeMenu(false);
     onViewProfile?.(message, event);
+  }
+
+  function moderateAuthor(action: 'kick' | 'timeout' | 'ban', event: MouseEvent) {
+    event.stopPropagation();
+    const author = message.author;
+    closeMenu(false);
+    if (author) onModerate?.(author, action);
   }
 
   async function copy(value: string, event: MouseEvent) {
@@ -381,6 +393,7 @@
   </div>
   {#if menuOpen}
     <div
+      use:portal
       bind:this={menuElement}
       id={`message-actions-${entityRef(message)}`}
       class="message-context-menu"
@@ -430,6 +443,28 @@
             <span>Copy technical user ID</span>
           </button>
         {/if}
+      {/if}
+      {#if message.author && moderationActions.length && onModerate}
+        {#each moderationActions as action, index (action.id)}
+          <button
+            class:menu-separator={index === 0}
+            class:danger-item={action.id === 'kick' || action.id === 'ban'}
+            type="button"
+            role="menuitem"
+            tabindex="-1"
+            onclick={(event) => moderateAuthor(action.id, event)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              {#if action.id === 'timeout'}
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v5l3 2" />
+              {:else}
+                <path d="M12 3 4 6v5c0 5 3.4 8.2 8 10 4.6-1.8 8-5 8-10V6l-8-3Z" />
+              {/if}
+            </svg>
+            <span>{action.label} {message.author.display_name ?? message.author.username}</span>
+          </button>
+        {/each}
       {/if}
       {#if editAvailable}
         <button

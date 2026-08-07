@@ -5,6 +5,7 @@
   import type { PresenceStatus, Relationship, UserSummary } from '$lib/chat/types';
   import { assetUrl } from '$lib/media/assets';
   import { placeContextMenu } from '$lib/ui/context-menu';
+  import { portal } from '$lib/ui/portal';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import { onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
@@ -16,7 +17,9 @@
     y,
     isSelf = false,
     onClose,
-    onMessage
+    onMessage,
+    moderationActions = [],
+    onModerate
   }: {
     user: UserSummary;
     presence?: PresenceStatus;
@@ -25,6 +28,8 @@
     isSelf?: boolean;
     onClose: () => void;
     onMessage?: (user: UserSummary) => void;
+    moderationActions?: Array<{ id: 'kick' | 'timeout' | 'ban'; label: string }>;
+    onModerate?: (user: UserSummary, action: 'kick' | 'timeout' | 'ban') => void;
   } = $props();
 
   let popover = $state<HTMLElement | null>(null);
@@ -135,6 +140,7 @@
 />
 
 <div
+  use:portal
   bind:this={popover}
   class="user-popover"
   role="dialog"
@@ -213,6 +219,23 @@
           <Icon name={feedback === 'User ID copied' ? 'check' : 'hash'} size={17} />
           <span>{actionLabel('User ID copied', 'Copy technical user ID')}</span>
         </button>
+      {/if}
+      {#if moderationActions.length && onModerate}
+        <div class="user-popover-moderation" role="group" aria-label="Moderation actions">
+          {#each moderationActions as action (action.id)}
+            <button
+              type="button"
+              class:danger-action={action.id === 'kick' || action.id === 'ban'}
+              onclick={() => {
+                onClose();
+                onModerate?.(user, action.id);
+              }}
+            >
+              <Icon name={action.id === 'timeout' ? 'clock' : 'shield'} size={17} />
+              <span>{action.label}</span>
+            </button>
+          {/each}
+        </div>
       {/if}
     </div>
     {#if relationshipError}
@@ -417,6 +440,20 @@
     grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
     gap: 8px;
     margin-top: 16px;
+  }
+
+  .user-popover-moderation {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.45rem;
+    margin-top: 0.15rem;
+    border-top: 1px solid var(--line-soft);
+    padding-top: 0.65rem;
+  }
+
+  .user-popover-moderation .danger-action {
+    color: var(--danger);
   }
 
   .user-popover-actions button,

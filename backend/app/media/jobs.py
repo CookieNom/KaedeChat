@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.settings import Settings
 from app.db.models import Attachment, RemoteMediaCache, RemoteMediaTombstone
 from app.media.processing import (
+    IMAGE_PIPELINE_VERSION,
     IMAGE_TYPES,
     VIDEO_TYPES,
     Derivative,
@@ -31,6 +32,16 @@ from app.media.storage import S3Storage, StorageError
 log = structlog.get_logger()
 
 
+def image_derivatives_are_current(attachment: Attachment) -> bool:
+    if attachment.detected_content_type not in IMAGE_TYPES:
+        return True
+    for name in ("thumbnail_128", "thumbnail_512", "thumbnail_1024"):
+        raw = attachment.variants.get(name)
+        if not isinstance(raw, dict) or raw.get("processing_version") != IMAGE_PIPELINE_VERSION:
+            return False
+    return True
+
+
 async def process_attachment_record(
     session: AsyncSession, settings: Settings, attachment_id: int, origin_domain: str
 ) -> str:
@@ -43,7 +54,10 @@ async def process_attachment_record(
         return "missing"
     if attachment.finalized_at is None:
         return "pending_upload"
-    if attachment.scan_status in {"clean", "infected"}:
+    reprocessing = attachment.scan_status == "clean"
+    if reprocessing and image_derivatives_are_current(attachment):
+        return "clean"
+    if attachment.scan_status == "infected":
         return attachment.scan_status
     storage = S3Storage(settings)
     try:
@@ -57,10 +71,12 @@ async def process_attachment_record(
             raise MediaValidationError("stored object size changed after finalization")
         detected = sniff_content_type(data)
         validate_detected_type(attachment.content_type, detected)
-        attachment.detected_content_type = detected
         digest = content_digest(data)
+        if reprocessing and attachment.content_sha256 != digest:
+            raise MediaValidationError("clean media content digest changed")
+        attachment.detected_content_type = detected
         attachment.content_sha256 = digest
-        scan = await clamav_scan(data, settings)
+        scan = "clean" if reprocessing else await clamav_scan(data, settings)
         if scan == "infected":
             attachment.scan_status = "infected"
             await storage.delete(settings.media_attachments_bucket, staging_key)
@@ -91,7 +107,13 @@ async def process_attachment_record(
                 "size": len(derivative.content),
                 "width": derivative.width,
                 "height": derivative.height,
+                "processing_version": IMAGE_PIPELINE_VERSION,
             }
+        if reprocessing:
+            attachment.variants = rendered_variants
+            attachment.scan_status = "clean"
+            await session.commit()
+            return "clean"
         # A presigned staging PUT cannot be revoked portably across Garage, S3,
         # and other compatible providers. Copy the exact in-memory bytes that
         # passed validation to a key the client never received, then atomically
@@ -119,6 +141,10 @@ async def process_attachment_record(
             )
         return "clean"
     except MediaValidationError:
+        if reprocessing:
+            await session.rollback()
+            log.exception("media_reprocessing_failed", attachment_id=str(attachment_id))
+            raise
         attachment.scan_status = "infected"
         try:
             await storage.delete(settings.media_attachments_bucket, attachment.object_key)
@@ -128,6 +154,10 @@ async def process_attachment_record(
         await session.commit()
         return "infected"
     except (StorageError, RuntimeError):
+        if reprocessing:
+            await session.rollback()
+            log.exception("media_reprocessing_failed", attachment_id=str(attachment_id))
+            raise
         attachment.scan_status = "failed"
         await session.commit()
         log.exception("media_processing_failed", attachment_id=str(attachment_id))

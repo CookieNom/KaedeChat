@@ -23,3 +23,14 @@ def test_endpoint_permission_contract_is_unique_known_and_nonempty() -> None:
         assert required_permissions(operation) == contract.permission
     with pytest.raises(RuntimeError, match="unknown permission contract"):
         required_permissions("unregistered.operation")
+
+
+def test_federated_instance_bans_use_a_dedicated_critical_permission() -> None:
+    assert required_permissions("instance_ban.list") == Permission.BAN_INSTANCES
+    assert required_permissions("instance_ban.put") == Permission.BAN_INSTANCES
+    assert required_permissions("instance_ban.remove") == Permission.BAN_INSTANCES
+    metadata = next(
+        item for item in PERMISSION_METADATA if item.permission == Permission.BAN_INSTANCES
+    )
+    assert metadata.resource_scopes == ("guild",)
+    assert metadata.danger == "critical"

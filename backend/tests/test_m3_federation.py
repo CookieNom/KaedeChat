@@ -239,6 +239,7 @@ def test_complete_guild_mutation_registry_and_snapshot_fences() -> None:
         "guild.overwrite.delete",
         "guild.member.update",
         "guild.member.remove",
+        "guild.members.origin.remove",
         "guild.member.role.add",
         "guild.member.role.remove",
         "guild.ban.add",
@@ -469,6 +470,7 @@ def test_block_policy_holds_durable_traffic_and_protects_reconciliation() -> Non
     assert federation_policy_holds_event("silence", "guild.message.create")
     assert {
         "guild.access.revoked",
+        "guild.instance_access.revoked",
         "guild.resync.required",
         "relationship.remove",
     } == SECURITY_CRITICAL_GUILD_EVENTS

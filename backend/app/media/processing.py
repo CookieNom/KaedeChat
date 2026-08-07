@@ -40,6 +40,7 @@ ALLOWED_CONTENT_TYPES = {
 }
 IMAGE_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}
 VIDEO_TYPES = {"video/mp4", "video/webm"}
+IMAGE_PIPELINE_VERSION = 2
 
 
 class MediaValidationError(ValueError):
@@ -186,17 +187,24 @@ def image_derivatives(data: bytes) -> tuple[list[Derivative], str, str, int, int
     for size in (128, 512, 1024):
         scale = min(1.0, size / max(width, height))
         resized = image.resize(scale) if scale < 1 else image
+        resized_page_height = max(1, round(page_height * scale))
+        if pages > 1:
+            # libvips stores animation frames in one vertical image. resize()
+            # scales those pixels but leaves page-height unchanged, causing the
+            # encoded thumbnail to render as a tall strip instead of frames.
+            resized.set_type(pyvips.GValue.gint_type, "page-height", resized_page_height)
         output = resized.write_to_buffer(".webp", Q=82, keep="none", effort=4)
         derivatives.append(
             Derivative(
                 name=f"thumbnail_{size}",
                 content=output,
                 content_type="image/webp",
-                width=max(1, round(width * scale)),
-                height=max(1, round(height * scale)),
+                width=int(resized.width),
+                height=resized_page_height,
             )
         )
-    preview = _flatten_alpha(image)
+    # Hash what people initially see, not libvips' stacked animation sheet.
+    preview = _flatten_alpha(image.crop(0, 0, image.width, page_height))
     preview = preview.thumbnail_image(32, height=32, size="down").colourspace("srgb")
     preview = preview.cast("uchar")
     pixels = np.frombuffer(preview.write_to_memory(), dtype=np.uint8).reshape(

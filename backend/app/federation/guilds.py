@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +15,7 @@ from app.chat.permissions import calculate_permissions
 from app.core.permissions import ALL_PERMISSIONS, Permission
 from app.core.settings import Settings
 from app.db.models import (
+    Attachment,
     Ban,
     Channel,
     ChannelOverwrite,
@@ -26,6 +27,8 @@ from app.db.models import (
     MessageProjection,
     Pin,
     Reaction,
+    ReadState,
+    RemoteMediaCache,
     Role,
     User,
 )
@@ -62,6 +65,7 @@ GUILD_MUTATION_EVENT_TYPES = frozenset(
         "guild.overwrite.delete",
         "guild.member.update",
         "guild.member.remove",
+        "guild.members.origin.remove",
         "guild.member.role.add",
         "guild.member.role.remove",
         "guild.ban.add",
@@ -89,6 +93,7 @@ HISTORY_ACCESS_MUTATION_EVENT_TYPES = frozenset(
         "guild.overwrite.delete",
         "guild.member.update",
         "guild.member.remove",
+        "guild.members.origin.remove",
         "guild.member.role.add",
         "guild.member.role.remove",
         "guild.ban.add",
@@ -693,6 +698,24 @@ async def apply_guild_mutation_event(
         locked.history_policy_generation = database_snowflake(
             raw.get("history_policy_generation", "1"), "history policy generation"
         )
+        owner_ref = (
+            database_snowflake(raw.get("owner_id"), "guild owner id"),
+            normalize_domain(str(raw.get("owner_domain", locked.origin_domain))),
+        )
+        if owner_ref[1] != locked.origin_domain:
+            raise ValueError("guild owner must belong to the guild home")
+        owner = await session.get(User, owner_ref)
+        owner_membership = await session.get(
+            GuildMember,
+            (locked.id, locked.origin_domain, owner_ref[0], owner_ref[1]),
+        )
+        if owner is None or owner_membership is None:
+            raise ValueError("guild owner is not a guild member")
+        locked.owner_id, locked.owner_domain = owner_ref
+        locked.permission_generation = database_snowflake(
+            raw.get("permission_generation", locked.permission_generation),
+            "permission generation",
+        )
         dispatch = {**dispatch, **raw}
     elif event_type in {"guild.channel.create", "guild.channel.update"}:
         raw = content.get("channel")
@@ -790,18 +813,7 @@ async def apply_guild_mutation_event(
         if channel is not None:
             if (channel.guild_id, channel.guild_domain) != (locked.id, locked.origin_domain):
                 raise ValueError("channel deletion references the wrong guild")
-            has_messages = await session.scalar(
-                select(Message.id)
-                .where(
-                    Message.channel_id == channel.id,
-                    Message.channel_domain == channel.origin_domain,
-                )
-                .limit(1)
-            )
-            if has_messages is None:
-                await session.delete(channel)
-            else:
-                tombstone_omitted_replicated_channel(channel)
+            await purge_replicated_channel_cache(session, channel)
         dispatch_type = "CHANNEL_DELETE"
         dispatch = {
             **dispatch,
@@ -966,6 +978,12 @@ async def apply_guild_mutation_event(
         member.timeout_until = _event_datetime(
             raw.get("timeout_until"), "member timeout", optional=True
         )
+        timeout_indefinite = raw.get("timeout_indefinite", False)
+        if not isinstance(timeout_indefinite, bool):
+            raise ValueError("member indefinite timeout is invalid")
+        if timeout_indefinite and member.timeout_until is not None:
+            raise ValueError("member timeout modes conflict")
+        member.timeout_indefinite = timeout_indefinite
         voice_flags = raw.get("voice_flags")
         if voice_flags is not None:
             if isinstance(voice_flags, bool) or not isinstance(voice_flags, int) or voice_flags < 0:
@@ -988,6 +1006,19 @@ async def apply_guild_mutation_event(
             await session.delete(member)
         dispatch_type = "GUILD_MEMBER_REMOVE"
         dispatch = {**dispatch, "user_id": str(user_ref[0]), "user_domain": user_ref[1]}
+    elif event_type == "guild.members.origin.remove":
+        origin_domain = normalize_domain(str(content.get("origin_domain", "")))
+        if origin_domain == locked.owner_domain:
+            raise ValueError("guild owner origin cannot be removed")
+        await session.execute(
+            delete(GuildMember).where(
+                GuildMember.guild_id == locked.id,
+                GuildMember.guild_domain == locked.origin_domain,
+                GuildMember.user_domain == origin_domain,
+            )
+        )
+        dispatch_type = "GUILD_UPDATE"
+        dispatch = {**dispatch, "members_removed_origin": origin_domain}
     elif event_type in {"guild.member.role.add", "guild.member.role.remove"}:
         user_ref = _event_ref(content.get("user"), "member user")
         role_ref = _event_ref(content.get("role"), "role")
@@ -1045,6 +1076,7 @@ async def apply_guild_mutation_event(
         user_ref = _event_ref(content.get("user"), "banned user")
         user = await session.get(User, user_ref)
         if event_type.endswith("add") and user is not None:
+            expires_at = _event_datetime(content.get("expires_at"), "ban expiry", optional=True)
             await session.execute(
                 pg_insert(Ban)
                 .values(
@@ -1055,8 +1087,16 @@ async def apply_guild_mutation_event(
                     reason=None,
                     actor_id=actor_ref[0],
                     actor_domain=actor_ref[1],
+                    expires_at=expires_at,
                 )
-                .on_conflict_do_nothing()
+                .on_conflict_do_update(
+                    index_elements=["guild_id", "guild_domain", "user_id", "user_domain"],
+                    set_={
+                        "actor_id": actor_ref[0],
+                        "actor_domain": actor_ref[1],
+                        "expires_at": expires_at,
+                    },
+                )
             )
         else:
             await session.execute(
@@ -1606,6 +1646,11 @@ def validate_guild_snapshot(
             raise ValueError("guild snapshot member timestamp is invalid") from None
         if joined_at.tzinfo is None or (timeout_until is not None and timeout_until.tzinfo is None):
             raise ValueError("guild snapshot member timestamp lacks a timezone")
+        timeout_indefinite = raw.get("timeout_indefinite", False)
+        if not isinstance(timeout_indefinite, bool):
+            raise ValueError("guild snapshot member indefinite timeout is invalid")
+        if timeout_indefinite and timeout_until is not None:
+            raise ValueError("guild snapshot member timeout modes conflict")
         voice_flags = raw.get("voice_flags")
         if isinstance(voice_flags, bool) or not isinstance(voice_flags, int) or voice_flags < 0:
             raise ValueError("guild snapshot member voice flags are invalid")
@@ -1664,14 +1709,7 @@ def validate_guild_snapshot(
 
 
 def tombstone_omitted_replicated_channel(channel: Channel) -> None:
-    """Retain message ownership while making an omitted remote channel inaccessible.
-
-    Snapshots are permission-filtered and retained messages have a restrictive
-    foreign key to their channel. Deleting an omitted channel both fails once it
-    owns history and risks conflating "not visible" with "does not exist". An
-    tombstoned channel remains addressable by foreign keys but is rejected by
-    normal channel-access queries until a later snapshot restores it.
-    """
+    """Keep only the channel identity needed to restore a later snapshot."""
 
     channel.unavailable = True
     channel.name = None
@@ -1680,6 +1718,69 @@ def tombstone_omitted_replicated_channel(channel: Channel) -> None:
     channel.parent_id = None
     channel.parent_domain = None
     channel.rate_limit_per_user = 0
+    channel.last_message_id = None
+    channel.last_message_domain = None
+
+
+async def purge_replicated_channel_cache(
+    session: AsyncSession,
+    channel: Channel,
+) -> None:
+    """Logically and physically evict inaccessible replicated channel data.
+
+    Access is revoked immediately by tombstoning the channel and deleting its
+    message rows. Cached remote object bytes are marked expired in the same
+    transaction; the storage GC performs retryable physical deletion.
+    """
+
+    if channel.guild_domain is None or channel.origin_domain != channel.guild_domain:
+        raise ValueError("only replicated guild channels may be purged")
+    message_refs = select(Message.id, Message.origin_domain).where(
+        Message.channel_id == channel.id,
+        Message.channel_domain == channel.origin_domain,
+    )
+    attachment_refs = select(Attachment.id, Attachment.origin_domain).where(
+        tuple_(Attachment.message_id, Attachment.message_domain).in_(message_refs)
+    )
+    refs = list(await session.execute(attachment_refs))
+    if refs:
+        await session.execute(
+            update(RemoteMediaCache)
+            .where(
+                tuple_(
+                    RemoteMediaCache.attachment_id,
+                    RemoteMediaCache.origin_domain,
+                ).in_(refs)
+            )
+            .values(expires_at=datetime.now(UTC))
+        )
+    await session.execute(
+        update(ReadState)
+        .where(
+            ReadState.channel_id == channel.id,
+            ReadState.channel_domain == channel.origin_domain,
+        )
+        .values(last_message_id=None, last_message_domain=None, mention_count=0)
+    )
+    await session.execute(
+        update(Message)
+        .where(
+            Message.channel_id == channel.id,
+            Message.channel_domain == channel.origin_domain,
+            Message.referenced_message_id.is_not(None),
+        )
+        .values(referenced_message_id=None, referenced_message_domain=None)
+    )
+    channel.last_message_id = None
+    channel.last_message_domain = None
+    await session.flush()
+    await session.execute(
+        delete(Message).where(
+            Message.channel_id == channel.id,
+            Message.channel_domain == channel.origin_domain,
+        )
+    )
+    tombstone_omitted_replicated_channel(channel)
 
 
 async def apply_guild_access_revocation(
@@ -1730,7 +1831,61 @@ async def apply_guild_access_revocation(
             )
         )
         for channel in channels:
-            tombstone_omitted_replicated_channel(channel)
+            await purge_replicated_channel_cache(session, channel)
+        await session.execute(
+            delete(ChannelOverwrite).where(
+                ChannelOverwrite.channel_id.in_([channel.id for channel in channels]),
+                ChannelOverwrite.channel_domain == locked.origin_domain,
+            )
+        )
+    from app.federation.history import purge_ineligible_federated_history
+
+    await purge_ineligible_federated_history(session, settings, locked)
+    return removed
+
+
+async def apply_guild_instance_access_revocation(
+    session: AsyncSession,
+    settings: Settings,
+    guild: Guild,
+    *,
+    target_domain: str,
+) -> list[int]:
+    """Apply an authority-signed revocation for every local guild member."""
+
+    if normalize_domain(target_domain) != settings.domain:
+        raise ValueError("instance access revocation was addressed to another instance")
+    locked = await session.scalar(
+        select(Guild)
+        .where(Guild.id == guild.id, Guild.origin_domain == guild.origin_domain)
+        .with_for_update()
+    )
+    if locked is None or locked.origin_domain == settings.domain:
+        raise ValueError("instance revocation references an invalid replicated guild")
+    removed = list(
+        await session.scalars(
+            delete(GuildMember)
+            .where(
+                GuildMember.guild_id == locked.id,
+                GuildMember.guild_domain == locked.origin_domain,
+                GuildMember.user_domain == settings.domain,
+            )
+            .returning(GuildMember.user_id)
+        )
+    )
+    locked.unavailable = True
+    locked.sync_status = "stale"
+    channels = list(
+        await session.scalars(
+            select(Channel).where(
+                Channel.guild_id == locked.id,
+                Channel.guild_domain == locked.origin_domain,
+            )
+        )
+    )
+    for channel in channels:
+        await purge_replicated_channel_cache(session, channel)
+    if channels:
         await session.execute(
             delete(ChannelOverwrite).where(
                 ChannelOverwrite.channel_id.in_([channel.id for channel in channels]),
@@ -1840,6 +1995,7 @@ def guild_snapshot_payload(
                 "timeout_until": (
                     member.timeout_until.isoformat() if member.timeout_until else None
                 ),
+                "timeout_indefinite": member.timeout_indefinite,
                 "voice_flags": member.voice_flags,
                 "member_version": str(member.member_version),
             }
@@ -1951,7 +2107,7 @@ async def apply_guild_snapshot(
     for channel in existing_channels:
         if (channel.id, channel.origin_domain) not in channel_refs:
             omitted_channel_ids.append(channel.id)
-            tombstone_omitted_replicated_channel(channel)
+            await purge_replicated_channel_cache(session, channel)
     if omitted_channel_ids:
         await session.execute(
             delete(ChannelOverwrite).where(
@@ -2060,6 +2216,7 @@ async def apply_guild_snapshot(
         loaded_member.timeout_until = (
             datetime.fromisoformat(str(raw["timeout_until"])) if raw.get("timeout_until") else None
         )
+        loaded_member.timeout_indefinite = bool(raw.get("timeout_indefinite", False))
         loaded_member.voice_flags = int(raw.get("voice_flags", 0))
         loaded_member.member_version = int(raw.get("member_version", 1))
     await session.flush()

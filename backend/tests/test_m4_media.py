@@ -12,7 +12,9 @@ from app.chat.payloads import guild_payload
 from app.chat.schemas import MessageCreate
 from app.core.settings import Settings
 from app.db.models import Attachment, Guild
+from app.media.jobs import image_derivatives_are_current
 from app.media.processing import (
+    IMAGE_PIPELINE_VERSION,
     MediaValidationError,
     image_derivatives,
     normalize_declared_type,
@@ -247,6 +249,31 @@ def test_missing_image_derivative_falls_back_to_scanned_original() -> None:
     assert filename == "legacy.gif"
 
 
+def test_legacy_animated_image_derivatives_are_marked_for_repair() -> None:
+    attachment = Attachment(
+        id=31,
+        origin_domain="alpha.localhost",
+        uploader_id=20,
+        uploader_domain="alpha.localhost",
+        filename="legacy.gif",
+        content_type="image/gif",
+        detected_content_type="image/gif",
+        size=128,
+        object_key="alpha.localhost/31/clean/original",
+        variants={
+            name: {"object_key": f"alpha.localhost/31/{name}.webp"}
+            for name in ("thumbnail_128", "thumbnail_512", "thumbnail_1024")
+        },
+        scan_status="clean",
+        purpose="avatar",
+    )
+
+    assert not image_derivatives_are_current(attachment)
+    for variant in attachment.variants.values():
+        variant["processing_version"] = IMAGE_PIPELINE_VERSION
+    assert image_derivatives_are_current(attachment)
+
+
 def test_webhook_tokens_are_prefixed_random_and_only_stored_as_digests() -> None:
     first = new_webhook_token()
     second = new_webhook_token()
@@ -258,13 +285,13 @@ def test_webhook_tokens_are_prefixed_random_and_only_stored_as_digests() -> None
 
 def test_image_pipeline_emits_safe_metadata_and_preserves_animation() -> None:
     source = io.BytesIO()
-    frames = [Image.new("RGB", (16, 12), color) for color in ("red", "blue")]
+    frames = [Image.new("RGB", (320, 180), color) for color in ("red", "blue", "green")]
     frames[0].save(
         source,
         format="GIF",
         save_all=True,
         append_images=frames[1:],
-        duration=[100, 200],
+        duration=[100, 200, 300],
         loop=0,
     )
     derivatives, blurhash, perceptual_hash, width, height = image_derivatives(source.getvalue())
@@ -273,10 +300,18 @@ def test_image_pipeline_emits_safe_metadata_and_preserves_animation() -> None:
         "thumbnail_512",
         "thumbnail_1024",
     ]
-    assert (width, height) == (16, 12)
+    assert (width, height) == (320, 180)
     assert blurhash
     assert len(perceptual_hash) == 16
-    for derivative in derivatives:
+    expected_sizes = [(128, 72), (320, 180), (320, 180)]
+    for derivative, expected_size in zip(derivatives, expected_sizes, strict=True):
+        assert (derivative.width, derivative.height) == expected_size
         with Image.open(io.BytesIO(derivative.content)) as rendered:
             assert rendered.format == "WEBP"
-            assert rendered.n_frames == 2
+            assert rendered.size == expected_size
+            assert rendered.n_frames == 3
+            rendered.seek(0)
+            first_frame = rendered.convert("RGB").getpixel((0, 0))
+            rendered.seek(1)
+            second_frame = rendered.convert("RGB").getpixel((0, 0))
+            assert first_frame != second_frame

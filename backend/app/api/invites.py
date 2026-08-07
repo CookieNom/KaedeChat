@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
@@ -39,7 +39,7 @@ from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef, EntityReference, validate_snowflake
-from app.db.models import Ban, Channel, Guild, GuildMember, Invite, User
+from app.db.models import Ban, Channel, Guild, GuildInstanceBan, GuildMember, Invite, User
 from app.federation.client import signed_request
 from app.federation.guilds import apply_guild_snapshot, fetch_guild_snapshot
 from app.federation.network import FederationNetworkError, normalize_domain
@@ -455,10 +455,24 @@ async def accept_invite(
             Ban.guild_domain == guild.origin_domain,
             Ban.user_id == auth.user.id,
             Ban.user_domain == auth.user.origin_domain,
+            or_(Ban.expires_at.is_(None), Ban.expires_at > now),
         )
     )
     if banned is not None:
         raise HTTPException(status_code=403, detail={"code": "BANNED_FROM_GUILD"})
+    instance_banned = await session.scalar(
+        select(GuildInstanceBan.instance_domain).where(
+            GuildInstanceBan.guild_id == guild.id,
+            GuildInstanceBan.guild_domain == guild.origin_domain,
+            GuildInstanceBan.instance_domain == auth.user.origin_domain,
+            or_(
+                GuildInstanceBan.expires_at.is_(None),
+                GuildInstanceBan.expires_at > now,
+            ),
+        )
+    )
+    if instance_banned is not None:
+        raise HTTPException(status_code=403, detail={"code": "INSTANCE_BANNED_FROM_GUILD"})
     member = await session.scalar(
         select(GuildMember).where(
             GuildMember.guild_id == guild.id,

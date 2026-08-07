@@ -206,3 +206,37 @@ async def queue_guild_access_revocation(
     )
     remember_guild_delivery_wakes(guild, (user_domain,))
     return {user_domain}
+
+
+async def queue_guild_instance_access_revocation(
+    session: AsyncSession,
+    settings: Settings,
+    guild: Guild,
+    *,
+    instance_domain: str,
+    reason: str,
+) -> set[str]:
+    """Revoke every cached membership held by one remote instance."""
+
+    if instance_domain == settings.domain:
+        raise ValueError("the local instance cannot be revoked from its own guild")
+    owner = await session.get(User, (guild.owner_id, guild.owner_domain))
+    if owner is None or not owner.is_local or owner.origin_domain != settings.domain:
+        raise RuntimeError("local guild owner cannot sign an instance access revocation")
+    revoked = await build_envelope(
+        session,
+        settings,
+        "guild.instance_access.revoked",
+        owner,
+        {"target_domain": instance_domain, "reason": reason},
+        context={"guild_id": str(guild.id), "guild_domain": guild.origin_domain},
+    )
+    await queue_event(
+        session,
+        settings,
+        instance_domain,
+        revoked,
+        discover_destination=False,
+    )
+    remember_guild_delivery_wakes(guild, (instance_domain,))
+    return {instance_domain}

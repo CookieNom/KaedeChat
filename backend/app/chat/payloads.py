@@ -9,6 +9,7 @@ from app.db.models import (
     Ban,
     Channel,
     Guild,
+    GuildInstanceBan,
     GuildMember,
     Message,
     Relationship,
@@ -47,6 +48,7 @@ def guild_payload(guild: Guild) -> dict[str, object]:
         "icon_hash": guild.icon_hash,
         "banner_hash": guild.banner_hash,
         "owner_id": str(guild.owner_id),
+        "owner_domain": guild.owner_domain,
         "permission_generation": str(guild.permission_generation),
         "federated_history_policy": guild.federated_history_policy,
         "history_policy_generation": str(guild.history_policy_generation),
@@ -104,6 +106,7 @@ def member_payload(
         "nickname": member.nickname,
         "joined_at": member.joined_at.isoformat(),
         "timeout_until": member.timeout_until.isoformat() if member.timeout_until else None,
+        "timeout_indefinite": member.timeout_indefinite,
         "voice_flags": member.voice_flags,
         "member_version": str(member.member_version),
         "role_ids": [str(role_id) for role_id in (role_ids or [])],
@@ -118,6 +121,20 @@ def ban_payload(ban: Ban, user: User) -> dict[str, object]:
         "reason": ban.reason,
         "actor_id": str(ban.actor_id),
         "created_at": ban.created_at.isoformat(),
+        "expires_at": ban.expires_at.isoformat() if ban.expires_at else None,
+    }
+
+
+def instance_ban_payload(ban: GuildInstanceBan) -> dict[str, object]:
+    return {
+        "guild_id": str(ban.guild_id),
+        "guild_domain": ban.guild_domain,
+        "instance_domain": ban.instance_domain,
+        "reason": ban.reason,
+        "actor_id": str(ban.actor_id),
+        "actor_domain": ban.actor_domain,
+        "created_at": ban.created_at.isoformat(),
+        "expires_at": ban.expires_at.isoformat() if ban.expires_at else None,
     }
 
 

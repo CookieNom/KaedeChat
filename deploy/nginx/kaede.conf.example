@@ -205,9 +205,9 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
 
-    # The default application maximum is 100 MiB. The extra MiB covers request
+    # The default application maximum is 15 MiB. The extra MiB covers request
     # framing without weakening the 2 MiB API/federation boundary above.
-    client_max_body_size 101m;
+    client_max_body_size 16m;
     client_body_timeout 30s;
     send_timeout 300s;
 

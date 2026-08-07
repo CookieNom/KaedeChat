@@ -47,6 +47,21 @@
   interface MemberSummary extends GuildMemberSummary {
     joined_at?: string;
     timeout_until?: string | null;
+    timeout_indefinite?: boolean;
+  }
+
+  interface BanSummary {
+    user: UserSummary;
+    reason: string | null;
+    created_at: string;
+    expires_at: string | null;
+  }
+
+  interface InstanceBanSummary {
+    instance_domain: string;
+    reason: string | null;
+    created_at: string;
+    expires_at: string | null;
   }
 
   interface ChannelOverwrite {
@@ -78,6 +93,53 @@
         title: string;
         description: string;
         confirmLabel: string;
+      }
+    | {
+        kind: 'member-kick';
+        target: MemberSummary;
+        reason: string;
+        title: string;
+        description: string;
+        confirmLabel: string;
+      }
+    | {
+        kind: 'member-ban';
+        target: MemberSummary;
+        reason: string;
+        expiresAt: string | null;
+        deleteMessageSeconds: number;
+        title: string;
+        description: string;
+        confirmLabel: string;
+      }
+    | {
+        kind: 'instance-ban';
+        domain: string;
+        reason: string;
+        expiresAt: string | null;
+        title: string;
+        description: string;
+        confirmLabel: string;
+      }
+    | {
+        kind: 'guild-leave';
+        title: string;
+        description: string;
+        confirmLabel: string;
+      }
+    | {
+        kind: 'guild-transfer';
+        target: MemberSummary;
+        title: string;
+        description: string;
+        confirmLabel: string;
+      }
+    | {
+        kind: 'guild-delete';
+        verificationText: string;
+        title: string;
+        description: string;
+        confirmLabel: string;
       };
 
   type GuildAssetKind = 'icon' | 'banner';
@@ -88,10 +150,21 @@
   const guildId = $derived(page.params.guildId ?? '');
   const channelId = $derived(channelOnly ? (page.params.channelId ?? '') : '');
   let localDomain = $state('');
+  let currentUserRef = $state('');
   let guild = $state<GuildView | null>(null);
   let members = $state<MemberSummary[]>([]);
   let membersHaveMore = $state(false);
   let membersLoadingMore = $state(false);
+  let bans = $state<BanSummary[]>([]);
+  let instanceBans = $state<InstanceBanSummary[]>([]);
+  let moderationTarget = $state('');
+  let moderationReason = $state('');
+  let timeoutDuration = $state('3600');
+  let banDuration = $state('permanent');
+  let banDeleteSeconds = $state('0');
+  let instanceBanDomain = $state('');
+  let instanceBanReason = $state('');
+  let instanceBanDuration = $state('permanent');
   let invites = $state<InviteSummary[]>([]);
   let webhooks = $state<WebhookSummary[]>([]);
   let newWebhookName = $state('');
@@ -146,6 +219,8 @@
   let confirmationDialog = $state<HTMLElement | null>(null);
   let confirmationCancelButton = $state<HTMLButtonElement | null>(null);
   let confirmationPreviousFocus: HTMLElement | null = null;
+  let confirmationVerification = $state('');
+  let ownershipTarget = $state('');
 
   const permissionGroups = [...new Set(PERMISSION_METADATA.map((item) => item.group))].map(
     (group) => ({
@@ -213,9 +288,37 @@
   }
 
   const canManageGuild = $derived(isLocalGuild && hasPermission(Permission.MANAGE_GUILD));
+  const isGuildOwner = $derived(
+    Boolean(
+      guild &&
+      currentUserRef &&
+      `${guild.owner_id}@${guild.owner_domain ?? guild.origin_domain}` === currentUserRef
+    )
+  );
+  const ownershipCandidates = $derived(
+    members.filter(
+      (member) =>
+        member.user.origin_domain === localDomain && entityRef(member.user) !== currentUserRef
+    )
+  );
   const canManageChannels = $derived(isLocalGuild && hasPermission(Permission.MANAGE_CHANNELS));
   const canManageRoles = $derived(isLocalGuild && hasPermission(Permission.MANAGE_ROLES));
   const canViewMembers = $derived(isLocalGuild && hasPermission(Permission.VIEW_CHANNEL));
+  const canKickMembers = $derived(isLocalGuild && hasPermission(Permission.KICK_MEMBERS));
+  const canBanMembers = $derived(isLocalGuild && hasPermission(Permission.BAN_MEMBERS));
+  const canTimeoutMembers = $derived(isLocalGuild && hasPermission(Permission.MODERATE_MEMBERS));
+  const canBanInstances = $derived(isLocalGuild && hasPermission(Permission.BAN_INSTANCES));
+  const canModerateMembers = $derived(canKickMembers || canBanMembers || canTimeoutMembers);
+  const moderatableMembers = $derived(
+    members.filter(
+      (member) =>
+        entityRef(member.user) !== currentUserRef &&
+        !(member.user.id === guild?.owner_id && member.user.origin_domain === guild?.origin_domain)
+    )
+  );
+  const selectedModerationMember = $derived(
+    members.find((member) => entityRef(member.user) === moderationTarget) ?? null
+  );
   const canCreateInvites = $derived(isLocalGuild && hasPermission(Permission.CREATE_INVITE));
   const canAccessInvites = $derived(canManageGuild || canCreateInvites);
   const canManageWebhooks = $derived(isLocalGuild && hasPermission(Permission.MANAGE_WEBHOOKS));
@@ -530,6 +633,7 @@
       ]);
       if (generation !== loadGeneration || targetGuild !== guildId) return;
       localDomain = currentUser.origin_domain;
+      currentUserRef = entityRef(currentUser);
       guild = loaded;
       name = loaded.name;
       description = loaded.description ?? '';
@@ -582,6 +686,25 @@
             signal
           }).then((value) => {
             if (generation === loadGeneration) webhooks = value;
+          })
+        );
+      }
+      if (local && (administrator || Boolean(permissions & Permission.BAN_MEMBERS))) {
+        optional.push(
+          api<BanSummary[]>(`/guilds/${encodeURIComponent(targetGuild)}/bans?limit=1000`, {
+            signal
+          }).then((value) => {
+            if (generation === loadGeneration) bans = value;
+          })
+        );
+      }
+      if (local && (administrator || Boolean(permissions & Permission.BAN_INSTANCES))) {
+        optional.push(
+          api<InstanceBanSummary[]>(
+            `/guilds/${encodeURIComponent(targetGuild)}/instance-bans?limit=1000`,
+            { signal }
+          ).then((value) => {
+            if (generation === loadGeneration) instanceBans = value;
           })
         );
       }
@@ -641,6 +764,7 @@
     confirmationPreviousFocus =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     destructiveConfirmation = confirmation;
+    confirmationVerification = '';
     error = '';
     notice = '';
     await tick();
@@ -651,6 +775,7 @@
     if (busy) return;
     const previousFocus = confirmationPreviousFocus;
     destructiveConfirmation = null;
+    confirmationVerification = '';
     confirmationPreviousFocus = null;
     void tick().then(() => {
       if (previousFocus?.isConnected) {
@@ -1137,10 +1262,114 @@
       succeeded = await deleteConfirmedChannel(confirmation.target);
     } else if (confirmation.kind === 'role') {
       succeeded = await deleteConfirmedRole(confirmation.target);
-    } else {
+    } else if (confirmation.kind === 'invite') {
       succeeded = await revokeConfirmedInvite(confirmation.target);
+    } else if (confirmation.kind === 'member-kick') {
+      succeeded = await kickConfirmedMember(confirmation.target, confirmation.reason);
+    } else if (confirmation.kind === 'member-ban') {
+      succeeded = await banConfirmedMember(
+        confirmation.target,
+        confirmation.reason,
+        confirmation.expiresAt,
+        confirmation.deleteMessageSeconds
+      );
+    } else if (confirmation.kind === 'instance-ban') {
+      succeeded = await banConfirmedFederatedInstance(
+        confirmation.domain,
+        confirmation.reason,
+        confirmation.expiresAt
+      );
+    } else if (confirmation.kind === 'guild-leave') {
+      succeeded = await leaveConfirmedGuild();
+    } else if (confirmation.kind === 'guild-transfer') {
+      succeeded = await transferConfirmedGuild(confirmation.target);
+    } else {
+      if (confirmationVerification !== confirmation.verificationText) return;
+      succeeded = await deleteConfirmedGuild();
     }
     if (succeeded) closeDestructiveConfirmation();
+  }
+
+  function destructiveBusyLabel(confirmation: DestructiveConfirmation): string {
+    if (confirmation.kind === 'invite') return 'Revoking…';
+    if (confirmation.kind === 'member-kick') return 'Kicking…';
+    if (confirmation.kind === 'member-ban' || confirmation.kind === 'instance-ban')
+      return 'Banning…';
+    if (confirmation.kind === 'guild-leave') return 'Leaving…';
+    if (confirmation.kind === 'guild-transfer') return 'Transferring…';
+    return 'Deleting…';
+  }
+
+  function requestLeaveGuild() {
+    if (!guild || isGuildOwner) return;
+    void openDestructiveConfirmation({
+      kind: 'guild-leave',
+      title: `Leave ${guild.name}?`,
+      description:
+        'You will lose access to this guild and its cached remote history. You need another valid invite to return.',
+      confirmLabel: 'Leave guild'
+    });
+  }
+
+  function requestOwnershipTransfer() {
+    const member = ownershipCandidates.find(
+      (candidate) => entityRef(candidate.user) === ownershipTarget
+    );
+    if (!guild || !isGuildOwner || !member) return;
+    const targetName = member.user.display_name ?? member.user.username;
+    void openDestructiveConfirmation({
+      kind: 'guild-transfer',
+      target: member,
+      title: `Transfer ownership to ${targetName}?`,
+      description:
+        'They will become the guild owner immediately. You will remain a member, but only the new owner can transfer or delete the guild.',
+      confirmLabel: 'Transfer ownership'
+    });
+  }
+
+  function requestDeleteGuild() {
+    if (!guild || !isGuildOwner || !isLocalGuild) return;
+    void openDestructiveConfirmation({
+      kind: 'guild-delete',
+      verificationText: guild.name,
+      title: `Delete ${guild.name}?`,
+      description:
+        'This permanently removes the guild, its channels, messages, roles, invites, and moderation records. Remote instances will receive durable access-revocation events.',
+      confirmLabel: 'Delete guild'
+    });
+  }
+
+  function leaveConfirmedGuild() {
+    return run(async (targetGuild) => {
+      await api(`/guilds/${encodeURIComponent(targetGuild)}/members/@me`, { method: 'DELETE' });
+      window.location.assign(resolve('/home'));
+    });
+  }
+
+  function transferConfirmedGuild(member: MemberSummary) {
+    return run(async (targetGuild, generation) => {
+      if (!guild?.version) throw new Error('Guild version is unavailable.');
+      const updated = await api<GuildView>(`/guilds/${encodeURIComponent(targetGuild)}/owner`, {
+        method: 'PUT',
+        headers: { 'If-Match': guild.version },
+        body: JSON.stringify({ owner_id: entityRef(member.user) })
+      });
+      if (generation !== loadGeneration) return;
+      guild = { ...guild!, ...updated };
+      ownershipTarget = '';
+      notice = `Ownership transferred to ${member.user.display_name ?? member.user.username}.`;
+    });
+  }
+
+  function deleteConfirmedGuild() {
+    return run(async (targetGuild) => {
+      if (!guild?.version) throw new Error('Guild version is unavailable.');
+      await api(`/guilds/${encodeURIComponent(targetGuild)}`, {
+        method: 'DELETE',
+        headers: { 'If-Match': guild.version }
+      });
+      window.location.assign(resolve('/home'));
+    });
   }
 
   async function copyInvite(invite: InviteSummary) {
@@ -1173,6 +1402,210 @@
         };
       });
       notice = `${role.name} ${enabled ? 'assigned' : 'removed'}.`;
+    });
+  }
+
+  function expiryFor(duration: string): string | null {
+    if (duration === 'permanent') return null;
+    return new Date(Date.now() + Number(duration) * 1000).toISOString();
+  }
+
+  function kickSelectedMember() {
+    const member = selectedModerationMember;
+    if (!canKickMembers || !member) return;
+    const name = member.user.display_name ?? member.user.username;
+    void openDestructiveConfirmation({
+      kind: 'member-kick',
+      target: member,
+      reason: moderationReason,
+      title: `Kick ${name}?`,
+      description: `${name} will be removed from the guild immediately. They can return with a valid invite unless they are also banned.`,
+      confirmLabel: 'Kick member'
+    });
+  }
+
+  function kickConfirmedMember(member: MemberSummary, reason: string) {
+    return run(async (targetGuild, generation) => {
+      await api(
+        `/guilds/${encodeURIComponent(targetGuild)}/members/${encodeURIComponent(entityRef(member.user))}`,
+        {
+          method: 'DELETE',
+          headers: reason ? { 'X-Audit-Log-Reason': reason } : undefined
+        }
+      );
+      if (generation !== loadGeneration) return;
+      members = members.filter((item) => entityKey(item.user) !== entityKey(member.user));
+      moderationTarget = '';
+      moderationReason = '';
+      notice = `${member.user.display_name ?? member.user.username} was kicked.`;
+    });
+  }
+
+  function timeoutSelectedMember() {
+    const member = selectedModerationMember;
+    if (!canTimeoutMembers || !member) return;
+    const permanent = timeoutDuration === 'permanent';
+    return run(async (targetGuild, generation) => {
+      const updated = await api<MemberSummary>(
+        `/guilds/${encodeURIComponent(targetGuild)}/members/${encodeURIComponent(entityRef(member.user))}`,
+        {
+          method: 'PATCH',
+          headers: moderationReason ? { 'X-Audit-Log-Reason': moderationReason } : undefined,
+          body: JSON.stringify({
+            timeout_until: permanent ? null : expiryFor(timeoutDuration),
+            timeout_indefinite: permanent
+          })
+        }
+      );
+      if (generation !== loadGeneration) return;
+      members = members.map((item) =>
+        entityKey(item.user) === entityKey(member.user) ? updated : item
+      );
+      moderationReason = '';
+      notice = `${member.user.display_name ?? member.user.username} was timed out${permanent ? ' indefinitely' : ''}.`;
+    });
+  }
+
+  function removeSelectedTimeout() {
+    const member = selectedModerationMember;
+    if (!canTimeoutMembers || !member) return;
+    return run(async (targetGuild, generation) => {
+      const updated = await api<MemberSummary>(
+        `/guilds/${encodeURIComponent(targetGuild)}/members/${encodeURIComponent(entityRef(member.user))}`,
+        {
+          method: 'PATCH',
+          headers: moderationReason ? { 'X-Audit-Log-Reason': moderationReason } : undefined,
+          body: JSON.stringify({ timeout_until: null, timeout_indefinite: false })
+        }
+      );
+      if (generation !== loadGeneration) return;
+      members = members.map((item) =>
+        entityKey(item.user) === entityKey(member.user) ? updated : item
+      );
+      moderationReason = '';
+      notice = `Timeout removed for ${member.user.display_name ?? member.user.username}.`;
+    });
+  }
+
+  function banSelectedMember() {
+    const member = selectedModerationMember;
+    if (!canBanMembers || !member) return;
+    const name = member.user.display_name ?? member.user.username;
+    const expiresAt = expiryFor(banDuration);
+    const deleteMessageSeconds = Number(banDeleteSeconds);
+    void openDestructiveConfirmation({
+      kind: 'member-ban',
+      target: member,
+      reason: moderationReason,
+      expiresAt,
+      deleteMessageSeconds,
+      title: `Ban ${name}?`,
+      description: `${name} will be removed and unable to rejoin${expiresAt ? ` until ${formatDateTime(expiresAt)}` : ' until the ban is removed'}. ${deleteMessageSeconds ? 'Recent messages within the selected interval will be deleted.' : 'Existing messages will remain.'}`,
+      confirmLabel: 'Ban member'
+    });
+  }
+
+  function banConfirmedMember(
+    member: MemberSummary,
+    reason: string,
+    expiresAt: string | null,
+    deleteMessageSeconds: number
+  ) {
+    return run(async (targetGuild, generation) => {
+      await api(
+        `/guilds/${encodeURIComponent(targetGuild)}/bans/${encodeURIComponent(entityRef(member.user))}`,
+        {
+          method: 'PUT',
+          headers: reason ? { 'X-Audit-Log-Reason': reason } : undefined,
+          body: JSON.stringify({
+            reason: reason || null,
+            expires_at: expiresAt,
+            delete_message_seconds: deleteMessageSeconds
+          })
+        }
+      );
+      if (generation !== loadGeneration) return;
+      members = members.filter((item) => entityKey(item.user) !== entityKey(member.user));
+      bans = [
+        {
+          user: member.user,
+          reason: reason || null,
+          created_at: new Date().toISOString(),
+          expires_at: expiresAt
+        },
+        ...bans.filter((item) => entityKey(item.user) !== entityKey(member.user))
+      ];
+      moderationTarget = '';
+      moderationReason = '';
+      notice = `${member.user.display_name ?? member.user.username} was banned.`;
+    });
+  }
+
+  function unbanUser(ban: BanSummary) {
+    if (!canBanMembers) return;
+    return run(async (targetGuild, generation) => {
+      await api(
+        `/guilds/${encodeURIComponent(targetGuild)}/bans/${encodeURIComponent(entityRef(ban.user))}`,
+        { method: 'DELETE' }
+      );
+      if (generation !== loadGeneration) return;
+      bans = bans.filter((item) => entityKey(item.user) !== entityKey(ban.user));
+      notice = `${ban.user.display_name ?? ban.user.username} was unbanned.`;
+    });
+  }
+
+  function banFederatedInstance() {
+    if (!canBanInstances || !instanceBanDomain.trim()) return;
+    const domain = instanceBanDomain.trim().toLowerCase().replace(/\.$/, '');
+    const expiresAt = expiryFor(instanceBanDuration);
+    void openDestructiveConfirmation({
+      kind: 'instance-ban',
+      domain,
+      reason: instanceBanReason,
+      expiresAt,
+      title: `Ban everyone from ${domain}?`,
+      description: `Every current member homed on ${domain} will be removed and that instance cannot add members${expiresAt ? ` until ${formatDateTime(expiresAt)}` : ' until this ban is removed'}. Its server will be asked to erase cached guild data, but a malicious, offline, or modified server may retain copies.`,
+      confirmLabel: 'Ban instance'
+    });
+  }
+
+  function banConfirmedFederatedInstance(domain: string, reason: string, expiresAt: string | null) {
+    return run(async (targetGuild, generation) => {
+      await api(
+        `/guilds/${encodeURIComponent(targetGuild)}/instance-bans/${encodeURIComponent(domain)}`,
+        {
+          method: 'PUT',
+          headers: reason ? { 'X-Audit-Log-Reason': reason } : undefined,
+          body: JSON.stringify({ reason: reason || null, expires_at: expiresAt })
+        }
+      );
+      if (generation !== loadGeneration) return;
+      members = members.filter((member) => member.user.origin_domain !== domain);
+      instanceBans = [
+        {
+          instance_domain: domain,
+          reason: reason || null,
+          created_at: new Date().toISOString(),
+          expires_at: expiresAt
+        },
+        ...instanceBans.filter((item) => item.instance_domain !== domain)
+      ];
+      instanceBanDomain = '';
+      instanceBanReason = '';
+      notice = `${domain} was banned from this guild.`;
+    });
+  }
+
+  function unbanFederatedInstance(ban: InstanceBanSummary) {
+    if (!canBanInstances) return;
+    return run(async (targetGuild, generation) => {
+      await api(
+        `/guilds/${encodeURIComponent(targetGuild)}/instance-bans/${encodeURIComponent(ban.instance_domain)}`,
+        { method: 'DELETE' }
+      );
+      if (generation !== loadGeneration) return;
+      instanceBans = instanceBans.filter((item) => item.instance_domain !== ban.instance_domain);
+      notice = `${ban.instance_domain} may join this guild again.`;
     });
   }
 
@@ -1212,6 +1645,9 @@
     members = [];
     membersHaveMore = false;
     membersLoadingMore = false;
+    bans = [];
+    instanceBans = [];
+    moderationTarget = '';
     invites = [];
     createdInvite = null;
     selectedChannel = null;
@@ -1336,6 +1772,8 @@
         {#if canAccessInvites}
           <a href="#invites"><Icon name="globe" size={18} />Invites</a>
         {/if}
+        <p>Membership</p>
+        <a href="#guild-lifecycle"><Icon name="logout" size={18} />Guild access</a>
       </nav>
       <span class="settings-instance-label">
         {isLocalGuild ? 'Managed on this instance' : 'Managed by its home instance'}
@@ -2473,6 +2911,161 @@
               <p>{members.length} loaded member{members.length === 1 ? '' : 's'} in this guild.</p>
             </div>
           </div>
+          {#if canModerateMembers}
+            <div class="settings-card moderation-console">
+              <div class="settings-list-heading">
+                <div>
+                  <strong>Member moderation</strong>
+                  <p>Actions are recorded in the audit log and enforced across federated copies.</p>
+                </div>
+              </div>
+              <div class="moderation-fields">
+                <label class="form-field">
+                  <span>Member</span>
+                  <select bind:value={moderationTarget} disabled={busy}>
+                    <option value="">Choose a member</option>
+                    {#each moderatableMembers as member (entityKey(member.user))}
+                      <option value={entityRef(member.user)}>
+                        {member.nickname ?? member.user.display_name ?? member.user.username} ·
+                        {member.user.handle}
+                      </option>
+                    {/each}
+                  </select>
+                </label>
+                <label class="form-field moderation-reason-field">
+                  <span>Reason <small>optional</small></span>
+                  <input
+                    bind:value={moderationReason}
+                    maxlength="512"
+                    placeholder="Visible in the guild audit log"
+                    disabled={busy}
+                  />
+                </label>
+              </div>
+              {#if selectedModerationMember}
+                <div class="moderation-target-summary">
+                  <span class="avatar avatar-medium">
+                    {#if selectedModerationMember.user.avatar_hash}
+                      <img
+                        src={assetUrl(
+                          selectedModerationMember.user.avatar_hash,
+                          'thumbnail_128',
+                          selectedModerationMember.user
+                        )}
+                        alt=""
+                      />
+                    {:else}
+                      {selectedModerationMember.user.username.slice(0, 1).toUpperCase()}
+                    {/if}
+                  </span>
+                  <div>
+                    <strong
+                      >{selectedModerationMember.nickname ??
+                        selectedModerationMember.user.display_name ??
+                        selectedModerationMember.user.username}</strong
+                    >
+                    <small>{selectedModerationMember.user.handle}</small>
+                  </div>
+                  {#if selectedModerationMember.timeout_indefinite}
+                    <span class="sanction-badge">Timed out indefinitely</span>
+                  {:else if selectedModerationMember.timeout_until}
+                    <span class="sanction-badge"
+                      >Timed out until {formatDateTime(
+                        selectedModerationMember.timeout_until
+                      )}</span
+                    >
+                  {/if}
+                </div>
+                <div class="moderation-action-grid">
+                  {#if canTimeoutMembers}
+                    <div class="moderation-action-card">
+                      <div>
+                        <strong>Timeout</strong>
+                        <p>Restricts sending, reacting, speaking, and other interactive actions.</p>
+                      </div>
+                      <select
+                        bind:value={timeoutDuration}
+                        disabled={busy}
+                        aria-label="Timeout duration"
+                      >
+                        <option value="600">10 minutes</option>
+                        <option value="3600">1 hour</option>
+                        <option value="86400">1 day</option>
+                        <option value="604800">7 days</option>
+                        <option value="2419200">28 days</option>
+                        <option value="permanent">Indefinite</option>
+                      </select>
+                      <div class="button-row">
+                        <button
+                          class="secondary-button"
+                          type="button"
+                          disabled={busy}
+                          onclick={() => void timeoutSelectedMember()}>Apply timeout</button
+                        >
+                        {#if selectedModerationMember.timeout_indefinite || selectedModerationMember.timeout_until}
+                          <button
+                            class="secondary-button"
+                            type="button"
+                            disabled={busy}
+                            onclick={() => void removeSelectedTimeout()}>Remove timeout</button
+                          >
+                        {/if}
+                      </div>
+                    </div>
+                  {/if}
+                  {#if canBanMembers}
+                    <div class="moderation-action-card danger-card">
+                      <div>
+                        <strong>Ban</strong>
+                        <p>Removes the member and prevents rejoining until the ban expires.</p>
+                      </div>
+                      <div class="moderation-inline-selects">
+                        <label>
+                          <span>Duration</span>
+                          <select bind:value={banDuration} disabled={busy}>
+                            <option value="3600">1 hour</option>
+                            <option value="86400">1 day</option>
+                            <option value="604800">7 days</option>
+                            <option value="2592000">30 days</option>
+                            <option value="permanent">Permanent</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span>Delete messages</span>
+                          <select bind:value={banDeleteSeconds} disabled={busy}>
+                            <option value="0">None</option>
+                            <option value="3600">Previous hour</option>
+                            <option value="86400">Previous day</option>
+                            <option value="604800">Previous 7 days</option>
+                          </select>
+                        </label>
+                      </div>
+                      <button
+                        class="danger-button"
+                        type="button"
+                        disabled={busy}
+                        onclick={() => void banSelectedMember()}>Ban member</button
+                      >
+                    </div>
+                  {/if}
+                  {#if canKickMembers}
+                    <div class="moderation-action-card">
+                      <div>
+                        <strong>Kick</strong>
+                        <p>Removes the member without preventing them from using another invite.</p>
+                      </div>
+                      <button
+                        class="secondary-button"
+                        type="button"
+                        disabled={busy}
+                        onclick={() => void kickSelectedMember()}>Kick member</button
+                      >
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
           <div class="settings-card member-management-list">
             {#each members as member (entityKey(member.user))}
               <article class="member-management-row">
@@ -2525,6 +3118,128 @@
               </button>
             {/if}
           </div>
+          {#if canBanMembers}
+            <div class="settings-card sanction-list">
+              <div class="settings-list-heading">
+                <div>
+                  <strong>Active user bans</strong>
+                  <p>Expired bans disappear automatically and no longer block joining.</p>
+                </div>
+                <span>{bans.length}</span>
+              </div>
+              {#each bans as ban (entityKey(ban.user))}
+                <article class="sanction-row">
+                  <span class="avatar avatar-medium">
+                    {#if ban.user.avatar_hash}
+                      <img src={assetUrl(ban.user.avatar_hash, 'thumbnail_128', ban.user)} alt="" />
+                    {:else}
+                      {ban.user.username.slice(0, 1).toUpperCase()}
+                    {/if}
+                  </span>
+                  <div>
+                    <strong>{ban.user.display_name ?? ban.user.username}</strong>
+                    <small>{ban.user.handle}</small>
+                    <span>{ban.reason ?? 'No reason provided'}</span>
+                  </div>
+                  <span
+                    >{ban.expires_at
+                      ? `Until ${formatDateTime(ban.expires_at)}`
+                      : 'Permanent'}</span
+                  >
+                  <button
+                    class="secondary-button"
+                    type="button"
+                    disabled={busy}
+                    onclick={() => void unbanUser(ban)}>Unban</button
+                  >
+                </article>
+              {:else}
+                <p class="field-hint">No active user bans.</p>
+              {/each}
+            </div>
+          {/if}
+
+          {#if canBanInstances}
+            <div class="settings-card instance-ban-card">
+              <div class="settings-list-heading">
+                <div>
+                  <strong>Federated instance bans</strong>
+                  <p>Block an entire instance from participating in this guild.</p>
+                </div>
+              </div>
+              <div class="federation-warning" role="note">
+                <Icon name="shield" size={20} />
+                <div>
+                  <strong>This removes every current member from that instance.</strong>
+                  <p>
+                    Their home will be instructed to delete cached guild data. That deletion is best
+                    effort: a malicious or modified instance can retain data it already received.
+                    Existing messages authored by those members remain in this guild.
+                  </p>
+                </div>
+              </div>
+              <div class="instance-ban-form">
+                <label class="form-field">
+                  <span>Exact instance domain</span>
+                  <input
+                    bind:value={instanceBanDomain}
+                    maxlength="253"
+                    placeholder="chat.example.net"
+                    disabled={busy}
+                  />
+                </label>
+                <label class="form-field">
+                  <span>Duration</span>
+                  <select bind:value={instanceBanDuration} disabled={busy}>
+                    <option value="3600">1 hour</option>
+                    <option value="86400">1 day</option>
+                    <option value="604800">7 days</option>
+                    <option value="2592000">30 days</option>
+                    <option value="permanent">Permanent</option>
+                  </select>
+                </label>
+                <label class="form-field instance-ban-reason">
+                  <span>Reason <small>optional</small></span>
+                  <input
+                    bind:value={instanceBanReason}
+                    maxlength="512"
+                    placeholder="Visible in the audit log"
+                    disabled={busy}
+                  />
+                </label>
+                <button
+                  class="danger-button"
+                  type="button"
+                  disabled={busy || !instanceBanDomain.trim()}
+                  onclick={() => void banFederatedInstance()}>Ban instance</button
+                >
+              </div>
+              <div class="sanction-list embedded-list">
+                {#each instanceBans as ban (ban.instance_domain)}
+                  <article class="sanction-row instance-sanction-row">
+                    <span class="section-icon"><Icon name="globe" /></span>
+                    <div>
+                      <strong>{ban.instance_domain}</strong>
+                      <span>{ban.reason ?? 'No reason provided'}</span>
+                    </div>
+                    <span
+                      >{ban.expires_at
+                        ? `Until ${formatDateTime(ban.expires_at)}`
+                        : 'Permanent'}</span
+                    >
+                    <button
+                      class="secondary-button"
+                      type="button"
+                      disabled={busy}
+                      onclick={() => void unbanFederatedInstance(ban)}>Remove ban</button
+                    >
+                  </article>
+                {:else}
+                  <p class="field-hint">No federated instances are banned from this guild.</p>
+                {/each}
+              </div>
+            </div>
+          {/if}
         </section>
       {/if}
 
@@ -2653,6 +3368,85 @@
           {/if}
         </section>
       {/if}
+
+      {#if !channelOnly}
+        <section id="guild-lifecycle" class="settings-section">
+          <div class="settings-section-heading">
+            <span class="section-icon"><Icon name="logout" /></span>
+            <div>
+              <h2>Guild access</h2>
+              <p>Leave this community or manage its ownership and permanent deletion.</p>
+            </div>
+          </div>
+          {#if isGuildOwner && isLocalGuild}
+            <div class="settings-card guild-ownership-card">
+              <div class="settings-list-heading">
+                <div>
+                  <strong>Transfer ownership</strong>
+                  <p>Ownership can only be transferred to a member homed on this instance.</p>
+                </div>
+              </div>
+              <div class="inline-settings-form">
+                <label class="form-field">
+                  <span>New owner</span>
+                  <select bind:value={ownershipTarget} disabled={busy}>
+                    <option value="">Choose a local member</option>
+                    {#each ownershipCandidates as member (entityKey(member.user))}
+                      <option value={entityRef(member.user)}>
+                        {member.nickname ?? member.user.display_name ?? member.user.username} · @{member
+                          .user.handle}
+                      </option>
+                    {/each}
+                  </select>
+                </label>
+                <button
+                  class="secondary-button"
+                  type="button"
+                  disabled={busy || !ownershipTarget}
+                  onclick={requestOwnershipTransfer}>Transfer ownership</button
+                >
+              </div>
+              {#if !ownershipCandidates.length}
+                <p class="field-hint">No other local-instance member can receive ownership.</p>
+              {/if}
+            </div>
+            <div class="settings-card danger-zone guild-delete-card">
+              <div>
+                <span>Permanent action</span>
+                <h3>Delete guild</h3>
+                <p>
+                  Deletes all guild data at its home and sends durable access revocations to remote
+                  member instances.
+                </p>
+              </div>
+              <button
+                class="danger-button"
+                type="button"
+                disabled={busy}
+                onclick={requestDeleteGuild}
+              >
+                <Icon name="trash" size={16} />Delete guild
+              </button>
+            </div>
+          {:else}
+            <div class="settings-card danger-zone guild-leave-card">
+              <div>
+                <span>Membership</span>
+                <h3>Leave guild</h3>
+                <p>You will need a new valid invitation before you can return.</p>
+              </div>
+              <button
+                class="danger-button"
+                type="button"
+                disabled={busy}
+                onclick={requestLeaveGuild}
+              >
+                <Icon name="logout" size={16} />Leave guild
+              </button>
+            </div>
+          {/if}
+        </section>
+      {/if}
     {/if}
 
     {#if !channelOnly}
@@ -2705,6 +3499,17 @@
         <div class="confirmation-copy">
           <p id="destructive-confirmation-description">{destructiveConfirmation.description}</p>
         </div>
+        {#if destructiveConfirmation.kind === 'guild-delete'}
+          <label class="channel-dialog-field">
+            Type <strong>{destructiveConfirmation.verificationText}</strong> to confirm
+            <input
+              bind:value={confirmationVerification}
+              autocomplete="off"
+              disabled={busy}
+              required
+            />
+          </label>
+        {/if}
         {#if error}<p class="form-error" role="alert">{error}</p>{/if}
         <footer>
           <button
@@ -2714,11 +3519,14 @@
             disabled={busy}
             onclick={closeDestructiveConfirmation}>Cancel</button
           >
-          <button class="danger-button" disabled={busy}>
+          <button
+            class="danger-button"
+            disabled={busy ||
+              (destructiveConfirmation.kind === 'guild-delete' &&
+                confirmationVerification !== destructiveConfirmation.verificationText)}
+          >
             {busy
-              ? destructiveConfirmation.kind === 'invite'
-                ? 'Revoking…'
-                : 'Deleting…'
+              ? destructiveBusyLabel(destructiveConfirmation)
               : destructiveConfirmation.confirmLabel}
           </button>
         </footer>

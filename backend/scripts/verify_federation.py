@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from websockets.asyncio.client import connect
 
 from app.auth.security import hash_password
@@ -1142,15 +1142,94 @@ async def verify() -> None:
             "granular channel deletion did not produce an inaccessible tombstone",
         )
 
-        kicked = await alpha.delete(
-            f"/api/v1/guilds/{guild_ref}/members/9000000000002@beta.localhost",
-            headers=alice,
+        leave_guild_created = await alpha.post(
+            "/api/v1/guilds", headers=alice, json={"name": "Remote Leave Fixture"}
         )
-        require(kicked.status_code == 204, f"remote member kick failed: {kicked.text}")
+        require(
+            leave_guild_created.status_code == 201,
+            f"remote leave guild creation failed: {leave_guild_created.text}",
+        )
+        leave_guild = leave_guild_created.json()
+        leave_guild_ref = entity_ref(leave_guild)
+        leave_invite = await alpha.post(
+            f"/api/v1/guilds/{leave_guild_ref}/invites",
+            headers=alice,
+            json={"channel_id": leave_guild["channels"][0]["id"]},
+        )
+        require(
+            leave_invite.status_code == 201,
+            f"remote leave invite creation failed: {leave_invite.text}",
+        )
+        leave_joined = await beta.post(
+            f"/api/v1/invites/{leave_invite.json()['code']}@alpha.localhost",
+            headers=bob,
+        )
+        require(
+            leave_joined.status_code == 200,
+            f"remote leave fixture join failed: {leave_joined.text}",
+        )
+        remote_left = await beta.delete(
+            f"/api/v1/guilds/{leave_guild_ref}/members/@me", headers=bob
+        )
+        require(remote_left.status_code == 204, f"remote guild leave failed: {remote_left.text}")
+        await wait_for(
+            lambda: row_count(
+                ALPHA_DATABASE_URL,
+                GuildMember,
+                GuildMember.guild_id == int(leave_guild["id"]),
+                GuildMember.guild_domain == "alpha.localhost",
+                GuildMember.user_id == 9000000000002,
+                GuildMember.user_domain == "beta.localhost",
+            ),
+            lambda value: value == 0,
+            "remote guild leave did not remove authoritative membership",
+        )
+        await wait_for(
+            lambda: beta.get(f"/api/v1/guilds/{leave_guild_ref}", headers=bob),
+            lambda item: item.status_code == 404,
+            "remote guild leave did not hide and purge the replica",
+        )
+
+        rejoin_invite = await alpha.post(
+            f"/api/v1/guilds/{guild_ref}/invites",
+            headers=alice,
+            json={"channel_id": channel["id"]},
+        )
+        require(
+            rejoin_invite.status_code == 201,
+            f"instance-ban rejoin fixture failed: {rejoin_invite.text}",
+        )
+        instance_banned = await alpha.put(
+            f"/api/v1/guilds/{guild_ref}/instance-bans/beta.localhost",
+            headers=alice,
+            json={"reason": "federation acceptance sanction", "expires_at": None},
+        )
+        require(
+            instance_banned.status_code == 204,
+            f"remote instance ban failed: {instance_banned.text}",
+        )
+        active_instance_bans = await alpha.get(
+            f"/api/v1/guilds/{guild_ref}/instance-bans", headers=alice
+        )
+        require(
+            active_instance_bans.status_code == 200
+            and any(
+                item["instance_domain"] == "beta.localhost" for item in active_instance_bans.json()
+            ),
+            f"remote instance ban was not listed: {active_instance_bans.text}",
+        )
         await wait_for(
             lambda: beta.get(f"/api/v1/guilds/{guild_ref}", headers=bob),
             lambda item: item.status_code == 404,
-            "direct access revocation did not remove the last remote member",
+            "origin-wide access revocation did not remove the remote member",
+        )
+        blocked_rejoin = await beta.post(
+            f"/api/v1/invites/{rejoin_invite.json()['code']}@alpha.localhost",
+            headers=bob,
+        )
+        require(
+            blocked_rejoin.status_code == 403,
+            f"instance-banned origin could still rejoin: {blocked_rejoin.text}",
         )
 
         drained = await alpha.post(
@@ -1176,7 +1255,27 @@ async def verify() -> None:
     beta_messages = await row_count(
         BETA_DATABASE_URL, Message, Message.client_nonce.in_(expected_nonces)
     )
-    require(alpha_messages == 9 and beta_messages == 8, "message replicas are incomplete")
+    beta_dm_messages = await row_count(
+        BETA_DATABASE_URL,
+        Message,
+        Message.client_nonce.in_(("m3-dm-1", "m3-dm-outage", "m3-dm-reply")),
+    )
+    beta_guild_messages = await row_count(
+        BETA_DATABASE_URL,
+        Message,
+        tuple_(Message.channel_id, Message.channel_domain).in_(
+            select(Channel.id, Channel.origin_domain).where(
+                Channel.guild_id == int(guild_id),
+                Channel.guild_domain == "alpha.localhost",
+            )
+        ),
+    )
+    require(alpha_messages == 9, "authoritative messages are incomplete")
+    require(beta_dm_messages == 3, "direct-message replicas were removed with guild access")
+    require(
+        beta_guild_messages == 0 and beta_messages == beta_dm_messages,
+        "revoked guild message cache was retained",
+    )
     beta_inbox = await row_count(BETA_DATABASE_URL, FederationInbox)
     require(beta_inbox >= 2, "durable federation inbox was not used")
     pending = await row_count(

@@ -32,6 +32,7 @@ class Permission(IntFlag):
     MANAGE_EMOJIS = 1 << 30
     STREAM = 1 << 31
     MODERATE_MEMBERS = 1 << 40
+    BAN_INSTANCES = 1 << 41
 
 
 ALL_PERMISSIONS = sum(permission.value for permission in Permission)
@@ -319,10 +320,18 @@ PERMISSION_METADATA = (
     _permission(
         Permission.MODERATE_MEMBERS,
         "Timeout members",
-        "Temporarily restrict lower-ranked members.",
+        "Temporarily or indefinitely restrict lower-ranked members.",
         "Membership",
         ("guild",),
         danger="dangerous",
+    ),
+    _permission(
+        Permission.BAN_INSTANCES,
+        "Ban federated instances",
+        "Remove and block every member from a federated instance.",
+        "Federation",
+        ("guild",),
+        danger="critical",
     ),
 )
 

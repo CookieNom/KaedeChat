@@ -10,6 +10,7 @@
     replaceCompletion
   } from '$lib/chat/completion';
   import { mentionsUser } from '$lib/chat/mentions';
+  import { guildModerationActions } from '$lib/chat/moderation';
   import {
     discardAttachments,
     pendingMessageSend,
@@ -73,6 +74,7 @@
   } from '$lib/navigation/routes';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
   import { placeContextMenu } from '$lib/ui/context-menu';
+  import { portal } from '$lib/ui/portal';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import VoiceDock from '$lib/voice/VoiceDock.svelte';
   import {
@@ -167,6 +169,14 @@
   let mobileNavigationClose = $state<HTMLButtonElement | null>(null);
   let memberRosterOpen = $state(true);
   let profile = $state<{ user: UserSummary; x: number; y: number } | null>(null);
+  let moderationDialog = $state<{
+    user: UserSummary;
+    action: 'kick' | 'timeout' | 'ban';
+  } | null>(null);
+  let moderationReason = $state('');
+  let moderationDuration = $state('86400');
+  let moderationBusy = $state(false);
+  let moderationError = $state('');
   let presencePreference = $state<'online' | 'idle' | 'dnd' | 'invisible'>('online');
   let voiceOccupancy = $state<Record<string, VoiceOccupant[]>>({});
   let voiceOccupancyVersion = 0;
@@ -210,6 +220,7 @@
       return false;
     }
   }
+
   const canCreateCurrentChannelInvite = $derived(
     Boolean(
       channel && channel.type !== 4 && channelHasPermission(channel, Permission.CREATE_INVITE)
@@ -984,6 +995,80 @@
 
   function openMessageProfile(message: Message, event: MouseEvent) {
     if (message.author) openProfile(message.author, event);
+  }
+
+  function moderationActionsFor(user: UserSummary) {
+    return guildModerationActions(guild, currentUser, user, members);
+  }
+
+  function requestModeration(user: UserSummary, action: 'kick' | 'timeout' | 'ban') {
+    if (!moderationActionsFor(user).some((candidate) => candidate.id === action)) return;
+    moderationReason = '';
+    moderationDuration = action === 'timeout' ? '86400' : 'permanent';
+    moderationError = '';
+    moderationDialog = { user, action };
+  }
+
+  function closeModerationDialog() {
+    if (moderationBusy) return;
+    moderationDialog = null;
+    moderationError = '';
+  }
+
+  async function confirmModeration() {
+    if (!guild || !moderationDialog || moderationBusy) return;
+    const request = moderationDialog;
+    moderationBusy = true;
+    moderationError = '';
+    const headers = moderationReason.trim()
+      ? { 'X-Audit-Log-Reason': moderationReason.trim() }
+      : undefined;
+    const guildRef = encodeURIComponent(entityRef(guild));
+    const userRef = encodeURIComponent(entityRef(request.user));
+    try {
+      if (request.action === 'kick') {
+        await api(`/guilds/${guildRef}/members/${userRef}`, { method: 'DELETE', headers });
+        setMembers(members.filter((member) => entityKey(member.user) !== entityKey(request.user)));
+      } else if (request.action === 'ban') {
+        const expiresAt =
+          moderationDuration === 'permanent'
+            ? null
+            : new Date(Date.now() + Number(moderationDuration) * 1000).toISOString();
+        await api(`/guilds/${guildRef}/bans/${userRef}`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({
+            reason: moderationReason.trim() || null,
+            expires_at: expiresAt,
+            delete_message_seconds: 0
+          })
+        });
+        setMembers(members.filter((member) => entityKey(member.user) !== entityKey(request.user)));
+      } else {
+        const indefinite = moderationDuration === 'permanent';
+        const updated = await api<GuildMemberSummary>(`/guilds/${guildRef}/members/${userRef}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({
+            timeout_until: indefinite
+              ? null
+              : new Date(Date.now() + Number(moderationDuration) * 1000).toISOString(),
+            timeout_indefinite: indefinite
+          })
+        });
+        setMembers(
+          members.map((member) =>
+            entityKey(member.user) === entityKey(updated.user) ? updated : member
+          )
+        );
+      }
+      moderationDialog = null;
+    } catch (caught) {
+      moderationError =
+        caught instanceof ApiError ? caught.message : 'The moderation action could not be applied.';
+    } finally {
+      moderationBusy = false;
+    }
   }
 
   async function openHandleProfile(event: Event) {
@@ -2006,6 +2091,11 @@
 <svelte:window
   onclick={() => closeChannelMenu(false)}
   onkeydown={(event) => {
+    if (moderationDialog && event.key === 'Escape') {
+      event.preventDefault();
+      closeModerationDialog();
+      return;
+    }
     if (inviteDialogOpen) {
       inviteDialogKeydown(event);
       return;
@@ -2524,6 +2614,10 @@
                     : undefined}
                   onRetry={retryMessage}
                   onViewProfile={openMessageProfile}
+                  moderationActions={item.message.author
+                    ? moderationActionsFor(item.message.author)
+                    : []}
+                  onModerate={requestModeration}
                 />
               {/if}
             {/snippet}
@@ -2644,11 +2738,88 @@
     isSelf={Boolean(currentUser && entityKey(currentUser) === entityKey(profile.user))}
     onClose={() => (profile = null)}
     onMessage={messageUser}
+    moderationActions={moderationActionsFor(profile.user)}
+    onModerate={requestModeration}
   />
+{/if}
+
+{#if moderationDialog}
+  <div use:portal class="channel-dialog-layer">
+    <button
+      class="channel-dialog-backdrop"
+      type="button"
+      aria-label="Cancel moderation action"
+      disabled={moderationBusy}
+      onclick={closeModerationDialog}
+    ></button>
+    <div
+      class="channel-dialog confirmation-dialog"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="moderation-dialog-title"
+      aria-busy={moderationBusy}
+    >
+      <header>
+        <div>
+          <p>Member moderation</p>
+          <h2 id="moderation-dialog-title">
+            {moderationDialog.action === 'timeout'
+              ? 'Timeout'
+              : moderationDialog.action === 'kick'
+                ? 'Kick'
+                : 'Ban'}
+            {moderationDialog.user.display_name ?? moderationDialog.user.username}?
+          </h2>
+        </div>
+      </header>
+      <form
+        onsubmit={(event) => {
+          event.preventDefault();
+          void confirmModeration();
+        }}
+      >
+        {#if moderationDialog.action !== 'kick'}
+          <label class="channel-dialog-field">
+            Duration
+            <select bind:value={moderationDuration} disabled={moderationBusy}>
+              {#if moderationDialog.action === 'timeout'}
+                <option value="3600">1 hour</option>
+                <option value="86400">1 day</option>
+                <option value="604800">7 days</option>
+                <option value="2419200">28 days</option>
+              {:else}
+                <option value="86400">1 day</option>
+                <option value="604800">7 days</option>
+                <option value="2592000">30 days</option>
+              {/if}
+              <option value="permanent">Permanent</option>
+            </select>
+          </label>
+        {/if}
+        <label class="channel-dialog-field">
+          Reason <span class="field-optional">Optional</span>
+          <textarea bind:value={moderationReason} maxlength="512" rows="3"></textarea>
+        </label>
+        {#if moderationError}<p class="form-error" role="alert">{moderationError}</p>{/if}
+        <footer>
+          <button
+            class="secondary-button"
+            type="button"
+            disabled={moderationBusy}
+            onclick={closeModerationDialog}>Cancel</button
+          >
+          <button class="danger-button" type="submit" disabled={moderationBusy}>
+            {moderationBusy ? 'Applying…' : 'Confirm'}
+          </button>
+        </footer>
+      </form>
+    </div>
+  </div>
 {/if}
 
 {#if channelMenu}
   <div
+    use:portal
     bind:this={channelMenuElement}
     id="channel-context-menu"
     class="channel-context-menu"

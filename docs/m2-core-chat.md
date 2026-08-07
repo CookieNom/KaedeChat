@@ -1,6 +1,6 @@
 # Core chat
 
-Updated: 2026-07-20
+Updated: 2026-08-07
 
 This document describes the REST, persistence, permission, moderation,
 direct-message, gateway, browser, and runtime-scaling behavior of the current
@@ -23,8 +23,20 @@ chat implementation.
 - Manager-only invite listing and durable revocation with retained audit records.
 - Role assignment and removal with owner/self protection, position hierarchy,
   lower-snowflake tie-breaking, and permission-grant ceilings.
-- Paginated member and ban lists, nickname changes, 28-day maximum timeouts,
-  kick, ban, unban, optional recent-message deletion, and audit reasons.
+- Paginated member and active-ban lists, nickname changes, finite or indefinite
+  timeouts, kick, timed or permanent ban, unban, optional recent-message
+  deletion, and audit reasons. Finite timeouts are capped at 28 days; a distinct
+  indefinite mode avoids encoding permanence as a distant timestamp.
+- Permission-aware member and message context actions expose timeout, kick, and
+  ban without weakening the server-side hierarchy check. Guild members may
+  leave directly; an owner must instead transfer ownership to another member
+  homed on the guild instance or permanently delete the guild. Ownership
+  transfer uses optimistic concurrency and is recorded in the audit log.
+- A dedicated critical `BAN_INSTANCES` permission controls timed or permanent
+  guild bans for a complete federated origin. The action enforces role hierarchy,
+  removes current members from that origin, rejects later joins while active,
+  records an audit entry, and sends an authority-signed cache revocation to the
+  affected instance.
 - Permission-gated, newest-first audit-log reads.
 - Partitioned message creation through SQLAlchemy Core, nonce reconciliation,
   history paging, edit, soft-delete, reactions, pins, read acknowledgements,
@@ -59,6 +71,8 @@ chat implementation.
   then token-decorated without interpreting user text as HTML. The composer has
   keyboard-operable ARIA mention/channel/emoji completion, edit/cancel, failed-send
   retry, Enter/Shift+Enter, Escape, and Arrow-Up-to-edit behavior.
+- Message, channel, and profile menus are portaled to the document layer before
+  viewport placement, so transformed scroll panes cannot clip or offset them.
 - Last-channel persistence, a `Ctrl`/`Cmd`+`K` channel switcher, `Alt+Arrow`
   history navigation, public invite landing (including federated invites), and
   permission-gated guild overview/channel/role/invite settings routes are present.
@@ -91,7 +105,8 @@ isolation, DM hydration and history, acknowledgements, permission-generation
 stability, invite listing/revocation permissions, reaction removal, pin
 round-trips, bulk soft deletion, owner immunity, role hierarchy, lower-role
 assignment, timeout masking, ban persistence, banned invite refusal,
-unban/rejoin, kick, channel overwrites, owner bypass, and audit-log reads. The
+unban/rejoin, kick, finite and indefinite timeout masking, channel overwrites,
+owner bypass, and audit-log reads. The
 target removes its containers, networks, and volumes on exit. `make check` also
 validates the frontend unit suite, Svelte diagnostics, the static production
 build, and CSP. `make migration-check` covers every migration up/down/up,

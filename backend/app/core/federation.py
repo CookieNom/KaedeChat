@@ -17,6 +17,7 @@ BLOCK_POLICY_ADVISORY_NAME = "kaede-instance-blocks"
 SECURITY_CRITICAL_GUILD_EVENTS = frozenset(
     {
         "guild.access.revoked",
+        "guild.instance_access.revoked",
         "guild.resync.required",
         "relationship.remove",
     }

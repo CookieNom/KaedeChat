@@ -32,6 +32,11 @@ from app.api.dependencies import get_redis, get_session, get_snowflake
 from app.bootstrap import MAX_ADVERTISED_OLD_KEYS
 from app.chat.e2ee import validate_e2ee_envelope
 from app.chat.events import guild_topic, publish_dispatch, user_topic
+from app.chat.guild_revision import (
+    queue_guild_access_revocation,
+    queue_guild_mutation,
+    wake_queued_guild_federation,
+)
 from app.chat.payloads import (
     channel_payload,
     dm_channel_payload,
@@ -61,6 +66,7 @@ from app.db.models import (
     FederationOutbox,
     Guild,
     GuildEvent,
+    GuildInstanceBan,
     GuildMember,
     Invite,
     MemberRole,
@@ -77,6 +83,7 @@ from app.federation.guilds import (
     HISTORY_ACCESS_MUTATION_EVENT_TYPES,
     GuildSequenceGap,
     apply_guild_access_revocation,
+    apply_guild_instance_access_revocation,
     apply_guild_member_event,
     apply_guild_message_event,
     apply_guild_mutation_event,
@@ -118,6 +125,7 @@ from app.federation.schemas import (
     EventEnvelope,
     GuildHistoryExportRequest,
     GuildJoinRequest,
+    GuildLeaveRequest,
     GuildProxyRequest,
     InboxResult,
     InviteResolveRequest,
@@ -723,6 +731,7 @@ async def process_event(
     dm_open_rejection_target: tuple[int, str] | None = None
     dm_open_rejection_payload: dict[str, object] | None = None
     access_revocation_target: tuple[int, str] | None = None
+    instance_access_revoked_users: list[int] = []
     media_purge_target: tuple[str, int] | None = None
     relationship_application: RelationshipApplication | None = None
     history_access_changed = False
@@ -999,6 +1008,25 @@ async def process_event(
                 replicated_guild,
                 user_id=access_revocation_target[0],
                 user_domain=access_revocation_target[1],
+            )
+        elif envelope.type == "guild.instance_access.revoked":
+            guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
+            guild_domain = normalize_domain(str(envelope.context.get("guild_domain", "")))
+            if guild_domain != envelope.origin:
+                raise ValueError("guild instance revocation did not originate at the guild home")
+            replicated_guild = await session.get(Guild, (guild_id, guild_domain))
+            if replicated_guild is None:
+                raise ValueError("guild instance revocation references an unknown replica")
+            if (
+                database_snowflake(envelope.actor.id, "guild instance revocation actor id"),
+                envelope.actor.domain,
+            ) != (replicated_guild.owner_id, replicated_guild.owner_domain):
+                raise ValueError("guild instance revocation was not signed for the guild owner")
+            instance_access_revoked_users = await apply_guild_instance_access_revocation(
+                session,
+                settings,
+                replicated_guild,
+                target_domain=normalize_domain(str(envelope.content.get("target_domain", ""))),
             )
         elif envelope.type == "guild.resync.required":
             guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
@@ -1416,6 +1444,17 @@ async def process_event(
                     "origin_domain": replicated_guild.origin_domain,
                 },
             )
+        if instance_access_revoked_users and replicated_guild is not None:
+            for revoked_user_id in instance_access_revoked_users:
+                await publish_dispatch(
+                    redis,
+                    user_topic(settings.domain, revoked_user_id),
+                    "GUILD_DELETE",
+                    {
+                        "id": str(replicated_guild.id),
+                        "origin_domain": replicated_guild.origin_domain,
+                    },
+                )
         if home_message is not None and home_message_created:
             await publish_dispatch(
                 redis,
@@ -1919,9 +1958,31 @@ async def federation_guild_join(
     if locked_guild is None:
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
     guild = locked_guild
-    banned = await session.get(Ban, (guild.id, guild.origin_domain, user.id, user.origin_domain))
+    now = datetime.now(UTC)
+    banned = await session.scalar(
+        select(Ban).where(
+            Ban.guild_id == guild.id,
+            Ban.guild_domain == guild.origin_domain,
+            Ban.user_id == user.id,
+            Ban.user_domain == user.origin_domain,
+            or_(Ban.expires_at.is_(None), Ban.expires_at > now),
+        )
+    )
     if banned is not None:
         raise HTTPException(status_code=403, detail={"code": "BANNED_FROM_GUILD"})
+    instance_banned = await session.scalar(
+        select(GuildInstanceBan.instance_domain).where(
+            GuildInstanceBan.guild_id == guild.id,
+            GuildInstanceBan.guild_domain == guild.origin_domain,
+            GuildInstanceBan.instance_domain == principal.origin,
+            or_(
+                GuildInstanceBan.expires_at.is_(None),
+                GuildInstanceBan.expires_at > now,
+            ),
+        )
+    )
+    if instance_banned is not None:
+        raise HTTPException(status_code=403, detail={"code": "INSTANCE_BANNED_FROM_GUILD"})
     member = await session.get(
         GuildMember, (guild.id, guild.origin_domain, user.id, user.origin_domain)
     )
@@ -1994,6 +2055,74 @@ async def federation_guild_join(
     # reads the resource version.
     await session.refresh(guild)
     return {"guild": guild_payload(guild), "snapshot_seq": str(seq)}
+
+
+@router.delete("/_kaede/v1/guilds/{guild_id}/members/@me", status_code=204)
+async def federation_guild_leave(
+    guild_id: Snowflake,
+    payload: GuildLeaveRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    require_guild_federation_access(principal)
+    await enforce_federation_route_rate_limit(
+        redis, principal.origin, "guild-leave", capacity=20, refill_per_minute=20
+    )
+    if payload.user.domain != principal.origin:
+        raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
+    guild = await session.scalar(
+        select(Guild)
+        .where(Guild.id == guild_id, Guild.origin_domain == settings.domain)
+        .with_for_update()
+    )
+    if guild is None:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    user_id = database_snowflake(payload.user.id, "guild leave user id")
+    member = await session.get(
+        GuildMember,
+        (guild.id, guild.origin_domain, user_id, payload.user.domain),
+    )
+    if member is None:
+        raise HTTPException(status_code=404, detail={"code": "NOT_A_GUILD_MEMBER"})
+    if (guild.owner_id, guild.owner_domain) == (user_id, payload.user.domain):
+        raise HTTPException(status_code=409, detail={"code": "OWNER_MUST_TRANSFER_OR_DELETE_GUILD"})
+    owner = await session.get(User, (guild.owner_id, guild.owner_domain))
+    if owner is None or not owner.is_local:
+        raise RuntimeError("local guild owner is unavailable")
+    await session.delete(member)
+    await queue_guild_access_revocation(
+        session,
+        settings,
+        guild,
+        user_id=user_id,
+        user_domain=payload.user.domain,
+        reason="member_left",
+    )
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        owner,
+        "guild.member.remove",
+        {"user": {"id": str(user_id), "origin_domain": payload.user.domain}},
+        snapshot_required=True,
+    )
+    await session.commit()
+    await wake_queued_guild_federation(guild)
+    await publish_dispatch(
+        redis,
+        guild_topic(guild.origin_domain, guild.id),
+        "GUILD_MEMBER_REMOVE",
+        {
+            "guild_id": str(guild.id),
+            "guild_domain": guild.origin_domain,
+            "user_id": str(user_id),
+            "user_domain": payload.user.domain,
+        },
+    )
+    return Response(status_code=204)
 
 
 async def require_origin_guild_member(session: AsyncSession, guild: Guild, origin: str) -> None:

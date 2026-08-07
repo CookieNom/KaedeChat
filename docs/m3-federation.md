@@ -31,8 +31,14 @@ The normative wire contract is in [kaede-fed-v1.md](kaede-fed-v1.md).
   local live gateway fanout.
 - Signed remote invite resolution and authoritative joins, paged structural
   snapshots, permission-filtered sequencing and gap fill, full-resync
-  signaling, direct access revocation, and authoritative queued or synchronous
-  remote message writes.
+  signaling, per-user and origin-wide direct access revocation, timed/permanent
+  remote-user and federated-instance join sanctions, and authoritative queued or
+  synchronous remote message writes.
+- Signed remote leave requests let a member leave at the guild home. The home
+  removes authoritative membership and sends a direct access revocation; losing
+  the final local member makes the replica unavailable and schedules cooperative
+  message and media-cache removal. Ownership transfer remains a guild-home-only
+  operation and may target only a member homed on that same instance.
 - Capability-negotiated, permission-bound retained guild-history transfer with
   disabled-by-default guild policy, channel overrides, durable leased imports,
   recent-first byte-bounded pages, sequenced delta reconciliation, bounded replica
@@ -42,6 +48,8 @@ The normative wire contract is in [kaede-fed-v1.md](kaede-fed-v1.md).
   membership-role, moderation, message edit/delete/purge, reaction, and pin
   events. Permission-sensitive changes fence application on a fresh filtered
   snapshot; inaccessible channel events become signed sequence-only redactions.
+  Omitted channels are tombstoned and their message/object cache is cooperatively
+  purged once no local member at that replica retains access.
 - Open/allowlist federation plus subdomain-aware silence/suspend administration,
   route-specific invite/join limits, and Mastodon-compatible block CSV exchange.
 

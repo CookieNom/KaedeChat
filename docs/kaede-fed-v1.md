@@ -116,9 +116,11 @@ accept the following exact names:
 | `guild.role.create`, `guild.role.update`, `guild.role.delete` | The guild home creates, replaces, or removes role state. |
 | `guild.overwrite.upsert` | The guild home replaces a channel permission overwrite. |
 | `guild.member.update`, `guild.member.remove` | The guild home updates or removes membership state. |
+| `guild.members.origin.remove` | The guild home atomically removes every member homed on one federated origin after an instance-wide sanction. |
 | `guild.member.role.add`, `guild.member.role.remove` | The guild home changes one member-role assignment. |
-| `guild.ban.add`, `guild.ban.remove` | The guild home changes its moderation ban set. |
+| `guild.ban.add`, `guild.ban.remove` | The guild home changes its moderation ban set; an add may carry an absolute expiry. |
 | `guild.access.revoked` | The guild home directly removes one user at the target user's origin; it remains valid when that origin has no member left and can no longer request snapshots. |
+| `guild.instance_access.revoked` | The guild home directly removes all of the target origin's local members and instructs that origin to purge its cached guild data after an instance-wide ban. |
 | `guild.resync.required` | A revision-bound guild-home marker replaces expired delivery rows and requires background gap-fill/full snapshot recovery. |
 | `guild.message.create` | The guild home announces a message authored on the home instance. |
 | `guild.message.update`, `guild.message.delete`, `guild.message.purge` | The guild home edits, tombstones, or author/time-range purges messages. |
@@ -200,7 +202,22 @@ Guild, channel, role, overwrite, member, moderation, message mutation, reaction,
 and pin changes are granular sequenced events. Permission-sensitive changes carry `snapshot_required`; a
 replica fetches a current permission-filtered snapshot before accepting the retried
 event. Peers without channel visibility receive a signed sequence-only redaction.
-Kicks and bans additionally send a direct target-specific access revocation.
+An ownership transfer is represented by an authority-signed `guild.update` and
+may name only an existing member homed on the guild-home instance. A remote
+member leaves by sending an authenticated
+`DELETE /_kaede/v1/guilds/{id}/members/@me` request whose user domain must match
+the signing origin. The guild home removes membership before emitting the
+sequenced member removal and target-specific access revocation. Guild owners
+cannot leave through this operation.
+Kicks and user bans additionally send a direct target-specific access revocation.
+An instance ban sends a direct origin-wide revocation even after every member from
+that origin has been removed from the authoritative membership set. It also emits
+the sequenced `guild.members.origin.remove` mutation to remaining replicas.
+
+User bans and federated-instance bans may be permanent or carry an absolute expiry.
+Join authorization always evaluates expiry directly; it does not depend on the
+background cleanup task running on time. Member timeouts may likewise be finite or
+explicitly indefinite. These sanctions are owned and evaluated by the guild home.
 
 Remote writes include `(origin,client_nonce)`. The remote instance performs an
 advisory check and proxies to the home for an authoritative check. A response
@@ -261,6 +278,12 @@ Replicas tag messages whose initial copy came from an export. On replicated poli
 role, overwrite, or membership revocation, a cooperative replica re-evaluates all
 local members and deletes imported-only messages for channels no local member may
 still read. A periodic reconciliation sweep repairs missed live notifications.
+For ordinary live cache as well as imported history, a permission-filtered snapshot
+tombstones a channel and deletes its local messages once no local member on that
+replica may view it. Losing the final local guild membership, or receiving an
+origin-wide access revocation, applies the same purge to every replicated channel.
+Attachment cache entries are expired in the same transaction and their object bytes
+are removed asynchronously by retryable media garbage collection.
 This purge is intentionally best effort: federation cannot force a malicious,
 modified, backed-up, or offline remote server to delete data it already received.
 Administrative clients MUST show that warning before enabling export. Local API

@@ -109,8 +109,8 @@ class Settings(BaseSettings):
     admin_token: SecretStr | None = None
 
     # Media
-    media_max_attachment_bytes: int = Field(default=100 * 1024 * 1024, ge=1)
-    media_user_quota_bytes: int = Field(default=5 * 1024 * 1024 * 1024, ge=1)
+    media_max_attachment_bytes: int = Field(default=15 * 1024 * 1024, ge=1)
+    media_user_quota_bytes: int = Field(default=10 * 1024 * 1024 * 1024, ge=1)
     media_inflight_limit: int = Field(default=10, ge=1, le=100)
     media_inflight_quota_bytes: int = Field(default=500 * 1024 * 1024, ge=1)
     media_upload_ttl_seconds: int = Field(default=15 * 60, ge=60, le=3600)

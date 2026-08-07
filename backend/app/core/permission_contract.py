@@ -77,6 +77,14 @@ _CONTRACTS = (
     ),
     EndpointPermissionContract("ban.list", Permission.BAN_MEMBERS, "guild"),
     EndpointPermissionContract("ban.remove", Permission.BAN_MEMBERS, "guild"),
+    EndpointPermissionContract("instance_ban.list", Permission.BAN_INSTANCES, "guild"),
+    EndpointPermissionContract(
+        "instance_ban.put",
+        Permission.BAN_INSTANCES,
+        "guild",
+        "actor must outrank every affected member and cannot ban the local instance",
+    ),
+    EndpointPermissionContract("instance_ban.remove", Permission.BAN_INSTANCES, "guild"),
     EndpointPermissionContract("invite.create", Permission.CREATE_INVITE, "channel"),
     EndpointPermissionContract(
         "message.list", Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY, "channel"

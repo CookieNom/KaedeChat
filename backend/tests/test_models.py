@@ -22,6 +22,7 @@ def test_complete_v1_schema_is_registered() -> None:
         "guild_history_export_channels",
         "guild_members",
         "guild_notification_settings",
+        "guild_instance_bans",
         "roles",
         "member_roles",
         "channels",
@@ -76,6 +77,30 @@ def test_guild_notification_settings_are_membership_scoped() -> None:
     assert "ck_guild_notification_settings_notification_level_value" in constraint_names(
         "guild_notification_settings"
     )
+
+
+def test_guild_sanctions_have_expiry_and_instance_scope() -> None:
+    members = Base.metadata.tables["guild_members"]
+    bans = Base.metadata.tables["bans"]
+    instance_bans = Base.metadata.tables["guild_instance_bans"]
+
+    assert members.c.timeout_indefinite.nullable is False
+    assert bans.c.expires_at.nullable is True
+    assert "ck_bans_expiry_after_creation" in constraint_names("bans")
+    assert "ix_bans_expiry" in {index.name for index in bans.indexes}
+    assert tuple(instance_bans.primary_key.columns.keys()) == (
+        "guild_id",
+        "guild_domain",
+        "instance_domain",
+    )
+    instance_fk = foreign_key_for_columns("guild_instance_bans", ("instance_domain",))
+    assert tuple(element.target_fullname for element in instance_fk.elements) == (
+        "instances.domain",
+    )
+    guild_fk = foreign_key_for_columns("guild_instance_bans", ("guild_id", "guild_domain"))
+    assert guild_fk.ondelete == "CASCADE"
+    assert "ck_guild_instance_bans_expiry_after_creation" in constraint_names("guild_instance_bans")
+    assert "ix_guild_instance_bans_expiry" in {index.name for index in instance_bans.indexes}
 
 
 def test_email_outbox_contains_only_encrypted_delivery_content() -> None:

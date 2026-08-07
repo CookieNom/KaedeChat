@@ -140,6 +140,10 @@ class GuildJoinRequest(BaseModel):
     user: RemoteUserProfile
 
 
+class GuildLeaveRequest(BaseModel):
+    user: ActorRef
+
+
 class GuildHistoryExportRequest(BaseModel):
     user: ActorRef
 

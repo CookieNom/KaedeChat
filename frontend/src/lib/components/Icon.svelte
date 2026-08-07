@@ -5,6 +5,7 @@
     | 'check'
     | 'chevron-down'
     | 'chevron-right'
+    | 'clock'
     | 'copy'
     | 'edit'
     | 'globe'
@@ -65,6 +66,9 @@
     <path d="m6 9 6 6 6-6" />
   {:else if name === 'chevron-right'}
     <path d="m9 18 6-6-6-6" />
+  {:else if name === 'clock'}
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7v5l3 2" />
   {:else if name === 'copy'}
     <rect x="8" y="8" width="12" height="12" rx="2" />
     <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />

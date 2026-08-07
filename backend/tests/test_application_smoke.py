@@ -27,6 +27,10 @@ def test_api_and_gateway_register_all_routes() -> None:
         from app.main import app
 
         schema = app.openapi()
+        assert "delete" in schema["paths"]["/api/v1/guilds/{guild_id}/members/@me"]
+        assert "put" in schema["paths"]["/api/v1/guilds/{guild_id}/owner"]
+        assert "delete" in schema["paths"]["/api/v1/guilds/{guild_id}"]
+        assert "delete" in schema["paths"]["/_kaede/v1/guilds/{guild_id}/members/@me"]
         operation = schema["paths"]["/api/v1/channels/{channel_id}/messages"]["get"]
         parameter = next(item for item in operation["parameters"] if item["name"] == "channel_id")
         assert parameter["schema"]["type"] == "string"

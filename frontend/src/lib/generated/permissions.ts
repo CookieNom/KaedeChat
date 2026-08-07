@@ -29,6 +29,7 @@ export const Permission = {
   MANAGE_EMOJIS: 1073741824n,
   STREAM: 2147483648n,
   MODERATE_MEMBERS: 1099511627776n,
+  BAN_INSTANCES: 2199023255552n,
 } as const;
 
 export type PermissionDanger = 'normal' | 'elevated' | 'dangerous' | 'critical';
@@ -357,11 +358,22 @@ export const PERMISSION_METADATA = [
     permission: 'MODERATE_MEMBERS',
     bit: 1099511627776n,
     label: "Timeout members",
-    description: "Temporarily restrict lower-ranked members.",
+    description: "Temporarily or indefinitely restrict lower-ranked members.",
     group: "Membership",
     resourceScopes: ["guild"],
     channelTypes: [],
     dependencies: [],
     danger: 'dangerous',
+  },
+  {
+    permission: 'BAN_INSTANCES',
+    bit: 2199023255552n,
+    label: "Ban federated instances",
+    description: "Remove and block every member from a federated instance.",
+    group: "Federation",
+    resourceScopes: ["guild"],
+    channelTypes: [],
+    dependencies: [],
+    danger: 'critical',
   },
 ] as const satisfies readonly PermissionMetadata[];
