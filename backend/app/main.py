@@ -21,6 +21,7 @@ from app.api.calls import router as calls_router
 from app.api.channels import router as channels_router
 from app.api.dms import router as dms_router
 from app.api.federation import router as federation_router
+from app.api.gifs import router as gifs_router
 from app.api.guild_lifecycle import router as guild_lifecycle_router
 from app.api.guilds import router as guilds_router
 from app.api.invites import router as invites_router
@@ -102,6 +103,7 @@ app.include_router(federation_router)
 app.include_router(users_router)
 app.include_router(voice_router)
 app.include_router(guilds_router)
+app.include_router(gifs_router)
 app.include_router(guild_lifecycle_router)
 app.include_router(channels_router)
 app.include_router(calls_router)

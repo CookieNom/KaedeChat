@@ -114,6 +114,13 @@ mail, so restore and rotate it only through a reviewed application workflow. Als
 preserve the distinct `KAEDE_GATEWAY_SECRET_KEY`; it satisfies strict process
 configuration without exposing the instance master key to the gateway.
 
+Optional interaction services are disabled by default. Set
+`KAEDE_KLIPY_ENABLED=true` with a private `KAEDE_KLIPY_API_KEY` to expose the GIF
+picker. Set `KAEDE_TURNSTILE_ENABLED=true`, `KAEDE_TURNSTILE_SITE_KEY`, and the
+private `TURNSTILE_SECRET` to require Turnstile during registration. The API key
+and Turnstile secret belong only in backend environments; neither is included
+in public configuration responses.
+
 Set the same `KAEDE_EDGE_SECRET` in `.env` and the nginx
 `X-Kaede-Edge-Secret` header. It must differ from `KAEDE_PROXY_SECRET`. The
 selected internal edge receives only the domain and these two edge credentials; application processes

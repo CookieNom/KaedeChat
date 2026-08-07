@@ -18,7 +18,7 @@ const config = {
         'base-uri': ['none'],
         'object-src': ['none'],
         'form-action': ['self'],
-        'script-src': ['self'],
+        'script-src': ['self', 'https://challenges.cloudflare.com'],
         'style-src': ['self'],
         // SvelteKit's accessibility announcer has one framework-owned static
         // style attribute. Authorize only that exact value rather than all
@@ -29,7 +29,8 @@ const config = {
         // Voice rooms are authoritative on the guild's home instance. A
         // federated member therefore connects directly to that instance's
         // secure LiveKit signaling endpoint after receiving a signed grant.
-        'connect-src': ['self', 'wss:', ...mediaUploadOrigins],
+        'connect-src': ['self', 'wss:', 'https://challenges.cloudflare.com', ...mediaUploadOrigins],
+        'frame-src': ['https://challenges.cloudflare.com'],
         'font-src': ['self', 'data:']
       }
     }

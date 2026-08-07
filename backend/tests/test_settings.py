@@ -86,12 +86,38 @@ def test_blank_optional_secrets_are_treated_as_unset() -> None:
         smtp_url="",
         mailtrap_api_token="",
         federation_ca_file="",
+        klipy_api_key="",
+        turnstile_site_key="",
+        turnstile_secret="",
     )
     assert configured.proxy_secret is None
     assert configured.admin_token is None
     assert configured.smtp_url is None
     assert configured.mailtrap_api_token is None
     assert configured.federation_ca_file is None
+    assert configured.klipy_api_key is None
+    assert configured.turnstile_secret is None
+
+
+def test_optional_interaction_services_require_credentials_and_hide_them() -> None:
+    with pytest.raises(ValidationError, match="klipy_api_key"):
+        settings(service_role="api", klipy_enabled=True)
+    with pytest.raises(ValidationError, match="TURNSTILE_SECRET"):
+        settings(
+            service_role="api",
+            turnstile_enabled=True,
+            turnstile_site_key="0x4AAAAAAExampleSiteKey",
+        )
+    configured = settings(
+        service_role="api",
+        klipy_enabled=True,
+        klipy_api_key="klipy_example_key",
+        turnstile_enabled=True,
+        turnstile_site_key="0x4AAAAAAExampleSiteKey",
+        turnstile_secret="0x4AAAAAAExampleSecret",
+    )
+    assert "klipy_example_key" not in repr(configured)
+    assert "0x4AAAAAAExampleSecret" not in repr(configured)
 
 
 def test_media_configuration_is_bounded_and_secret_safe() -> None:

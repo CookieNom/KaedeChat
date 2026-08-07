@@ -17,6 +17,9 @@ if (!policy.includes('base-uri &#39;none&#39;') && !policy.includes("base-uri 'n
 if (/script-src[^;]*unsafe-inline/.test(policy)) {
   throw new Error('generated script-src unexpectedly permits unsafe-inline');
 }
+if (!policy.includes('https://challenges.cloudflare.com')) {
+  throw new Error('generated CSP does not authorize Cloudflare Turnstile');
+}
 if (/style-src(?:-attr)?[^;]*unsafe-inline/.test(policy)) {
   throw new Error('generated style policy unexpectedly permits unsafe-inline');
 }

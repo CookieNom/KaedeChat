@@ -40,8 +40,8 @@ make setup
 ```
 
 The wizard creates a private `.env`, selects Garage or an external S3-compatible
-provider, configures optional email and voice services, and can render a host
-nginx configuration. It writes configuration only; it does not start services,
+provider, configures optional email, voice, KLIPY GIF, and Turnstile services,
+and can render a host nginx configuration. It writes configuration only; it does not start services,
 install nginx files, reload nginx, or obtain certificates. See
 [docs/deployment-wizard.md](docs/deployment-wizard.md) for all available options.
 

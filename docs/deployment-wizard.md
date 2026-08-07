@@ -20,6 +20,7 @@ The wizard asks about:
   referencing operator-supplied TLS certificate and private-key paths;
 - bundled Garage, AWS S3, Backblaze B2, Cloudflare R2, or generic S3 storage;
 - Mailtrap API, Mailtrap SMTP, AWS SES SMTP, generic SMTP, or no email;
+- optional KLIPY GIF search and Cloudflare Turnstile registration protection;
 - optional LiveKit voice/video and observability services; and
 - worker counts, upload limits, and non-conflicting host ports.
 
@@ -67,6 +68,13 @@ self-service password recovery are unavailable, so operators should establish
 an administrative account-recovery policy before enabling this mode. The wizard
 requires a separate confirmation because a forgotten password cannot be
 recovered by the user.
+
+KLIPY requires a provider API key. The key remains backend-only: browsers query
+Kaede, and Kaede returns a bounded, validated list of provider-hosted media.
+Turnstile requires the widget's public site key and private secret. The wizard
+stores the latter under Cloudflare's `TURNSTILE_SECRET` name and never prints
+either private credential. Registration validation binds successful tokens to
+the instance hostname and the `turnstile-spin-v2` action.
 
 ## After setup
 

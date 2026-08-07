@@ -2,6 +2,9 @@
   import { page } from '$app/state';
   import { resolve } from '$app/paths';
   import { api, ApiError } from '$lib/api/client';
+  import { loadAuthConfiguration } from '$lib/auth/config';
+  import type { GifResult } from '$lib/chat/gifs';
+  import { autosizeTextarea } from '$lib/ui/autosize';
   import {
     channelCompletions,
     completionAt,
@@ -53,6 +56,7 @@
     type Completion
   } from '$lib/components/ComposerAutocomplete.svelte';
   import GuildMemberRoster from '$lib/components/GuildMemberRoster.svelte';
+  import GifPicker from '$lib/components/GifPicker.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import MessageRow from '$lib/components/MessageRow.svelte';
   import PresencePicker from '$lib/components/PresencePicker.svelte';
@@ -109,6 +113,8 @@
   const currentUser = $derived(entities.currentUser);
   const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
+  let gifPickerEnabled = $state(false);
+  let gifPickerOpen = $state(false);
   let error = $state('');
   let busy = $state(false);
   let channelReady = $state(false);
@@ -1438,6 +1444,10 @@
     };
     const dismissChannelMenu = () => closeChannelMenu(false);
     gateway = client;
+    const featureController = new AbortController();
+    void loadAuthConfiguration(featureController.signal)
+      .then((configuration) => (gifPickerEnabled = configuration.gif_picker_enabled))
+      .catch(() => (gifPickerEnabled = false));
     try {
       memberRosterOpen = localStorage.getItem('kaede.member-roster.visible') !== 'false';
     } catch {
@@ -1469,6 +1479,7 @@
     client.addEventListener('dispatch', receive);
     client.addEventListener(GATEWAY_SESSION_RESET_EVENT, sessionReset);
     return () => {
+      featureController.abort();
       loadGeneration += 1;
       snapshotGeneration += 1;
       voiceRefreshSequence += 1;
@@ -1487,6 +1498,12 @@
       resetUploads();
     };
   });
+
+  function chooseGif(gif: GifResult) {
+    if (busy || !channelReady || !channel || editingMessage) return;
+    gifPickerOpen = false;
+    void send(pendingMessageSend(gif.url, [], []));
+  }
 
   $effect(() => {
     const targetGuild = guildId;
@@ -2746,6 +2763,7 @@
             </svg>
           </button>
           <textarea
+            use:autosizeTextarea={{ value: content, maxHeight: 180 }}
             bind:this={composerInput}
             bind:value={content}
             oninput={composerChanged}
@@ -2767,6 +2785,17 @@
             rows="1"
             maxlength="4000"
           ></textarea>
+          {#if gifPickerEnabled && !editingMessage}
+            <button
+              class="gif-button"
+              class:active={gifPickerOpen}
+              type="button"
+              disabled={busy || !channelReady || !channel}
+              aria-label="Choose a GIF"
+              aria-expanded={gifPickerOpen}
+              onclick={() => (gifPickerOpen = !gifPickerOpen)}>GIF</button
+            >
+          {/if}
           <small class="composer-count">{content.length}/4000</small>
           <button
             class="send-button"
@@ -2785,6 +2814,9 @@
             </svg>
           </button>
         </form>
+        {#if gifPickerOpen}
+          <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
+        {/if}
         {#if uploads.length && !editingMessage}
           <UploadPreviewTray {uploads} onRemove={removeUpload} />
         {/if}

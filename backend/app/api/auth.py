@@ -68,6 +68,7 @@ from app.auth.service import (
     verify_mfa_code,
 )
 from app.auth.tokens import AccessTokenStore, LoginLimiter
+from app.auth.turnstile import TurnstileUnavailableError, verify_turnstile_token
 from app.core.proxy import resolve_client_ip
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
@@ -207,11 +208,16 @@ def token_response(
 
 
 @router.get("/config")
-async def auth_configuration(settings: Settings = Depends(get_settings)) -> dict[str, bool]:
+async def auth_configuration(settings: Settings = Depends(get_settings)) -> dict[str, object]:
     email_enabled = email_delivery_enabled(settings)
     return {
         "email_required": email_enabled,
         "password_recovery_enabled": email_enabled,
+        "turnstile": {
+            "enabled": settings.turnstile_enabled,
+            "site_key": settings.turnstile_site_key if settings.turnstile_enabled else None,
+        },
+        "gif_picker_enabled": settings.klipy_enabled,
     }
 
 
@@ -231,6 +237,27 @@ async def register(
     email_enabled = email_delivery_enabled(settings)
     if email_enabled and payload.email is None:
         raise auth_error("EMAIL_REQUIRED", "Email is required on this instance", 422)
+    if settings.turnstile_enabled:
+        if payload.turnstile_token is None:
+            raise auth_error("TURNSTILE_REQUIRED", "Complete the verification challenge", 403)
+        try:
+            verified = await verify_turnstile_token(
+                settings,
+                payload.turnstile_token,
+                client_ip(request, settings),
+            )
+        except TurnstileUnavailableError as exc:
+            raise auth_error(
+                "TURNSTILE_UNAVAILABLE",
+                "Verification is temporarily unavailable; try again",
+                503,
+            ) from exc
+        if not verified:
+            raise auth_error(
+                "TURNSTILE_INVALID",
+                "Verification expired or was unsuccessful; try again",
+                403,
+            )
     email = str(payload.email).lower() if email_enabled and payload.email is not None else None
     user = User(
         id=await snowflake.mint(),

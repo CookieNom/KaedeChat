@@ -2,6 +2,7 @@
   import { resolve } from '$app/paths';
   import { api, ApiError } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
+  import TurnstileWidget from '$lib/components/TurnstileWidget.svelte';
   import { onMount, tick } from 'svelte';
 
   interface RegistrationResult {
@@ -19,6 +20,10 @@
   let busy = $state(false);
   let emailRequired = $state<boolean | null>(null);
   let verificationRequired = $state(true);
+  let turnstileEnabled = $state(false);
+  let turnstileSiteKey = $state<string | null>(null);
+  let turnstileToken = $state<string | null>(null);
+  let turnstileWidget = $state<TurnstileWidget | null>(null);
   let successPanel = $state<HTMLElement | null>(null);
 
   onMount(() => {
@@ -26,6 +31,8 @@
     void loadAuthConfiguration(controller.signal)
       .then((configuration) => {
         emailRequired = configuration.email_required;
+        turnstileEnabled = configuration.turnstile.enabled;
+        turnstileSiteKey = configuration.turnstile.site_key;
         if (!emailRequired) email = '';
       })
       .catch(() => {
@@ -47,7 +54,12 @@
     try {
       const result = await api<RegistrationResult>('/auth/register', {
         method: 'POST',
-        body: JSON.stringify(emailRequired ? { username, email, password } : { username, password })
+        body: JSON.stringify({
+          username,
+          ...(emailRequired ? { email } : {}),
+          password,
+          ...(turnstileEnabled ? { turnstile_token: turnstileToken } : {})
+        })
       });
       password = '';
       confirmPassword = '';
@@ -57,6 +69,7 @@
       successPanel?.focus();
     } catch (caught) {
       error = caught instanceof ApiError ? caught.message : 'Could not create your account.';
+      if (turnstileEnabled) turnstileWidget?.reset();
     } finally {
       busy = false;
     }
@@ -146,8 +159,17 @@
         disabled={busy}
       /></label
     >
+    {#if turnstileEnabled && turnstileSiteKey}
+      <TurnstileWidget
+        bind:this={turnstileWidget}
+        siteKey={turnstileSiteKey}
+        onToken={(token) => (turnstileToken = token)}
+      />
+    {/if}
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-    <button class="primary-button" disabled={busy}>{busy ? 'Creating…' : 'Create account'}</button>
+    <button class="primary-button" disabled={busy || (turnstileEnabled && !turnstileToken)}
+      >{busy ? 'Creating…' : 'Create account'}</button
+    >
   </form>
   <p class="form-foot">Already have an account? <a href={resolve('/login')}>Sign in</a></p>
 {/if}

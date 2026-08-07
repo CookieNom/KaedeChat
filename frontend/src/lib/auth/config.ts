@@ -3,6 +3,11 @@ import { api } from '$lib/api/client';
 export interface AuthConfiguration {
   email_required: boolean;
   password_recovery_enabled: boolean;
+  gif_picker_enabled: boolean;
+  turnstile: {
+    enabled: boolean;
+    site_key: string | null;
+  };
 }
 
 export function loadAuthConfiguration(signal?: AbortSignal): Promise<AuthConfiguration> {

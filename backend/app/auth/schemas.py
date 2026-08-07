@@ -13,6 +13,7 @@ class RegisterRequest(BaseModel):
     username: str
     email: EmailStr | None = None
     password: str = Field(min_length=10, max_length=256)
+    turnstile_token: str | None = Field(default=None, min_length=1, max_length=2048)
 
     @field_validator("username")
     @classmethod

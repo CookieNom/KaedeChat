@@ -15,6 +15,7 @@
   import type { Message, PresenceStatus, UserSummary } from '$lib/chat/types';
   import { entityRef } from '$lib/chat/refs';
   import { inviteReferencesInMessage } from '$lib/chat/invites';
+  import { klipyGifUrl } from '$lib/chat/gifs';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { portal } from '$lib/ui/portal';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
@@ -69,6 +70,7 @@
   const inviteReferences = $derived(
     message.content ? inviteReferencesInMessage(message.content) : []
   );
+  const gifUrl = $derived(klipyGifUrl(message.content));
 
   function authorName(): string {
     return (
@@ -340,6 +342,11 @@
     {/if}
     {#if message.deleted_at}
       <p class="message-removed">Message removed</p>
+    {:else if gifUrl}
+      <a class="klipy-gif" href={gifUrl} target="_blank" rel="noopener noreferrer">
+        <img src={gifUrl} alt="GIF shared from KLIPY" loading="lazy" />
+        <small>Powered by KLIPY</small>
+      </a>
     {:else if message.content}
       <Markdown content={message.content} {mentionUsers} />
       {#each inviteReferences as reference (reference)}

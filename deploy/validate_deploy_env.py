@@ -37,6 +37,7 @@ SENSITIVE_NAMES = {
     "KAEDE_EDGE_SECRET",
     "KAEDE_GATEWAY_SECRET_KEY",
     "KAEDE_MAILTRAP_API_TOKEN",
+    "KAEDE_KLIPY_API_KEY",
     "KAEDE_MEDIA_S3_ACCESS_KEY",
     "KAEDE_MEDIA_S3_SECRET_KEY",
     "KAEDE_MEDIA_S3_SESSION_TOKEN",
@@ -46,6 +47,7 @@ SENSITIVE_NAMES = {
     "LIVEKIT_API_KEY",
     "LIVEKIT_API_SECRET",
     "POSTGRES_PASSWORD",
+    "TURNSTILE_SECRET",
 }
 VOICE_PORT_DEFAULTS = {
     "LIVEKIT_CONTROL_PORT": 7880,
@@ -167,6 +169,20 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
         value = values.get(name, "").strip()
         if value and _is_placeholder(value):
             raise DeploymentConfigurationError(f"{name} still contains a documented placeholder")
+
+    if values.get("KAEDE_KLIPY_ENABLED", "false").strip().lower() == "true" and not values.get(
+        "KAEDE_KLIPY_API_KEY", ""
+    ).strip():
+        raise DeploymentConfigurationError(
+            "KAEDE_KLIPY_API_KEY is required when KLIPY is enabled"
+        )
+    if values.get("KAEDE_TURNSTILE_ENABLED", "false").strip().lower() == "true":
+        if not values.get("KAEDE_TURNSTILE_SITE_KEY", "").strip() or not values.get(
+            "TURNSTILE_SECRET", ""
+        ).strip():
+            raise DeploymentConfigurationError(
+                "KAEDE_TURNSTILE_SITE_KEY and TURNSTILE_SECRET are required when Turnstile is enabled"
+            )
 
     if values.get("KAEDE_MEDIA_SCAN_ENABLED", "true").strip().lower() != "true":
         raise DeploymentConfigurationError("KAEDE_MEDIA_SCAN_ENABLED must be true in production")

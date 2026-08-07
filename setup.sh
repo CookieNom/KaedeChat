@@ -789,6 +789,35 @@ else
   fi
 fi
 
+section 'Interaction services' \
+  'KLIPY adds a GIF picker. Cloudflare Turnstile can protect new-account registration.'
+if confirm 'Enable the KLIPY GIF picker?' "$([[ $(old KAEDE_KLIPY_ENABLED false) == true ]] && printf true || printf false)"; then
+  KLIPY_ENABLED=true
+  if [[ -n ${OLD[KAEDE_KLIPY_API_KEY]-} ]] && confirm 'Reuse existing KLIPY API key?' true; then
+    KLIPY_API_KEY=${OLD[KAEDE_KLIPY_API_KEY]}
+  else
+    KLIPY_API_KEY=$(ask_provider_secret 'KLIPY API key' 8)
+  fi
+else
+  KLIPY_ENABLED=false
+  KLIPY_API_KEY=
+fi
+
+if confirm 'Enable Cloudflare Turnstile for registration?' "$([[ $(old KAEDE_TURNSTILE_ENABLED false) == true ]] && printf true || printf false)"; then
+  TURNSTILE_ENABLED=true
+  TURNSTILE_SITE_KEY=$(prompt_text 'Turnstile site key' "$(old KAEDE_TURNSTILE_SITE_KEY '')")
+  [[ $TURNSTILE_SITE_KEY =~ ^[A-Za-z0-9_-]{8,128}$ ]] || die 'invalid Turnstile site key'
+  if [[ -n ${OLD[TURNSTILE_SECRET]-} ]] && confirm 'Reuse existing Turnstile secret?' true; then
+    TURNSTILE_SECRET_VALUE=${OLD[TURNSTILE_SECRET]}
+  else
+    TURNSTILE_SECRET_VALUE=$(ask_provider_secret 'Turnstile secret' 8)
+  fi
+else
+  TURNSTILE_ENABLED=false
+  TURNSTILE_SITE_KEY=
+  TURNSTILE_SECRET_VALUE=
+fi
+
 section 'Runtime sizing' 'Defaults are appropriate for a small instance and can be changed now.'
 if confirm 'Customize worker counts and media limits?' false; then
   API_WORKERS=$(prompt_text 'API workers (1-64)' "$(old KAEDE_API_WORKERS 4)")
@@ -909,6 +938,13 @@ emit() {
     emit KAEDE_SMTP_URL "$SMTP_URL"
   fi
   [[ $EMAIL == disabled ]] || emit KAEDE_EMAIL_FROM_ADDRESS "$FROM_ADDRESS"
+  emit KAEDE_KLIPY_ENABLED "$KLIPY_ENABLED"
+  [[ $KLIPY_ENABLED == false ]] || emit KAEDE_KLIPY_API_KEY "$KLIPY_API_KEY"
+  emit KAEDE_TURNSTILE_ENABLED "$TURNSTILE_ENABLED"
+  if [[ $TURNSTILE_ENABLED == true ]]; then
+    emit KAEDE_TURNSTILE_SITE_KEY "$TURNSTILE_SITE_KEY"
+    emit TURNSTILE_SECRET "$TURNSTILE_SECRET_VALUE"
+  fi
   emit KAEDE_APP_URL "https://$DOMAIN"
   emit KAEDE_API_WORKERS "$API_WORKERS"
   emit KAEDE_GATEWAY_WORKERS "$GATEWAY_WORKERS"
@@ -997,7 +1033,8 @@ fi
   printf 'Nothing was started, installed, or reloaded.\n\n'
   printf 'Validate:\n  make env-check\n  make generated-compose-check\n\n'
   printf 'Internal Caddy edge: 127.0.0.1:%s\n' "$EDGE_PORT"
-  printf 'Selected storage: %s\nSelected email: %s\n' "$STORAGE" "$EMAIL"
+  printf 'Selected storage: %s\nSelected email: %s\nKLIPY GIF picker: %s\nTurnstile: %s\n' \
+    "$STORAGE" "$EMAIL" "$KLIPY_ENABLED" "$TURNSTILE_ENABLED"
   if [[ $STORAGE == garage ]]; then
     printf '\nRequired media origin: create public DNS for media.%s, include it in the TLS certificate, and enable the generated nginx media virtual host. Browser uploads and every Garage-backed image depend on this origin.\n' "$DOMAIN"
   fi
@@ -1025,6 +1062,8 @@ if [[ $USE_GUM == true ]]; then
     "Internal Caddy: 127.0.0.1:$EDGE_PORT" \
     "Storage: $STORAGE" \
     "Email: $EMAIL" \
+    "KLIPY GIF picker: $KLIPY_ENABLED" \
+    "Turnstile: $TURNSTILE_ENABLED" \
     "Host nginx file: $HOST_NGINX" \
     "Voice: $VOICE" \
     "Observability: $OBSERVABILITY" \
@@ -1033,6 +1072,7 @@ else
   printf '\n%s%sReady to write%s\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
   printf '  Domain:          %s\n  Internal Caddy:  127.0.0.1:%s\n' "$DOMAIN" "$EDGE_PORT"
   printf '  Storage:         %s\n  Email:           %s\n' "$STORAGE" "$EMAIL"
+  printf '  KLIPY GIFs:      %s\n  Turnstile:       %s\n' "$KLIPY_ENABLED" "$TURNSTILE_ENABLED"
   printf '  Host nginx file: %s\n  Voice:           %s\n  Observability:   %s\n' "$HOST_NGINX" "$VOICE" "$OBSERVABILITY"
   printf '  Secrets:         generated or preserved; never displayed\n'
 fi

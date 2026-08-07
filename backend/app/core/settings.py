@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DOMAIN_RE = re.compile(
@@ -159,6 +159,18 @@ class Settings(BaseSettings):
     verification_ttl_hours: int = Field(default=48, ge=1)
     password_reset_ttl_minutes: int = Field(default=30, ge=5)
 
+    # Optional external interaction services
+    klipy_enabled: bool = False
+    klipy_api_key: SecretStr | None = None
+    turnstile_enabled: bool = False
+    turnstile_site_key: str | None = None
+    # Cloudflare names this credential TURNSTILE_SECRET. Accept the field name
+    # as well so tests and programmatic configuration remain straightforward.
+    turnstile_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TURNSTILE_SECRET", "turnstile_secret"),
+    )
+
     # Observability and retention
     audit_retention_days: int = Field(default=90, ge=90)
     metrics_enabled: bool = True
@@ -178,6 +190,9 @@ class Settings(BaseSettings):
         "voice_public_url",
         "voice_api_key",
         "voice_api_secret",
+        "klipy_api_key",
+        "turnstile_site_key",
+        "turnstile_secret",
         mode="before",
     )
     @classmethod
@@ -217,6 +232,31 @@ class Settings(BaseSettings):
     def validate_header_secret(cls, value: SecretStr | None) -> SecretStr | None:
         if value is not None and not HEADER_SECRET_RE.fullmatch(value.get_secret_value()):
             raise ValueError("must contain only URL-safe token characters")
+        return value
+
+    @field_validator("klipy_api_key")
+    @classmethod
+    def validate_klipy_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not re.fullmatch(
+            r"[A-Za-z0-9_-]{8,256}", value.get_secret_value()
+        ):
+            raise ValueError("must be an 8-256 character KLIPY API key")
+        return value
+
+    @field_validator("turnstile_site_key")
+    @classmethod
+    def validate_turnstile_site_key(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", value):
+            raise ValueError("must be a valid Cloudflare Turnstile site key")
+        return value
+
+    @field_validator("turnstile_secret")
+    @classmethod
+    def validate_turnstile_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not re.fullmatch(
+            r"[A-Za-z0-9_-]{8,256}", value.get_secret_value()
+        ):
+            raise ValueError("must be a valid Cloudflare Turnstile secret")
         return value
 
     @field_validator("database_url")
@@ -509,6 +549,17 @@ class Settings(BaseSettings):
             and (self.mailtrap_api_token is None or not self.mailtrap_api_token.get_secret_value())
         ):
             raise ValueError("mailtrap_api_token is required for the mailtrap_api email backend")
+        interaction_runtime = self.service_role in {"full", "api", "preflight"}
+        if interaction_runtime and self.klipy_enabled and self.klipy_api_key is None:
+            raise ValueError("klipy_api_key is required when KLIPY GIF support is enabled")
+        if (
+            interaction_runtime
+            and self.turnstile_enabled
+            and (self.turnstile_site_key is None or self.turnstile_secret is None)
+        ):
+            raise ValueError(
+                "turnstile_site_key and TURNSTILE_SECRET are required when Turnstile is enabled"
+            )
         if self.environment == "production":
             if self.domain.endswith(".localhost"):
                 raise ValueError("a .localhost domain cannot be used in production")

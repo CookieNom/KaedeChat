@@ -37,6 +37,21 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(DeploymentConfigurationError, "placeholder"):
             validate_values(values, observability=False)
 
+    def test_enabled_interaction_services_require_private_credentials(self) -> None:
+        with self.assertRaisesRegex(DeploymentConfigurationError, "KLIPY_API_KEY"):
+            validate_values(
+                self.production | {"KAEDE_KLIPY_ENABLED": "true"}, observability=False
+            )
+        with self.assertRaisesRegex(DeploymentConfigurationError, "TURNSTILE_SECRET"):
+            validate_values(
+                self.production
+                | {
+                    "KAEDE_TURNSTILE_ENABLED": "true",
+                    "KAEDE_TURNSTILE_SITE_KEY": "site-key",
+                },
+                observability=False,
+            )
+
     def test_observability_requires_an_independent_password(self) -> None:
         with self.assertRaisesRegex(DeploymentConfigurationError, "at least 20"):
             validate_values(self.production, observability=True)
