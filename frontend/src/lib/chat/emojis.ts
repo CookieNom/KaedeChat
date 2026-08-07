@@ -4,6 +4,7 @@ export type EmojiCategory =
 export interface EmojiOption {
   value: string;
   name: string;
+  shortcode: string;
   keywords: string[];
   category: EmojiCategory;
 }
@@ -16,6 +17,43 @@ export interface CustomEmojiOption {
   /** Stable wire-format token to insert into the message composer. */
   value: string;
   animated?: boolean;
+  guild_id: string;
+  guild_domain: string;
+  guild_name?: string;
+}
+
+const FEDERATED_DOMAIN =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+const SNOWFLAKE = /^[1-9][0-9]{0,18}$/;
+const MAX_SNOWFLAKE = 9223372036854775807n;
+const CUSTOM_NAME = /^[A-Za-z0-9_]{2,32}$/;
+
+export function customEmojiToken(emoji: {
+  id: string;
+  origin_domain: string;
+  name: string;
+  animated?: boolean;
+}): string {
+  if (
+    !validSnowflake(emoji.id) ||
+    !FEDERATED_DOMAIN.test(emoji.origin_domain) ||
+    !CUSTOM_NAME.test(emoji.name)
+  )
+    return '';
+  return `<${emoji.animated ? 'a' : ''}:${emoji.name}:${emoji.id}@${emoji.origin_domain.toLowerCase()}>`;
+}
+
+export function customEmojiUrl(id: string, domain: string, variant = 'thumbnail_128'): string {
+  if (!validSnowflake(id) || !FEDERATED_DOMAIN.test(domain)) return '';
+  const safeVariant =
+    variant === 'original' || variant === 'thumbnail_512' ? variant : 'thumbnail_128';
+  const localDomain = typeof window === 'undefined' ? '' : window.location.hostname.toLowerCase();
+  const path = `/media/emojis/${id}/${safeVariant}`;
+  return domain.toLowerCase() === localDomain ? path : `https://${domain.toLowerCase()}${path}`;
+}
+
+function validSnowflake(value: string): boolean {
+  return SNOWFLAKE.test(value) && BigInt(value) <= MAX_SNOWFLAKE;
 }
 
 interface EmojiRecord {
@@ -60,6 +98,10 @@ function makeOption(record: EmojiRecord, inheritedTags: string[] = []): EmojiOpt
   return {
     value: record.emoji,
     name: record.label.toLowerCase(),
+    shortcode: record.label
+      .toLowerCase()
+      .replace(/[^a-z0-9+_-]+/g, '_')
+      .replace(/^_+|_+$/g, ''),
     keywords: [...new Set([record.label, ...inheritedTags, ...(record.tags ?? [])])].map(
       (keyword) => keyword.toLowerCase()
     ),
@@ -92,3 +134,38 @@ export function loadUnicodeEmojis(): Promise<EmojiOption[]> {
   );
   return emojiPromise;
 }
+
+function emojiSearchScore(emoji: EmojiOption, needle: string): number {
+  if (!needle) return 3;
+  if (emoji.shortcode === needle) return 0;
+  if (emoji.shortcode.startsWith(needle)) return 1;
+  if (emoji.keywords.some((keyword) => keyword === needle || keyword.startsWith(needle))) return 2;
+  if (
+    emoji.shortcode.includes(needle) ||
+    emoji.name.includes(needle) ||
+    emoji.keywords.some((keyword) => keyword.includes(needle))
+  )
+    return 3;
+  return Number.POSITIVE_INFINITY;
+}
+
+export function unicodeEmojiCompletions(
+  emojis: EmojiOption[],
+  query: string,
+  limit = 40
+): CompletionOption[] {
+  const needle = query.trim().toLocaleLowerCase();
+  return emojis
+    .map((emoji, index) => ({ emoji, index, score: emojiSearchScore(emoji, needle) }))
+    .filter((item) => Number.isFinite(item.score))
+    .sort((left, right) => left.score - right.score || left.index - right.index)
+    .slice(0, limit)
+    .map(({ emoji }) => ({
+      value: emoji.value,
+      label: `:${emoji.shortcode}:`,
+      detail: emoji.name,
+      emoji: emoji.value,
+      kind: 'unicode-emoji' as const
+    }));
+}
+import type { CompletionOption } from './completion';

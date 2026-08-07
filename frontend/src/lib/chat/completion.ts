@@ -1,5 +1,16 @@
-import type { Channel, GuildMemberSummary } from './types';
+import type { Channel, GuildMemberSummary, Role } from './types';
 import { entityRef } from './refs';
+import { assetUrl } from '$lib/media/assets';
+
+export interface CompletionOption {
+  value: string;
+  label: string;
+  detail?: string;
+  emoji?: string;
+  imageUrl?: string;
+  color?: string;
+  kind?: 'user' | 'role' | 'channel' | 'unicode-emoji' | 'custom-emoji';
+}
 
 export interface CompletionQuery {
   marker: '@' | '#' | ':';
@@ -10,11 +21,12 @@ export interface CompletionQuery {
 
 export function completionAt(value: string, cursor: number): CompletionQuery | null {
   const prefix = value.slice(0, cursor);
-  const match = /(?:^|\s)([@#:])([\w.-]*)$/.exec(prefix);
+  const match = /(?:^|\s)([@#:])([\w.+-]*)(?::)?$/.exec(prefix);
   if (!match) return null;
   const marker = match[1] as '@' | '#' | ':';
   const query = match[2];
-  return { marker, query, start: cursor - query.length - 1, end: cursor };
+  const start = prefix.length - match[0].length + match[0].indexOf(marker);
+  return { marker, query, start, end: cursor };
 }
 
 export function replaceCompletion(
@@ -37,7 +49,33 @@ export function memberCompletions(members: GuildMemberSummary[], query: string) 
     .map((member) => ({
       value: `<@${entityRef(member.user)}>`,
       label: member.nickname ?? member.user.display_name ?? member.user.username,
-      detail: `@${member.user.handle}`
+      detail: `@${member.user.handle}`,
+      imageUrl: member.user.avatar_hash
+        ? assetUrl(member.user.avatar_hash, 'thumbnail_128', member.user)
+        : undefined,
+      kind: 'user' as const
+    }));
+}
+
+export function roleCompletions(
+  roles: Role[],
+  query: string,
+  options: { canMentionUnmentionable?: boolean } = {}
+): CompletionOption[] {
+  const needle = query.toLocaleLowerCase();
+  return roles
+    .filter(
+      (role) =>
+        (role.mentionable || options.canMentionUnmentionable) &&
+        role.name.toLocaleLowerCase().includes(needle)
+    )
+    .sort((left, right) => right.position - left.position || left.name.localeCompare(right.name))
+    .map((role) => ({
+      value: `<@&${entityRef(role)}>`,
+      label: `@${role.name}`,
+      detail: 'Role',
+      color: `#${role.color.toString(16).padStart(6, '0')}`,
+      kind: 'role' as const
     }));
 }
 
@@ -45,10 +83,9 @@ export function channelCompletions(channels: Channel[], query: string) {
   const needle = query.toLocaleLowerCase();
   return channels
     .filter((channel) => channel.name?.toLocaleLowerCase().includes(needle))
-    .map((channel) => ({ value: `#${channel.name}`, label: `#${channel.name}` }));
+    .map((channel) => ({
+      value: `#${channel.name}`,
+      label: `#${channel.name}`,
+      kind: 'channel' as const
+    }));
 }
-
-export const EMOJI_COMPLETIONS = ['wave', 'heart', 'thumbsup', 'sparkles', 'kaede'].map((name) => ({
-  value: `:${name}:`,
-  label: `:${name}:`
-}));

@@ -8,6 +8,7 @@ from app.db.models import (
     AuditLogEntry,
     Ban,
     Channel,
+    Emoji,
     Guild,
     GuildInstanceBan,
     GuildMember,
@@ -54,6 +55,19 @@ def guild_payload(guild: Guild) -> dict[str, object]:
         "history_policy_generation": str(guild.history_policy_generation),
         "unavailable": guild.unavailable,
         "version": resource_version(guild),
+    }
+
+
+def emoji_payload(emoji: Emoji) -> dict[str, object]:
+    return {
+        "id": str(emoji.id),
+        "origin_domain": emoji.origin_domain,
+        "guild_id": str(emoji.guild_id),
+        "guild_domain": emoji.guild_domain,
+        "name": emoji.name,
+        "animated": emoji.animated,
+        "media_hash": emoji.media_hash,
+        "version": resource_version(emoji),
     }
 
 

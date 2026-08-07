@@ -1,10 +1,16 @@
 <script lang="ts">
   import { renderMessageMarkdown } from '$lib/chat/markdown';
-  import type { UserSummary } from '$lib/chat/types';
+  import type { Role, UserSummary } from '$lib/chat/types';
 
-  let { content, mentionUsers = [] }: { content: string; mentionUsers?: UserSummary[] } = $props();
+  let {
+    content,
+    mentionUsers = [],
+    mentionRoles = []
+  }: { content: string; mentionUsers?: UserSummary[]; mentionRoles?: Role[] } = $props();
   const localDomain = typeof window === 'undefined' ? '' : window.location.hostname;
-  const rendered = $derived(renderMessageMarkdown(content, mentionUsers, localDomain));
+  const rendered = $derived(
+    renderMessageMarkdown(content, mentionUsers, localDomain, mentionRoles)
+  );
 
   function activate(target: EventTarget | null) {
     if (!(target instanceof Element)) return;

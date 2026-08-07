@@ -4,12 +4,19 @@
   import { api, ApiError } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import type { GifResult } from '$lib/chat/gifs';
+  import {
+    customEmojiToken,
+    loadUnicodeEmojis,
+    unicodeEmojiCompletions,
+    type CustomEmojiOption,
+    type EmojiOption
+  } from '$lib/chat/emojis';
   import { autosizeTextarea } from '$lib/ui/autosize';
   import {
     channelCompletions,
     completionAt,
-    EMOJI_COMPLETIONS,
     memberCompletions,
+    roleCompletions,
     replaceCompletion
   } from '$lib/chat/completion';
   import { mentionsUser } from '$lib/chat/mentions';
@@ -38,6 +45,7 @@
   import type {
     Attachment,
     Channel,
+    CustomEmoji,
     Guild,
     GuildMemberSummary,
     Message,
@@ -118,6 +126,9 @@
   let gifPickerEnabled = $state(false);
   let gifPickerOpen = $state(false);
   let emojiPickerOpen = $state(false);
+  let availableEmojis = $state<CustomEmoji[]>([]);
+  let unicodeEmojis = $state<EmojiOption[]>([]);
+  let emojiCatalogLoading = false;
   let slowmodeRemaining = $state(0);
   let slowmodeTimer: number | null = null;
   let error = $state('');
@@ -217,6 +228,25 @@
   const channel = $derived(
     guild?.channels?.find((item) => matchesEntityRef(channelId, item, localDomain)) ?? null
   );
+  const pickerEmojis = $derived.by((): CustomEmojiOption[] => {
+    if (!guild || !channel) return [];
+    const activeGuild = guild;
+    const mayUseExternal = channelHasPermission(channel, Permission.USE_EXTERNAL_EMOJIS);
+    return availableEmojis
+      .filter(
+        (emoji) =>
+          emoji.media_hash &&
+          ((emoji.guild_id === activeGuild.id &&
+            emoji.guild_domain === activeGuild.origin_domain) ||
+            mayUseExternal)
+      )
+      .map((emoji) => ({
+        ...emoji,
+        url: assetUrl(emoji.media_hash ?? '', 'thumbnail_128', emoji.origin_domain),
+        value: customEmojiToken(emoji)
+      }))
+      .filter((emoji) => Boolean(emoji.url && emoji.value));
+  });
   const currentReadState = $derived(channel ? unreadFor(channel) : undefined);
   const channelGroups = $derived(groupChannels(guild?.channels ?? []));
   const canManageChannels = $derived.by(() => {
@@ -301,10 +331,36 @@
   const completionQuery = $derived(completionAt(content, composerCursor));
   const completionOptions = $derived.by((): Completion[] => {
     if (!completionQuery) return [];
-    if (completionQuery.marker === '@') return memberCompletions(members, completionQuery.query);
+    if (completionQuery.marker === '@')
+      return [
+        ...memberCompletions(members, completionQuery.query),
+        ...roleCompletions(guild?.roles ?? [], completionQuery.query, {
+          canMentionUnmentionable: Boolean(
+            channel && channelHasPermission(channel, Permission.MENTION_EVERYONE)
+          )
+        })
+      ];
     if (completionQuery.marker === '#')
       return channelCompletions(guild?.channels ?? [], completionQuery.query);
-    return EMOJI_COMPLETIONS.filter((item) => item.value.includes(completionQuery.query));
+    const needle = completionQuery.query.toLocaleLowerCase();
+    const custom = pickerEmojis
+      .filter((emoji) => emoji.name.toLocaleLowerCase().includes(needle))
+      .map((emoji) => ({
+        value: emoji.value,
+        label: `:${emoji.name}:`,
+        detail: emoji.guild_name ?? 'Custom emoji',
+        imageUrl: emoji.url,
+        kind: 'custom-emoji' as const
+      }));
+    return [...custom, ...unicodeEmojiCompletions(unicodeEmojis, needle)];
+  });
+
+  $effect(() => {
+    if (completionQuery?.marker !== ':' || unicodeEmojis.length || emojiCatalogLoading) return;
+    emojiCatalogLoading = true;
+    void loadUnicodeEmojis()
+      .then((items) => (unicodeEmojis = items))
+      .finally(() => (emojiCatalogLoading = false));
   });
 
   const setMessages = (items: Message[]) => {
@@ -1082,7 +1138,8 @@
   function manageableRolesFor(user: UserSummary): Role[] {
     if (!guild || !currentUser || !canManageRoles) return [];
     const actorMember = memberFor(currentUser.id, currentUser.origin_domain);
-    if (!actorOutranks(user)) return [];
+    const editingSelf = entityKey(user) === entityKey(currentUser);
+    if (!editingSelf && !actorOutranks(user)) return [];
     const actorIsOwner =
       currentUser.id === guild.owner_id &&
       currentUser.origin_domain === (guild.owner_domain ?? guild.origin_domain);
@@ -1583,6 +1640,20 @@
         );
         error = failure.reason ?? `Queued message rejected: ${rejected.code}`;
       }
+    } else if (dispatch.t === 'GUILD_EMOJI_CREATE') {
+      const emoji = dispatch.d as CustomEmoji;
+      availableEmojis = [
+        ...availableEmojis.filter((item) => entityKey(item) !== entityKey(emoji)),
+        emoji
+      ];
+    } else if (dispatch.t === 'GUILD_EMOJI_DELETE') {
+      const emoji = dispatch.d as CustomEmoji;
+      availableEmojis = availableEmojis.filter((item) => entityKey(item) !== entityKey(emoji));
+    } else if (dispatch.t === 'GUILD_DELETE') {
+      const removed = dispatch.d as { id: string; origin_domain: string };
+      availableEmojis = availableEmojis.filter(
+        (item) => item.guild_id !== removed.id || item.guild_domain !== removed.origin_domain
+      );
     } else if (dispatch.t === 'TYPING_START') {
       const started = dispatch.d as {
         channel_id: string;
@@ -2000,16 +2071,23 @@
     targetAround: string | null
   ) {
     try {
-      const [loadedGuild, loadedGuilds, loadedMessages, loadedReadStates, loadedCurrentUser] =
-        await Promise.all([
-          api<Guild>(`/guilds/${encodeURIComponent(targetGuild)}`),
-          api<Guild[]>('/users/@me/guilds'),
-          api<Message[]>(
-            `/channels/${encodeURIComponent(targetChannel)}/messages${targetAround ? `?around=${encodeURIComponent(targetAround)}` : ''}`
-          ),
-          api<ReadStateStatus[]>('/users/@me/read-states'),
-          api<UserSummary>('/users/@me')
-        ]);
+      const [
+        loadedGuild,
+        loadedGuilds,
+        loadedMessages,
+        loadedReadStates,
+        loadedCurrentUser,
+        loadedEmojis
+      ] = await Promise.all([
+        api<Guild>(`/guilds/${encodeURIComponent(targetGuild)}`),
+        api<Guild[]>('/users/@me/guilds'),
+        api<Message[]>(
+          `/channels/${encodeURIComponent(targetChannel)}/messages${targetAround ? `?around=${encodeURIComponent(targetAround)}` : ''}`
+        ),
+        api<ReadStateStatus[]>('/users/@me/read-states'),
+        api<UserSummary>('/users/@me'),
+        api<CustomEmoji[]>('/users/@me/emojis')
+      ]);
       if (
         routeGeneration !== loadGeneration ||
         snapshot !== snapshotGeneration ||
@@ -2018,6 +2096,7 @@
       )
         return;
       guild = loadedGuild;
+      availableEmojis = loadedEmojis;
       setGuilds(loadedGuilds);
       setReadStates(loadedReadStates);
       entities.ingestCurrentUser(loadedCurrentUser);
@@ -3124,6 +3203,7 @@
                   message={item.message}
                   compact={item.compact}
                   mentionUsers={entities.users.values}
+                  mentionRoles={guild?.roles ?? []}
                   presence={item.message.author ? presenceFor(item.message.author) : 'offline'}
                   canEdit={item.message.author_id === currentUser?.id &&
                     item.message.author_domain === currentUser?.origin_domain}
@@ -3282,7 +3362,11 @@
             <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
           {/if}
           {#if emojiPickerOpen}
-            <EmojiPicker onSelect={chooseEmoji} onClose={() => (emojiPickerOpen = false)} />
+            <EmojiPicker
+              customEmojis={pickerEmojis}
+              onSelect={chooseEmoji}
+              onClose={() => (emojiPickerOpen = false)}
+            />
           {/if}
           {#if uploads.length && !editingMessage}
             <UploadPreviewTray {uploads} onRemove={removeUpload} />
@@ -3299,6 +3383,7 @@
   {#if memberRosterOpen}
     <GuildMemberRoster
       {members}
+      roles={guild?.roles ?? []}
       {presenceFor}
       onProfile={openProfile}
       onClose={toggleMemberRoster}

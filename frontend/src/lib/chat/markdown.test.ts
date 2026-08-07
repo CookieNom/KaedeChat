@@ -18,6 +18,19 @@ describe('message markdown tokenization', () => {
       { text: '!', kind: 'text' }
     ]);
     expect(tokenKind('<@75512661369970688>')).toBe('mention');
+    expect(tokenizeText('party <:party_blob:75512661369970689@chat.example> now')).toEqual([
+      { text: 'party ', kind: 'text' },
+      {
+        text: '<:party_blob:75512661369970689@chat.example>',
+        kind: 'emoji'
+      },
+      { text: ' now', kind: 'text' }
+    ]);
+    expect(tokenKind('<a:dance:75512661369970690@chat.example>')).toBe('emoji');
+    expect(tokenizeText('hello <@&75512661369970691@chat.example>')).toEqual([
+      { text: 'hello ', kind: 'text' },
+      { text: '<@&75512661369970691@chat.example>', kind: 'mention' }
+    ]);
   });
 
   it('separates multiple spoilers without consuming surrounding markdown text', () => {

@@ -52,6 +52,21 @@ export interface Guild {
   unavailable: boolean;
   channels?: Channel[];
   roles?: Role[];
+  emojis?: CustomEmoji[];
+  emoji_limit?: number;
+  emoji_max_bytes?: number;
+  version?: string | null;
+}
+
+export interface CustomEmoji {
+  id: string;
+  origin_domain: string;
+  guild_id: string;
+  guild_domain: string;
+  guild_name?: string;
+  name: string;
+  animated: boolean;
+  media_hash: string | null;
   version?: string | null;
 }
 

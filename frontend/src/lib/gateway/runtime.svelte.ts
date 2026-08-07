@@ -1,6 +1,7 @@
 import { entityKey } from '$lib/chat/refs';
 import type {
   Channel,
+  CustomEmoji,
   Guild,
   GuildMemberSummary,
   Message,
@@ -110,6 +111,27 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       chatEntities.guilds.update(`${role.guild_id}@${role.guild_domain}`, (guild) => ({
         ...guild,
         roles: (guild.roles ?? []).filter((candidate) => entityKey(candidate) !== entityKey(role))
+      }));
+      return;
+    }
+    case 'GUILD_EMOJI_CREATE': {
+      const emoji = dispatch.d as CustomEmoji;
+      chatEntities.guilds.update(`${emoji.guild_id}@${emoji.guild_domain}`, (guild) => ({
+        ...guild,
+        emojis: [
+          ...(guild.emojis ?? []).filter((candidate) => entityKey(candidate) !== entityKey(emoji)),
+          emoji
+        ]
+      }));
+      return;
+    }
+    case 'GUILD_EMOJI_DELETE': {
+      const emoji = dispatch.d as CustomEmoji;
+      chatEntities.guilds.update(`${emoji.guild_id}@${emoji.guild_domain}`, (guild) => ({
+        ...guild,
+        emojis: (guild.emojis ?? []).filter(
+          (candidate) => entityKey(candidate) !== entityKey(emoji)
+        )
       }));
       return;
     }

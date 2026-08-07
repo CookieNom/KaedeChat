@@ -1,11 +1,8 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import type { CompletionOption } from '$lib/chat/completion';
 
-  export interface Completion {
-    value: string;
-    label: string;
-    detail?: string;
-  }
+  export type Completion = CompletionOption;
 
   let {
     query,
@@ -32,7 +29,11 @@
       options.map((option) => [option.value, option.label, option.detail ?? ''])
     ])
   );
-  const shown = $derived(dismissed ? [] : options.slice(0, 8));
+  const shown = $derived(dismissed ? [] : options.slice(0, 12));
+  const emojiMode = $derived(
+    shown.length > 0 &&
+      shown.every((option) => option.kind === 'unicode-emoji' || option.kind === 'custom-emoji')
+  );
 
   export function handleKeydown(event: KeyboardEvent): boolean {
     if (!shown.length) return false;
@@ -85,6 +86,9 @@
     role="listbox"
     aria-label="Message suggestions"
   >
+    {#if emojiMode}
+      <p class="completion-heading">Emoji matching :{query}</p>
+    {/if}
     {#each shown as option, index (option.value)}
       <button
         type="button"
@@ -98,7 +102,25 @@
         onmousedown={(event) => event.preventDefault()}
         onclick={() => onSelect(option)}
       >
-        <strong>{option.label}</strong>{#if option.detail}<small>{option.detail}</small>{/if}
+        {#if option.imageUrl}
+          <img class="completion-preview completion-preview-image" src={option.imageUrl} alt="" />
+        {:else if option.emoji}
+          <span class="completion-preview completion-preview-emoji" aria-hidden="true"
+            >{option.emoji}</span
+          >
+        {:else if option.kind === 'role'}
+          <i
+            class="completion-preview completion-preview-role"
+            style={`--role-color:${option.color}`}
+          ></i>
+        {:else if option.kind === 'channel'}
+          <span class="completion-preview completion-preview-symbol" aria-hidden="true">#</span>
+        {:else}
+          <span class="completion-preview completion-preview-symbol" aria-hidden="true">@</span>
+        {/if}
+        <span class="completion-copy">
+          <strong>{option.label}</strong>{#if option.detail}<small>{option.detail}</small>{/if}
+        </span>
       </button>
     {/each}
   </div>

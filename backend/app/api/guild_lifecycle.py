@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from redis.asyncio import Redis
-from sqlalchemy import delete, select, tuple_, update
+from sqlalchemy import delete, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
@@ -251,10 +251,20 @@ async def _prepare_guild_content_deletion(
     message_refs = select(Message.id, Message.origin_domain).where(
         tuple_(Message.channel_id, Message.channel_domain).in_(channel_refs)
     )
+    asset_prefix = f"emoji:{guild.origin_domain}:"
     attachments = list(
         await session.scalars(
             select(Attachment).where(
-                tuple_(Attachment.message_id, Attachment.message_domain).in_(message_refs)
+                or_(
+                    tuple_(Attachment.message_id, Attachment.message_domain).in_(message_refs),
+                    Attachment.asset_binding.in_(
+                        (
+                            f"guild:{guild.origin_domain}:{guild.id}:icon",
+                            f"guild:{guild.origin_domain}:{guild.id}:banner",
+                        )
+                    ),
+                    Attachment.asset_binding.startswith(asset_prefix),
+                )
             )
         )
     )
@@ -264,6 +274,7 @@ async def _prepare_guild_content_deletion(
         if attachment.origin_domain == settings.domain:
             attachment.message_id = None
             attachment.message_domain = None
+            attachment.asset_binding = None
             local_purge.append((attachment.id, attachment.origin_domain))
         else:
             remote_refs.append((attachment.id, attachment.origin_domain))

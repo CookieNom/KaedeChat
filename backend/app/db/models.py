@@ -1195,7 +1195,7 @@ class Reaction(Base):
     message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     user_id: Mapped[int] = mapped_column(BigInteger)
     user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
-    emoji_key: Mapped[str] = mapped_column(String(255))
+    emoji_key: Mapped[str] = mapped_column(String(320))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         PrimaryKeyConstraint("message_id", "message_domain", "user_id", "user_domain", "emoji_key"),
@@ -1443,6 +1443,9 @@ class Emoji(Base, FederatedIdMixin, TimestampMixin):
     guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     name: Mapped[str] = mapped_column(String(32))
     object_key: Mapped[str] = mapped_column(String(512))
+    # Content-addressed public asset identity. Remote guild replicas keep this
+    # value without copying the object into their own storage.
+    media_hash: Mapped[str | None] = mapped_column(String(64))
     animated: Mapped[bool] = mapped_column(Boolean, server_default=false())
     creator_id: Mapped[int] = mapped_column(BigInteger)
     creator_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
@@ -1453,7 +1456,11 @@ class Emoji(Base, FederatedIdMixin, TimestampMixin):
         ),
         ForeignKeyConstraint(["creator_id", "creator_domain"], ["users.id", "users.origin_domain"]),
         CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
-        UniqueConstraint("guild_id", "guild_domain", "name"),
+        UniqueConstraint("guild_id", "guild_domain", "name", name="uq_emojis_guild_name"),
+        CheckConstraint(
+            "media_hash IS NULL OR media_hash ~ '^[0-9a-f]{64}$'",
+            name="media_hash_format",
+        ),
     )
 
 

@@ -26,8 +26,10 @@ from app.chat.channel_access import (
     lock_local_channel_mutation,
     publish_channel_dispatch,
 )
+from app.chat.custom_emojis import validate_custom_emoji_use
 from app.chat.events import publish_dispatch, user_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
+from app.chat.mentions import merge_mention_recipients, role_mention_recipients
 from app.chat.payloads import attachment_payload, message_payload, render_message_payload
 from app.chat.permissions import require_permissions
 from app.chat.privacy import blocked_between, lock_relationship_pair, require_can_direct_message
@@ -384,6 +386,13 @@ async def create_message(
         auth.user,
         needed,
     )
+    await validate_custom_emoji_use(
+        session,
+        auth.user,
+        payload.content,
+        target_guild=access.guild,
+        target_permissions=actor_permissions,
+    )
     await require_dm_send(session, access, auth.user)
     if channel.type not in {0, 1, 5}:
         raise HTTPException(status_code=400, detail={"code": "NOT_TEXT_CHANNEL"})
@@ -416,9 +425,17 @@ async def create_message(
         referenced = await channel_message(
             session, settings, channel, payload.referenced_message_id
         )
-    mention_pairs = list(
+    explicit_mention_pairs = list(
         dict.fromkeys(item.resolve(settings.domain) for item in payload.mention_user_ids)
     )
+    mention_pairs = explicit_mention_pairs
+    if access.guild is not None:
+        mention_pairs = merge_mention_recipients(
+            mention_pairs,
+            await role_mention_recipients(
+                session, access.guild, payload.content, actor_permissions
+            ),
+        )
     allowed_mentions = {
         (participant.id, participant.origin_domain) for participant in access.participants
     }
@@ -481,7 +498,9 @@ async def create_message(
             "referenced_message_id": (
                 f"{referenced.id}@{referenced.origin_domain}" if referenced is not None else None
             ),
-            "mention_user_ids": [f"{user_id}@{domain}" for user_id, domain in mention_pairs],
+            "mention_user_ids": [
+                f"{user_id}@{domain}" for user_id, domain in explicit_mention_pairs
+            ],
             "attachments": [attachment_payload(item) for item in message_attachments],
         }
         try:
@@ -515,7 +534,7 @@ async def create_message(
                     ),
                     "mention_user_refs": [
                         {"id": str(user_id), "origin_domain": domain}
-                        for user_id, domain in mention_pairs
+                        for user_id, domain in explicit_mention_pairs
                     ],
                     "attachments": [attachment_payload(item) for item in message_attachments],
                 },
@@ -732,7 +751,7 @@ async def edit_message(
     require_local_mutation_authority(access, settings)
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
-    await require_channel_permissions(
+    actor_permissions = await require_channel_permissions(
         session,
         redis,
         access,
@@ -752,6 +771,13 @@ async def edit_message(
         # Moderation is intentionally delete-only. Editing another user's
         # content while preserving their authorship would be impersonation.
         raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
+    await validate_custom_emoji_use(
+        session,
+        auth.user,
+        payload.content,
+        target_guild=access.guild,
+        target_permissions=actor_permissions,
+    )
     message.content = payload.content
     message.e2ee = payload.e2ee
     message.edited_at = datetime.now(UTC)
@@ -952,7 +978,7 @@ async def add_reaction(
     require_local_mutation_authority(access, settings)
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
-    await require_channel_permissions(
+    actor_permissions = await require_channel_permissions(
         session,
         redis,
         access,
@@ -960,6 +986,13 @@ async def add_reaction(
         required_permissions("reaction.create"),
     )
     await require_dm_send(session, access, auth.user)
+    await validate_custom_emoji_use(
+        session,
+        auth.user,
+        payload.emoji,
+        target_guild=access.guild,
+        target_permissions=actor_permissions,
+    )
     message = await channel_message(
         session,
         settings,
@@ -1021,7 +1054,7 @@ async def remove_own_reaction(
     channel_id: EntityRef,
     message_id: EntityRef,
     response: Response,
-    emoji: str = Path(min_length=1, max_length=255),
+    emoji: str = Path(min_length=1, max_length=320),
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
@@ -1092,7 +1125,7 @@ async def remove_user_reaction(
     channel_id: EntityRef,
     message_id: EntityRef,
     user_id: EntityRef,
-    emoji: str = Path(min_length=1, max_length=255),
+    emoji: str = Path(min_length=1, max_length=320),
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),

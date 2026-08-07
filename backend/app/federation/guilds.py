@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import secrets
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -20,6 +21,7 @@ from app.db.models import (
     Ban,
     Channel,
     ChannelOverwrite,
+    Emoji,
     Guild,
     GuildEvent,
     GuildMember,
@@ -62,6 +64,8 @@ GUILD_MUTATION_EVENT_TYPES = frozenset(
         "guild.role.create",
         "guild.role.update",
         "guild.role.delete",
+        "guild.emoji.create",
+        "guild.emoji.delete",
         "guild.overwrite.upsert",
         "guild.overwrite.delete",
         "guild.member.update",
@@ -367,7 +371,7 @@ async def apply_guild_message_event(
     if raw.get("edited_at") is not None or raw.get("deleted_at") is not None:
         raise ValueError("guild create event contains mutation timestamps")
     raw_mention_refs = raw.get("mention_user_refs", [])
-    if not isinstance(raw_mention_refs, list) or len(raw_mention_refs) > 100:
+    if not isinstance(raw_mention_refs, list) or len(raw_mention_refs) > 5_000:
         raise ValueError("guild message mention list is invalid")
     mention_pairs: list[tuple[int, str]] = []
     for item in raw_mention_refs:
@@ -904,6 +908,67 @@ async def apply_guild_mutation_event(
                 raise ValueError("role deletion is invalid")
             await session.delete(role)
         dispatch["deleted_role_id"] = str(role_ref[0])
+    elif event_type in {"guild.emoji.create", "guild.emoji.delete"}:
+        raw = content.get("emoji")
+        emoji_ref = _event_ref(raw, "emoji")
+        if not isinstance(raw, dict) or emoji_ref[1] != locked.origin_domain:
+            raise ValueError("emoji mutation identity is invalid")
+        if (
+            database_snowflake(raw.get("guild_id"), "emoji guild id"),
+            normalize_domain(str(raw.get("guild_domain", ""))),
+        ) != (locked.id, locked.origin_domain):
+            raise ValueError("emoji mutation references the wrong guild")
+        if event_type.endswith("create"):
+            name = raw.get("name")
+            media_hash = raw.get("media_hash")
+            if (
+                not isinstance(name, str)
+                or re.fullmatch(r"[A-Za-z0-9_]{2,32}", name) is None
+                or not isinstance(media_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", media_hash) is None
+                or not isinstance(raw.get("animated"), bool)
+            ):
+                raise ValueError("emoji mutation fields are invalid")
+            duplicate_name = await session.scalar(
+                select(Emoji.id).where(
+                    Emoji.guild_id == locked.id,
+                    Emoji.guild_domain == locked.origin_domain,
+                    func.lower(Emoji.name) == name.casefold(),
+                    (Emoji.id != emoji_ref[0]) | (Emoji.origin_domain != emoji_ref[1]),
+                )
+            )
+            if duplicate_name is not None:
+                raise ValueError("emoji mutation name conflicts with another emoji")
+            emoji = await session.get(Emoji, emoji_ref)
+            if emoji is None:
+                emoji = Emoji(
+                    id=emoji_ref[0],
+                    origin_domain=emoji_ref[1],
+                    guild_id=locked.id,
+                    guild_domain=locked.origin_domain,
+                    name=name,
+                    object_key=f"remote:{emoji_ref[1]}:{emoji_ref[0]}",
+                    creator_id=actor.id,
+                    creator_domain=actor.origin_domain,
+                )
+                session.add(emoji)
+            elif (emoji.guild_id, emoji.guild_domain) != (locked.id, locked.origin_domain):
+                raise ValueError("emoji mutation conflicts with another guild")
+            emoji.name = name
+            emoji.animated = bool(raw["animated"])
+            emoji.media_hash = media_hash
+            dispatch_type = "GUILD_EMOJI_CREATE"
+        else:
+            emoji = await session.get(Emoji, emoji_ref)
+            if emoji is not None:
+                if (emoji.guild_id, emoji.guild_domain) != (
+                    locked.id,
+                    locked.origin_domain,
+                ):
+                    raise ValueError("emoji deletion references the wrong guild")
+                await session.delete(emoji)
+            dispatch_type = "GUILD_EMOJI_DELETE"
+        dispatch = dict(raw)
     elif event_type in {"guild.overwrite.upsert", "guild.overwrite.delete"}:
         raw = content.get("overwrite")
         if not isinstance(raw, dict):
@@ -1229,7 +1294,7 @@ async def apply_guild_mutation_event(
         message_ref = _event_ref(content.get("message"), "reaction message")
         user_ref = _event_ref(content.get("user"), "reaction user")
         emoji = content.get("emoji")
-        if not isinstance(emoji, str) or not 1 <= len(emoji) <= 255:
+        if not isinstance(emoji, str) or not 1 <= len(emoji) <= 320:
             raise ValueError("reaction emoji is invalid")
         message = await session.get(Message, message_ref)
         user = await session.get(User, user_ref)
@@ -1444,7 +1509,7 @@ async def fetch_guild_snapshot(
                 raise RuntimeError(
                     "guild membership watermark changed while its snapshot was paged"
                 )
-            for field in ("guild", "roles", "channels", "overwrites"):
+            for field in ("guild", "roles", "channels", "overwrites", "emojis"):
                 if payload.get(field) != combined.get(field):
                     raise RuntimeError("guild structure changed while its snapshot was paged")
             combined["members"].extend(members)
@@ -1585,12 +1650,14 @@ def validate_guild_snapshot(
     members = snapshot.get("members")
     member_roles = snapshot.get("member_roles")
     overwrites = snapshot.get("overwrites")
+    emojis = snapshot.get("emojis", [])
     if (
         not isinstance(roles, list)
         or not isinstance(channels, list)
         or not isinstance(members, list)
         or not isinstance(member_roles, list)
         or not isinstance(overwrites, list)
+        or not isinstance(emojis, list)
     ):
         raise ValueError("guild snapshot collections are invalid")
     if (
@@ -1599,6 +1666,7 @@ def validate_guild_snapshot(
         or len(members) > MAX_SNAPSHOT_MEMBERS
         or len(member_roles) > MAX_SNAPSHOT_MEMBER_ROLES
         or len(overwrites) > MAX_SNAPSHOT_OVERWRITES
+        or len(emojis) > 1000
     ):
         raise ValueError("guild snapshot collection exceeds its protocol bound")
     role_refs: set[tuple[int, str]] = set()
@@ -1765,6 +1833,33 @@ def validate_guild_snapshot(
         if overwrite_ref in overwrite_refs:
             raise ValueError("guild snapshot contains a duplicate overwrite")
         overwrite_refs.add(overwrite_ref)
+    emoji_refs: set[tuple[int, str]] = set()
+    emoji_names: set[str] = set()
+    for raw in emojis:
+        if not isinstance(raw, dict):
+            raise ValueError("guild snapshot emoji is invalid")
+        ref = _event_ref(raw, "emoji")
+        if ref[1] != origin or ref in emoji_refs:
+            raise ValueError("guild snapshot emoji identity is invalid")
+        if (
+            database_snowflake(raw.get("guild_id"), "emoji guild id"),
+            normalize_domain(str(raw.get("guild_domain", ""))),
+        ) != (guild_id, origin):
+            raise ValueError("guild snapshot emoji references the wrong guild")
+        name = raw.get("name")
+        media_hash = raw.get("media_hash")
+        if (
+            not isinstance(name, str)
+            or re.fullmatch(r"[A-Za-z0-9_]{2,32}", name) is None
+            or name.casefold() in emoji_names
+        ):
+            raise ValueError("guild snapshot emoji name is invalid")
+        if not isinstance(media_hash, str) or re.fullmatch(r"[0-9a-f]{64}", media_hash) is None:
+            raise ValueError("guild snapshot emoji media identity is invalid")
+        if not isinstance(raw.get("animated"), bool):
+            raise ValueError("guild snapshot emoji animation flag is invalid")
+        emoji_refs.add(ref)
+        emoji_names.add(name.casefold())
 
 
 def tombstone_omitted_replicated_channel(channel: Channel) -> None:
@@ -1965,6 +2060,7 @@ def guild_snapshot_payload(
     member_roles: list[MemberRole],
     overwrites: list[ChannelOverwrite],
     *,
+    emojis: list[Emoji] | None = None,
     member_snapshot_at: datetime,
     next_member_cursor: tuple[str, int] | None = None,
 ) -> dict[str, Any]:
@@ -2082,6 +2178,19 @@ def guild_snapshot_payload(
             }
             for item in overwrites
         ],
+        "emojis": [
+            {
+                "id": str(item.id),
+                "origin_domain": item.origin_domain,
+                "guild_id": str(item.guild_id),
+                "guild_domain": item.guild_domain,
+                "name": item.name,
+                "animated": item.animated,
+                "media_hash": item.media_hash,
+            }
+            for item in (emojis or [])
+            if item.media_hash is not None
+        ],
     }
 
 
@@ -2185,6 +2294,15 @@ async def apply_guild_snapshot(
     for member in existing_members:
         if (member.user_id, member.user_domain) not in member_refs:
             await session.delete(member)
+    emoji_refs = {(int(raw["id"]), str(raw["origin_domain"])) for raw in snapshot.get("emojis", [])}
+    existing_emojis = list(
+        await session.scalars(
+            select(Emoji).where(Emoji.guild_id == guild.id, Emoji.guild_domain == origin)
+        )
+    )
+    for emoji in existing_emojis:
+        if (emoji.id, emoji.origin_domain) not in emoji_refs:
+            await session.delete(emoji)
     for raw in snapshot["roles"]:
         loaded_role = await session.get(Role, (int(raw["id"]), str(raw["origin_domain"])))
         if loaded_role is None:
@@ -2235,6 +2353,25 @@ async def apply_guild_snapshot(
         loaded_channel.federated_history_policy = str(
             raw.get("federated_history_policy", "inherit")
         )
+    for raw in snapshot.get("emojis", []):
+        loaded_emoji = await session.get(Emoji, (int(raw["id"]), str(raw["origin_domain"])))
+        if loaded_emoji is None:
+            loaded_emoji = Emoji(
+                id=int(raw["id"]),
+                origin_domain=str(raw["origin_domain"]),
+                guild_id=guild.id,
+                guild_domain=guild.origin_domain,
+                name=str(raw["name"]),
+                object_key=f"remote:{origin}:{raw['id']}",
+                creator_id=guild.owner_id,
+                creator_domain=guild.owner_domain,
+            )
+            session.add(loaded_emoji)
+        elif (loaded_emoji.guild_id, loaded_emoji.guild_domain) != (guild.id, origin):
+            raise ValueError("snapshot emoji identity conflicts with another guild")
+        loaded_emoji.name = str(raw["name"])
+        loaded_emoji.animated = bool(raw["animated"])
+        loaded_emoji.media_hash = str(raw["media_hash"])
     await session.flush()
     if channel_refs:
         await session.execute(

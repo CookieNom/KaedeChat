@@ -12,7 +12,7 @@
 </script>
 
 <script lang="ts">
-  import type { Message, PresenceStatus, UserSummary } from '$lib/chat/types';
+  import type { Message, PresenceStatus, Role, UserSummary } from '$lib/chat/types';
   import { entityRef } from '$lib/chat/refs';
   import { inviteReferencesInMessage } from '$lib/chat/invites';
   import { klipyGifUrl } from '$lib/chat/gifs';
@@ -34,6 +34,7 @@
     canEdit = false,
     presence = 'offline',
     mentionUsers = [],
+    mentionRoles = [],
     onEdit,
     onDelete,
     onMessageAuthor,
@@ -47,6 +48,7 @@
     canEdit?: boolean;
     presence?: PresenceStatus;
     mentionUsers?: UserSummary[];
+    mentionRoles?: Role[];
     onEdit?: (message: Message) => void;
     onDelete?: (message: Message) => void;
     onMessageAuthor?: (message: Message) => void;
@@ -370,7 +372,7 @@
         <small>Powered by KLIPY</small>
       </a>
     {:else if message.content}
-      <Markdown content={message.content} {mentionUsers} />
+      <Markdown content={message.content} {mentionUsers} {mentionRoles} />
       {#each inviteReferences as reference (reference)}
         <InviteEmbed {reference} />
       {/each}

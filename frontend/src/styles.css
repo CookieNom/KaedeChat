@@ -4544,6 +4544,53 @@ progress {
   font-weight: inherit;
 }
 
+.chat-custom-emoji {
+  display: inline-block;
+  width: 1.45em;
+  height: 1.45em;
+  margin-inline: 0.04em;
+  object-fit: contain;
+  vertical-align: -0.34em;
+}
+
+.emoji-management-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+.emoji-management-item {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.65rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: var(--surface-subtle);
+}
+
+.emoji-management-item img {
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+}
+
+.emoji-management-item span,
+.emoji-management-item small {
+  display: block;
+  min-width: 0;
+}
+
+.emoji-management-item strong {
+  overflow-wrap: anywhere;
+}
+
+.emoji-management-item small {
+  color: var(--text-muted);
+}
+
 .chat-token-mention[role='button'] {
   display: inline;
   box-decoration-break: clone;
@@ -5054,11 +5101,22 @@ progress {
   box-shadow: var(--shadow-md);
 }
 
+.composer-autocomplete .completion-heading {
+  margin: 0;
+  padding: 0.45rem 0.65rem 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .composer-autocomplete button {
-  display: grid;
+  display: flex;
   width: 100%;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0.12rem;
+  min-height: 48px;
+  align-items: center;
+  gap: 0.65rem;
   border: 0;
   border-radius: 8px;
   padding: 0.55rem 0.65rem;
@@ -5066,6 +5124,47 @@ progress {
   background: transparent;
   text-align: left;
   cursor: pointer;
+}
+
+.completion-preview {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+}
+
+.completion-preview-image {
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.completion-preview-emoji {
+  font-size: 1.55rem;
+  line-height: 1;
+}
+
+.completion-preview-role {
+  width: 14px;
+  height: 14px;
+  flex-basis: 14px;
+  margin: 0 9px;
+  border-radius: 50%;
+  background: var(--role-color, var(--text-muted));
+}
+
+.completion-preview-symbol {
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: var(--surface-subtle);
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.completion-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.12rem;
 }
 
 .composer-autocomplete button strong {
@@ -5084,6 +5183,10 @@ progress {
 .composer-autocomplete button[aria-selected='true'] {
   color: var(--text);
   background: var(--surface-hover);
+}
+
+.chat-token-role-mention {
+  box-shadow: inset 3px 0 var(--mention-role-color, var(--accent));
 }
 
 .upload-tray {

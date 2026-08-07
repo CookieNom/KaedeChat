@@ -30,6 +30,14 @@ is normative in [kaede-fed-v1.md](kaede-fed-v1.md).
 - Avatar, banner, guild icon/banner, and emoji ticket/commit paths use the same
   scan gate. Public assets are content-addressed and return a cacheable redirect
   whose lifetime is shorter than its immutable seven-day S3 target.
+- A guild may own between one and 1,000 custom emoji according to the operator's
+  configured limit (100 by default). Names are unique within a guild and emoji
+  images have an independent 512 KiB default upload limit. Membership grants use
+  of that collection; posting it in another guild additionally requires the
+  destination channel's `USE_EXTERNAL_EMOJIS` permission. Messages store a
+  domain-qualified emoji identity so equal names and snowflakes from different
+  instances remain unambiguous. Guild snapshots and sequenced create/delete
+  events replicate emoji metadata while immutable bytes remain at their origin.
 - Message media authorization rechecks channel membership and
   `VIEW_CHANNEL`/`READ_MESSAGE_HISTORY`, then issues a private 24-hour target
   behind a five-minute redirect. Message deletion asynchronously removes the

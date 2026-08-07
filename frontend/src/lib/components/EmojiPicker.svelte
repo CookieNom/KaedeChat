@@ -17,7 +17,7 @@
     onClose: () => void;
   } = $props();
   let query = $state('');
-  let category = $state<EmojiOption['category']>('people');
+  let category = $state<'custom' | EmojiOption['category']>('people');
   let searchInput = $state<HTMLInputElement | null>(null);
   let unicodeEmojis = $state<EmojiOption[]>([]);
   let loading = $state(true);
@@ -27,7 +27,7 @@
   const matchingUnicode = $derived(
     unicodeEmojis.filter(
       (emoji) =>
-        (!normalizedQuery && emoji.category === category) ||
+        (!normalizedQuery && category !== 'custom' && emoji.category === category) ||
         (normalizedQuery &&
           (emoji.name.includes(normalizedQuery) ||
             emoji.keywords.some((keyword) => keyword.includes(normalizedQuery))))
@@ -36,7 +36,11 @@
   const visibleUnicode = $derived(matchingUnicode.slice(0, visibleLimit));
   const matchingCustom = $derived(
     customEmojis.filter(
-      (emoji) => !normalizedQuery || emoji.name.toLowerCase().includes(normalizedQuery)
+      (emoji) =>
+        (category === 'custom' || Boolean(normalizedQuery)) &&
+        (!normalizedQuery ||
+          emoji.name.toLowerCase().includes(normalizedQuery) ||
+          emoji.guild_name?.toLowerCase().includes(normalizedQuery))
     )
   );
 
@@ -73,7 +77,17 @@
   </label>
   <nav aria-label="Emoji categories">
     {#if customEmojis.length}
-      <span class="emoji-custom-tab" title="Guild emoji" aria-label="Guild emoji">K</span>
+      <button
+        class:active={!normalizedQuery && category === 'custom'}
+        class="emoji-custom-tab"
+        type="button"
+        title="Custom emoji"
+        aria-label="Custom emoji"
+        onclick={() => {
+          category = 'custom';
+          query = '';
+        }}>✦</button
+      >
     {/if}
     {#each emojiCategories as item (item.id)}
       <button
@@ -89,32 +103,33 @@
       >
     {/each}
   </nav>
-  <div
-    class="emoji-results"
-    role="region"
-    aria-label="Emoji results"
-    aria-live="polite"
-  >
+  <div class="emoji-results" role="region" aria-label="Emoji results" aria-live="polite">
     {#if matchingCustom.length}
-      <h3>Guild emoji</h3>
+      <h3>Custom emoji from your guilds</h3>
       <div class="emoji-grid custom-emojis">
         {#each matchingCustom as emoji (`${emoji.id}@${emoji.origin_domain}`)}
-          <button type="button" title={`:${emoji.name}:`} onclick={() => onSelect(emoji.value)}>
+          <button
+            type="button"
+            title={`:${emoji.name}:${emoji.guild_name ? ` — ${emoji.guild_name}` : ''}`}
+            onclick={() => onSelect(emoji.value)}
+          >
             <img src={emoji.url} alt={`:${emoji.name}:`} loading="lazy" />
           </button>
         {/each}
       </div>
     {/if}
-    <h3>
-      {normalizedQuery
-        ? 'Search results'
-        : emojiCategories.find((item) => item.id === category)?.label}
-    </h3>
-    {#if loading}
+    {#if category !== 'custom' || normalizedQuery}
+      <h3>
+        {normalizedQuery
+          ? 'Unicode results'
+          : emojiCategories.find((item) => item.id === category)?.label}
+      </h3>
+    {/if}
+    {#if loading && category !== 'custom'}
       <p>Loading emoji…</p>
-    {:else if loadFailed}
+    {:else if loadFailed && category !== 'custom'}
       <p>Could not load emoji.</p>
-    {:else}
+    {:else if category !== 'custom' || normalizedQuery}
       <div class="emoji-grid">
         {#each visibleUnicode as emoji (emoji.value)}
           <button type="button" title={emoji.name} onclick={() => onSelect(emoji.value)}
@@ -127,8 +142,8 @@
           Show more emoji
         </button>
       {/if}
-      {#if !matchingCustom.length && !matchingUnicode.length}<p>No emoji found.</p>{/if}
     {/if}
+    {#if !matchingCustom.length && !matchingUnicode.length}<p>No emoji found.</p>{/if}
   </div>
   <footer>
     <span aria-hidden="true">{matchingUnicode[0]?.value ?? '😀'}</span>

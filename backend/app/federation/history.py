@@ -944,7 +944,7 @@ def _validate_history_message(
         raise ValueError("historical message attachments are invalid")
     if not isinstance(reactions, list) or len(reactions) > 10_000:
         raise ValueError("historical message reactions are invalid")
-    if not isinstance(mentions, list) or len(mentions) > 100:
+    if not isinstance(mentions, list) or len(mentions) > 5_000:
         raise ValueError("historical message mentions are invalid")
     if pin is not None and not isinstance(pin, dict):
         raise ValueError("historical message pin is invalid")
@@ -988,7 +988,7 @@ def _validate_history_message(
         database_snowflake(reaction.get("user_id"), "historical reaction user")
         normalize_domain(str(reaction.get("user_domain", "")))
         emoji = reaction.get("emoji")
-        if not isinstance(emoji, str) or not 1 <= len(emoji) <= 255:
+        if not isinstance(emoji, str) or not 1 <= len(emoji) <= 320:
             raise ValueError("historical reaction emoji is invalid")
         try:
             reaction_created = datetime.fromisoformat(str(reaction.get("created_at")))
@@ -1450,7 +1450,7 @@ async def _merge_history_import_batch(
                     message_domain=message.origin_domain,
                     user_id=user_id,
                     user_domain=user_domain,
-                    emoji_key=str(reaction.get("emoji", ""))[:255],
+                    emoji_key=str(reaction.get("emoji", ""))[:320],
                     created_at=datetime.fromisoformat(str(reaction["created_at"])),
                 )
                 .on_conflict_do_nothing()

@@ -456,7 +456,7 @@ async def replicate_dm_message(
     if raw.get("edited_at") is not None or raw.get("deleted_at") is not None:
         raise ValueError("DM create event contains mutation timestamps")
     raw_mention_refs = raw.get("mention_user_refs", [])
-    if not isinstance(raw_mention_refs, list) or len(raw_mention_refs) > 100:
+    if not isinstance(raw_mention_refs, list) or len(raw_mention_refs) > 5_000:
         raise ValueError("DM message mention list is invalid")
     mention_pairs: list[tuple[int, str]] = []
     for item in raw_mention_refs:

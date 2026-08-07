@@ -21,8 +21,9 @@ chat implementation.
   creation does not change the guild permission generation.
 - Atomic, expiring, use-limited local invites with ban checks.
 - Manager-only invite listing and durable revocation with retained audit records.
-- Role assignment and removal with owner/self protection, position hierarchy,
-  lower-snowflake tie-breaking, and permission-grant ceilings.
+- Role assignment and removal with owner immunity, owner self-management,
+  hierarchy-bounded self-management for other role managers, lower-snowflake
+  tie-breaking, and permission-grant ceilings.
 - Paginated member and active-ban lists, nickname changes, finite or indefinite
   timeouts, kick, timed or permanent ban, unban, optional recent-message
   deletion, and audit reasons. Finite timeouts are capped at 28 days; a distinct
@@ -69,8 +70,15 @@ chat implementation.
   and presents a new-message pill when the reader is away from the bottom.
 - Markdown is parsed with `marked`, sanitized through a strict DOMPurify allowlist,
   then token-decorated without interpreting user text as HTML. The composer has
-  keyboard-operable ARIA mention/channel/emoji completion, edit/cancel, failed-send
-  retry, Enter/Shift+Enter, Escape, and Arrow-Up-to-edit behavior.
+  keyboard-operable ARIA user/role/channel/emoji completion, including the full
+  Unicode catalog and federated custom-emoji thumbnails. Role mentions and custom
+  emoji use immutable federated tokens rather than display names. The composer
+  also supports edit/cancel, failed-send retry, Enter/Shift+Enter, Escape, and
+  Arrow-Up-to-edit behavior.
+- The member roster groups active users under their highest role marked for
+  separate display, then lists remaining online and offline members. Role mention
+  fanout is resolved by the guild authority against current assignments and the
+  role's mentionability setting; clients cannot supply arbitrary role recipients.
 - Message, channel, and profile menus are portaled to the document layer before
   viewport placement, so transformed scroll panes cannot clip or offset them.
 - Last-channel persistence, a `Ctrl`/`Cmd`+`K` channel switcher, `Alt+Arrow`

@@ -4,9 +4,16 @@
   import { api, ApiError } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import type { GifResult } from '$lib/chat/gifs';
+  import {
+    customEmojiToken,
+    loadUnicodeEmojis,
+    unicodeEmojiCompletions,
+    type CustomEmojiOption,
+    type EmojiOption
+  } from '$lib/chat/emojis';
   import { autosizeTextarea } from '$lib/ui/autosize';
   import { firstNavigableChannel } from '$lib/chat/channels';
-  import { completionAt, EMOJI_COMPLETIONS, replaceCompletion } from '$lib/chat/completion';
+  import { completionAt, replaceCompletion } from '$lib/chat/completion';
   import { mentionsUser } from '$lib/chat/mentions';
   import {
     applyMessageDeliveryUpdate,
@@ -27,6 +34,7 @@
   import type {
     Attachment,
     Channel,
+    CustomEmoji,
     Guild,
     Message,
     ReadStateStatus,
@@ -85,6 +93,19 @@
   let gifPickerEnabled = $state(false);
   let gifPickerOpen = $state(false);
   let emojiPickerOpen = $state(false);
+  let availableEmojis = $state<CustomEmoji[]>([]);
+  let unicodeEmojis = $state<EmojiOption[]>([]);
+  let emojiCatalogLoading = false;
+  const pickerEmojis = $derived(
+    availableEmojis
+      .filter((emoji) => emoji.media_hash)
+      .map((emoji): CustomEmojiOption => ({
+        ...emoji,
+        url: assetUrl(emoji.media_hash ?? '', 'thumbnail_128', emoji.origin_domain),
+        value: customEmojiToken(emoji)
+      }))
+      .filter((emoji) => Boolean(emoji.url && emoji.value))
+  );
   let error = $state('');
   let busy = $state(false);
   let channelReady = $state(false);
@@ -225,7 +246,20 @@
   const completionQuery = $derived(completionAt(content, composerCursor));
   const completionOptions = $derived(
     completionQuery?.marker === ':'
-      ? EMOJI_COMPLETIONS.filter((item) => item.value.includes(completionQuery.query))
+      ? [
+          ...pickerEmojis
+            .filter((emoji) =>
+              emoji.name.toLocaleLowerCase().includes(completionQuery.query.toLocaleLowerCase())
+            )
+            .map((emoji) => ({
+              value: emoji.value,
+              label: `:${emoji.name}:`,
+              detail: emoji.guild_name ?? 'Custom emoji',
+              imageUrl: emoji.url,
+              kind: 'custom-emoji' as const
+            })),
+          ...unicodeEmojiCompletions(unicodeEmojis, completionQuery.query)
+        ]
       : completionQuery?.marker === '@' &&
           recipient?.handle.toLocaleLowerCase().includes(completionQuery.query.toLocaleLowerCase())
         ? [
@@ -237,6 +271,14 @@
           ]
         : []
   );
+
+  $effect(() => {
+    if (completionQuery?.marker !== ':' || unicodeEmojis.length || emojiCatalogLoading) return;
+    emojiCatalogLoading = true;
+    void loadUnicodeEmojis()
+      .then((items) => (unicodeEmojis = items))
+      .finally(() => (emojiCatalogLoading = false));
+  });
 
   const setMessages = (items: Message[]) => {
     const target = channel;
@@ -414,6 +456,20 @@
         setMessages(applied.messages);
         if (!applied.matched) void recoverDeliveryUpdate(update);
       }
+    } else if (dispatch.t === 'GUILD_EMOJI_CREATE') {
+      const emoji = dispatch.d as CustomEmoji;
+      availableEmojis = [
+        ...availableEmojis.filter((item) => entityKey(item) !== entityKey(emoji)),
+        emoji
+      ];
+    } else if (dispatch.t === 'GUILD_EMOJI_DELETE') {
+      const emoji = dispatch.d as CustomEmoji;
+      availableEmojis = availableEmojis.filter((item) => entityKey(item) !== entityKey(emoji));
+    } else if (dispatch.t === 'GUILD_DELETE') {
+      const removed = dispatch.d as { id: string; origin_domain: string };
+      availableEmojis = availableEmojis.filter(
+        (item) => item.guild_id !== removed.id || item.guild_domain !== removed.origin_domain
+      );
     } else if (dispatch.t === 'TYPING_START') {
       const started = dispatch.d as {
         channel_id: string;
@@ -615,7 +671,8 @@
         loadedMessages,
         loadedReadStates,
         loadedCurrentUser,
-        loadedCall
+        loadedCall,
+        loadedEmojis
       ] = await Promise.all([
         api<Channel[]>('/users/@me/channels'),
         api<Guild[]>('/users/@me/guilds'),
@@ -629,7 +686,8 @@
             call: null,
             joined: false
           })
-        )
+        ),
+        api<CustomEmoji[]>('/users/@me/emojis')
       ]);
       if (
         routeGeneration !== loadGeneration ||
@@ -640,6 +698,7 @@
       setDirectMessages(loadedDms);
       setGuilds(loadedGuilds);
       setReadStates(loadedReadStates);
+      availableEmojis = loadedEmojis;
       entities.ingestCurrentUser(loadedCurrentUser);
       const preferredPresence = myPresencePreference();
       presencePreference = preferredPresence;
@@ -1673,7 +1732,11 @@
         <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
       {/if}
       {#if emojiPickerOpen}
-        <EmojiPicker onSelect={chooseEmoji} onClose={() => (emojiPickerOpen = false)} />
+        <EmojiPicker
+          customEmojis={pickerEmojis}
+          onSelect={chooseEmoji}
+          onClose={() => (emojiPickerOpen = false)}
+        />
       {/if}
       {#if uploads.length && !editingMessage}
         <UploadPreviewTray {uploads} onRemove={removeUpload} />

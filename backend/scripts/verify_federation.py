@@ -15,6 +15,7 @@ from websockets.asyncio.client import connect
 from app.auth.security import hash_password
 from app.db.models import (
     Channel,
+    Emoji,
     FederatedHistoryMessage,
     FederationEvent,
     FederationInbox,
@@ -91,6 +92,38 @@ async def seed_user(database_url: str, domain: str, user_id: int, username: str)
                     )
                 )
                 await session.commit()
+    finally:
+        await engine.dispose()
+
+
+async def seed_guild_emoji(
+    database_url: str,
+    *,
+    domain: str,
+    guild_id: int,
+    creator_id: int,
+    emoji_id: int,
+) -> None:
+    """Seed immutable media metadata for federation tests without an object store."""
+
+    engine, sessionmaker = create_engine_and_sessionmaker(database_url)
+    try:
+        async with sessionmaker() as session:
+            session.add(
+                Emoji(
+                    id=emoji_id,
+                    origin_domain=domain,
+                    guild_id=guild_id,
+                    guild_domain=domain,
+                    name="federated_lantern",
+                    object_key=f"validation/{emoji_id}",
+                    media_hash="a" * 64,
+                    animated=False,
+                    creator_id=creator_id,
+                    creator_domain=domain,
+                )
+            )
+            await session.commit()
     finally:
         await engine.dispose()
 
@@ -598,6 +631,15 @@ async def verify() -> None:
             retained_before_join.status_code == 201,
             f"historical export fixture failed: {retained_before_join.text}",
         )
+        emoji_id = 9_000_000_000_100
+        emoji_token = f"<:federated_lantern:{emoji_id}@alpha.localhost>"
+        await seed_guild_emoji(
+            ALPHA_DATABASE_URL,
+            domain="alpha.localhost",
+            guild_id=int(guild_id),
+            creator_id=9_000_000_000_001,
+            emoji_id=emoji_id,
+        )
         invite = await alpha.post(
             f"/api/v1/guilds/{guild_ref}/invites",
             headers=alice,
@@ -611,6 +653,33 @@ async def verify() -> None:
         replica = await beta.get(f"/api/v1/guilds/{guild_ref}", headers=bob)
         require(replica.status_code == 200, f"replicated guild unavailable: {replica.text}")
         require(entity_ref(replica.json()) == guild_ref, "wrong guild replica identity")
+        require(
+            any(
+                emoji.get("id") == str(emoji_id) and emoji.get("media_hash") == "a" * 64
+                for emoji in replica.json().get("emojis", [])
+            ),
+            "custom emoji metadata was omitted from the guild snapshot",
+        )
+        emoji_message = await beta.post(
+            f"/api/v1/channels/{channel_ref}/messages",
+            headers=bob,
+            json={"content": emoji_token, "client_nonce": "m3-custom-emoji"},
+        )
+        require(
+            emoji_message.status_code == 201,
+            f"remote custom emoji message failed: {emoji_message.text}",
+        )
+        authoritative_emoji_message = await alpha.get(
+            f"/api/v1/channels/{channel_ref}/messages", headers=alice
+        )
+        require(
+            any(
+                message.get("client_nonce") == "m3-custom-emoji"
+                and message.get("content") == emoji_token
+                for message in authoritative_emoji_message.json()
+            ),
+            "custom emoji identity did not survive the federated proxy write",
+        )
 
         # Reproduce the channel permission editor's deny -> inherit path on a
         # remote member. This guards both the empty-overwrite transition and

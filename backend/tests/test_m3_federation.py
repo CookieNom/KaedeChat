@@ -237,6 +237,8 @@ def test_complete_guild_mutation_registry_and_snapshot_fences() -> None:
         "guild.role.create",
         "guild.role.update",
         "guild.role.delete",
+        "guild.emoji.create",
+        "guild.emoji.delete",
         "guild.overwrite.upsert",
         "guild.overwrite.delete",
         "guild.member.update",
@@ -1299,10 +1301,66 @@ def test_guild_snapshot_rejects_cross_origin_entity_injection() -> None:
         ],
         "member_roles": [],
         "overwrites": [],
+        "emojis": [
+            {
+                "id": "13",
+                "origin_domain": "beta.localhost",
+                "guild_id": "10",
+                "guild_domain": "beta.localhost",
+                "name": "lantern",
+                "animated": False,
+                "media_hash": "a" * 64,
+            }
+        ],
     }
     validate_guild_snapshot(snapshot, expected_origin="beta.localhost", expected_guild_id=10)
     snapshot["channels"][0]["origin_domain"] = "evil.example"
     with pytest.raises(ValueError, match="channel identity"):
+        validate_guild_snapshot(snapshot, expected_origin="beta.localhost", expected_guild_id=10)
+
+
+def test_guild_snapshot_rejects_invalid_custom_emoji_identity() -> None:
+    snapshot: dict[str, Any] = {
+        "snapshot_seq": "0",
+        "guild": {
+            "id": "10",
+            "origin_domain": "beta.localhost",
+            "name": "Paper Lantern",
+            "owner_id": "11",
+            "owner_domain": "beta.localhost",
+            "permission_generation": "1",
+        },
+        "roles": [],
+        "channels": [],
+        "members": [
+            {
+                "user": {
+                    "id": "11",
+                    "origin_domain": "beta.localhost",
+                    "username": "owner",
+                },
+                "nickname": None,
+                "joined_at": "2026-07-17T00:00:00+00:00",
+                "timeout_until": None,
+                "voice_flags": 0,
+                "member_version": "1",
+            }
+        ],
+        "member_roles": [],
+        "overwrites": [],
+        "emojis": [
+            {
+                "id": "13",
+                "origin_domain": "evil.example",
+                "guild_id": "10",
+                "guild_domain": "beta.localhost",
+                "name": "lantern",
+                "animated": False,
+                "media_hash": "a" * 64,
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="emoji identity"):
         validate_guild_snapshot(snapshot, expected_origin="beta.localhost", expected_guild_id=10)
 
 

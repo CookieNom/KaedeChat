@@ -23,7 +23,7 @@ from app.api.guilds import local_guild
 from app.chat.channel_access import load_channel_access
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
-from app.chat.payloads import guild_payload, user_payload
+from app.chat.payloads import emoji_payload, guild_payload, user_payload
 from app.chat.permissions import require_permissions
 from app.core.permission_contract import required_permissions
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
@@ -34,6 +34,8 @@ from app.core.types import EntityRef, EntityReference, Snowflake
 from app.db.models import (
     Attachment,
     Emoji,
+    Guild,
+    GuildMember,
     Message,
     RemoteMediaCache,
     RemoteMediaTombstone,
@@ -370,6 +372,14 @@ async def create_emoji_ticket(
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     require_image_type(payload.content_type)
+    if payload.size > settings.media_max_emoji_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "code": "EMOJI_TOO_LARGE",
+                "max_bytes": settings.media_max_emoji_bytes,
+            },
+        )
     await enforce_client_rate_limit(
         redis,
         response,
@@ -442,6 +452,7 @@ async def create_emoji(
         guild_domain=guild.origin_domain,
         name=payload.name,
         object_key=object_key,
+        media_hash=attachment.content_sha256,
         animated=attachment.detected_content_type in {"image/gif", "image/webp"},
         creator_id=auth.user.id,
         creator_domain=auth.user.origin_domain,
@@ -452,15 +463,25 @@ async def create_emoji(
         f"emoji:{guild.origin_domain}:{emoji.id}",
     )
     session.add(emoji)
+    await session.flush()
+    rendered = emoji_payload(emoji)
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        auth.user,
+        "guild.emoji.create",
+        {"emoji": rendered},
+    )
     await session.commit()
-    return {
-        "id": str(emoji.id),
-        "origin_domain": emoji.origin_domain,
-        "guild_id": str(emoji.guild_id),
-        "name": emoji.name,
-        "animated": emoji.animated,
-        "media_hash": attachment.content_sha256,
-    }
+    await wake_queued_guild_federation(guild)
+    await publish_dispatch(
+        redis,
+        guild_topic(guild.origin_domain, guild.id),
+        "GUILD_EMOJI_CREATE",
+        rendered,
+    )
+    return rendered
 
 
 @router.delete("/api/v1/guilds/{guild_id}/emojis/{emoji_id}", status_code=204)
@@ -472,7 +493,7 @@ async def delete_emoji(
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
 ) -> Response:
-    guild = await local_guild(session, settings, guild_id)
+    guild = await local_guild(session, settings, guild_id, for_update=True)
     await require_permissions(
         session, redis, guild, auth.user, required_permissions("guild.emoji.manage")
     )
@@ -487,13 +508,59 @@ async def delete_emoji(
         .where(Attachment.asset_binding == f"emoji:{emoji.origin_domain}:{emoji.id}")
         .with_for_update()
     )
+    rendered = emoji_payload(emoji)
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        auth.user,
+        "guild.emoji.delete",
+        {"emoji": rendered},
+    )
     await session.delete(emoji)
     if attachment is not None:
         attachment.asset_binding = None
     await session.commit()
+    await wake_queued_guild_federation(guild)
+    await publish_dispatch(
+        redis,
+        guild_topic(guild.origin_domain, guild.id),
+        "GUILD_EMOJI_DELETE",
+        rendered,
+    )
     if attachment is not None:
         await enqueue_best_effort(media_local_purge, attachment.id, attachment.origin_domain)
     return Response(status_code=204)
+
+
+@router.get("/api/v1/users/@me/emojis")
+async def available_emojis(
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, object]]:
+    rows = (
+        await session.execute(
+            select(Emoji, Guild.name)
+            .join(
+                Guild,
+                (Guild.id == Emoji.guild_id) & (Guild.origin_domain == Emoji.guild_domain),
+            )
+            .join(
+                GuildMember,
+                (GuildMember.guild_id == Emoji.guild_id)
+                & (GuildMember.guild_domain == Emoji.guild_domain),
+            )
+            .where(
+                GuildMember.user_id == auth.user.id,
+                GuildMember.user_domain == auth.user.origin_domain,
+                Guild.unavailable.is_(False),
+                Emoji.media_hash.is_not(None),
+            )
+            .order_by(Guild.name, Emoji.name, Emoji.id)
+            .limit(5000)
+        )
+    ).tuples()
+    return [{**emoji_payload(emoji), "guild_name": guild_name} for emoji, guild_name in rows]
 
 
 @router.get("/api/v1/attachments/{attachment_id}")
@@ -575,6 +642,28 @@ async def public_asset(
     )
     if attachment is None:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    return redirect_to_object(settings, attachment, variant, public=True)
+
+
+@router.get("/media/emojis/{emoji_id}/{variant}")
+async def public_emoji(
+    emoji_id: Snowflake,
+    variant: str = Path(pattern=r"^(original|thumbnail_128|thumbnail_512)$"),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> RedirectResponse:
+    emoji = await session.get(Emoji, (int(emoji_id), settings.domain))
+    if emoji is None:
+        raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
+    attachment = await session.scalar(
+        select(Attachment).where(
+            Attachment.asset_binding == f"emoji:{emoji.origin_domain}:{emoji.id}",
+            Attachment.scan_status == "clean",
+            Attachment.deleted_at.is_(None),
+        )
+    )
+    if attachment is None:
+        raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
     return redirect_to_object(settings, attachment, variant, public=True)
 
 

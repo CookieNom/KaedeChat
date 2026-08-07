@@ -4,7 +4,14 @@
   import { api, ApiError } from '$lib/api/client';
   import { firstNavigableChannel, groupChannels } from '$lib/chat/channels';
   import { entityKey, entityRef } from '$lib/chat/refs';
-  import type { Channel, Guild, GuildMemberSummary, Role, UserSummary } from '$lib/chat/types';
+  import type {
+    Channel,
+    CustomEmoji,
+    Guild,
+    GuildMemberSummary,
+    Role,
+    UserSummary
+  } from '$lib/chat/types';
   import Icon from '$lib/components/Icon.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { PERMISSION_METADATA, Permission } from '$lib/generated/permissions';
@@ -177,6 +184,10 @@
   let guildAssetStage = $state<GuildAssetStage | null>(null);
   let guildAssetProgress = $state(0);
   let guildAssetError = $state('');
+  let emojiName = $state('');
+  let emojiFile = $state<File | null>(null);
+  let emojiInput = $state<HTMLInputElement | null>(null);
+  let emojiBusy = $state(false);
 
   let name = $state('');
   let description = $state('');
@@ -304,6 +315,7 @@
   );
   const canManageChannels = $derived(isLocalGuild && hasPermission(Permission.MANAGE_CHANNELS));
   const canManageRoles = $derived(isLocalGuild && hasPermission(Permission.MANAGE_ROLES));
+  const canManageEmojis = $derived(isLocalGuild && hasPermission(Permission.MANAGE_EMOJIS));
   const actorHighestRole = $derived(
     guild?.roles?.find((role) => role.id === guild?.actor_highest_role_id) ?? null
   );
@@ -339,7 +351,8 @@
   }
 
   function canManageMember(member: MemberSummary): boolean {
-    if (!guild || !canManageRoles || entityRef(member.user) === currentUserRef) return false;
+    if (!guild || !canManageRoles) return false;
+    if (entityRef(member.user) === currentUserRef) return true;
     if (
       member.user.id === guild.owner_id &&
       member.user.origin_domain === (guild.owner_domain ?? guild.origin_domain)
@@ -1029,6 +1042,95 @@
         guildAssetStage = null;
         guildAssetProgress = 0;
       }
+    }
+  }
+
+  async function createEmoji(event: SubmitEvent) {
+    event.preventDefault();
+    const signal = routeController?.signal;
+    if (!guild || !emojiFile || !canManageEmojis || emojiBusy || !signal) return;
+    const file = emojiFile;
+    if (!acceptedImageTypes.has(file.type)) {
+      error = 'Choose a PNG, JPEG, GIF, or WebP image.';
+      return;
+    }
+    if (file.size > (guild.emoji_max_bytes ?? 524288)) {
+      error = `Emoji images can be at most ${Math.ceil((guild.emoji_max_bytes ?? 524288) / 1024)} KiB.`;
+      return;
+    }
+    emojiBusy = true;
+    error = '';
+    notice = '';
+    try {
+      const ticket = await api<UploadTicket>(
+        `/guilds/${encodeURIComponent(guildId)}/emojis/tickets`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ filename: file.name, content_type: file.type, size: file.size })
+        }
+      );
+      await uploadObject(ticket, file, () => undefined, signal);
+      let created = await api<CustomEmoji>(`/guilds/${encodeURIComponent(guildId)}/emojis`, {
+        method: 'POST',
+        body: JSON.stringify({ attachment_id: ticket.id, name: emojiName.trim() })
+      });
+      if (!created.media_hash) {
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          await cancelableDelay(1000, signal);
+          const status = await api<{ scan_status: string }>(`/attachments/${ticket.id}`);
+          if (status.scan_status === 'clean') {
+            created = await api<CustomEmoji>(`/guilds/${encodeURIComponent(guildId)}/emojis`, {
+              method: 'POST',
+              body: JSON.stringify({ attachment_id: ticket.id, name: emojiName.trim() })
+            });
+            break;
+          }
+          if (status.scan_status === 'infected' || status.scan_status === 'failed') {
+            throw new Error('The emoji did not pass media processing.');
+          }
+        }
+      }
+      if (!created.media_hash) throw new Error('Emoji processing is taking longer than expected.');
+      guild = {
+        ...guild,
+        emojis: [
+          ...(guild.emojis ?? []).filter((item) => entityKey(item) !== entityKey(created)),
+          created
+        ]
+      };
+      emojiName = '';
+      emojiFile = null;
+      if (emojiInput) emojiInput.value = '';
+      notice = `:${created.name}: is ready to use.`;
+    } catch (caught) {
+      error =
+        caught instanceof ApiError
+          ? caught.message
+          : caught instanceof Error
+            ? caught.message
+            : 'Could not create emoji.';
+    } finally {
+      emojiBusy = false;
+    }
+  }
+
+  async function deleteEmoji(emoji: CustomEmoji) {
+    if (!guild || !canManageEmojis || emojiBusy) return;
+    emojiBusy = true;
+    error = '';
+    try {
+      await api(`/guilds/${encodeURIComponent(guildId)}/emojis/${encodeURIComponent(emoji.id)}`, {
+        method: 'DELETE'
+      });
+      guild = {
+        ...guild,
+        emojis: (guild.emojis ?? []).filter((item) => entityKey(item) !== entityKey(emoji))
+      };
+      notice = `:${emoji.name}: was deleted.`;
+    } catch (caught) {
+      error = caught instanceof ApiError ? caught.message : 'Could not delete emoji.';
+    } finally {
+      emojiBusy = false;
     }
   }
 
@@ -2012,6 +2114,9 @@
         {#if canManageRoles}
           <a href="#roles"><Icon name="shield" size={18} />Roles</a>
         {/if}
+        {#if canManageEmojis}
+          <a href="#emoji"><span aria-hidden="true">☺</span>Emoji</a>
+        {/if}
         {#if canViewMembers}
           <p>Community</p>
           <a href="#members"><Icon name="users" size={18} />Members</a>
@@ -2888,6 +2993,83 @@
               <Icon name="plus" size={16} />Create
             </button>
           </form>
+        </section>
+      {/if}
+
+      {#if !channelOnly && canManageEmojis}
+        <section id="emoji" class="settings-section">
+          <div class="settings-section-heading">
+            <span class="section-icon" aria-hidden="true">☺</span>
+            <div>
+              <h2>Custom emoji</h2>
+              <p>Upload emoji that members can use here and in their other guilds.</p>
+            </div>
+          </div>
+          <div class="settings-card">
+            <div class="settings-list-heading">
+              <div>
+                <strong>Guild emoji</strong>
+                <p>{guild?.emojis?.length ?? 0} of {guild?.emoji_limit ?? 100} used</p>
+              </div>
+            </div>
+            <form class="inline-create-form" onsubmit={createEmoji}>
+              <label class="form-field compact-field">
+                <span>Name</span>
+                <input
+                  bind:value={emojiName}
+                  pattern={'[A-Za-z0-9_]{2,32}'}
+                  minlength="2"
+                  maxlength="32"
+                  placeholder="party_blob"
+                  required
+                  disabled={emojiBusy}
+                />
+              </label>
+              <label class="form-field compact-field">
+                <span>Image</span>
+                <input
+                  bind:this={emojiInput}
+                  type="file"
+                  accept="image/png,image/jpeg,image/gif,image/webp"
+                  required
+                  disabled={emojiBusy}
+                  onchange={(event) => {
+                    emojiFile = event.currentTarget.files?.[0] ?? null;
+                  }}
+                />
+              </label>
+              <button
+                class="primary-button"
+                disabled={emojiBusy || (guild?.emojis?.length ?? 0) >= (guild?.emoji_limit ?? 100)}
+                >{emojiBusy ? 'Uploading…' : 'Upload emoji'}</button
+              >
+            </form>
+            <div class="emoji-management-grid">
+              {#each guild?.emojis ?? [] as emoji (entityKey(emoji))}
+                <article class="emoji-management-item">
+                  {#if emoji.media_hash}
+                    <img
+                      src={assetUrl(emoji.media_hash, 'thumbnail_128', emoji.origin_domain)}
+                      alt={`:${emoji.name}:`}
+                    />
+                  {/if}
+                  <span
+                    ><strong>:{emoji.name}:</strong><small
+                      >{emoji.animated ? 'Animated' : 'Image'}</small
+                    ></span
+                  >
+                  <button
+                    class="secondary-button danger-button"
+                    type="button"
+                    disabled={emojiBusy}
+                    onclick={() => void deleteEmoji(emoji)}>Delete</button
+                  >
+                </article>
+              {:else}
+                <p class="empty-copy">This guild has no custom emoji yet.</p>
+              {/each}
+            </div>
+          </div>
         </section>
       {/if}
 

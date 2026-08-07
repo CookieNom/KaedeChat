@@ -1,13 +1,17 @@
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { entityRef } from './refs';
-import type { UserSummary } from './types';
+import { customEmojiUrl } from './emojis';
+import type { Role, UserSummary } from './types';
 
 const EXPLICIT_MENTION = /^<@(\d+)(?:@([a-z0-9.-]+))?>$/i;
+const ROLE_MENTION = /^<@&(\d+)@([a-z0-9.-]+)>$/i;
+const CUSTOM_EMOJI =
+  /^<(?<animated>a?):(?<name>[A-Za-z0-9_]{2,32}):(?<id>[1-9][0-9]{0,18})@(?<domain>[a-z0-9.-]{1,253})>$/i;
 const TOKEN =
-  /(<@\d+(?:@[a-z0-9.-]+)?>|@[a-z0-9_.-]{1,64}@[a-z0-9.-]+|#[a-z0-9_-]{1,100}|:[a-z0-9_+-]{1,64}:)/gi;
+  /(<a?:[A-Za-z0-9_]{2,32}:[1-9][0-9]{0,18}@[a-z0-9.-]{1,253}>|<@&\d+@[a-z0-9.-]+>|<@\d+(?:@[a-z0-9.-]+)?>|@[a-z0-9_.-]{1,64}@[a-z0-9.-]+|#[a-z0-9_-]{1,100}|:[a-z0-9_+-]{1,64}:)/gi;
 const COMPLETE_TOKEN =
-  /^(<@\d+(?:@[a-z0-9.-]+)?>|@[a-z0-9_.-]{1,64}@[a-z0-9.-]+|#[a-z0-9_-]{1,100}|:[a-z0-9_+-]{1,64}:)$/i;
+  /^(<a?:[A-Za-z0-9_]{2,32}:[1-9][0-9]{0,18}@[a-z0-9.-]{1,253}>|<@&\d+@[a-z0-9.-]+>|<@\d+(?:@[a-z0-9.-]+)?>|@[a-z0-9_.-]{1,64}@[a-z0-9.-]+|#[a-z0-9_-]{1,100}|:[a-z0-9_+-]{1,64}:)$/i;
 const SPOILER = /(\|\|[^|](?:.|\n)*?\|\|)/g;
 
 export function splitSpoilers(value: string): string[] {
@@ -18,6 +22,21 @@ export function tokenKind(token: string): 'mention' | 'channel' | 'emoji' {
   if (token.startsWith('@') || token.startsWith('<@')) return 'mention';
   if (token.startsWith('#')) return 'channel';
   return 'emoji';
+}
+
+function customEmojiImage(token: string): HTMLImageElement | undefined {
+  const match = CUSTOM_EMOJI.exec(token);
+  if (!match?.groups) return undefined;
+  const src = customEmojiUrl(match.groups.id, match.groups.domain);
+  if (!src) return undefined;
+  const image = document.createElement('img');
+  image.className = 'chat-custom-emoji';
+  image.src = src;
+  image.alt = `:${match.groups.name}:`;
+  image.title = `:${match.groups.name}:`;
+  image.loading = 'lazy';
+  image.decoding = 'async';
+  return image;
 }
 
 export function tokenizeText(
@@ -75,6 +94,24 @@ function mentionSpan(token: string, users: UserSummary[], localDomain: string): 
   return span;
 }
 
+function roleMentionSpan(token: string, roles: Role[]): HTMLSpanElement {
+  const reference = ROLE_MENTION.exec(token);
+  const role = reference
+    ? roles.find(
+        (candidate) =>
+          candidate.id === reference[1] &&
+          candidate.origin_domain.toLowerCase() === reference[2].toLowerCase()
+      )
+    : undefined;
+  const span = document.createElement('span');
+  span.className = 'chat-token chat-token-mention chat-token-role-mention';
+  span.textContent = role ? `@${role.name}` : '@unknown-role';
+  span.title = role ? `Role: ${role.name}` : token;
+  if (role)
+    span.style.setProperty('--mention-role-color', `#${role.color.toString(16).padStart(6, '0')}`);
+  return span;
+}
+
 function replaceLegacyMentionLinks(
   root: DocumentFragment,
   users: UserSummary[],
@@ -106,7 +143,8 @@ function replaceLegacyMentionLinks(
 export function renderMessageMarkdown(
   content: string,
   users: UserSummary[] = [],
-  localDomain = ''
+  localDomain = '',
+  roles: Role[] = []
 ): string {
   const parsed = marked.parse(content, { async: false, breaks: true, gfm: true });
   const sanitized = DOMPurify.sanitize(parsed, {
@@ -169,7 +207,13 @@ export function renderMessageMarkdown(
         if (part.kind === 'text') fragment.append(document.createTextNode(part.text));
         else {
           if (part.kind === 'mention') {
-            fragment.append(mentionSpan(part.text, users, localDomain));
+            fragment.append(
+              part.text.startsWith('<@&')
+                ? roleMentionSpan(part.text, roles)
+                : mentionSpan(part.text, users, localDomain)
+            );
+          } else if (part.kind === 'emoji' && part.text.startsWith('<')) {
+            fragment.append(customEmojiImage(part.text) ?? document.createTextNode(part.text));
           } else {
             const span = document.createElement('span');
             span.className = `chat-token chat-token-${part.kind}`;

@@ -103,3 +103,30 @@ async def require_can_manage_member(
     if role_rank(actor_role) <= role_rank(target_role):
         raise HTTPException(status_code=403, detail={"code": "ROLE_HIERARCHY"})
     return target
+
+
+async def require_can_assign_member_role(
+    session: AsyncSession, guild: Guild, actor: User, target_id: int, target_domain: str
+) -> GuildMember:
+    """Authorize a role mutation without treating self-assignment as moderation.
+
+    A member with Manage Roles may change their own roles only below their
+    highest role. The guild owner may change their own roles without a
+    hierarchy ceiling. Nobody else may alter the owner's assignments.
+    """
+
+    target = await guild_member(session, guild, target_id, target_domain)
+    actor_ref = (actor.id, actor.origin_domain)
+    target_ref = (target_id, target_domain)
+    owner_ref = (guild.owner_id, guild.owner_domain)
+    if target_ref == owner_ref:
+        if actor_ref != owner_ref:
+            raise HTTPException(status_code=403, detail={"code": "OWNER_IMMUNE"})
+        return target
+    if actor_ref in (target_ref, owner_ref):
+        return target
+    actor_role = await highest_role(session, guild, actor.id, actor.origin_domain)
+    target_role = await highest_role(session, guild, target_id, target_domain)
+    if role_rank(actor_role) <= role_rank(target_role):
+        raise HTTPException(status_code=403, detail={"code": "ROLE_HIERARCHY"})
+    return target

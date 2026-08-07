@@ -114,6 +114,7 @@ accept the following exact names:
 | `guild.update` | The guild home replaces mutable guild metadata. |
 | `guild.channel.create`, `guild.channel.update`, `guild.channel.delete` | The guild home creates, replaces, or removes channel state. |
 | `guild.role.create`, `guild.role.update`, `guild.role.delete` | The guild home creates, replaces, or removes role state. |
+| `guild.emoji.create`, `guild.emoji.delete` | The guild home creates or removes a content-addressed custom emoji. |
 | `guild.overwrite.upsert` | The guild home replaces a channel permission overwrite. |
 | `guild.member.update`, `guild.member.remove` | The guild home updates or removes membership state. |
 | `guild.members.origin.remove` | The guild home atomically removes every member homed on one federated origin after an instance-wide sanction. |
@@ -177,7 +178,7 @@ and its `guild_events` record.
 
 A remote join resolves a signed invite, obtains a join grant, then downloads:
 
-1. guild metadata, roles, and channels;
+1. guild metadata, roles, channels, and custom emoji metadata;
 2. members in pages of at most 1,000;
 3. permission overwrites and membership/role assignments needed by the replica.
 
@@ -198,10 +199,24 @@ origin; the relayed copy can identify the cached immutable handle but cannot cre
 or mutate the third party's profile. Nested user-signed profile proofs are reserved
 for a future compatible extension.
 
-Guild, channel, role, overwrite, member, moderation, message mutation, reaction,
-and pin changes are granular sequenced events. Permission-sensitive changes carry `snapshot_required`; a
+Guild, channel, role, emoji, overwrite, member, moderation, message mutation,
+reaction, and pin changes are granular sequenced events. Permission-sensitive changes carry `snapshot_required`; a
 replica fetches a current permission-filtered snapshot before accepting the retried
 event. Peers without channel visibility receive a signed sequence-only redaction.
+
+Plaintext message content uses origin-qualified tokens for mutable display
+objects. A user mention is `<@user_id@user_origin>`, a role mention is
+`<@&role_id@guild_origin>`, and a custom emoji is
+`<:name:emoji_id@emoji_origin>` (`<a:...>` when animated). Unicode emoji remain
+ordinary Unicode text. The receiving client resolves names and media from its
+replicated guild state, so renames do not change the referenced identity. For a
+role mention, only the guild authority may expand the token into
+`mention_user_refs`; it validates that the role belongs to the guild, is
+mentionable (or that the actor has the override permission), and resolves current
+assignments. Replicas may forward explicit user mentions but cannot assert role
+recipients. Committed message events carry the authority-derived user references,
+which keeps notification fanout deterministic across instances.
+
 An ownership transfer is represented by an authority-signed `guild.update` and
 may name only an existing member homed on the guild-home instance. A remote
 member leaves by sending an authenticated

@@ -307,7 +307,9 @@ class ReadStateUpdate(RequestModel):
 
 
 class ReactionCreate(RequestModel):
-    emoji: str = Field(min_length=1, max_length=255)
+    # A canonical custom-emoji token includes a fully qualified federation
+    # domain and can be longer than an ordinary Unicode grapheme.
+    emoji: str = Field(min_length=1, max_length=320)
 
 
 class InviteCreate(RequestModel):

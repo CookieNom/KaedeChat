@@ -23,7 +23,7 @@ from app.chat.guild_revision import (
     wake_queued_guild_federation,
 )
 from app.chat.hierarchy import highest_role, require_can_manage_member, require_can_manage_role
-from app.chat.payloads import channel_payload, guild_payload, role_payload
+from app.chat.payloads import channel_payload, emoji_payload, guild_payload, role_payload
 from app.chat.permissions import get_permissions, require_permissions
 from app.chat.schemas import (
     ChannelCreate,
@@ -41,6 +41,7 @@ from app.core.types import EntityRef, EntityReference, EntityReferenceLike
 from app.db.models import (
     Channel,
     ChannelOverwrite,
+    Emoji,
     Guild,
     GuildMember,
     GuildNotificationSetting,
@@ -390,6 +391,13 @@ async def get_guild(
         .where(Role.guild_id == guild.id, Role.guild_domain == guild.origin_domain)
         .order_by(Role.position, Role.id)
     )
+    emojis = list(
+        await session.scalars(
+            select(Emoji)
+            .where(Emoji.guild_id == guild.id, Emoji.guild_domain == guild.origin_domain)
+            .order_by(Emoji.name, Emoji.id)
+        )
+    )
     permissions = await get_permissions(session, redis, guild, auth.user)
     actor_highest_role = await highest_role(session, guild, auth.user.id, auth.user.origin_domain)
     return {
@@ -403,6 +411,9 @@ async def get_guild(
             & Permission.VIEW_CHANNEL
         ],
         "roles": [role_payload(role) for role in roles],
+        "emojis": [emoji_payload(emoji) for emoji in emojis],
+        "emoji_limit": settings.media_emoji_limit,
+        "emoji_max_bytes": settings.media_max_emoji_bytes,
     }
 
 

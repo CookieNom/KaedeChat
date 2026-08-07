@@ -24,7 +24,18 @@ const ERROR_MESSAGES: Record<string, string> = {
   VOICE_NOT_CONNECTED: 'That member is no longer connected to voice.',
   VOICE_DISABLED: 'Voice is disabled on this instance.',
   VOICE_HOME_UNREACHABLE: 'The voice server is temporarily unavailable. Try again shortly.',
-  SLOWMODE_RATE_LIMITED: 'Slow mode is active. Wait before sending another message.'
+  SLOWMODE_RATE_LIMITED: 'Slow mode is active. Wait before sending another message.',
+  USE_EXTERNAL_EMOJIS_REQUIRED: "You don't have permission to use emoji from another guild here.",
+  CUSTOM_EMOJI_SOURCE_ACCESS_REQUIRED: 'You no longer have access to that custom emoji.',
+  CUSTOM_EMOJI_NOT_FOUND: 'That custom emoji no longer exists.',
+  CUSTOM_EMOJI_INVALID: 'That custom emoji reference is invalid.',
+  EMOJI_LIMIT_REACHED: 'This guild has reached its custom emoji limit.',
+  EMOJI_NAME_TAKEN: 'This guild already has an emoji with that name.',
+  EMOJI_TOO_LARGE: 'That emoji image exceeds this instance’s size limit.',
+  ROLE_NOT_MENTIONABLE: 'That role cannot be mentioned.',
+  INVALID_ROLE_MENTION: 'That role mention is no longer valid.',
+  TOO_MANY_ROLE_MENTIONS: 'A message can mention at most 25 roles.',
+  ROLE_MENTION_TOO_LARGE: 'That role mention would notify too many members.'
 };
 
 function readableErrorMessage(

@@ -4,6 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.chat.hierarchy import (
+    require_can_assign_member_role,
     require_can_manage_member,
     require_can_manage_role,
     role_rank,
@@ -140,3 +141,58 @@ async def test_role_hierarchy_rejects_equal_role(monkeypatch: pytest.MonkeyPatch
             role(10, 2),
         )
     assert raised.value.detail == {"code": "ROLE_HIERARCHY"}
+
+
+async def test_role_assignment_allows_self_without_moderating_self(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_member = GuildMember(
+        guild_id=1,
+        guild_domain=DOMAIN,
+        user_id=2,
+        user_domain=DOMAIN,
+    )
+
+    async def member(*_args: Any) -> GuildMember:
+        return target_member
+
+    async def unexpected_highest(*_args: Any) -> Role:
+        raise AssertionError("self assignment should not compare the member against themself")
+
+    monkeypatch.setattr("app.chat.hierarchy.guild_member", member)
+    monkeypatch.setattr("app.chat.hierarchy.highest_role", unexpected_highest)
+
+    managed = await require_can_assign_member_role(
+        None,  # type: ignore[arg-type]
+        guild(),
+        user(2),
+        2,
+        DOMAIN,
+    )
+    assert managed is target_member
+
+
+async def test_role_assignment_keeps_owner_immune_from_other_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_member = GuildMember(
+        guild_id=1,
+        guild_domain=DOMAIN,
+        user_id=1,
+        user_domain=DOMAIN,
+    )
+
+    async def member(*_args: Any) -> GuildMember:
+        return target_member
+
+    monkeypatch.setattr("app.chat.hierarchy.guild_member", member)
+
+    with pytest.raises(HTTPException) as raised:
+        await require_can_assign_member_role(
+            None,  # type: ignore[arg-type]
+            guild(),
+            user(2),
+            1,
+            DOMAIN,
+        )
+    assert raised.value.detail == {"code": "OWNER_IMMUNE"}

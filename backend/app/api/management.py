@@ -31,7 +31,7 @@ from app.chat.guild_revision import (
 from app.chat.hierarchy import (
     guild_role,
     highest_role,
-    require_can_manage_member,
+    require_can_assign_member_role,
     require_can_manage_role,
     role_reorder_allowed,
 )
@@ -722,7 +722,9 @@ async def assign_role(
     role_number, role_domain = role_id.resolve(settings.domain)
     if role_domain != guild.origin_domain:
         raise HTTPException(status_code=404, detail={"code": "ROLE_NOT_FOUND"})
-    member = await require_can_manage_member(session, guild, auth.user, user_number, user_domain)
+    member = await require_can_assign_member_role(
+        session, guild, auth.user, user_number, user_domain
+    )
     role = await guild_role(session, guild, role_number)
     if role.id == guild.id:
         raise HTTPException(status_code=400, detail={"code": "EVERYONE_ROLE_IMPLICIT"})
@@ -797,7 +799,9 @@ async def remove_role(
     role_number, role_domain = role_id.resolve(settings.domain)
     if role_domain != guild.origin_domain:
         raise HTTPException(status_code=404, detail={"code": "ROLE_NOT_FOUND"})
-    member = await require_can_manage_member(session, guild, auth.user, user_number, user_domain)
+    member = await require_can_assign_member_role(
+        session, guild, auth.user, user_number, user_domain
+    )
     role = await guild_role(session, guild, role_number)
     await require_can_manage_role(session, guild, auth.user, role)
     result = await session.execute(

@@ -255,7 +255,7 @@ async def project_message_record(
     mention_states: list[tuple[int, int | None, str | None, int]] = []
     for pending, message in messages:
         seen: set[int] = set()
-        for reference in pending.mention_user_refs[:100]:
+        for reference in pending.mention_user_refs[:5_000]:
             try:
                 user_id = int(reference["id"])
                 domain = str(reference["origin_domain"])

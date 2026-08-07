@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.dependencies import get_redis, get_session, get_snowflake
 from app.bootstrap import MAX_ADVERTISED_OLD_KEYS
+from app.chat.custom_emojis import validate_custom_emoji_use
 from app.chat.e2ee import validate_e2ee_envelope
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import (
@@ -37,6 +38,7 @@ from app.chat.guild_revision import (
     queue_guild_mutation,
     wake_queued_guild_federation,
 )
+from app.chat.mentions import merge_mention_recipients, role_mention_recipients
 from app.chat.payloads import (
     channel_payload,
     dm_channel_payload,
@@ -61,6 +63,7 @@ from app.db.models import (
     ChannelOverwrite,
     DMConversation,
     DMParticipant,
+    Emoji,
     FederationEvent,
     FederationInbox,
     FederationOutbox,
@@ -1087,6 +1090,14 @@ async def process_event(
                 needed,
                 channel=channel,
             )
+            await validate_custom_emoji_use(
+                session,
+                actor,
+                envelope.content.get("content"),
+                target_guild=guild,
+                target_permissions=actor_permissions,
+                trust_unknown_external=True,
+            )
             nonce = str(envelope.content["client_nonce"])
             if not 1 <= len(nonce) <= 64:
                 raise ValueError("proxy write client nonce is invalid")
@@ -1104,7 +1115,7 @@ async def process_event(
                     "proxy write requires content, encrypted content, or an attachment"
                 )
             raw_mention_refs = envelope.content.get("mention_user_refs", [])
-            if not isinstance(raw_mention_refs, list) or len(raw_mention_refs) > 100:
+            if not isinstance(raw_mention_refs, list) or len(raw_mention_refs) > 5_000:
                 raise ValueError("proxy write mention list is invalid")
             parsed_mention_refs: list[tuple[int, str]] = []
             for ref in raw_mention_refs:
@@ -1116,6 +1127,10 @@ async def process_event(
                         str(ref.get("origin_domain")),
                     )
                 )
+            parsed_mention_refs = merge_mention_recipients(
+                parsed_mention_refs,
+                await role_mention_recipients(session, guild, proxy_content, actor_permissions),
+            )
             mention_refs = await validated_guild_mentions(session, guild, parsed_mention_refs)
             raw_reference = envelope.content.get("referenced_message_ref")
             referenced_message: Message | None = None
@@ -2540,6 +2555,13 @@ async def federation_guild_snapshot(
             )
         )
     )
+    emojis = list(
+        await session.scalars(
+            select(Emoji)
+            .where(Emoji.guild_id == guild.id, Emoji.guild_domain == guild.origin_domain)
+            .order_by(Emoji.name, Emoji.id)
+        )
+    )
     return guild_snapshot_payload(
         guild,
         roles,
@@ -2547,6 +2569,7 @@ async def federation_guild_snapshot(
         members,
         member_roles,
         overwrites,
+        emojis=emojis,
         member_snapshot_at=snapshot_at,
         next_member_cursor=next_member_cursor,
     )
@@ -2670,6 +2693,14 @@ async def federation_guild_proxy(
         needed,
         channel=channel,
     )
+    await validate_custom_emoji_use(
+        session,
+        actor,
+        payload.content,
+        target_guild=guild,
+        target_permissions=actor_permissions,
+        trust_unknown_external=True,
+    )
     await lock_proxy_nonce(session, guild, actor, channel, payload.client_nonce)
     existing = await session.scalar(
         select(Message).where(
@@ -2737,7 +2768,10 @@ async def federation_guild_proxy(
         mention_user_refs=await validated_guild_mentions(
             session,
             guild,
-            [item.resolve(principal.origin) for item in payload.mention_user_ids],
+            merge_mention_recipients(
+                [item.resolve(principal.origin) for item in payload.mention_user_ids],
+                await role_mention_recipients(session, guild, payload.content, actor_permissions),
+            ),
         ),
         flags=(0 if actor_permissions & Permission.EMBED_LINKS else 4),
     )

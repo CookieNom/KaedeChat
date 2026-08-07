@@ -1,22 +1,24 @@
 <script lang="ts">
   import { assetUrl } from '$lib/media/assets';
   import { groupGuildMembers, memberDisplayName } from '$lib/chat/members';
-  import type { GuildMemberSummary, PresenceStatus, UserSummary } from '$lib/chat/types';
+  import type { GuildMemberSummary, PresenceStatus, Role, UserSummary } from '$lib/chat/types';
   import Icon from './Icon.svelte';
 
   let {
     members,
+    roles = [],
     presenceFor,
     onProfile,
     onClose
   }: {
     members: GuildMemberSummary[];
+    roles?: Role[];
     presenceFor: (user: UserSummary) => PresenceStatus;
     onProfile: (user: UserSummary, event: MouseEvent) => void;
     onClose: () => void;
   } = $props();
 
-  const groups = $derived(groupGuildMembers(members, (member) => presenceFor(member.user)));
+  const groups = $derived(groupGuildMembers(members, (member) => presenceFor(member.user), roles));
 </script>
 
 {#snippet memberRow(member: GuildMemberSummary, offline: boolean)}
@@ -58,6 +60,20 @@
     >
   </header>
   <div class="member-roster-scroll">
+    {#each groups.hoisted as group (group.role.id + '@' + group.role.origin_domain)}
+      <section class="roster-group" aria-labelledby={`role-members-${group.role.id}`}>
+        <h3
+          id={`role-members-${group.role.id}`}
+          style={`--role-color:#${group.role.color.toString(16).padStart(6, '0')}`}
+        >
+          {group.role.name} — {group.members.length}
+        </h3>
+        {#each group.members as member (member.user.id + '@' + member.user.origin_domain)}
+          {@render memberRow(member, false)}
+        {/each}
+      </section>
+    {/each}
+
     {#if groups.online.length}
       <section class="roster-group" aria-labelledby="online-members-heading">
         <h3 id="online-members-heading">Online — {groups.online.length}</h3>
@@ -156,6 +172,10 @@
     font-weight: 780;
     letter-spacing: 0.08em;
     text-transform: uppercase;
+  }
+
+  h3[style] {
+    color: var(--role-color);
   }
 
   .roster-member {

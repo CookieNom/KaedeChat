@@ -1,6 +1,7 @@
-import type { GuildMemberSummary, PresenceStatus } from './types';
+import type { GuildMemberSummary, PresenceStatus, Role } from './types';
 
 export interface GuildMemberGroups {
+  hoisted: Array<{ role: Role; members: GuildMemberSummary[] }>;
   online: GuildMemberSummary[];
   offline: GuildMemberSummary[];
 }
@@ -19,7 +20,8 @@ export function memberDisplayName(member: GuildMemberSummary): string {
 
 export function groupGuildMembers(
   members: GuildMemberSummary[],
-  presenceFor: (member: GuildMemberSummary) => PresenceStatus
+  presenceFor: (member: GuildMemberSummary) => PresenceStatus,
+  roles: Role[] = []
 ): GuildMemberGroups {
   const sorted = [...members].sort((left, right) => {
     const presenceDifference = presenceOrder[presenceFor(left)] - presenceOrder[presenceFor(right)];
@@ -27,10 +29,31 @@ export function groupGuildMembers(
     return memberCollator.compare(memberDisplayName(left), memberDisplayName(right));
   });
 
-  const firstOffline = sorted.findIndex((member) => presenceFor(member) === 'offline');
-  if (firstOffline === -1) return { online: sorted, offline: [] };
+  const onlineMembers = sorted.filter((member) => presenceFor(member) !== 'offline');
+  const offline = sorted.filter((member) => presenceFor(member) === 'offline');
+  const hoistedRoles = roles
+    .filter((role) => role.hoist && role.position > 0)
+    .sort((left, right) => right.position - left.position || right.id.localeCompare(left.id));
+  const hoisted = hoistedRoles
+    .map((role) => ({
+      role,
+      members: onlineMembers.filter((member) => {
+        if (!member.role_ids.includes(role.id)) return false;
+        const highest = hoistedRoles.find((candidate) => member.role_ids.includes(candidate.id));
+        return highest?.id === role.id && highest.origin_domain === role.origin_domain;
+      })
+    }))
+    .filter((group) => group.members.length > 0);
+  const hoistedMemberKeys = new Set(
+    hoisted.flatMap((group) =>
+      group.members.map((member) => `${member.user.id}@${member.user.origin_domain}`)
+    )
+  );
   return {
-    online: sorted.slice(0, firstOffline),
-    offline: sorted.slice(firstOffline)
+    hoisted,
+    online: onlineMembers.filter(
+      (member) => !hoistedMemberKeys.has(`${member.user.id}@${member.user.origin_domain}`)
+    ),
+    offline
   };
 }

@@ -134,6 +134,7 @@ class Settings(BaseSettings):
     media_remote_cache_ttl_days: int = Field(default=30, ge=1, le=365)
     media_retention_days: int | None = Field(default=None, ge=1)
     media_emoji_limit: int = Field(default=100, ge=1, le=1000)
+    media_max_emoji_bytes: int = Field(default=512 * 1024, ge=1024, le=15 * 1024 * 1024)
 
     # Voice, video, and calls
     voice_enabled: bool = False
