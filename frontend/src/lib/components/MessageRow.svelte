@@ -17,6 +17,7 @@
   import { inviteReferencesInMessage } from '$lib/chat/invites';
   import { klipyGifUrl } from '$lib/chat/gifs';
   import { placeContextMenu } from '$lib/ui/context-menu';
+  import { DISMISS_FLOATING_LAYERS_EVENT, dismissFloatingLayers } from '$lib/ui/floating-layers';
   import { portal } from '$lib/ui/portal';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import { preferredLocale } from '$lib/ui/locale';
@@ -102,6 +103,7 @@
   }
 
   function showMenu(pointerX: number, pointerY: number, trigger: HTMLElement | null) {
+    dismissFloatingLayers();
     claimMessageMenu(closeExclusiveMenu);
     menuTrigger = trigger;
     menuOpen = true;
@@ -251,6 +253,8 @@
     window.addEventListener('keydown', windowKeydown);
     window.addEventListener('resize', windowResize);
     window.addEventListener('scroll', windowScroll, true);
+    window.addEventListener('contextmenu', windowContextMenu);
+    window.addEventListener(DISMISS_FLOATING_LAYERS_EVENT, windowDismissFloatingLayers);
   }
 
   function removeMenuListeners() {
@@ -260,6 +264,8 @@
     window.removeEventListener('keydown', windowKeydown);
     window.removeEventListener('resize', windowResize);
     window.removeEventListener('scroll', windowScroll, true);
+    window.removeEventListener('contextmenu', windowContextMenu);
+    window.removeEventListener(DISMISS_FLOATING_LAYERS_EVENT, windowDismissFloatingLayers);
   }
 
   function windowResize() {
@@ -268,6 +274,19 @@
 
   function windowScroll() {
     closeMenu(true);
+  }
+
+  function windowContextMenu(event: MouseEvent) {
+    if (
+      !menuElement?.contains(event.target as Node) &&
+      !rowElement?.contains(event.target as Node)
+    ) {
+      closeMenu(false);
+    }
+  }
+
+  function windowDismissFloatingLayers() {
+    closeMenu(false);
   }
 
   onDestroy(() => {

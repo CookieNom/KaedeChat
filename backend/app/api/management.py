@@ -35,7 +35,7 @@ from app.chat.hierarchy import (
     require_can_manage_role,
     role_rank,
 )
-from app.chat.payloads import channel_payload, guild_payload, role_payload
+from app.chat.payloads import channel_payload, guild_payload, member_payload, role_payload
 from app.chat.permissions import require_permissions
 from app.chat.schemas import (
     ChannelPositionBatch,
@@ -48,9 +48,26 @@ from app.core.permission_contract import required_permissions
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.types import EntityRef, EntityReference
-from app.db.models import Channel, ChannelOverwrite, MemberRole, Message, Role
+from app.db.models import Channel, ChannelOverwrite, GuildMember, MemberRole, Message, Role, User
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["guild-management"])
+
+
+async def render_member_update(session: AsyncSession, member: GuildMember) -> dict[str, object]:
+    user = await session.get(User, (member.user_id, member.user_domain))
+    if user is None:
+        raise RuntimeError("guild member user disappeared")
+    role_ids = list(
+        await session.scalars(
+            select(MemberRole.role_id).where(
+                MemberRole.guild_id == member.guild_id,
+                MemberRole.guild_domain == member.guild_domain,
+                MemberRole.user_id == member.user_id,
+                MemberRole.user_domain == member.user_domain,
+            )
+        )
+    )
+    return member_payload(member, user, role_ids)
 
 
 def require_current_version(updated_at: datetime, if_match: str | None) -> None:
@@ -745,6 +762,7 @@ async def assign_role(
             target_ref={"id": str(user_number), "origin_domain": user_domain},
             changes=[{"key": "roles", "added": str(role.id)}],
         )
+        rendered_member = await render_member_update(session, member)
         await session.commit()
         await session.refresh(guild)
         await wake_queued_guild_federation(guild)
@@ -752,14 +770,7 @@ async def assign_role(
             redis,
             guild_topic(guild.origin_domain, guild.id),
             "GUILD_MEMBER_UPDATE",
-            {
-                "guild_id": str(guild.id),
-                "guild_domain": guild.origin_domain,
-                "user_id": str(user_number),
-                "user_domain": user_domain,
-                "role_id": str(role.id),
-                "role_domain": role.origin_domain,
-            },
+            rendered_member,
         )
     return Response(status_code=204)
 
@@ -823,6 +834,7 @@ async def remove_role(
             target_ref={"id": str(user_number), "origin_domain": user_domain},
             changes=[{"key": "roles", "removed": str(role.id)}],
         )
+        rendered_member = await render_member_update(session, member)
         await session.commit()
         await session.refresh(guild)
         await wake_queued_guild_federation(guild)
@@ -830,11 +842,6 @@ async def remove_role(
             redis,
             guild_topic(guild.origin_domain, guild.id),
             "GUILD_MEMBER_UPDATE",
-            {
-                "guild_id": str(guild.id),
-                "guild_domain": guild.origin_domain,
-                "user_id": str(user_number),
-                "user_domain": user_domain,
-            },
+            rendered_member,
         )
     return Response(status_code=204)

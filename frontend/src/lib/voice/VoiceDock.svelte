@@ -1,11 +1,16 @@
 <script lang="ts">
   import { api, ApiError } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
+  import { Permission } from '$lib/generated/permissions';
   import { onDestroy, onMount } from 'svelte';
 
   import { attachVideo, VoiceSession, type VoiceToken } from './session';
 
-  let { channelRef, callRef }: { channelRef?: string; callRef?: string } = $props();
+  let {
+    channelRef,
+    callRef,
+    permissions = null
+  }: { channelRef?: string; callRef?: string; permissions?: string | null } = $props();
   const voice = new VoiceSession();
   let revision = $state(0);
   let error = $state('');
@@ -14,6 +19,37 @@
   let mounted = false;
   let connectionGeneration = 0;
   let joinController: AbortController | null = null;
+  const permissionBits = $derived.by(() => {
+    if (callRef || permissions === null) return null;
+    try {
+      return BigInt(permissions);
+    } catch {
+      return 0n;
+    }
+  });
+  const canConnect = $derived(
+    permissionBits === null ||
+      Boolean(permissionBits & (Permission.ADMINISTRATOR | Permission.CONNECT))
+  );
+  const permittedToSpeak = $derived(
+    permissionBits === null ||
+      Boolean(permissionBits & (Permission.ADMINISTRATOR | Permission.SPEAK))
+  );
+  const permittedToStream = $derived(
+    permissionBits === null ||
+      Boolean(permissionBits & (Permission.ADMINISTRATOR | Permission.STREAM))
+  );
+  const voiceCapabilitySummary = $derived(
+    !canConnect
+      ? 'You do not have permission to connect'
+      : !permittedToSpeak && !permittedToStream
+        ? 'You may listen, but cannot speak, use video, or share your screen'
+        : !permittedToSpeak
+          ? 'You may listen and share video, but cannot speak'
+          : !permittedToStream
+            ? 'You may speak, but cannot use video or share your screen'
+            : 'Join to talk, share video, or present your screen'
+  );
   const view = $derived.by(() => {
     // VoiceSession deliberately owns the LiveKit lifecycle outside Svelte's
     // proxy system. Reading the revision here makes its event-driven state
@@ -76,6 +112,10 @@
 
   async function join() {
     if (!mounted) return;
+    if (!canConnect) {
+      error = 'You do not have permission to join this voice channel.';
+      return;
+    }
     const generation = ++connectionGeneration;
     joinController?.abort();
     const controller = new AbortController();
@@ -103,7 +143,9 @@
       if (mounted && generation === connectionGeneration && !controller.signal.aborted) {
         error =
           caught instanceof ApiError
-            ? caught.message
+            ? caught.code === 'MISSING_PERMISSIONS'
+              ? 'You do not have permission to join this voice channel.'
+              : caught.message
             : voice.error ||
               (caught instanceof Error && caught.message
                 ? caught.message
@@ -133,12 +175,17 @@
         <span>
           {view.connected
             ? `${view.participants.length} ${view.participants.length === 1 ? 'participant' : 'participants'}`
-            : 'Join to talk, share video, or present your screen'}
+            : voiceCapabilitySummary}
         </span>
       </div>
     </div>
     {#if !view.connected}
-      <button class="primary" disabled={view.connecting} onclick={join}>
+      <button
+        class="primary"
+        disabled={view.connecting || !canConnect}
+        title={!canConnect ? 'You do not have permission to join this voice channel.' : undefined}
+        onclick={join}
+      >
         {view.connecting ? 'Connecting…' : 'Join voice'}
       </button>
     {/if}
@@ -183,6 +230,12 @@
           {/each}
         </div>
       {/if}
+    {:else if !canConnect}
+      <div class="join-prompt permission-prompt">
+        <span><Icon name="lock" size={26} /></span>
+        <strong>You cannot join this voice channel</strong>
+        <p>Your roles do not include the Connect permission for this channel.</p>
+      </div>
     {:else}
       <div class="join-prompt">
         <span><Icon name="volume" size={28} /></span>
@@ -193,6 +246,17 @@
   </main>
 
   {#if view.connected}
+    {#if !view.canSpeak || !view.canStream}
+      <div class="voice-permission-notice" role="status">
+        {#if !view.canSpeak && !view.canStream}
+          You can listen, but your roles do not allow speaking, camera, or screen sharing here.
+        {:else if !view.canSpeak}
+          You can listen and share video, but your roles do not allow speaking here.
+        {:else}
+          You can speak, but your roles do not allow camera or screen sharing here.
+        {/if}
+      </div>
+    {/if}
     <footer class="voice-dock" aria-label="Voice controls">
       <button
         class:off={!view.microphone}
@@ -200,7 +264,11 @@
         disabled={!view.canSpeak}
         aria-pressed={view.microphone}
         aria-label={view.microphone ? 'Mute microphone' : 'Unmute microphone'}
-        title={view.microphone ? 'Mute' : 'Unmute'}
+        title={!view.canSpeak
+          ? 'You do not have permission to speak in this channel.'
+          : view.microphone
+            ? 'Mute'
+            : 'Unmute'}
         onclick={() => safely(() => voice.toggleMicrophone())}
       >
         <Icon name={view.microphone ? 'microphone' : 'microphone-off'} size={20} />
@@ -211,7 +279,11 @@
         disabled={!view.canStream}
         aria-pressed={view.camera}
         aria-label={view.camera ? 'Turn camera off' : 'Turn camera on'}
-        title={view.camera ? 'Camera off' : 'Camera on'}
+        title={!view.canStream
+          ? 'You do not have permission to use video in this channel.'
+          : view.camera
+            ? 'Camera off'
+            : 'Camera on'}
         onclick={() => safely(() => voice.toggleCamera())}
       >
         <Icon name={view.camera ? 'video' : 'video-off'} size={21} />
@@ -222,7 +294,11 @@
         disabled={!view.canStream}
         aria-pressed={view.screen}
         aria-label={view.screen ? 'Stop sharing screen' : 'Share screen'}
-        title={view.screen ? 'Stop sharing' : 'Share screen'}
+        title={!view.canStream
+          ? 'You do not have permission to share your screen in this channel.'
+          : view.screen
+            ? 'Stop sharing'
+            : 'Share screen'}
         onclick={() => safely(() => voice.toggleScreen())}
       >
         <Icon name="screen" size={21} />
@@ -250,6 +326,19 @@
     gap: 0;
     overflow: hidden;
     background: var(--paper);
+  }
+
+  .voice-permission-notice {
+    border-top: 1px solid var(--line-soft);
+    padding: 0.65rem 1rem;
+    color: var(--text-muted);
+    background: color-mix(in srgb, var(--surface-subtle) 82%, transparent);
+    font-size: 0.78rem;
+    text-align: center;
+  }
+
+  .permission-prompt span {
+    color: var(--text-muted);
   }
 
   .voice-heading {

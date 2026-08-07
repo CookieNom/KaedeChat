@@ -2,7 +2,7 @@
   import { resolve } from '$app/paths';
   import { api, ApiError } from '$lib/api/client';
   import { entityRef } from '$lib/chat/refs';
-  import type { PresenceStatus, Relationship, UserSummary } from '$lib/chat/types';
+  import type { PresenceStatus, Relationship, Role, UserSummary } from '$lib/chat/types';
   import { assetUrl } from '$lib/media/assets';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { portal } from '$lib/ui/portal';
@@ -19,7 +19,11 @@
     onClose,
     onMessage,
     moderationActions = [],
-    onModerate
+    onModerate,
+    roles = [],
+    roleIds = [],
+    manageableRoles = [],
+    onRoleChange
   }: {
     user: UserSummary;
     presence?: PresenceStatus;
@@ -30,6 +34,10 @@
     onMessage?: (user: UserSummary) => void;
     moderationActions?: Array<{ id: 'kick' | 'timeout' | 'ban'; label: string }>;
     onModerate?: (user: UserSummary, action: 'kick' | 'timeout' | 'ban') => void;
+    roles?: Role[];
+    roleIds?: string[];
+    manageableRoles?: Role[];
+    onRoleChange?: (user: UserSummary, role: Role, enabled: boolean) => Promise<void>;
   } = $props();
 
   let popover = $state<HTMLElement | null>(null);
@@ -39,6 +47,13 @@
   );
   let relationshipBusy = $state(false);
   let relationshipError = $state('');
+  let roleBusy = $state<string | null>(null);
+  let roleError = $state('');
+  const assignedRoles = $derived(
+    roles
+      .filter((role) => roleIds.includes(role.id))
+      .sort((left, right) => right.position - left.position)
+  );
   const statusLabel = $derived(
     presence === 'dnd'
       ? 'Do not disturb'
@@ -128,128 +143,220 @@
       ? feedback
       : defaultLabel;
   }
+
+  async function changeRole(role: Role, enabled: boolean) {
+    if (!onRoleChange || roleBusy) return;
+    roleBusy = role.id;
+    roleError = '';
+    try {
+      await onRoleChange(user, role, enabled);
+    } catch (caught) {
+      roleError = caught instanceof ApiError ? caught.message : 'Could not update this role.';
+    } finally {
+      roleBusy = null;
+    }
+  }
 </script>
 
 <svelte:window
   onkeydown={(event) => {
-    if (event.key === 'Escape') onClose();
-  }}
-  onpointerdown={(event) => {
-    if (popover && !popover.contains(event.target as Node)) onClose();
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      onClose();
+    }
   }}
 />
 
 <div
   use:portal
-  bind:this={popover}
-  class="user-popover"
-  role="dialog"
-  aria-label={`${user.display_name ?? user.username}'s profile`}
-  tabindex="-1"
+  class="user-popover-layer"
+  role="presentation"
+  onpointerdown={(event) => {
+    if (event.target === event.currentTarget) onClose();
+  }}
+  oncontextmenu={(event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  }}
+  onkeydown={(event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    }
+  }}
 >
-  <div class="user-popover-banner">
-    {#if user.banner_hash}
-      <img src={assetUrl(user.banner_hash, 'thumbnail_512', user)} alt="" />
-    {/if}
-    <button class="user-popover-close" type="button" aria-label="Close profile" onclick={onClose}>
-      <span aria-hidden="true">×</span>
-    </button>
-  </div>
-
-  <div class="user-popover-content">
-    <div class="user-popover-avatar-wrap">
-      <span class="user-popover-avatar" aria-hidden="true">
-        {#if user.avatar_hash}
-          <img src={assetUrl(user.avatar_hash, 'thumbnail_128', user)} alt="" />
-        {:else}
-          {user.username.slice(0, 1).toUpperCase()}
-        {/if}
-      </span>
-      <i class={`user-popover-presence presence-${presence}`} title={statusLabel}></i>
-    </div>
-
-    <div class="user-popover-identity">
-      <h2>{user.display_name ?? user.username}</h2>
-      <p>@{user.handle}</p>
-    </div>
-
-    <div class="user-popover-status">
-      <i class={`user-popover-status-dot presence-${presence}`}></i>
-      <span>{user.custom_status?.trim() || statusLabel}</span>
-    </div>
-
-    {#if user.bio?.trim()}
-      <section class="user-popover-about" aria-labelledby="user-popover-about-heading">
-        <h3 id="user-popover-about-heading">About me</h3>
-        <p>{user.bio.trim()}</p>
-      </section>
-    {/if}
-
-    <div class="user-popover-actions">
-      {#if isSelf}
-        <a class="user-popover-primary" href={resolve('/settings#profile')} onclick={onClose}>
-          <Icon name="edit" size={17} />
-          <span>Edit profile</span>
-        </a>
-      {:else if onMessage}
-        <button type="button" class="user-popover-primary" onclick={() => onMessage?.(user)}>
-          <Icon name="message" size={17} />
-          <span>Message</span>
-        </button>
+  <div
+    bind:this={popover}
+    class="user-popover"
+    role="dialog"
+    aria-modal="true"
+    aria-label={`${user.display_name ?? user.username}'s profile`}
+    tabindex="-1"
+    oncontextmenu={(event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    }}
+  >
+    <div class="user-popover-banner">
+      {#if user.banner_hash}
+        <img src={assetUrl(user.banner_hash, 'thumbnail_512', user)} alt="" />
       {/if}
-      {#if !isSelf}
-        <button
-          type="button"
-          class:relationship-friend={relationshipType === 'friend'}
-          disabled={relationshipBusy || !['none', 'pending_in'].includes(relationshipType)}
-          aria-label={friendshipLabel()}
-          title={friendshipLabel()}
-          onclick={updateFriendship}
-        >
-          <Icon name={relationshipType === 'friend' ? 'check' : 'users'} size={17} />
-          <span>{relationshipBusy ? 'Updating…' : friendshipLabel()}</span>
-        </button>
-      {/if}
-      <button type="button" onclick={() => copyValue(`@${user.handle}`, 'Username copied')}>
-        <Icon name={feedback === 'Username copied' ? 'check' : 'copy'} size={17} />
-        <span>{actionLabel('Username copied', 'Copy username')}</span>
+      <button
+        class="user-popover-close"
+        type="button"
+        aria-label="Close profile"
+        onclick={(event) => {
+          event.stopPropagation();
+          onClose();
+        }}
+      >
+        <span aria-hidden="true">×</span>
       </button>
-      {#if developerMode.enabled}
-        <button type="button" onclick={() => copyValue(entityRef(user), 'User ID copied')}>
-          <Icon name={feedback === 'User ID copied' ? 'check' : 'hash'} size={17} />
-          <span>{actionLabel('User ID copied', 'Copy technical user ID')}</span>
-        </button>
+    </div>
+
+    <div class="user-popover-content">
+      <div class="user-popover-avatar-wrap">
+        <span class="user-popover-avatar" aria-hidden="true">
+          {#if user.avatar_hash}
+            <img src={assetUrl(user.avatar_hash, 'thumbnail_128', user)} alt="" />
+          {:else}
+            {user.username.slice(0, 1).toUpperCase()}
+          {/if}
+        </span>
+        <i class={`user-popover-presence presence-${presence}`} title={statusLabel}></i>
+      </div>
+
+      <div class="user-popover-identity">
+        <h2>{user.display_name ?? user.username}</h2>
+        <p>@{user.handle}</p>
+      </div>
+
+      <div class="user-popover-status">
+        <i class={`user-popover-status-dot presence-${presence}`}></i>
+        <span>{user.custom_status?.trim() || statusLabel}</span>
+      </div>
+
+      {#if user.bio?.trim()}
+        <section class="user-popover-about" aria-labelledby="user-popover-about-heading">
+          <h3 id="user-popover-about-heading">About me</h3>
+          <p>{user.bio.trim()}</p>
+        </section>
       {/if}
-      {#if moderationActions.length && onModerate}
-        <div class="user-popover-moderation" role="group" aria-label="Moderation actions">
-          {#each moderationActions as action (action.id)}
-            <button
-              type="button"
-              class:danger-action={action.id === 'kick' || action.id === 'ban'}
-              onclick={() => {
-                onClose();
-                onModerate?.(user, action.id);
-              }}
-            >
-              <Icon name={action.id === 'timeout' ? 'clock' : 'shield'} size={17} />
-              <span>{action.label}</span>
-            </button>
-          {/each}
-        </div>
+
+      {#if assignedRoles.length || manageableRoles.length}
+        <section class="user-popover-roles" aria-labelledby="user-popover-roles-heading">
+          <h3 id="user-popover-roles-heading">Roles</h3>
+          {#if assignedRoles.length}
+            <div class="user-role-tags">
+              {#each assignedRoles as role (role.id + '@' + role.origin_domain)}
+                <span>
+                  <i style={`--role-color: #${role.color.toString(16).padStart(6, '0')}`}></i>
+                  {role.name}
+                </span>
+              {/each}
+            </div>
+          {:else}
+            <p class="user-role-empty">No assigned roles</p>
+          {/if}
+          {#if manageableRoles.length && onRoleChange}
+            <details class="user-role-editor">
+              <summary>Manage roles</summary>
+              <div>
+                {#each manageableRoles as role (role.id + '@' + role.origin_domain)}
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={roleIds.includes(role.id)}
+                      disabled={roleBusy !== null}
+                      onchange={(event) => void changeRole(role, event.currentTarget.checked)}
+                    />
+                    <i style={`--role-color: #${role.color.toString(16).padStart(6, '0')}`}></i>
+                    <span>{role.name}</span>
+                    {#if roleBusy === role.id}<small>Saving…</small>{/if}
+                  </label>
+                {/each}
+              </div>
+            </details>
+          {/if}
+          {#if roleError}<p class="user-popover-error" role="alert">{roleError}</p>{/if}
+        </section>
+      {/if}
+
+      <div class="user-popover-actions">
+        {#if isSelf}
+          <a class="user-popover-primary" href={resolve('/settings#profile')} onclick={onClose}>
+            <Icon name="edit" size={17} />
+            <span>Edit profile</span>
+          </a>
+        {:else if onMessage}
+          <button type="button" class="user-popover-primary" onclick={() => onMessage?.(user)}>
+            <Icon name="message" size={17} />
+            <span>Message</span>
+          </button>
+        {/if}
+        {#if !isSelf}
+          <button
+            type="button"
+            class:relationship-friend={relationshipType === 'friend'}
+            disabled={relationshipBusy || !['none', 'pending_in'].includes(relationshipType)}
+            aria-label={friendshipLabel()}
+            title={friendshipLabel()}
+            onclick={updateFriendship}
+          >
+            <Icon name={relationshipType === 'friend' ? 'check' : 'users'} size={17} />
+            <span>{relationshipBusy ? 'Updating…' : friendshipLabel()}</span>
+          </button>
+        {/if}
+        <button type="button" onclick={() => copyValue(`@${user.handle}`, 'Username copied')}>
+          <Icon name={feedback === 'Username copied' ? 'check' : 'copy'} size={17} />
+          <span>{actionLabel('Username copied', 'Copy username')}</span>
+        </button>
+        {#if developerMode.enabled}
+          <button type="button" onclick={() => copyValue(entityRef(user), 'User ID copied')}>
+            <Icon name={feedback === 'User ID copied' ? 'check' : 'hash'} size={17} />
+            <span>{actionLabel('User ID copied', 'Copy technical user ID')}</span>
+          </button>
+        {/if}
+        {#if moderationActions.length && onModerate}
+          <div class="user-popover-moderation" role="group" aria-label="Moderation actions">
+            {#each moderationActions as action (action.id)}
+              <button
+                type="button"
+                class:danger-action={action.id === 'kick' || action.id === 'ban'}
+                onclick={() => {
+                  onClose();
+                  onModerate?.(user, action.id);
+                }}
+              >
+                <Icon name={action.id === 'timeout' ? 'clock' : 'shield'} size={17} />
+                <span>{action.label}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+      {#if relationshipError}
+        <p class="user-popover-error" role="alert">{relationshipError}</p>
       {/if}
     </div>
-    {#if relationshipError}
-      <p class="user-popover-error" role="alert">{relationshipError}</p>
-    {/if}
   </div>
 </div>
 
 <style>
+  .user-popover-layer {
+    position: fixed;
+    z-index: 219;
+    inset: 0;
+  }
+
   .user-popover {
     position: fixed;
-    z-index: 220;
+    z-index: 1;
     width: min(340px, calc(100vw - 20px));
-    overflow: hidden;
+    max-height: calc(100vh - 20px);
+    overflow-x: hidden;
+    overflow-y: auto;
     border: 1px solid var(--line);
     border-radius: 18px;
     color: var(--text);
@@ -433,6 +540,91 @@
     line-height: 1.5;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
+  }
+
+  .user-popover-roles {
+    display: grid;
+    gap: 8px;
+    margin-top: 14px;
+    border-top: 1px solid var(--line-soft);
+    padding-top: 13px;
+  }
+
+  .user-popover-roles h3 {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.63rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .user-role-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .user-role-tags span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--line-soft);
+    border-radius: 999px;
+    padding: 4px 8px;
+    color: var(--text-soft);
+    background: var(--surface-subtle);
+    font-size: 0.68rem;
+  }
+
+  .user-role-tags i,
+  .user-role-editor label > i {
+    width: 8px;
+    height: 8px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: var(--role-color);
+  }
+
+  .user-role-empty {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+  }
+
+  .user-role-editor summary {
+    width: fit-content;
+    color: var(--accent);
+    font-size: 0.72rem;
+    font-weight: 750;
+    cursor: pointer;
+  }
+
+  .user-role-editor > div {
+    display: grid;
+    max-height: 150px;
+    gap: 2px;
+    overflow-y: auto;
+    margin-top: 7px;
+  }
+
+  .user-role-editor label {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    border-radius: 8px;
+    padding: 7px;
+    font-size: 0.74rem;
+  }
+
+  .user-role-editor label:hover {
+    background: var(--surface-subtle);
+  }
+
+  .user-role-editor small {
+    color: var(--text-muted);
+    font-size: 0.63rem;
   }
 
   .user-popover-actions {

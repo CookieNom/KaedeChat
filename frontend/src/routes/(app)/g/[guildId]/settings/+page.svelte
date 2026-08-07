@@ -17,6 +17,7 @@
   } from '$lib/notifications/browser.svelte';
   import { guildChannelPath, type ChannelSettingsPanel } from '$lib/navigation/routes';
   import { formatDateTime } from '$lib/ui/locale';
+  import { portal } from '$lib/ui/portal';
   import { tick } from 'svelte';
 
   interface GuildView extends Guild {
@@ -1460,6 +1461,12 @@
     void tick().then(() => {
       if (previousFocus?.isConnected) previousFocus.focus();
     });
+  }
+
+  function cancelMemberModeration(event: Event) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeMemberModeration();
   }
 
   function memberModerationKeydown(event: KeyboardEvent) {
@@ -3434,12 +3441,20 @@
 </main>
 
 {#if memberModerationDialog}
-  <div class="channel-dialog-layer">
+  <div
+    use:portal
+    class="channel-dialog-layer"
+    role="presentation"
+    oncontextmenu={(event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    }}
+  >
     <button
       class="channel-dialog-backdrop"
       type="button"
       aria-label="Cancel moderation action"
-      onclick={closeMemberModeration}
+      onclick={cancelMemberModeration}
     ></button>
     <div
       bind:this={memberModerationElement}
@@ -3457,7 +3472,7 @@
           <p>Member moderation</p>
           <h2 id="member-moderation-title">{memberModerationTitle(memberModerationDialog)}</h2>
         </div>
-        <button type="button" aria-label="Cancel" onclick={closeMemberModeration}>×</button>
+        <button type="button" aria-label="Cancel" onclick={cancelMemberModeration}>×</button>
       </header>
       <form
         onsubmit={(event) => {
@@ -3543,7 +3558,7 @@
             bind:this={memberModerationCancel}
             class="secondary-button"
             type="button"
-            onclick={closeMemberModeration}>Cancel</button
+            onclick={cancelMemberModeration}>Cancel</button
           >
           <button
             class={memberModerationDialog.action === 'untimeout'
@@ -3569,7 +3584,7 @@
 {/if}
 
 {#if destructiveConfirmation}
-  <div class="channel-dialog-layer">
+  <div use:portal class="channel-dialog-layer">
     <button
       class="channel-dialog-backdrop"
       type="button"

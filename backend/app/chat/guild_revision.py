@@ -114,6 +114,10 @@ async def queue_guild_mutation(
         )
     if snapshot_required:
         context["snapshot_required"] = True
+        # Permission-sensitive receivers normally refresh from a snapshot.
+        # Carry the durable generation as well so direct replay and older
+        # peers cannot retain a permission cache under the previous fence.
+        context["permission_generation"] = str(guild.permission_generation)
     envelope = await build_envelope(
         session,
         settings,

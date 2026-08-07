@@ -304,6 +304,10 @@ async def require_permissions(
             )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "MISSING_PERMISSIONS", "permissions": str(int(needed))},
+            detail={
+                "code": "MISSING_PERMISSIONS",
+                "message": "You do not have permission to perform this action.",
+                "permissions": str(int(needed)),
+            },
         )
     return permissions

@@ -612,6 +612,74 @@ async def verify() -> None:
         require(replica.status_code == 200, f"replicated guild unavailable: {replica.text}")
         require(entity_ref(replica.json()) == guild_ref, "wrong guild replica identity")
 
+        # Reproduce the channel permission editor's deny -> inherit path on a
+        # remote member. This guards both the empty-overwrite transition and
+        # the replica permission-generation fence used by cached voice ACLs.
+        voice_created = await alpha.post(
+            f"/api/v1/guilds/{guild_ref}/channels",
+            headers=alice,
+            json={"name": "federated-voice-acl", "type": 2},
+        )
+        require(
+            voice_created.status_code == 201,
+            f"voice permission fixture failed: {voice_created.text}",
+        )
+        voice_channel = voice_created.json()
+        voice_channel_id = voice_channel["id"]
+        voice_channel_ref = entity_ref(voice_channel)
+
+        def replicated_voice_permissions(response: httpx.Response) -> int | None:
+            if response.status_code != 200:
+                return None
+            for item in response.json().get("channels", []):
+                if item.get("id") == voice_channel_id:
+                    return int(item.get("permissions", "0"))
+            return None
+
+        await wait_for(
+            lambda: beta.get(f"/api/v1/guilds/{guild_ref}", headers=bob),
+            lambda response: bool((replicated_voice_permissions(response) or 0) & (1 << 20)),
+            "replicated voice channel did not grant the default CONNECT permission",
+        )
+        voice_denied = await alpha.put(
+            f"/api/v1/guilds/{guild_ref}/channels/{voice_channel_ref}/overwrites",
+            headers=alice,
+            json={
+                "target_id": guild_ref,
+                "target_type": "role",
+                "allow": "0",
+                "deny": str(1 << 20),
+            },
+        )
+        require(voice_denied.status_code == 200, f"voice deny failed: {voice_denied.text}")
+        await wait_for(
+            lambda: beta.get(f"/api/v1/guilds/{guild_ref}", headers=bob),
+            lambda response: (
+                replicated_voice_permissions(response) is not None
+                and not (int(replicated_voice_permissions(response) or 0) & (1 << 20))
+            ),
+            "federated CONNECT denial did not reach the remote member",
+        )
+        voice_inherited = await alpha.put(
+            f"/api/v1/guilds/{guild_ref}/channels/{voice_channel_ref}/overwrites",
+            headers=alice,
+            json={
+                "target_id": guild_ref,
+                "target_type": "role",
+                "allow": "0",
+                "deny": "0",
+            },
+        )
+        require(
+            voice_inherited.status_code == 200,
+            f"voice inherit reset failed: {voice_inherited.text}",
+        )
+        await wait_for(
+            lambda: beta.get(f"/api/v1/guilds/{guild_ref}", headers=bob),
+            lambda response: bool((replicated_voice_permissions(response) or 0) & (1 << 20)),
+            "CONNECT did not recover after the federated overwrite returned to inherit",
+        )
+
         # Presence originates in the gateway, but the worker owns federation
         # signing material. Exercise that boundary over the real broker and
         # confirm the remote member home projects the resulting live event.

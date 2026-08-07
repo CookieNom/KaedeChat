@@ -79,6 +79,7 @@
   } from '$lib/navigation/routes';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
   import { placeContextMenu } from '$lib/ui/context-menu';
+  import { DISMISS_FLOATING_LAYERS_EVENT, dismissFloatingLayers } from '$lib/ui/floating-layers';
   import { portal } from '$lib/ui/portal';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import VoiceDock from '$lib/voice/VoiceDock.svelte';
@@ -214,12 +215,27 @@
       return false;
     }
   });
-  function channelHasPermission(target: Channel, permission: bigint): boolean {
+  const canManageRoles = $derived.by(() => {
     if (!guild || guild.origin_domain !== localDomain) return false;
     if (
       currentUser &&
       guild.owner_id === currentUser.id &&
-      guild.origin_domain === currentUser.origin_domain
+      (guild.owner_domain ?? guild.origin_domain) === currentUser.origin_domain
+    )
+      return true;
+    try {
+      const permissions = BigInt(guild.permissions ?? '0');
+      return Boolean(permissions & (Permission.ADMINISTRATOR | Permission.MANAGE_ROLES));
+    } catch {
+      return false;
+    }
+  });
+  function channelHasPermission(target: Channel, permission: bigint): boolean {
+    if (!guild) return false;
+    if (
+      currentUser &&
+      guild.owner_id === currentUser.id &&
+      (guild.owner_domain ?? guild.origin_domain) === currentUser.origin_domain
     )
       return true;
     try {
@@ -232,8 +248,17 @@
 
   const canCreateCurrentChannelInvite = $derived(
     Boolean(
-      channel && channel.type !== 4 && channelHasPermission(channel, Permission.CREATE_INVITE)
+      channel &&
+      guild?.origin_domain === localDomain &&
+      channel.type !== 4 &&
+      channelHasPermission(channel, Permission.CREATE_INVITE)
     )
+  );
+  const canSendMessages = $derived(
+    Boolean(channel && channelHasPermission(channel, Permission.SEND_MESSAGES))
+  );
+  const canAttachFiles = $derived(
+    Boolean(canSendMessages && channel && channelHasPermission(channel, Permission.ATTACH_FILES))
   );
   const timeline = $derived(
     buildTimeline(
@@ -306,6 +331,7 @@
     pointer?: { x: number; y: number }
   ) {
     if (channelDialogOpen || (!target && !canManageChannels)) return;
+    dismissFloatingLayers();
     closeChannelMenu(false);
     const bounds = anchor.getBoundingClientRect();
     const x = pointer?.x ?? Math.min(bounds.right, bounds.left + 28);
@@ -986,6 +1012,82 @@
     );
   }
 
+  function roleRank(role: Role): [number, bigint] {
+    return [role.position, -BigInt(role.id)];
+  }
+
+  function compareRoleRank(left: Role, right: Role): number {
+    const [leftPosition, leftId] = roleRank(left);
+    const [rightPosition, rightId] = roleRank(right);
+    return leftPosition - rightPosition || (leftId < rightId ? -1 : leftId > rightId ? 1 : 0);
+  }
+
+  function highestRoleFor(member: GuildMemberSummary | undefined): Role | undefined {
+    if (!guild || !member) return undefined;
+    const assigned = (guild.roles ?? []).filter(
+      (role) => role.id === guild?.id || member.role_ids.includes(role.id)
+    );
+    return assigned.sort(compareRoleRank).at(-1);
+  }
+
+  function manageableRolesFor(user: UserSummary): Role[] {
+    if (!guild || !currentUser || !canManageRoles) return [];
+    if (entityKey(user) === entityKey(currentUser)) return [];
+    if (
+      user.id === guild.owner_id &&
+      user.origin_domain === (guild.owner_domain ?? guild.origin_domain)
+    )
+      return [];
+    const targetMember = memberFor(user.id, user.origin_domain);
+    const actorMember = memberFor(currentUser.id, currentUser.origin_domain);
+    if (!targetMember || !actorMember) return [];
+    const actorIsOwner =
+      currentUser.id === guild.owner_id &&
+      currentUser.origin_domain === (guild.owner_domain ?? guild.origin_domain);
+    const actorHighest = highestRoleFor(actorMember);
+    const targetHighest = highestRoleFor(targetMember);
+    if (
+      !actorIsOwner &&
+      (!actorHighest || !targetHighest || compareRoleRank(actorHighest, targetHighest) <= 0)
+    ) {
+      return [];
+    }
+    return (guild.roles ?? [])
+      .filter(
+        (role) =>
+          role.id !== guild?.id &&
+          (actorIsOwner || Boolean(actorHighest && compareRoleRank(actorHighest, role) > 0))
+      )
+      .sort((left, right) => compareRoleRank(right, left));
+  }
+
+  async function changeMemberRole(user: UserSummary, role: Role, enabled: boolean) {
+    if (
+      !guild ||
+      !manageableRolesFor(user).some((candidate) => entityKey(candidate) === entityKey(role))
+    ) {
+      return;
+    }
+    const guildRef = encodeURIComponent(entityRef(guild));
+    const memberRef = encodeURIComponent(entityRef(user));
+    const roleRef = encodeURIComponent(entityRef(role));
+    await api(`/guilds/${guildRef}/members/${memberRef}/roles/${roleRef}`, {
+      method: enabled ? 'PUT' : 'DELETE'
+    });
+    setMembers(
+      members.map((member) =>
+        entityKey(member.user) === entityKey(user)
+          ? {
+              ...member,
+              role_ids: enabled
+                ? [...new Set([...member.role_ids, role.id])]
+                : member.role_ids.filter((id) => id !== role.id)
+            }
+          : member
+      )
+    );
+  }
+
   function occupantsFor(target: Channel): VoiceOccupant[] {
     return voiceOccupancy[entityKey(target)] ?? [];
   }
@@ -993,6 +1095,7 @@
   function openProfile(user: UserSummary, event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
+    dismissFloatingLayers();
     const target = event.currentTarget as HTMLElement | null;
     const bounds = target?.getBoundingClientRect();
     profile = {
@@ -1027,6 +1130,7 @@
 
   function requestModeration(user: UserSummary, action: 'kick' | 'timeout' | 'ban') {
     if (!moderationActionsFor(user).some((candidate) => candidate.id === action)) return;
+    dismissFloatingLayers();
     moderationReason = '';
     moderationDuration = action === 'timeout' ? '86400' : 'permanent';
     moderationError = '';
@@ -1040,6 +1144,12 @@
     moderationBusy = false;
     moderationDialog = null;
     moderationError = '';
+  }
+
+  function cancelModerationDialog(event: Event) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeModerationDialog();
   }
 
   function moderationDialogKeydown(event: KeyboardEvent) {
@@ -1353,6 +1463,12 @@
           )
         );
       }
+    } else if (dispatch.t === 'GUILD_UPDATE') {
+      const updated = dispatch.d as Guild;
+      if (guild && entityKey(updated) === entityKey(guild)) {
+        guild = { ...guild, ...updated };
+        entities.guilds.upsert(guild);
+      }
     } else if (dispatch.t === 'GUILD_ROLE_CREATE' || dispatch.t === 'GUILD_ROLE_UPDATE') {
       const role = dispatch.d as Role;
       if (guild && role.guild_id === guild.id && role.guild_domain === guild.origin_domain) {
@@ -1443,6 +1559,14 @@
       if (desktopViewport.matches) closeMobileNavigation(false);
     };
     const dismissChannelMenu = () => closeChannelMenu(false);
+    const dismissChannelMenuOnContext = (event: MouseEvent) => {
+      if (!channelMenuElement?.contains(event.target as Node)) closeChannelMenu(false);
+    };
+    const dismissTransientLayers = () => {
+      closeChannelMenu(false);
+      profile = null;
+      gifPickerOpen = false;
+    };
     gateway = client;
     const featureController = new AbortController();
     void loadAuthConfiguration(featureController.signal)
@@ -1473,7 +1597,9 @@
     window.addEventListener('focus', focused);
     window.addEventListener('resize', dismissChannelMenu);
     window.addEventListener('scroll', dismissChannelMenu, true);
+    window.addEventListener('contextmenu', dismissChannelMenuOnContext, true);
     window.addEventListener('kaede:open-user-profile', profileRequest);
+    window.addEventListener(DISMISS_FLOATING_LAYERS_EVENT, dismissTransientLayers);
     desktopViewport.addEventListener('change', viewportChanged);
     viewportChanged();
     client.addEventListener('dispatch', receive);
@@ -1489,7 +1615,9 @@
       window.clearInterval(voiceRefreshTimer);
       window.removeEventListener('resize', dismissChannelMenu);
       window.removeEventListener('scroll', dismissChannelMenu, true);
+      window.removeEventListener('contextmenu', dismissChannelMenuOnContext, true);
       window.removeEventListener('kaede:open-user-profile', profileRequest);
+      window.removeEventListener(DISMISS_FLOATING_LAYERS_EVENT, dismissTransientLayers);
       desktopViewport.removeEventListener('change', viewportChanged);
       client.removeEventListener('dispatch', receive);
       client.removeEventListener(GATEWAY_SESSION_RESET_EVENT, sessionReset);
@@ -1500,7 +1628,7 @@
   });
 
   function chooseGif(gif: GifResult) {
-    if (busy || !channelReady || !channel || editingMessage) return;
+    if (busy || !channelReady || !channel || !canSendMessages || editingMessage) return;
     gifPickerOpen = false;
     void send(pendingMessageSend(gif.url, [], []));
   }
@@ -1581,6 +1709,14 @@
         false,
         targetAround
       );
+    });
+  });
+
+  $effect(() => {
+    if (canSendMessages && canAttachFiles) return;
+    untrack(() => {
+      gifPickerOpen = false;
+      if (!canAttachFiles && uploads.length) resetUploads();
     });
   });
 
@@ -1809,6 +1945,10 @@
       }
       return;
     }
+    if (!canSendMessages) {
+      error = 'You do not have permission to send messages in this channel.';
+      return;
+    }
     if (busy || !channelReady || !channel) return;
     const attachmentIds = retry
       ? retry.attachmentIds
@@ -1923,7 +2063,7 @@
   }
 
   async function queueFiles(files: FileList | File[]) {
-    if (!channel || busy || uploads.length >= 10) return;
+    if (!channel || !canAttachFiles || busy || uploads.length >= 10) return;
     const target = entityRef(channel);
     const generation = loadGeneration;
     const routeChannel = channelId;
@@ -2647,7 +2787,7 @@
     {#if channel?.type === 2}
       <div class="guild-voice-content">
         {#key entityRef(channel)}
-          <VoiceDock channelRef={entityRef(channel)} />
+          <VoiceDock channelRef={entityRef(channel)} permissions={channel.permissions ?? '0'} />
         {/key}
       </div>
     {:else}
@@ -2730,95 +2870,108 @@
           onOpenChange={(open) => (completionOpen = open)}
           onSelect={chooseCompletion}
         />
-        <form
-          class="composer"
-          ondragover={(event) => event.preventDefault()}
-          ondrop={composerDrop}
-          onsubmit={(event) => {
-            event.preventDefault();
-            send();
-          }}
-        >
-          <input
-            class="visually-hidden"
-            bind:this={fileInput}
-            type="file"
-            multiple
-            onchange={(event) => {
-              const target = event.currentTarget;
-              if (target.files) void queueFiles(target.files);
-              target.value = '';
+        {#if canSendMessages || editingMessage}
+          <form
+            class="composer"
+            ondragover={(event) => event.preventDefault()}
+            ondrop={composerDrop}
+            onsubmit={(event) => {
+              event.preventDefault();
+              send();
             }}
-          />
-          <button
-            class="attach-button"
-            type="button"
-            disabled={busy || !channelReady || !channel || Boolean(editingMessage)}
-            onclick={() => fileInput?.click()}
-            aria-label="Attach files"
-            title="Attach files"
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m9.5 12.5 5.8-5.8a3 3 0 1 1 4.2 4.3l-8.2 8.1a5 5 0 0 1-7.1-7L12 4.3" />
-            </svg>
-          </button>
-          <textarea
-            use:autosizeTextarea={{ value: content, maxHeight: 180 }}
-            bind:this={composerInput}
-            bind:value={content}
-            oninput={composerChanged}
-            onselect={syncComposerCursor}
-            onclick={syncComposerCursor}
-            onkeyup={syncComposerCursor}
-            onkeydown={composerKeydown}
-            onpaste={composerPaste}
-            disabled={!channelReady || !channel}
-            role="combobox"
-            aria-autocomplete="list"
-            aria-expanded={completionOpen}
-            aria-controls={completionOpen ? 'guild-message-suggestions' : undefined}
-            aria-activedescendant={completionOpen
-              ? `guild-message-suggestions-option-${completionActive}`
-              : undefined}
-            aria-label={`Message ${channel?.name ?? 'channel'}`}
-            placeholder={`Message #${channel?.name ?? 'channel'}`}
-            rows="1"
-            maxlength="4000"
-          ></textarea>
-          {#if gifPickerEnabled && !editingMessage}
+            <input
+              class="visually-hidden"
+              bind:this={fileInput}
+              type="file"
+              multiple
+              onchange={(event) => {
+                const target = event.currentTarget;
+                if (target.files) void queueFiles(target.files);
+                target.value = '';
+              }}
+            />
             <button
-              class="gif-button"
-              class:active={gifPickerOpen}
+              class="attach-button"
               type="button"
-              disabled={busy || !channelReady || !channel}
-              aria-label="Choose a GIF"
-              aria-expanded={gifPickerOpen}
-              onclick={() => (gifPickerOpen = !gifPickerOpen)}>GIF</button
+              disabled={busy ||
+                !channelReady ||
+                !channel ||
+                !canAttachFiles ||
+                Boolean(editingMessage)}
+              onclick={() => fileInput?.click()}
+              aria-label={canAttachFiles
+                ? 'Attach files'
+                : 'You cannot attach files in this channel'}
+              title={canAttachFiles ? 'Attach files' : 'You cannot attach files in this channel'}
             >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m9.5 12.5 5.8-5.8a3 3 0 1 1 4.2 4.3l-8.2 8.1a5 5 0 0 1-7.1-7L12 4.3" />
+              </svg>
+            </button>
+            <textarea
+              use:autosizeTextarea={{ value: content, maxHeight: 180 }}
+              bind:this={composerInput}
+              bind:value={content}
+              oninput={composerChanged}
+              onselect={syncComposerCursor}
+              onclick={syncComposerCursor}
+              onkeyup={syncComposerCursor}
+              onkeydown={composerKeydown}
+              onpaste={composerPaste}
+              disabled={!channelReady || !channel}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={completionOpen}
+              aria-controls={completionOpen ? 'guild-message-suggestions' : undefined}
+              aria-activedescendant={completionOpen
+                ? `guild-message-suggestions-option-${completionActive}`
+                : undefined}
+              aria-label={`Message ${channel?.name ?? 'channel'}`}
+              placeholder={`Message #${channel?.name ?? 'channel'}`}
+              rows="1"
+              maxlength="4000"
+            ></textarea>
+            {#if gifPickerEnabled && !editingMessage}
+              <button
+                class="gif-button"
+                class:active={gifPickerOpen}
+                type="button"
+                disabled={busy || !channelReady || !channel}
+                aria-label="Choose a GIF"
+                aria-expanded={gifPickerOpen}
+                onclick={() => (gifPickerOpen = !gifPickerOpen)}>GIF</button
+              >
+            {/if}
+            <small class="composer-count">{content.length}/4000</small>
+            <button
+              class="send-button"
+              disabled={busy ||
+                !channelReady ||
+                !channel ||
+                uploads.some((item) => item.status === 'uploading') ||
+                (editingMessage
+                  ? !content.trim()
+                  : !content.trim() && !uploads.some((item) => item.status === 'ready'))}
+              aria-label="Send message"
+              title="Send message"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m4 4 17 8-17 8 3-7 8-1-8-1z" />
+              </svg>
+            </button>
+          </form>
+          {#if gifPickerOpen}
+            <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
           {/if}
-          <small class="composer-count">{content.length}/4000</small>
-          <button
-            class="send-button"
-            disabled={busy ||
-              !channelReady ||
-              !channel ||
-              uploads.some((item) => item.status === 'uploading') ||
-              (editingMessage
-                ? !content.trim()
-                : !content.trim() && !uploads.some((item) => item.status === 'ready'))}
-            aria-label="Send message"
-            title="Send message"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m4 4 17 8-17 8 3-7 8-1-8-1z" />
-            </svg>
-          </button>
-        </form>
-        {#if gifPickerOpen}
-          <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
-        {/if}
-        {#if uploads.length && !editingMessage}
-          <UploadPreviewTray {uploads} onRemove={removeUpload} />
+          {#if uploads.length && !editingMessage}
+            <UploadPreviewTray {uploads} onRemove={removeUpload} />
+          {/if}
+        {:else}
+          <div class="composer composer-disabled" role="note">
+            <Icon name="lock" size={18} />
+            <span>You do not have permission to send messages in this channel.</span>
+          </div>
         {/if}
       </footer>
     {/if}
@@ -2844,16 +2997,28 @@
     onMessage={messageUser}
     moderationActions={moderationActionsFor(profile.user)}
     onModerate={requestModeration}
+    roles={guild?.roles ?? []}
+    roleIds={memberFor(profile.user.id, profile.user.origin_domain)?.role_ids ?? []}
+    manageableRoles={manageableRolesFor(profile.user)}
+    onRoleChange={changeMemberRole}
   />
 {/if}
 
 {#if moderationDialog}
-  <div use:portal class="channel-dialog-layer">
+  <div
+    use:portal
+    class="channel-dialog-layer"
+    role="presentation"
+    oncontextmenu={(event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    }}
+  >
     <button
       class="channel-dialog-backdrop"
       type="button"
       aria-label="Cancel moderation action"
-      onclick={closeModerationDialog}
+      onclick={cancelModerationDialog}
     ></button>
     <div
       class="channel-dialog confirmation-dialog"
@@ -2908,7 +3073,7 @@
         </label>
         {#if moderationError}<p class="form-error" role="alert">{moderationError}</p>{/if}
         <footer>
-          <button class="secondary-button" type="button" onclick={closeModerationDialog}
+          <button class="secondary-button" type="button" onclick={cancelModerationDialog}
             >Cancel</button
           >
           <button class="danger-button" type="submit" disabled={moderationBusy}>
@@ -2927,7 +3092,12 @@
     id="channel-context-menu"
     class="channel-context-menu"
     role="menu"
+    tabindex="-1"
     aria-label={channelMenu.channel ? 'Channel actions' : 'Channel list actions'}
+    oncontextmenu={(event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    }}
     aria-busy={reorderingChannels}
   >
     {#if channelMenu.channel}

@@ -98,7 +98,11 @@ async def channel_voice_token(
     if not permissions & Permission.CONNECT:
         raise HTTPException(
             status_code=403,
-            detail={"code": "MISSING_PERMISSIONS", "permissions": str(int(Permission.CONNECT))},
+            detail={
+                "code": "MISSING_PERMISSIONS",
+                "message": "You do not have permission to join this voice channel.",
+                "permissions": str(int(Permission.CONNECT)),
+            },
         )
     if guild.origin_domain == settings.domain:
         return await authoritative_guild_token(

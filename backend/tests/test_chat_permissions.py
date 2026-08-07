@@ -106,6 +106,43 @@ def test_everyone_overwrite_uses_guild_domain_for_remote_member() -> None:
     assert result == Permission.VIEW_CHANNEL
 
 
+def test_voice_everyone_deny_then_inherit_restores_connect() -> None:
+    base = int(Permission.VIEW_CHANNEL | Permission.CONNECT | Permission.SPEAK)
+    denied = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain="remote.localhost",
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN)},
+        base_permissions=base,
+        overwrites=[overwrite(10, "role", deny=Permission.CONNECT)],
+        channel_type=2,
+        timed_out=False,
+    )
+    inherited = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain="remote.localhost",
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN)},
+        base_permissions=base,
+        # The middle tri-state removes the bit from both masks. The API now
+        # removes the empty row, but accepting it here protects the resolver
+        # while older federation events drain.
+        overwrites=[overwrite(10, "role")],
+        channel_type=2,
+        timed_out=False,
+    )
+
+    assert denied & Permission.VIEW_CHANNEL
+    assert not denied & Permission.CONNECT
+    assert not denied & Permission.SPEAK
+    assert inherited & Permission.CONNECT
+    assert inherited & Permission.SPEAK
+
+
 @pytest.mark.asyncio
 async def test_timeout_denial_explains_expiry_and_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     expiry = datetime.now(UTC) + timedelta(hours=1)
@@ -165,4 +202,5 @@ async def test_ordinary_permission_denial_does_not_leak_timeout_data(
     assert caught.value.detail == {
         "code": "MISSING_PERMISSIONS",
         "permissions": str(int(Permission.SEND_MESSAGES)),
+        "message": "You do not have permission to perform this action.",
     }

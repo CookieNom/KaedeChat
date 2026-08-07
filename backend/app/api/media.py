@@ -21,9 +21,9 @@ from app.api.dependencies import (
 )
 from app.api.guilds import local_guild
 from app.chat.channel_access import load_channel_access
-from app.chat.events import publish_dispatch, user_topic
+from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
-from app.chat.payloads import user_payload
+from app.chat.payloads import guild_payload, user_payload
 from app.chat.permissions import require_permissions
 from app.core.permission_contract import required_permissions
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
@@ -333,16 +333,26 @@ async def commit_guild_asset(
     )
     field = "icon_hash" if kind == "icon" else "banner_hash"
     setattr(guild, field, attachment.content_sha256)
+    # Render the signed event from the flushed row so its resource version
+    # describes the same guild state as the icon/banner digest.
+    await session.flush()
     await queue_guild_mutation(
         session,
         settings,
         guild,
         auth.user,
         "guild.update",
-        {"guild": {"id": str(guild.id), field: attachment.content_sha256}},
+        {"guild": guild_payload(guild)},
     )
     await session.commit()
+    await session.refresh(guild)
     await wake_queued_guild_federation(guild)
+    await publish_dispatch(
+        redis,
+        guild_topic(guild.origin_domain, guild.id),
+        "GUILD_UPDATE",
+        guild_payload(guild),
+    )
     if previous is not None:
         await enqueue_best_effort(media_local_purge, previous.id, previous.origin_domain)
     return attachment_payload(attachment)

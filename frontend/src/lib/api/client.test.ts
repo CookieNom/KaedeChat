@@ -167,6 +167,34 @@ describe('API session recovery', () => {
     browserWindow.removeEventListener('kaede:session-expired', expired);
   });
 
+  it('turns permission responses into useful messages', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(jsonResponse({ detail: { code: 'MISSING_PERMISSIONS' } }, 403))
+    );
+    const { api } = await import('./client');
+
+    await expect(api('/channels/1/messages')).rejects.toMatchObject({
+      code: 'MISSING_PERMISSIONS',
+      message: "You don't have permission to do that.",
+      status: 403
+    });
+  });
+
+  it('does not expose a bare Forbidden response to the interface', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ detail: 'Forbidden' }, 403))
+    );
+    const { api } = await import('./client');
+
+    await expect(api('/channels/1/messages')).rejects.toMatchObject({
+      message: "You don't have permission to do that."
+    });
+  });
+
   it('does not discard credentials when refresh is rate limited', async () => {
     storage.setItem('kaede.gateway.session', 'session');
     const expired = vi.fn();

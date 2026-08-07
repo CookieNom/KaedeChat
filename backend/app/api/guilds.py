@@ -679,42 +679,53 @@ async def put_overwrite(
             ChannelOverwrite.target_type == payload.target_type,
         )
     )
+    empty_overwrite = payload.allow == 0 and payload.deny == 0
     if overwrite is None:
         changed_bits = payload.allow | payload.deny
-        overwrite = ChannelOverwrite(
-            channel_id=channel.id,
-            channel_domain=channel.origin_domain,
-            guild_id=guild.id,
-            guild_domain=guild.origin_domain,
-            target_id=target_id,
-            target_domain=target_domain,
-            target_type=payload.target_type,
-            allow=payload.allow,
-            deny=payload.deny,
-        )
-        session.add(overwrite)
+        if not empty_overwrite:
+            overwrite = ChannelOverwrite(
+                channel_id=channel.id,
+                channel_domain=channel.origin_domain,
+                guild_id=guild.id,
+                guild_domain=guild.origin_domain,
+                target_id=target_id,
+                target_domain=target_domain,
+                target_type=payload.target_type,
+                allow=payload.allow,
+                deny=payload.deny,
+            )
+            session.add(overwrite)
     else:
         changed_bits = (overwrite.allow ^ payload.allow) | (overwrite.deny ^ payload.deny)
-        overwrite.allow = payload.allow
-        overwrite.deny = payload.deny
     if changed_bits & ~actor_permissions:
         raise HTTPException(status_code=403, detail={"code": "CANNOT_MANAGE_PERMISSIONS"})
+    if overwrite is not None:
+        if empty_overwrite:
+            await session.delete(overwrite)
+        else:
+            overwrite.allow = payload.allow
+            overwrite.deny = payload.deny
     guild.permission_generation += 1
+    event_type = "guild.overwrite.delete" if empty_overwrite else "guild.overwrite.upsert"
+    overwrite_payload: dict[str, object] = {
+        "channel": {"id": str(channel.id), "origin_domain": channel.origin_domain},
+        "target": {"id": str(target_id), "origin_domain": target_domain},
+        "target_type": payload.target_type,
+    }
+    if not empty_overwrite:
+        overwrite_payload.update(
+            {
+                "allow": str(payload.allow),
+                "deny": str(payload.deny),
+            }
+        )
     await queue_guild_mutation(
         session,
         settings,
         guild,
         auth.user,
-        "guild.overwrite.upsert",
-        {
-            "overwrite": {
-                "channel": {"id": str(channel.id), "origin_domain": channel.origin_domain},
-                "target": {"id": str(target_id), "origin_domain": target_domain},
-                "target_type": payload.target_type,
-                "allow": str(payload.allow),
-                "deny": str(payload.deny),
-            }
-        },
+        event_type,
+        {"overwrite": overwrite_payload},
         channel=channel,
         snapshot_required=True,
     )

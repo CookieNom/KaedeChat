@@ -9,6 +9,32 @@ export class ApiError extends Error {
   }
 }
 
+const ERROR_MESSAGES: Record<string, string> = {
+  MISSING_PERMISSIONS: "You don't have permission to do that.",
+  CANNOT_MANAGE_PERMISSIONS: "You can't change those permissions.",
+  CANNOT_GRANT_PERMISSIONS: "You can't grant permissions you don't have.",
+  ROLE_HIERARCHY: 'That member or role is higher than your highest role.',
+  OWNER_IMMUNE: "The guild owner can't be moderated or have their roles changed.",
+  CANNOT_MANAGE_SELF: "You can't use that action on yourself.",
+  TARGET_CANNOT_CONNECT: "That member doesn't have permission to join this voice channel.",
+  VOICE_NOT_CONNECTED: 'That member is no longer connected to voice.',
+  VOICE_DISABLED: 'Voice is disabled on this instance.',
+  VOICE_HOME_UNREACHABLE: 'The voice server is temporarily unavailable. Try again shortly.'
+};
+
+function readableErrorMessage(
+  code: string,
+  status: number,
+  detail: Record<string, unknown>
+): string {
+  const supplied = typeof detail.message === 'string' ? detail.message.trim() : '';
+  if (supplied && !/^forbidden$/i.test(supplied)) return supplied;
+  const configured = ERROR_MESSAGES[code];
+  if (configured) return configured;
+  if (status === 403) return "You don't have permission to do that.";
+  return supplied || 'Request failed';
+}
+
 const PUBLIC_AUTH_PATHS = new Set([
   '/auth/config',
   '/auth/login',
@@ -127,12 +153,22 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    const detail = body.detail ?? body;
+    const rawDetail =
+      typeof body === 'object' && body !== null && 'detail' in body
+        ? (body as Record<string, unknown>).detail
+        : body;
+    const detail =
+      typeof rawDetail === 'object' && rawDetail !== null
+        ? (rawDetail as Record<string, unknown>)
+        : typeof rawDetail === 'string'
+          ? { message: rawDetail }
+          : {};
+    const code = typeof detail.code === 'string' ? detail.code : 'REQUEST_FAILED';
     throw new ApiError(
-      detail.code ?? 'REQUEST_FAILED',
-      detail.message ?? 'Request failed',
+      code,
+      readableErrorMessage(code, response.status, detail),
       response.status,
-      typeof detail === 'object' && detail !== null ? detail : {}
+      detail
     );
   }
   if (response.status === 204) return undefined as T;

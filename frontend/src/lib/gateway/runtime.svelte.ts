@@ -119,9 +119,16 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       return;
     }
     case 'GUILD_MEMBER_ADD':
-    case 'GUILD_MEMBER_UPDATE':
-      chatEntities.members.upsert(dispatch.d as GuildMemberSummary);
+    case 'GUILD_MEMBER_UPDATE': {
+      const member = dispatch.d as Partial<GuildMemberSummary>;
+      // Older replicas emitted only user_id/role_id for role changes. Ignore
+      // those incomplete projections instead of corrupting the normalized
+      // member store; the next member chunk repairs the stale row.
+      if (member.user && member.guild_id && member.guild_domain) {
+        chatEntities.members.upsert(member as GuildMemberSummary);
+      }
       return;
+    }
     case 'GUILD_MEMBER_REMOVE': {
       const member = dispatch.d as GuildMemberSummary;
       chatEntities.members.remove(

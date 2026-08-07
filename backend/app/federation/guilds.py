@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.e2ee import validate_e2ee_envelope
+from app.chat.payloads import member_payload
 from app.chat.permissions import calculate_permissions
 from app.core.permissions import ALL_PERMISSIONS, Permission
 from app.core.settings import Settings
@@ -683,39 +684,47 @@ async def apply_guild_mutation_event(
         ):
             raise ValueError("guild update identity is invalid")
         name = raw.get("name")
-        if not isinstance(name, str) or not 2 <= len(name) <= 100:
-            raise ValueError("guild update name is invalid")
-        locked.name = name
+        if "name" in raw:
+            if not isinstance(name, str) or not 2 <= len(name) <= 100:
+                raise ValueError("guild update name is invalid")
+            locked.name = name
         for field, maximum in (("description", 500), ("icon_hash", 128), ("banner_hash", 128)):
+            if field not in raw:
+                continue
             value = raw.get(field)
             if value is not None and (not isinstance(value, str) or len(value) > maximum):
                 raise ValueError(f"guild update {field} is invalid")
             setattr(locked, field, value)
-        history_policy = raw.get("federated_history_policy", "disabled")
-        if history_policy not in {"disabled", "full_retained"}:
-            raise ValueError("guild history policy is invalid")
-        locked.federated_history_policy = str(history_policy)
-        locked.history_policy_generation = database_snowflake(
-            raw.get("history_policy_generation", "1"), "history policy generation"
-        )
-        owner_ref = (
-            database_snowflake(raw.get("owner_id"), "guild owner id"),
-            normalize_domain(str(raw.get("owner_domain", locked.origin_domain))),
-        )
-        if owner_ref[1] != locked.origin_domain:
-            raise ValueError("guild owner must belong to the guild home")
-        owner = await session.get(User, owner_ref)
-        owner_membership = await session.get(
-            GuildMember,
-            (locked.id, locked.origin_domain, owner_ref[0], owner_ref[1]),
-        )
-        if owner is None or owner_membership is None:
-            raise ValueError("guild owner is not a guild member")
-        locked.owner_id, locked.owner_domain = owner_ref
-        locked.permission_generation = database_snowflake(
-            raw.get("permission_generation", locked.permission_generation),
-            "permission generation",
-        )
+        if "federated_history_policy" in raw:
+            history_policy = raw.get("federated_history_policy")
+            if history_policy not in {"disabled", "full_retained"}:
+                raise ValueError("guild history policy is invalid")
+            locked.federated_history_policy = str(history_policy)
+        if "history_policy_generation" in raw:
+            locked.history_policy_generation = database_snowflake(
+                raw.get("history_policy_generation"), "history policy generation"
+            )
+        if "owner_id" in raw or "owner_domain" in raw:
+            if "owner_id" not in raw:
+                raise ValueError("guild owner identity is incomplete")
+            owner_ref = (
+                database_snowflake(raw.get("owner_id"), "guild owner id"),
+                normalize_domain(str(raw.get("owner_domain", locked.origin_domain))),
+            )
+            if owner_ref[1] != locked.origin_domain:
+                raise ValueError("guild owner must belong to the guild home")
+            owner = await session.get(User, owner_ref)
+            owner_membership = await session.get(
+                GuildMember,
+                (locked.id, locked.origin_domain, owner_ref[0], owner_ref[1]),
+            )
+            if owner is None or owner_membership is None:
+                raise ValueError("guild owner is not a guild member")
+            locked.owner_id, locked.owner_domain = owner_ref
+        if "permission_generation" in raw:
+            locked.permission_generation = database_snowflake(
+                raw.get("permission_generation"), "permission generation"
+            )
         dispatch = {**dispatch, **raw}
     elif event_type in {"guild.channel.create", "guild.channel.update"}:
         raw = content.get("channel")
@@ -924,7 +933,10 @@ async def apply_guild_mutation_event(
             valid_target = member_target is not None
         if not valid_target:
             raise ValueError("overwrite target is invalid")
-        if event_type.endswith("upsert"):
+        # Treat legacy zero-mask upserts as deletes. Empty overwrite rows have
+        # no semantic value and previously made deny -> inherit transitions
+        # unnecessarily dependent on cache invalidation behavior.
+        if event_type.endswith("upsert") and (allow or deny):
             await session.execute(
                 pg_insert(ChannelOverwrite)
                 .values(
@@ -1072,14 +1084,21 @@ async def apply_guild_mutation_event(
         if member_version < member.member_version:
             raise ValueError("member version regressed")
         member.member_version = member_version
+        user = await session.get(User, user_ref)
+        if user is None:
+            raise ValueError("member-role mutation user is unknown")
+        role_ids = list(
+            await session.scalars(
+                select(MemberRole.role_id).where(
+                    MemberRole.guild_id == locked.id,
+                    MemberRole.guild_domain == locked.origin_domain,
+                    MemberRole.user_id == user_ref[0],
+                    MemberRole.user_domain == user_ref[1],
+                )
+            )
+        )
         dispatch_type = "GUILD_MEMBER_UPDATE"
-        dispatch = {
-            **dispatch,
-            "user_id": str(user_ref[0]),
-            "user_domain": user_ref[1],
-            "role_id": str(role_ref[0]),
-            "role_domain": role_ref[1],
-        }
+        dispatch = member_payload(member, user, role_ids)
     elif event_type in {"guild.ban.add", "guild.ban.remove"}:
         user_ref = _event_ref(content.get("user"), "banned user")
         user = await session.get(User, user_ref)
@@ -1283,6 +1302,14 @@ async def apply_guild_mutation_event(
             "pinned": event_type.endswith("add"),
         }
 
+    raw_permission_generation = context.get("permission_generation")
+    if raw_permission_generation is not None:
+        permission_generation = database_snowflake(
+            raw_permission_generation, "permission generation"
+        )
+        if permission_generation < locked.permission_generation:
+            raise ValueError("permission generation regressed")
+        locked.permission_generation = permission_generation
     locked.last_event_seq = seq
     locked.next_event_seq = seq + 1
     locked.sync_status = "ready"
