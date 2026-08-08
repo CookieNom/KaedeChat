@@ -5,7 +5,9 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
+from app.api.auth import native_turnstile_challenge
 from app.auth.turnstile import LOGIN_ACTION, TurnstileUnavailableError, verify_turnstile_token
 from app.core.settings import Settings
 
@@ -81,3 +83,29 @@ async def test_turnstile_fails_closed_when_provider_is_unavailable() -> None:
                 action=LOGIN_ACTION,
                 client=client,
             )
+
+
+@pytest.mark.asyncio
+async def test_native_challenge_is_origin_hosted_and_not_cached() -> None:
+    response = await native_turnstile_challenge(
+        action=LOGIN_ACTION,
+        request_id="desktop-request-1",
+        settings=settings(),
+    )
+    body = bytes(response.body).decode()
+    assert "0x4AAAAAAExampleSiteKey" in body
+    assert "desktop-request-1" in body
+    assert "window.ipc.postMessage" in body
+    assert response.headers["cache-control"] == "no-store"
+    assert "challenges.cloudflare.com" in response.headers["content-security-policy"]
+
+
+@pytest.mark.asyncio
+async def test_native_challenge_rejects_unknown_action() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await native_turnstile_challenge(
+            action="unexpected",
+            request_id="desktop-request-1",
+            settings=settings(),
+        )
+    assert exc.value.status_code == 400

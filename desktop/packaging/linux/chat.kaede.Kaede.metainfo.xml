@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>chat.kaede.Kaede</id>
+  <name>Kaede Chat</name>
+  <summary>A native client for federated Kaede Chat communities</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <description>
+    <p>Kaede Chat connects to your home instance and supports communities,
+    direct messages, moderation, media, federation, and native voice/video.</p>
+  </description>
+  <launchable type="desktop-id">chat.kaede.Kaede.desktop</launchable>
+  <url type="homepage">https://github.com/kaede-chat/kaede-chat</url>
+  <provides><binary>kaede-desktop</binary></provides>
+  <releases><release version="0.1.0" date="2026-08-07"/></releases>
+</component>
+

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Kaede Chat
+Comment=Native client for federated Kaede Chat instances
+Exec=kaede-desktop %u
+Icon=chat.kaede.Kaede
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+MimeType=x-scheme-handler/kaede;
+StartupWMClass=Kaede Chat
+

@@ -1,0 +1,112 @@
+name: Desktop release build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["desktop-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact: kaede-desktop-linux-x86_64
+          - os: windows-2025
+            artifact: kaede-desktop-windows-x86_64
+          - os: macos-15
+            artifact: kaede-desktop-macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    env:
+      KAEDE_DESKTOP_UPDATE_MANIFEST_URL: ${{ vars.KAEDE_DESKTOP_UPDATE_MANIFEST_URL }}
+      KAEDE_DESKTOP_UPDATE_PUBLIC_KEY_BASE64: ${{ vars.KAEDE_DESKTOP_UPDATE_PUBLIC_KEY_BASE64 }}
+      WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libayatana-appindicator3-dev libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev dpkg-dev
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.92.0 --profile minimal
+      - name: Build locked release
+        run: cargo +1.92.0 build --locked --release --manifest-path desktop/Cargo.toml -p kaede-desktop
+
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        working-directory: desktop
+        shell: bash
+        run: |
+          chmod +x packaging/linux/build-package.sh
+          packaging/linux/build-package.sh "${GITHUB_REF_NAME#desktop-v}" amd64
+
+      - name: Install WiX
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: dotnet tool install --global wix --version 6.0.2
+      - name: Package Windows MSI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force desktop/dist | Out-Null
+          wix build desktop/packaging/windows/Package.wxs `
+            -d BinaryPath="$pwd/desktop/target/release/kaede-desktop.exe" `
+            -d ProductVersion="$($env:GITHUB_REF_NAME -replace '^desktop-v','')" `
+            -o desktop/dist/kaede-desktop-windows-x86_64.msi
+          Compress-Archive desktop/target/release/kaede-desktop.exe desktop/dist/kaede-desktop-windows-x86_64.zip
+      - name: Sign Windows package
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_BASE64 != ''
+        shell: pwsh
+        run: |
+          $cert = Join-Path $env:RUNNER_TEMP kaede-signing.pfx
+          [IO.File]::WriteAllBytes($cert, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $cert /p $env:WINDOWS_CERTIFICATE_PASSWORD desktop/dist/kaede-desktop-windows-x86_64.msi
+          Remove-Item $cert
+
+      - name: Assemble macOS application
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app="desktop/dist/Kaede Chat.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp desktop/target/release/kaede-desktop "$app/Contents/MacOS/kaede-desktop"
+          cp desktop/packaging/macos/Info.plist "$app/Contents/Info.plist"
+          plutil -replace CFBundleShortVersionString -string "${GITHUB_REF_NAME#desktop-v}" "$app/Contents/Info.plist"
+      - name: Sign and notarize macOS application
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
+        shell: bash
+        run: |
+          codesign --force --deep --options runtime --timestamp \
+            --entitlements desktop/packaging/macos/KaedeChat.entitlements \
+            --sign "$APPLE_SIGNING_IDENTITY" "desktop/dist/Kaede Chat.app"
+          ditto -c -k --keepParent "desktop/dist/Kaede Chat.app" desktop/dist/kaede-desktop-notarize.zip
+          xcrun notarytool submit desktop/dist/kaede-desktop-notarize.zip --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "desktop/dist/Kaede Chat.app"
+          rm desktop/dist/kaede-desktop-notarize.zip
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "desktop/dist/Kaede Chat.app" desktop/dist/kaede-desktop-macos-arm64.zip
+          hdiutil create -volname "Kaede Chat" -srcfolder "desktop/dist/Kaede Chat.app" -ov -format UDZO desktop/dist/kaede-desktop-macos-arm64.dmg
+
+      - name: Write package checksums
+        shell: bash
+        run: |
+          cd desktop/dist
+          if command -v sha256sum >/dev/null; then sha256sum * > SHA256SUMS; else shasum -a 256 * > SHA256SUMS; fi
+      - name: Upload packaged build for release signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: desktop/dist/*
+          if-no-files-found: error

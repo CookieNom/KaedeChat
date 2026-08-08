@@ -1,0 +1,29 @@
+[package]
+name = "kaede-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+futures-util.workspace = true
+kaede-api = { path = "../kaede-api" }
+kaede-auth = { path = "../kaede-auth" }
+kaede-cache = { path = "../kaede-cache" }
+kaede-core = { path = "../kaede-core" }
+kaede-gateway = { path = "../kaede-gateway" }
+kaede-media = { path = "../kaede-media" }
+kaede-platform = { path = "../kaede-platform" }
+kaede-protocol = { path = "../kaede-protocol" }
+kaede-turnstile = { path = "../kaede-turnstile", default-features = false }
+secrecy.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

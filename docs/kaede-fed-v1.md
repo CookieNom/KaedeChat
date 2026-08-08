@@ -352,6 +352,7 @@ Except for discovery at `/.well-known/kaede/server`, protocol routes are under
 | `GET /guilds/{id}/history-exports/{export}/delta?after_seq=…` | Reconcile retained mutations after the baseline | `guild-history-sync/1` |
 | `POST /guilds/{id}/history-exports/{export}/complete` | Idempotently acknowledge a merged export | `guild-history-sync/1` |
 | `POST /guilds/{id}/proxy` | Idempotent remote guild message write | v1 |
+| `POST /guilds/{id}/proxy-pin` | Permission-checked remote guild pin mutation | v1 |
 | `GET /link` | Signed `kaede-fed.1` hot-link WebSocket upgrade | v1 |
 | `POST /voice/token` | Home-SFU guild token broker | v1 |
 | `POST /voice/dm-token` | Caller-SFU DM call token broker | v1 |

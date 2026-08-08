@@ -1,0 +1,18 @@
+[package]
+name = "kaede-cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kaede-core = { path = "../kaede-core" }
+kaede-protocol = { path = "../kaede-protocol" }
+parking_lot.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

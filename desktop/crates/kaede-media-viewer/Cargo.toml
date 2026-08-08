@@ -1,0 +1,18 @@
+[package]
+name = "kaede-media-viewer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["embedded-webview"]
+embedded-webview = ["dep:tao", "dep:wry"]
+
+[dependencies]
+base64.workspace = true
+tao = { workspace = true, optional = true }
+thiserror.workspace = true
+wry = { workspace = true, optional = true }
+
+[lints]
+workspace = true

@@ -15,7 +15,8 @@ describe('pending message sends', () => {
       clientNonce: 'stable-nonce',
       content: 'hello',
       attachmentIds: ['10'],
-      mentionUserIds: ['20@example.test']
+      mentionUserIds: ['20@example.test'],
+      referencedMessageId: null
     });
   });
 
@@ -26,9 +27,22 @@ describe('pending message sends', () => {
       clientNonce: 'stable-nonce',
       content: null,
       attachmentIds: [],
-      mentionUserIds: []
+      mentionUserIds: [],
+      referencedMessageId: null
     });
     expect(send.attachmentIds).toEqual(['10']);
+  });
+
+  it('keeps the reply reference across attachment retries', () => {
+    const send = pendingMessageSend('reply', ['10'], ['20@example.test'], 'stable-nonce', '30');
+
+    expect(discardAttachments(send)).toEqual({
+      clientNonce: 'stable-nonce',
+      content: 'reply',
+      attachmentIds: [],
+      mentionUserIds: ['20@example.test'],
+      referencedMessageId: '30'
+    });
   });
 
   it('clears only uploads submitted by the completed request', () => {

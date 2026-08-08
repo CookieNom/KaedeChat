@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,7 @@ from app.auth.service import (
     MFA_ACCOUNT_FAILURE_LIMIT,
     MFA_IP_FAILURE_LIMIT,
     InvalidTokenError,
+    IssuedSession,
     claim_mfa_ticket,
     clear_mfa_account_failures,
     consume_mfa_ticket,
@@ -41,7 +43,7 @@ from app.auth.tokens import (
     LoginLimiter,
 )
 from app.core.settings import Settings
-from app.db.models import User
+from app.db.models import Session, User
 
 
 class FakeRedis:
@@ -156,6 +158,44 @@ def source_request() -> Request:
     )
 
 
+def client_request(client_kind: str | None) -> Request:
+    headers = [] if client_kind is None else [(b"x-kaede-client", client_kind.encode())]
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/login",
+            "headers": headers,
+            "client": ("192.0.2.10", 54321),
+        }
+    )
+
+
+@pytest.mark.parametrize("client_kind", ["desktop", "mobile"])
+def test_native_client_token_response_uses_body_tokens(client_kind: str) -> None:
+    response = auth_api.token_response(
+        client_request(client_kind),
+        IssuedSession("kc1_at_native", "kc1_rt_native", "session-one"),
+        auth_settings(),
+    )
+
+    assert b'"access_token":"kc1_at_native"' in response.body
+    assert b'"refresh_token":"kc1_rt_native"' in response.body
+    assert "set-cookie" not in response.headers
+
+
+def test_web_client_token_response_keeps_tokens_out_of_body() -> None:
+    response = auth_api.token_response(
+        client_request("web"),
+        IssuedSession("kc1_at_web", "kc1_rt_web", "session-one"),
+        auth_settings(),
+    )
+
+    assert b'"access_token":null' in response.body
+    assert b'"refresh_token":null' in response.body
+    assert response.headers.getlist("set-cookie")
+
+
 @pytest.mark.asyncio
 async def test_access_token_issue_lookup_and_session_revocation() -> None:
     redis = FakeRedis()
@@ -192,6 +232,88 @@ async def test_login_limiter_turnstile_challenge_is_scoped_and_clearable() -> No
     assert not await limiter.challenge_required("account", "127.0.0.2")
     await limiter.clear_challenge("account", "127.0.0.1")
     assert not await limiter.challenge_required("account", "127.0.0.1")
+
+
+@pytest.mark.asyncio
+async def test_session_listing_is_scoped_and_marks_current_device() -> None:
+    now = datetime.now(UTC)
+    user = User(
+        id=42,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        password_hash="encoded-password-hash",
+    )
+    record = Session(
+        id="session-one",
+        user_id=user.id,
+        user_domain=user.origin_domain,
+        local_domain=user.origin_domain,
+        refresh_token_hash=b"refresh",
+        device_name="Linux workstation",
+        user_agent="KaedeDesktop/0.1.0",
+        ip_address="192.0.2.10",
+        created_at=now - timedelta(days=2),
+        last_used_at=now,
+        expires_at=now + timedelta(days=7),
+        absolute_expires_at=now + timedelta(days=30),
+    )
+    result = MagicMock()
+    result.all.return_value = [record]
+    session = MagicMock()
+    session.scalars = AsyncMock(return_value=result)
+
+    rows = await auth_api.list_sessions(
+        authenticated_user(user),
+        session,  # type: ignore[arg-type]
+    )
+
+    assert [row.id for row in rows] == ["session-one"]
+    assert rows[0].current is True
+    assert rows[0].device_name == "Linux workstation"
+
+
+@pytest.mark.asyncio
+async def test_session_revocation_revokes_database_and_live_access_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    user = User(
+        id=42,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        password_hash="encoded-password-hash",
+    )
+    record = Session(
+        id="session-two",
+        user_id=user.id,
+        user_domain=user.origin_domain,
+        local_domain=user.origin_domain,
+        refresh_token_hash=b"refresh",
+        expires_at=now + timedelta(days=7),
+        absolute_expires_at=now + timedelta(days=30),
+    )
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=record)
+    session.commit = AsyncMock()
+    revoke = AsyncMock()
+    token_store = MagicMock()
+    token_store.revoke_session = revoke
+    monkeypatch.setattr(auth_api, "AccessTokenStore", MagicMock(return_value=token_store))
+
+    response = await auth_api.revoke_session(
+        record.id,
+        authenticated_user(user),
+        session,  # type: ignore[arg-type]
+        FakeRedis(),  # type: ignore[arg-type]
+        auth_settings(),
+    )
+
+    assert response.status_code == 204
+    assert record.revoked_at is not None
+    session.commit.assert_awaited_once()
+    revoke.assert_awaited_once_with("session-two")
 
 
 @pytest.mark.asyncio

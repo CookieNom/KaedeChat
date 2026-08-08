@@ -102,6 +102,7 @@ async def authoritative_guild_token(
     server_deaf = bool(member.voice_flags & VOICE_SERVER_DEAF)
     can_speak = bool(permissions & Permission.SPEAK) and not server_mute
     can_stream = bool(permissions & Permission.STREAM)
+    can_use_vad = bool(permissions & Permission.USE_VAD)
     metadata: dict[str, object] = {
         "version": 1,
         "generation": generation,
@@ -113,6 +114,7 @@ async def authoritative_guild_token(
         "server_deaf": server_deaf,
         "can_speak": can_speak,
         "can_stream": can_stream,
+        "can_use_vad": can_use_vad,
     }
     try:
         await LiveKitControl(settings).ensure_room(room)
@@ -141,6 +143,7 @@ async def authoritative_guild_token(
         expires_at=expires_at.isoformat(),
         can_speak=can_speak,
         can_stream=can_stream,
+        can_use_vad=can_use_vad,
     )
 
 
@@ -158,6 +161,7 @@ def parse_minted_metadata(raw: str, *, room: str, identity: str) -> dict[str, ob
         "channel_id": str,
         "can_speak": bool,
         "can_stream": bool,
+        "can_use_vad": bool,
         "server_mute": bool,
         "server_deaf": bool,
     }

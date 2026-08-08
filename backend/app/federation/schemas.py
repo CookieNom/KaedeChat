@@ -171,6 +171,15 @@ class GuildProxyRequest(BaseModel):
         return self
 
 
+class GuildPinProxyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    actor: RemoteUserProfile
+    channel_id: SnowflakeString
+    message_id: EntityRef
+    pinned: bool
+
+
 class InstanceBlockPut(BaseModel):
     domain: FederationDomain
     level: Literal["silence", "suspend"]

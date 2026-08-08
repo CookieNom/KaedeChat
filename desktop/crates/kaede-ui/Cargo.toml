@@ -1,0 +1,17 @@
+[package]
+name = "kaede-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[dependencies]
+slint.workspace = true
+zune-jpeg.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+zune-jpeg.workspace = true
+
+[lints]
+workspace = true

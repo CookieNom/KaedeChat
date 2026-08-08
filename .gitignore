@@ -31,3 +31,5 @@ deploy/generated/
 *.local.key
 kaede-dev-root.crt
 .DS_Store
+desktop/target/
+desktop/.kaede-desktop/

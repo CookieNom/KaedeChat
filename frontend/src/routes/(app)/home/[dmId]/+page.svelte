@@ -31,6 +31,12 @@
   } from '$lib/chat/outbox';
   import { compareEntityRefs, entityKey, entityRef, matchesEntityRef } from '$lib/chat/refs';
   import { buildTimeline } from '$lib/chat/timeline';
+  import {
+    activeTypingParticipants,
+    typingLabel,
+    upsertTypingParticipant,
+    type TypingParticipant
+  } from '$lib/chat/typing';
   import type {
     Attachment,
     Channel,
@@ -53,6 +59,7 @@
   import EmojiPicker from '$lib/components/EmojiPicker.svelte';
   import GifPicker from '$lib/components/GifPicker.svelte';
   import MessageRow from '$lib/components/MessageRow.svelte';
+  import PinnedMessagesPanel from '$lib/components/PinnedMessagesPanel.svelte';
   import PresencePicker from '$lib/components/PresencePicker.svelte';
   import UploadPreviewTray from '$lib/components/UploadPreviewTray.svelte';
   import UserProfileCard from '$lib/components/UserProfileCard.svelte';
@@ -110,6 +117,12 @@
   let busy = $state(false);
   let channelReady = $state(false);
   let typing = $state('');
+  let typingParticipants = $state<TypingParticipant[]>([]);
+  let replyingMessage = $state<Message | null>(null);
+  let pinnedMessages = $state<Message[]>([]);
+  let pinsOpen = $state(false);
+  let pinsLoading = $state(false);
+  let pinsError = $state('');
   let hasEarlier = $state(true);
   let loadingEarlier = $state(false);
   let hasLater = $state(false);
@@ -243,6 +256,48 @@
     );
     return target ? `message:${entityKey(target)}` : null;
   });
+
+  function referencedMessage(message: Message): Message | null {
+    if (!message.referenced_message_id) return null;
+    return (
+      messages.find(
+        (candidate) =>
+          candidate.id === message.referenced_message_id &&
+          candidate.origin_domain === message.referenced_message_domain
+      ) ?? null
+    );
+  }
+
+  function resetTyping() {
+    typingParticipants = [];
+    typing = '';
+    if (typingTimer) window.clearTimeout(typingTimer);
+    typingTimer = null;
+  }
+
+  function refreshTyping() {
+    typingParticipants = activeTypingParticipants(typingParticipants);
+    typing = typingLabel(typingParticipants);
+    if (typingTimer) window.clearTimeout(typingTimer);
+    typingTimer = null;
+    if (!typingParticipants.length) return;
+    const nextExpiry = Math.min(...typingParticipants.map((item) => item.expiresAt));
+    typingTimer = window.setTimeout(refreshTyping, Math.max(50, nextExpiry - Date.now() + 5));
+  }
+
+  function registerTyping(userId: string, userDomain?: string) {
+    const domain = userDomain ?? localDomain;
+    if (currentUser?.id === userId && currentUser.origin_domain === domain) return;
+    const user =
+      entities.users.values.find(
+        (candidate) => candidate.id === userId && candidate.origin_domain === domain
+      ) ?? recipient;
+    typingParticipants = upsertTypingParticipant(typingParticipants, {
+      ref: `${userId}@${domain}`,
+      name: user?.display_name ?? user?.username ?? 'Someone'
+    });
+    refreshTyping();
+  }
   const completionQuery = $derived(completionAt(content, composerCursor));
   const completionOptions = $derived(
     completionQuery?.marker === ':'
@@ -485,12 +540,7 @@
         !authoredByMe &&
         dispatchTargetsCurrentChannel(started.channel_id, started.channel_domain)
       ) {
-        typing = `${recipient?.display_name ?? recipient?.username ?? 'Someone'} is writing…`;
-        if (typingTimer) window.clearTimeout(typingTimer);
-        typingTimer = window.setTimeout(() => {
-          typing = '';
-          typingTimer = null;
-        }, 10_000);
+        registerTyping(started.user_id ?? recipient?.id ?? 'unknown', started.user_domain);
       }
     } else if (dispatch.t === 'READ_STATE_UPDATE') {
       setReadStates(applyReadStateDispatch(readStates, dispatch.d as ReadStateDispatch));
@@ -571,7 +621,7 @@
       client.removeEventListener(GATEWAY_SESSION_RESET_EVENT, sessionReset);
       desktopViewport.removeEventListener('change', viewportChanged);
       if (gateway === client) gateway = null;
-      if (typingTimer) window.clearTimeout(typingTimer);
+      resetTyping();
       resetUploads();
     };
   });
@@ -612,7 +662,12 @@
       composerDraftBeforeEdit = null;
       content = '';
       composerCursor = 0;
-      typing = '';
+      resetTyping();
+      replyingMessage = null;
+      pinnedMessages = [];
+      pinsOpen = false;
+      pinsLoading = false;
+      pinsError = '';
       error = '';
       busy = false;
       channelReady = false;
@@ -627,8 +682,6 @@
       hasLater = false;
       loadingLater = false;
       lastTypingAt = 0;
-      if (typingTimer) window.clearTimeout(typingTimer);
-      typingTimer = null;
       hasEarlier = true;
       pendingSends.clear();
       deliveryRecoveries.clear();
@@ -672,7 +725,8 @@
         loadedReadStates,
         loadedCurrentUser,
         loadedCall,
-        loadedEmojis
+        loadedEmojis,
+        loadedPins
       ] = await Promise.all([
         api<Channel[]>('/users/@me/channels'),
         api<Guild[]>('/users/@me/guilds'),
@@ -687,7 +741,8 @@
             joined: false
           })
         ),
-        api<CustomEmoji[]>('/users/@me/emojis')
+        api<CustomEmoji[]>('/users/@me/emojis'),
+        api<Message[]>(`/channels/${encodeURIComponent(targetRef)}/pins`).catch(() => [])
       ]);
       if (
         routeGeneration !== loadGeneration ||
@@ -699,6 +754,7 @@
       setGuilds(loadedGuilds);
       setReadStates(loadedReadStates);
       availableEmojis = loadedEmojis;
+      pinnedMessages = loadedPins;
       entities.ingestCurrentUser(loadedCurrentUser);
       const preferredPresence = myPresencePreference();
       presencePreference = preferredPresence;
@@ -941,7 +997,15 @@
         ? [entityRef(recipient)]
         : [];
     if (!retry && !text && !attachmentIds.length) return;
-    const draft = retry ?? pendingMessageSend(text || null, attachmentIds, mentionUserIds);
+    const draft =
+      retry ??
+      pendingMessageSend(
+        text || null,
+        attachmentIds,
+        mentionUserIds,
+        crypto.randomUUID(),
+        replyingMessage ? entityRef(replyingMessage) : null
+      );
     if (!draft.content && !draft.attachmentIds.length) {
       error = 'Reattach this message’s files before retrying.';
       return;
@@ -967,8 +1031,18 @@
           message_type: 0,
           flags: 0,
           client_nonce: nonce,
-          referenced_message_id: null,
-          referenced_message_domain: null,
+          referenced_message_id:
+            messages.find((item) =>
+              draft.referencedMessageId
+                ? matchesEntityRef(draft.referencedMessageId, item, localDomain)
+                : false
+            )?.id ?? null,
+          referenced_message_domain:
+            messages.find((item) =>
+              draft.referencedMessageId
+                ? matchesEntityRef(draft.referencedMessageId, item, localDomain)
+                : false
+            )?.origin_domain ?? null,
           mention_user_refs: [],
           edited_at: null,
           deleted_at: null,
@@ -983,6 +1057,7 @@
     if (!retry) {
       content = '';
       composerCursor = 0;
+      replyingMessage = null;
     }
     busy = true;
     try {
@@ -992,7 +1067,8 @@
           content: draft.content,
           client_nonce: nonce,
           attachment_ids: draft.attachmentIds,
-          mention_user_ids: draft.mentionUserIds
+          mention_user_ids: draft.mentionUserIds,
+          referenced_message_id: draft.referencedMessageId
         })
       });
       if (generation !== loadGeneration || routeRef !== dmId) return;
@@ -1207,6 +1283,7 @@
   }
 
   function startEditing(message: Message) {
+    replyingMessage = null;
     if (!editingMessage) {
       composerDraftBeforeEdit = { content, cursor: composerCursor };
     }
@@ -1217,6 +1294,64 @@
       composerInput?.focus();
       composerInput?.setSelectionRange(composerCursor, composerCursor);
     });
+  }
+
+  function startReply(message: Message) {
+    if (editingMessage) finishEditing();
+    replyingMessage = message;
+    void tick().then(() => composerInput?.focus());
+  }
+
+  function cancelReply() {
+    replyingMessage = null;
+    void tick().then(() => composerInput?.focus());
+  }
+
+  async function loadPins() {
+    if (!channel) return;
+    pinsLoading = true;
+    pinsError = '';
+    try {
+      pinnedMessages = await api<Message[]>(
+        `/channels/${encodeURIComponent(entityRef(channel))}/pins`
+      );
+    } catch (caught) {
+      pinsError = caught instanceof ApiError ? caught.message : 'Could not load pinned messages.';
+    } finally {
+      pinsLoading = false;
+    }
+  }
+
+  function togglePins() {
+    pinsOpen = !pinsOpen;
+    if (pinsOpen) void loadPins();
+  }
+
+  async function togglePinnedMessage(message: Message, shouldPin: boolean) {
+    if (!channel) return;
+    try {
+      await api(
+        `/channels/${encodeURIComponent(entityRef(channel))}/pins/${encodeURIComponent(entityRef(message))}`,
+        { method: shouldPin ? 'PUT' : 'DELETE' }
+      );
+      pinnedMessages = shouldPin
+        ? [message, ...pinnedMessages.filter((item) => entityKey(item) !== entityKey(message))]
+        : pinnedMessages.filter((item) => entityKey(item) !== entityKey(message));
+    } catch (caught) {
+      error = caught instanceof ApiError ? caught.message : 'Could not update the pinned message.';
+    }
+  }
+
+  function jumpToPinnedMessage(message: Message) {
+    pinsOpen = false;
+    const element = document.getElementById(`message-${entityRef(message)}`);
+    if (element) {
+      element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      return;
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.set('around', entityRef(message));
+    window.location.assign(url);
   }
 
   function finishEditing() {
@@ -1269,7 +1404,11 @@
         pendingMessageSend(
           message.content,
           [],
-          message.mention_user_refs.map((reference) => entityRef(reference))
+          message.mention_user_refs.map((reference) => entityRef(reference)),
+          crypto.randomUUID(),
+          message.referenced_message_id && message.referenced_message_domain
+            ? `${message.referenced_message_id}@${message.referenced_message_domain}`
+            : null
         )
       );
       return;
@@ -1284,7 +1423,8 @@
           draft.content,
           replacements,
           draft.mentionUserIds,
-          draft.clientNonce
+          draft.clientNonce,
+          draft.referencedMessageId
         );
         pendingSends.set(draft.clientNonce, draft);
       }
@@ -1521,6 +1661,15 @@
       </div>
       <div class="channel-header-actions">
         <button
+          class:active={pinsOpen}
+          class="icon-button"
+          type="button"
+          aria-label={pinsOpen ? 'Hide pinned messages' : 'Show pinned messages'}
+          aria-pressed={pinsOpen}
+          title="Pinned messages"
+          onclick={togglePins}
+        >📌</button>
+        <button
           class="icon-button"
           type="button"
           aria-label="Jump to a channel"
@@ -1594,6 +1743,10 @@
                   message={item.message}
                   compact={item.compact}
                   mentionUsers={entities.users.values}
+                  referencedMessage={referencedMessage(item.message)}
+                  pinned={pinnedMessages.some(
+                    (pinned) => entityKey(pinned) === entityKey(item.message)
+                  )}
                   presence={item.message.author
                     ? entities.presenceFor(item.message.author)
                     : 'offline'}
@@ -1603,6 +1756,8 @@
                   onDelete={deleteMessage}
                   onRetry={retryMessage}
                   onViewProfile={openMessageProfile}
+                  onReply={startReply}
+                  onTogglePin={togglePinnedMessage}
                 />
               {/if}
             {/snippet}
@@ -1612,6 +1767,17 @@
     </div>
     <footer class="composer-wrap">
       <span class="typing-line">{typing}</span>
+      {#if replyingMessage}
+        <div class="reply-banner">
+          <span>
+            Replying to
+            <strong>{replyingMessage.author?.display_name ?? replyingMessage.author?.username ?? 'Unknown author'}</strong>
+          </span>
+          <div class="reply-banner-actions">
+            <button type="button" onclick={cancelReply} aria-label="Cancel reply">×</button>
+          </div>
+        </div>
+      {/if}
       {#if editingMessage}
         <div class="editing-banner">
           <span>Editing message <small>Your draft and attachments are saved.</small></span>
@@ -1742,6 +1908,15 @@
         <UploadPreviewTray {uploads} onRemove={removeUpload} />
       {/if}
     </footer>
+    {#if pinsOpen}
+      <PinnedMessagesPanel
+        messages={pinnedMessages}
+        loading={pinsLoading}
+        error={pinsError}
+        onClose={() => (pinsOpen = false)}
+        onJump={jumpToPinnedMessage}
+      />
+    {/if}
   </section>
 </main>
 

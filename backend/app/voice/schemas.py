@@ -18,6 +18,9 @@ class VoiceTokenResponse(BaseModel):
     expires_at: str = Field(min_length=20, max_length=64)
     can_speak: bool
     can_stream: bool
+    # Defaults preserve compatibility with peers that predate the explicit
+    # grant. New home instances always send the authoritative value.
+    can_use_vad: bool = True
 
 
 class VoiceFlagsUpdate(BaseModel):

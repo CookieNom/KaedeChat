@@ -1,10 +1,12 @@
 <script lang="ts">
   import { api, ApiError } from '$lib/api/client';
-  import { klipyGifUrl, type GifPage, type GifResult } from '$lib/chat/gifs';
+  import {
+    loadGifFavorites,
+    saveGifFavorites,
+    type GifPage,
+    type GifResult
+  } from '$lib/chat/gifs';
   import { onDestroy, onMount } from 'svelte';
-
-  const FAVORITES_KEY = 'kaede.gif-favorites.v1';
-  const MAX_FAVORITES = 100;
 
   let { onSelect, onClose }: { onSelect: (gif: GifResult) => void; onClose: () => void } = $props();
   let query = $state('');
@@ -23,25 +25,8 @@
       : favorites.filter((gif) => gif.title.toLowerCase().includes(query.trim().toLowerCase()))
   );
 
-  function isGifResult(value: unknown): value is GifResult {
-    if (!value || typeof value !== 'object') return false;
-    const item = value as Record<string, unknown>;
-    return (
-      typeof item.id === 'string' &&
-      typeof item.title === 'string' &&
-      typeof item.url === 'string' &&
-      typeof item.preview_url === 'string' &&
-      klipyGifUrl(item.url) !== null &&
-      klipyGifUrl(item.preview_url) !== null
-    );
-  }
-
   function saveFavorites() {
-    try {
-      localStorage.setItem(FAVORITES_KEY, JSON.stringify(favorites));
-    } catch {
-      // The picker remains usable when browser storage is disabled or full.
-    }
+    saveGifFavorites(favorites);
   }
 
   function isFavorite(gif: GifResult) {
@@ -51,7 +36,7 @@
   function toggleFavorite(gif: GifResult) {
     favorites = isFavorite(gif)
       ? favorites.filter((favorite) => favorite.id !== gif.id)
-      : [gif, ...favorites].slice(0, MAX_FAVORITES);
+      : [gif, ...favorites].slice(0, 100);
     saveFavorites();
   }
 
@@ -97,12 +82,7 @@
 
   onMount(() => {
     window.addEventListener('keydown', windowKeydown);
-    try {
-      const stored: unknown = JSON.parse(localStorage.getItem(FAVORITES_KEY) ?? '[]');
-      favorites = Array.isArray(stored) ? stored.filter(isGifResult).slice(0, MAX_FAVORITES) : [];
-    } catch {
-      favorites = [];
-    }
+    favorites = loadGifFavorites();
     void load();
     searchInput?.focus();
   });

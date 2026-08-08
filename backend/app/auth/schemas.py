@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
@@ -83,6 +84,17 @@ class MfaDisableRequest(MfaCodeRequest):
 class EmailChangeRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=256)
+
+
+class SessionSummary(BaseModel):
+    id: str
+    device_name: str | None
+    user_agent: str | None
+    ip_address: str | None
+    created_at: datetime
+    last_used_at: datetime
+    expires_at: datetime
+    current: bool
 
 
 class SettingsPatch(BaseModel):

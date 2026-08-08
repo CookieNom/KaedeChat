@@ -1,0 +1,21 @@
+[package]
+name = "kaede-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytes.workspace = true
+kaede-api = { path = "../kaede-api" }
+kaede-core = { path = "../kaede-core" }
+kaede-protocol = { path = "../kaede-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true
+

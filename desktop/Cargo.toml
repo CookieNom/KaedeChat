@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+authors = ["Kaede Chat contributors"]
+repository = "https://github.com/kaede-chat/kaede-chat"
+
+[workspace.dependencies]
+anyhow = "1.0.99"
+async-trait = "0.1.89"
+bitflags = { version = "2.9.4", features = ["serde"] }
+bytes = "1.10.1"
+chrono = { version = "0.4.42", features = ["serde"] }
+cpal = "0.18.1"
+copypasta = "0.10.2"
+crossbeam-queue = "0.3.12"
+futures-util = "0.3.31"
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+livekit = { version = "0.7.53", default-features = false, features = ["tokio", "rustls-tls-native-roots"] }
+# LiveKit 0.7.53 and livekit-api 0.5.6 use 0.7.10 DTO literals.
+# Later 0.7.x protocol releases added required fields and are not source-compatible.
+livekit-protocol = "=0.7.10"
+nokhwa = { version = "0.10.11", default-features = false, features = ["decoding", "input-native"] }
+parking_lot = "0.12.4"
+ringbuf = "0.4.8"
+ring = "0.17.14"
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
+rfd = "0.17.2"
+rusqlite = { version = "0.37.0", features = ["bundled", "chrono"] }
+secrecy = { version = "0.10.3", features = ["serde"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+sha2 = "0.10.9"
+slint = { version = "1.17.1", default-features = false, features = ["backend-winit", "renderer-femtovg", "compat-1-2"] }
+slint-build = "1.17.1"
+thiserror = "2.0.16"
+tao = "0.36.0"
+tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.27.0", default-features = false, features = ["connect", "rustls-tls-native-roots", "url"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+url = { version = "2.5.7", features = ["serde"] }
+uuid = { version = "1.18.1", features = ["serde", "v4"] }
+wry = { version = "0.55.1", default-features = false, features = ["os-webview"] }
+global-hotkey = "0.8.0"
+single-instance = "0.3.3"
+tray-icon = "0.21.2"
+zeroize = { version = "1.8.1", features = ["derive"] }
+base64 = "0.22.1"
+zune-jpeg = { version = "=0.5.14", features = ["log"] }
+
+[workspace.lints.rust]
+# Slint's generated bindings contain narrowly scoped `allow(unsafe_code)`
+# annotations. `deny` still rejects unsafe code in Kaede's handwritten crates
+# while permitting the audited generated UI bindings to compile.
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

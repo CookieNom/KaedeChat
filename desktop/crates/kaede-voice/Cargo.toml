@@ -1,0 +1,24 @@
+[package]
+name = "kaede-voice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futures-util.workspace = true
+kaede-api = { path = "../kaede-api" }
+kaede-audio = { path = "../kaede-audio" }
+kaede-capture = { path = "../kaede-capture" }
+kaede-protocol = { path = "../kaede-protocol" }
+livekit.workspace = true
+livekit-protocol.workspace = true
+nokhwa.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+secrecy.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

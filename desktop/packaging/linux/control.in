@@ -1,0 +1,11 @@
+Package: kaede-desktop
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Kaede Chat contributors
+Depends: libasound2, libayatana-appindicator3-1, libgtk-3-0, libwebkit2gtk-4.1-0, libxdo3
+Section: net
+Priority: optional
+Homepage: https://github.com/kaede-chat/kaede-chat
+Description: Native client for federated Kaede Chat instances
+ Kaede Desktop provides communities, direct messages, media, moderation,
+ federation, and native voice/video through a Slint interface.

@@ -9,6 +9,7 @@ export interface VoiceToken {
   expires_at: string;
   can_speak: boolean;
   can_stream: boolean;
+  can_use_vad: boolean;
 }
 
 export interface VoiceTile {

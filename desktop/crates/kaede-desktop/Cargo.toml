@@ -1,0 +1,52 @@
+[package]
+name = "kaede-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = [
+    "embedded-media-viewer",
+    "embedded-turnstile",
+    "native-platform",
+    "native-voice",
+]
+embedded-turnstile = ["kaede-turnstile/embedded-webview"]
+embedded-media-viewer = ["kaede-media-viewer/embedded-webview"]
+native-platform = ["dep:tray-icon"]
+native-voice = ["dep:kaede-audio", "dep:kaede-voice"]
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+copypasta.workspace = true
+global-hotkey.workspace = true
+kaede-api = { path = "../kaede-api" }
+kaede-app = { path = "../kaede-app" }
+kaede-audio = { path = "../kaede-audio", optional = true }
+kaede-auth = { path = "../kaede-auth" }
+kaede-core = { path = "../kaede-core" }
+kaede-gateway = { path = "../kaede-gateway" }
+kaede-media = { path = "../kaede-media" }
+kaede-media-viewer = { path = "../kaede-media-viewer", default-features = false }
+kaede-platform = { path = "../kaede-platform" }
+kaede-protocol = { path = "../kaede-protocol" }
+kaede-turnstile = { path = "../kaede-turnstile", default-features = false }
+kaede-ui = { path = "../kaede-ui" }
+kaede-voice = { path = "../kaede-voice", optional = true }
+secrecy.workspace = true
+serde_json.workspace = true
+slint.workspace = true
+rfd.workspace = true
+serde.workspace = true
+single-instance.workspace = true
+tokio.workspace = true
+tray-icon = { workspace = true, optional = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

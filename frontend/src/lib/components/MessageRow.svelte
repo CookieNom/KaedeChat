@@ -12,10 +12,15 @@
 </script>
 
 <script lang="ts">
-  import type { Message, PresenceStatus, Role, UserSummary } from '$lib/chat/types';
+  import type { Attachment, Message, PresenceStatus, Role, UserSummary } from '$lib/chat/types';
   import { entityRef } from '$lib/chat/refs';
   import { inviteReferencesInMessage } from '$lib/chat/invites';
-  import { klipyGifUrl } from '$lib/chat/gifs';
+  import {
+    gifFavoriteForUrl,
+    isGifFavorite,
+    klipyGifUrl,
+    toggleGifFavorite
+  } from '$lib/chat/gifs';
   import { previewableLink } from '$lib/chat/links';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { DISMISS_FLOATING_LAYERS_EVENT, dismissFloatingLayers } from '$lib/ui/floating-layers';
@@ -27,6 +32,7 @@
   import Markdown from './Markdown.svelte';
   import InviteEmbed from './InviteEmbed.svelte';
   import LinkPreview from './LinkPreview.svelte';
+  import MediaViewer from './MediaViewer.svelte';
 
   let {
     message,
@@ -35,11 +41,15 @@
     presence = 'offline',
     mentionUsers = [],
     mentionRoles = [],
+    referencedMessage = null,
+    pinned = false,
     onEdit,
     onDelete,
     onMessageAuthor,
     onRetry,
     onViewProfile,
+    onReply,
+    onTogglePin,
     moderationActions = [],
     onModerate
   }: {
@@ -49,11 +59,15 @@
     presence?: PresenceStatus;
     mentionUsers?: UserSummary[];
     mentionRoles?: Role[];
+    referencedMessage?: Message | null;
+    pinned?: boolean;
     onEdit?: (message: Message) => void;
     onDelete?: (message: Message) => void;
     onMessageAuthor?: (message: Message) => void;
     onRetry?: (message: Message) => void;
     onViewProfile?: (message: Message, event: MouseEvent) => void;
+    onReply?: (message: Message) => void;
+    onTogglePin?: (message: Message, pinned: boolean) => void;
     moderationActions?: Array<{ id: 'kick' | 'timeout' | 'ban'; label: string }>;
     onModerate?: (user: UserSummary, action: 'kick' | 'timeout' | 'ban') => void;
   } = $props();
@@ -65,6 +79,8 @@
   let confirmingDelete = $state(false);
   let deleteConfirmationButton = $state<HTMLButtonElement | null>(null);
   let feedback = $state('');
+  let mediaViewer = $state<Attachment | null>(null);
+  let gifFavorited = $state(false);
   let menuListenersActive = false;
   const closeExclusiveMenu = (restoreFocus: boolean) => closeMenu(restoreFocus);
 
@@ -148,6 +164,27 @@
     event.stopPropagation();
     closeMenu(true);
     onEdit?.(message);
+  }
+
+  function replyToMessage(event: MouseEvent) {
+    event.stopPropagation();
+    closeMenu(false);
+    onReply?.(message);
+  }
+
+  function togglePin(event: MouseEvent) {
+    event.stopPropagation();
+    closeMenu(false);
+    onTogglePin?.(message, !pinned);
+  }
+
+  function favoriteGif(event: MouseEvent) {
+    event.stopPropagation();
+    if (!gifUrl) return;
+    const result = toggleGifFavorite(gifFavoriteForUrl(gifUrl));
+    gifFavorited = result.favorite;
+    feedback = result.favorite ? 'GIF added to favorites.' : 'GIF removed from favorites.';
+    closeMenu(true);
   }
 
   function requestDelete(event: MouseEvent) {
@@ -298,6 +335,10 @@
     removeMenuListeners();
     releaseMessageMenu(closeExclusiveMenu);
   });
+
+  $effect(() => {
+    gifFavorited = gifUrl ? isGifFavorite(gifUrl) : false;
+  });
 </script>
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- authenticated media URLs are API resources, not Svelte routes -->
@@ -351,6 +392,17 @@
     {/if}
   </button>
   <div class="message-body">
+    {#if message.referenced_message_id}
+      <div class="message-reply-reference">
+        <span aria-hidden="true">↪</span>
+        {#if referencedMessage}
+          <strong>{referencedMessage.author?.display_name ?? referencedMessage.author?.username ?? 'Unknown author'}</strong>
+          <span>{referencedMessage.deleted_at ? 'Message removed' : referencedMessage.content || 'Attachment'}</span>
+        {:else}
+          <span>Referenced message</span>
+        {/if}
+      </div>
+    {/if}
     {#if !compact}
       <header>
         {#if message.author && !message.webhook && onViewProfile}
@@ -367,10 +419,20 @@
     {#if message.deleted_at}
       <p class="message-removed">Message removed</p>
     {:else if gifUrl}
-      <a class="klipy-gif" href={gifUrl} target="_blank" rel="noopener noreferrer">
+      <div class="klipy-gif-wrap">
+        <a class="klipy-gif" href={gifUrl} target="_blank" rel="noopener noreferrer">
         <img src={gifUrl} alt="GIF shared from KLIPY" loading="lazy" />
         <small>Powered by KLIPY</small>
-      </a>
+        </a>
+        <button
+          class:active={gifFavorited}
+          class="sent-gif-favorite"
+          type="button"
+          aria-label={gifFavorited ? 'Remove GIF from favorites' : 'Add GIF to favorites'}
+          aria-pressed={gifFavorited}
+          onclick={favoriteGif}>★</button
+        >
+      </div>
     {:else if message.content}
       <Markdown content={message.content} {mentionUsers} {mentionRoles} />
       {#each inviteReferences as reference (reference)}
@@ -391,14 +453,31 @@
             <span class="attachment-file">Attachment processing unavailable</span>
           {:else if attachment.content_type.startsWith('image/')}
             <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- authenticated media is served by the API, not a Svelte route -->
-            <a href={`/media/${attachment.origin_domain}/${attachment.id}/original`}>
+            <button
+              class="attachment-preview-button"
+              type="button"
+              aria-label={`Open ${attachment.filename}`}
+              onclick={() => (mediaViewer = attachment)}
+            >
               <img
                 src={`/media/${attachment.origin_domain}/${attachment.id}/thumbnail_512`}
                 alt={attachment.filename}
                 width={attachment.width ?? 512}
                 height={attachment.height ?? 320}
               />
-            </a>
+            </button>
+          {:else if attachment.content_type.startsWith('video/')}
+            <div class="attachment-video">
+              <video
+                src={`/media/${attachment.origin_domain}/${attachment.id}/original`}
+                controls
+                playsinline
+                preload="metadata"
+              >
+                <track kind="captions" />
+              </video>
+              <button type="button" onclick={() => (mediaViewer = attachment)}>Open viewer</button>
+            </div>
           {:else}
             <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- authenticated media is served by the API, not a Svelte route -->
             <a
@@ -444,6 +523,31 @@
             <path d="M20 15a4 4 0 0 1-4 4H8l-4 2V7a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v8Z" />
           </svg>
           <span>Message {message.author.display_name ?? message.author.username}</span>
+        </button>
+      {/if}
+      {#if onReply && !message.deleted_at}
+        <button type="button" role="menuitem" tabindex="-1" onclick={replyToMessage}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m9 8-5 4 5 4v-3h4c3.5 0 5.8 1.4 7 4-.2-5.8-3.3-9-9-9H9Z" />
+          </svg>
+          <span>Reply</span>
+        </button>
+      {/if}
+      {#if onTogglePin && !message.deleted_at}
+        <button type="button" role="menuitem" tabindex="-1" onclick={togglePin}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m9 3 6 6-2 2 4 4-2 2-4-4-2 2-6-6 6-6Z" />
+            <path d="m9 15-5 5" />
+          </svg>
+          <span>{pinned ? 'Unpin message' : 'Pin message'}</span>
+        </button>
+      {/if}
+      {#if gifUrl}
+        <button type="button" role="menuitem" tabindex="-1" onclick={favoriteGif}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z" />
+          </svg>
+          <span>{gifFavorited ? 'Remove from GIF favorites' : 'Add to GIF favorites'}</span>
         </button>
       {/if}
       {#if message.author && !message.webhook && onViewProfile}
@@ -596,3 +700,6 @@
     </div>
   {/if}
 </article>
+{#if mediaViewer}
+  <MediaViewer attachment={mediaViewer} onClose={() => (mediaViewer = null)} />
+{/if}

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import html
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
@@ -8,7 +10,7 @@ from typing import NoReturn
 import pyotp
 from cryptography.exceptions import InvalidTag
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -32,6 +34,7 @@ from app.auth.schemas import (
     PasswordResetRequest,
     RefreshRequest,
     RegisterRequest,
+    SessionSummary,
     TokenRequest,
     VerificationResendRequest,
 )
@@ -201,11 +204,12 @@ def token_response(
 ) -> JSONResponse:
     access = issued.access_token
     refresh = issued.refresh_token
-    mobile = request.headers.get("X-Kaede-Client") == "mobile"
+    client_kind = request.headers.get("X-Kaede-Client", "").strip().lower()
+    native_client = client_kind in {"desktop", "mobile"}
     response = JSONResponse(
         {
-            "access_token": access if mobile else None,
-            "refresh_token": refresh if mobile else None,
+            "access_token": access if native_client else None,
+            "refresh_token": refresh if native_client else None,
             "token_type": "opaque",
             "expires_in": settings.access_token_ttl_seconds,
             "mfa_required": False,
@@ -213,7 +217,7 @@ def token_response(
         },
         status_code=status_code,
     )
-    if not mobile:
+    if not native_client:
         secure = settings.environment == "production"
         response.set_cookie(
             "kc_access",
@@ -248,6 +252,78 @@ async def auth_configuration(settings: Settings = Depends(get_settings)) -> dict
         },
         "gif_picker_enabled": settings.klipy_enabled,
     }
+
+
+@router.get("/native-challenge", response_class=HTMLResponse, include_in_schema=False)
+async def native_turnstile_challenge(
+    action: str,
+    request_id: str,
+    settings: Settings = Depends(get_settings),
+) -> HTMLResponse:
+    """Render Turnstile inside the packaged desktop client's restricted WebView.
+
+    The page never accepts credentials and does not exchange the challenge itself.
+    Its only output is the short-lived provider token delivered over the native
+    WebView IPC bridge, where the desktop parent verifies ``request_id`` before
+    attaching it to login or registration.
+    """
+
+    if not settings.turnstile_enabled or settings.turnstile_site_key is None:
+        raise auth_error("TURNSTILE_DISABLED", "Verification is not enabled", 404)
+    if action not in {LOGIN_ACTION, REGISTER_ACTION}:
+        raise auth_error("TURNSTILE_ACTION_INVALID", "Invalid verification action", 400)
+    if re.fullmatch(r"[A-Za-z0-9_-]{16,128}", request_id) is None:
+        raise auth_error("TURNSTILE_REQUEST_INVALID", "Invalid verification request", 400)
+    safe_site_key = html.escape(settings.turnstile_site_key, quote=True)
+    safe_action = html.escape(action, quote=True)
+    safe_request_id = html.escape(request_id, quote=True)
+    body = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kaede verification</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
+ async defer></script>
+<style>
+:root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;
+place-items:center;background:#111210;color:#f4eee5;font:15px system-ui,sans-serif}}
+main{{width:min(430px,calc(100vw - 32px));padding:28px;border:1px solid #3b3c36;border-radius:20px;
+background:#20211e}}h1{{margin:0 0 8px;font-size:24px}}p{{color:#aaa298;margin:0 0 22px}}
+#challenge{{min-height:70px;display:grid;place-items:center}}#error{{color:#ef6b68;margin-top:14px}}
+</style></head><body><main><h1>One quick check</h1>
+<p>Complete this verification to continue securely in Kaede Desktop.</p>
+<div id="challenge"></div><div id="error" role="alert"></div></main>
+<script>
+const requestId={safe_request_id!r};
+function emit(kind,value){{
+  const payload=JSON.stringify({{kind,request_id:requestId,value}});
+  if(window.ipc&&window.ipc.postMessage) window.ipc.postMessage(payload);
+}}
+window.addEventListener('load',()=>{{
+ const wait=setInterval(()=>{{if(!window.turnstile)return;clearInterval(wait);
+  window.turnstile.render('#challenge',{{sitekey:{safe_site_key!r},action:{safe_action!r},
+   callback:(token)=>emit('complete',token),
+   'error-callback':()=>{{
+     document.querySelector('#error').textContent='Verification failed. Try again.';
+     emit('error','provider');
+   }},
+   'expired-callback':()=>emit('expired','expired')}});
+ }},50);
+}});
+</script></body></html>"""
+    return HTMLResponse(
+        body,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "default-src 'none'; script-src 'self' 'unsafe-inline' "
+                "https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; "
+                "connect-src https://challenges.cloudflare.com; style-src 'unsafe-inline'; "
+                "img-src https://challenges.cloudflare.com data:; frame-ancestors 'none'"
+            ),
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
@@ -646,6 +722,67 @@ async def logout(
     response.delete_cookie("kc_access", path="/")
     response.delete_cookie("kc_refresh", path="/api/v1/auth")
     return response
+
+
+@router.get("/sessions", response_model=list[SessionSummary])
+async def list_sessions(
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[SessionSummary]:
+    now = datetime.now(UTC)
+    records = (
+        await session.scalars(
+            select(Session)
+            .where(
+                Session.user_id == auth.user.id,
+                Session.user_domain == auth.user.origin_domain,
+                Session.revoked_at.is_(None),
+                Session.absolute_expires_at > now,
+            )
+            .order_by(Session.last_used_at.desc(), Session.created_at.desc())
+        )
+    ).all()
+    return [
+        SessionSummary(
+            id=record.id,
+            device_name=record.device_name,
+            user_agent=record.user_agent,
+            ip_address=record.ip_address,
+            created_at=record.created_at,
+            last_used_at=record.last_used_at,
+            expires_at=min(record.expires_at, record.absolute_expires_at),
+            current=record.id == auth.grant.session_id,
+        )
+        for record in records
+    ]
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_session(
+    session_id: str,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    if len(session_id) > 64:
+        raise auth_error("SESSION_NOT_FOUND", "Session was not found", 404)
+    record = await session.scalar(
+        select(Session)
+        .where(
+            Session.id == session_id,
+            Session.user_id == auth.user.id,
+            Session.user_domain == auth.user.origin_domain,
+            Session.revoked_at.is_(None),
+        )
+        .with_for_update()
+    )
+    if record is None:
+        raise auth_error("SESSION_NOT_FOUND", "Session was not found", 404)
+    record.revoked_at = datetime.now(UTC)
+    await session.commit()
+    await AccessTokenStore(redis, settings.access_token_ttl_seconds).revoke_session(record.id)
+    return Response(status_code=204)
 
 
 @router.post("/password/forgot", status_code=status.HTTP_202_ACCEPTED)

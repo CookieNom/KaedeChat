@@ -3,19 +3,22 @@ export interface PendingMessageSend {
   content: string | null;
   attachmentIds: string[];
   mentionUserIds: string[];
+  referencedMessageId: string | null;
 }
 
 export function pendingMessageSend(
   content: string | null,
   attachmentIds: readonly string[],
   mentionUserIds: readonly string[],
-  clientNonce: string = crypto.randomUUID()
+  clientNonce: string = crypto.randomUUID(),
+  referencedMessageId: string | null = null
 ): PendingMessageSend {
   return {
     clientNonce,
     content,
     attachmentIds: [...attachmentIds],
-    mentionUserIds: [...mentionUserIds]
+    mentionUserIds: [...mentionUserIds],
+    referencedMessageId
   };
 }
 

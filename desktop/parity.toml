@@ -1,0 +1,81 @@
+schema = 1
+
+[[surface]]
+id = "auth"
+web = ["login", "register", "email verification", "password recovery", "MFA", "adaptive Turnstile"]
+desktop = "kaede-auth"
+tests = ["native token response", "refresh rotation", "vault persistence", "Turnstile callback binding"]
+
+[[surface]]
+id = "home"
+web = ["guild rail", "DM rail", "overview", "friends and requests", "unreads", "mention badges"]
+desktop = "kaede-ui::home"
+tests = ["snapshot reduction", "friend actions", "badge reconciliation"]
+
+[[surface]]
+id = "messages"
+web = ["bidirectional history", "optimistic send", "federated queued send", "edit", "delete", "reactions", "pins", "typing", "read state", "deep links"]
+desktop = "kaede-core::messages"
+tests = ["nonce reconciliation", "resume gap", "access revocation purge", "pagination anchors"]
+
+[[surface]]
+id = "composer"
+web = ["multiline growth", "Markdown", "mentions", "role mentions", "emoji autocomplete", "custom emoji", "GIF", "attachments", "slow mode"]
+desktop = "kaede-ui::composer"
+tests = ["permission gating", "autocomplete tokens", "upload cancellation", "slow-mode countdown"]
+
+[[surface]]
+id = "media"
+web = ["upload tickets", "presigned PUT", "commit", "scan state", "image and video previews", "link previews", "download"]
+desktop = "kaede-media"
+tests = ["authorization stripping", "redirect stripping", "size limits", "revocation purge"]
+
+[[surface]]
+id = "guilds"
+web = ["channels", "categories", "ordering", "invites", "notifications", "member roster", "roles", "emoji", "webhooks", "audit log"]
+desktop = "kaede-ui::guild"
+tests = ["effective permissions", "category sync", "role hierarchy", "settings conflicts"]
+
+[[surface]]
+id = "moderation"
+web = ["kick", "ban", "timed ban", "timeout", "instance ban", "voice moderation", "audit reason"]
+desktop = "kaede-ui::moderation"
+tests = ["hierarchy", "owner immunity", "pagination", "federated member actions"]
+
+[[surface]]
+id = "profiles"
+web = ["profile cards", "avatars", "banners", "custom status", "presence", "roles", "friend action", "block"]
+desktop = "kaede-ui::profiles"
+tests = ["overlay exclusivity", "remote profile refresh", "role assignment ceiling"]
+
+[[surface]]
+id = "voice"
+web = ["guild voice", "DM calls", "mute", "deafen", "camera", "screen share", "occupancy", "move and disconnect"]
+desktop = "kaede-voice"
+tests = ["token grants", "device hotplug", "PTT and VAD", "permission revocation", "reconnect"]
+
+[[surface]]
+id = "desktop-native"
+web = []
+desktop = "kaede-platform"
+tests = ["keychain", "tray", "OS notifications", "global PTT", "screen capture", "single instance", "deep links", "updater"]
+
+[[surface]]
+id = "federation"
+web = ["remote guilds", "remote DMs", "remote media", "presence", "voice", "history import", "access revocation"]
+desktop = "kaede-core::federation"
+tests = ["202 delivery", "replica lag", "history incompleteness", "logical purge", "malicious redirect"]
+
+[[surface]]
+id = "settings"
+web = ["profile", "security", "appearance", "notifications", "privacy", "advanced", "developer mode"]
+desktop = "kaede-ui::settings"
+tests = ["ETag conflict", "vault redaction", "cross-account isolation", "accessibility"]
+
+[deferred]
+message_search = "No server search API exists yet"
+group_dms = "No group-DM contract exists yet"
+stickers = "No sticker model or API exists yet"
+closed_app_push = "Requires a server push registration and delivery protocol"
+e2ee_key_management = "Opaque envelopes are supported; device/key protocol is not"
+

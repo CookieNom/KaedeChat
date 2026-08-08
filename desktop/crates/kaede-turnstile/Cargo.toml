@@ -1,0 +1,23 @@
+[package]
+name = "kaede-turnstile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["embedded-webview"]
+embedded-webview = ["dep:tao", "dep:wry"]
+
+[dependencies]
+async-trait.workspace = true
+kaede-platform = { path = "../kaede-platform" }
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tao = { workspace = true, optional = true }
+tokio.workspace = true
+url.workspace = true
+wry = { workspace = true, optional = true }
+
+[lints]
+workspace = true

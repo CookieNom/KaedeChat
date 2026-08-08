@@ -447,6 +447,7 @@ async def mint_dm_call_token(
         "server_deaf": False,
         "can_speak": True,
         "can_stream": True,
+        "can_use_vad": True,
     }
     try:
         await LiveKitControl(settings).ensure_room(room)
@@ -469,6 +470,7 @@ async def mint_dm_call_token(
         expires_at=expires_at.isoformat(),
         can_speak=True,
         can_stream=True,
+        can_use_vad=True,
     )
 
 

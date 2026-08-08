@@ -21,6 +21,8 @@ allowed to access and send writes back to the authority for validation.
   derivatives; Garage is included as the default self-hosted backend
 - LiveKit voice, video, and screen sharing
 - A static SvelteKit web client backed by FastAPI, PostgreSQL, and Dragonfly
+- A native Slint desktop client for Windows, macOS, and Linux with selectable
+  audio devices, push-to-talk, voice activity, camera, and desktop capture
 
 The federation wire format is documented in
 [docs/kaede-fed-v1.md](docs/kaede-fed-v1.md). Architectural and operational
@@ -85,6 +87,28 @@ These targets use isolated Compose project names and do not publish application
 ports. Run `make lock` after changing dependency declarations. Run `make dev`
 only when you intend to start both development instances.
 
+### Native desktop client
+
+The Rust workspace under `desktop/` uses the same home-instance REST, gateway,
+media, federation, and LiveKit contracts as the web client. The chat interface
+is native Slint; adaptive Turnstile challenges use a restricted, short-lived
+system web view inside the application rather than opening the full client in a
+browser.
+
+Install Rust 1.92 and the platform dependencies listed in
+[desktop/README.md](desktop/README.md), then run:
+
+```sh
+make desktop-check
+make desktop-test
+cargo +1.92.0 run --locked --manifest-path desktop/Cargo.toml -p kaede-desktop
+```
+
+The [desktop architecture](desktop/docs/architecture.md),
+[platform support](desktop/docs/platform-support.md), and
+[release guide](desktop/docs/releasing.md) document native permissions,
+packaging, signing, and known operating-system constraints.
+
 ## Production routing
 
 The default production layout expects host nginx to own ports 80 and 443. The
@@ -113,6 +137,7 @@ with other services.
 - [Voice and calls](docs/m5-voice.md)
 - [Release hardening](docs/m6-hardening-release.md)
 - [Reference deployment](docs/reference-deployment.md)
+- [Desktop client](desktop/README.md)
 
 ### Docker inside LXC
 

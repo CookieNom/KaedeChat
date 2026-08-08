@@ -178,6 +178,57 @@ def require_local_mutation_authority(access: ChannelAccess, settings: Settings) 
         raise HTTPException(status_code=409, detail={"code": "FEDERATED_WRITE_UNSUPPORTED"})
 
 
+async def proxy_remote_guild_pin(
+    session: AsyncSession,
+    settings: Settings,
+    access: ChannelAccess,
+    actor: User,
+    message_ref: EntityReferenceLike,
+    *,
+    pinned: bool,
+) -> Response:
+    guild = access.guild
+    if guild is None or guild.origin_domain == settings.domain:
+        raise RuntimeError("pin proxy requires a remote guild")
+    message_id, message_domain = message_ref.resolve(settings.domain)
+    try:
+        response = await signed_request(
+            session,
+            settings,
+            "POST",
+            guild.origin_domain,
+            f"/_kaede/v1/guilds/{guild.id}/proxy-pin",
+            payload={
+                "actor": profile_from_user(actor),
+                "channel_id": str(access.channel.id),
+                "message_id": f"{message_id}@{message_domain}",
+                "pinned": pinned,
+            },
+        )
+    except (httpx.HTTPError, FederationNetworkError, RuntimeError):
+        raise HTTPException(
+            status_code=503, detail={"code": "FEDERATED_WRITE_UNAVAILABLE"}
+        ) from None
+    if response.status_code in {400, 403, 404, 409, 429}:
+        try:
+            error_body = response.json()
+        except ValueError:
+            error_body = None
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=parse_upstream_error(error_body, "FEDERATED_WRITE_REJECTED"),
+        )
+    if response.status_code != 200:
+        raise HTTPException(status_code=503, detail={"code": "FEDERATED_WRITE_UNAVAILABLE"})
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict) or body.get("pinned") != pinned:
+        raise HTTPException(status_code=502, detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"})
+    return Response(status_code=204)
+
+
 async def channel_message(
     session: AsyncSession,
     settings: Settings,
@@ -1203,12 +1254,29 @@ async def pin_message(
     settings: Settings = Depends(get_settings),
 ) -> Response:
     access = await load_channel_access(session, settings, auth.user, channel_id)
-    require_local_mutation_authority(access, settings)
+    if access.guild is not None and access.guild.origin_domain != settings.domain:
+        await require_channel_permissions(
+            session, redis, access, auth.user, required_permissions("pin.update")
+        )
+        return await proxy_remote_guild_pin(
+            session, settings, access, auth.user, message_id, pinned=True
+        )
+    # Guild pins are shared federation state and are committed by the guild
+    # home. DM pins are intentionally a home-local saved view: a direct
+    # conversation has no safe total ordering for concurrent pin mutations
+    # from two independent homes.
+    if access.guild is not None:
+        require_local_mutation_authority(access, settings)
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
-    await require_channel_permissions(
-        session, redis, access, auth.user, required_permissions("pin.update")
-    )
+    if access.guild is not None:
+        await require_channel_permissions(
+            session, redis, access, auth.user, required_permissions("pin.update")
+        )
+    else:
+        # A DM pin belongs to the conversation and either participant may
+        # maintain it. Membership was already established by load_channel_access.
+        await require_dm_send(session, access, auth.user)
     message = await channel_message(
         session,
         settings,
@@ -1271,13 +1339,14 @@ async def list_pins(
     settings: Settings = Depends(get_settings),
 ) -> list[dict[str, object]]:
     access = await load_channel_access(session, settings, auth.user, channel_id)
-    await require_channel_permissions(
-        session,
-        redis,
-        access,
-        auth.user,
-        required_permissions("pin.list"),
-    )
+    if access.guild is not None:
+        await require_channel_permissions(
+            session,
+            redis,
+            access,
+            auth.user,
+            required_permissions("pin.list"),
+        )
     rows = (
         await session.execute(
             select(Pin, Message, User)
@@ -1322,11 +1391,22 @@ async def unpin_message(
     settings: Settings = Depends(get_settings),
 ) -> Response:
     access = await load_channel_access(session, settings, auth.user, channel_id)
-    require_local_mutation_authority(access, settings)
+    if access.guild is not None and access.guild.origin_domain != settings.domain:
+        await require_channel_permissions(
+            session, redis, access, auth.user, required_permissions("pin.update")
+        )
+        return await proxy_remote_guild_pin(
+            session, settings, access, auth.user, message_id, pinned=False
+        )
+    if access.guild is not None:
+        require_local_mutation_authority(access, settings)
     access = await lock_local_channel_mutation(session, settings, access)
-    await require_channel_permissions(
-        session, redis, access, auth.user, required_permissions("pin.update")
-    )
+    if access.guild is not None:
+        await require_channel_permissions(
+            session, redis, access, auth.user, required_permissions("pin.update")
+        )
+    else:
+        await require_dm_send(session, access, auth.user)
     message = await channel_message(session, settings, access.channel, message_id)
     removed = await session.scalar(
         delete(Pin)

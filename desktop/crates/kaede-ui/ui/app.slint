@@ -1,0 +1,1304 @@
+import { Button, CheckBox, ComboBox, LineEdit, ListView, ScrollView, TextEdit } from "std-widgets.slint";
+
+export struct GuildItem { id: string, initials: string, name: string, mentions: int, has-icon: bool, icon: image }
+export struct ChannelItem { id: string, name: string, kind: string, unread: bool, mentions: int }
+export struct MessageItem { id: string, author: string, avatar: string, has-avatar: bool, avatar-image: image, time: string, body: string, pending: bool, failed: bool, edited: bool, attachments: string, failure-reason: string, mine: bool, preview-url: string, preview-title: string, preview-description: string, preview-site: string, preview-media-type: string, has-attachment-preview: bool, attachment-preview: image, attachment-kind: string, has-reference: bool, reference-author: string, reference-body: string, gif-url: string }
+export struct MemberItem { id: string, initials: string, has-avatar: bool, avatar: image, name: string, status: string, online: bool, role-color: color }
+export struct FriendItem { id: string, initials: string, has-avatar: bool, avatar: image, name: string, handle: string, status: string, relationship: string, online: bool }
+export struct EmojiItem { value: string, label: string }
+export struct GifItem { id: string, title: string, url: string, favorite: bool }
+export struct RoleItem { id: string, name: string, color: color, position: int, hoist: bool, mentionable: bool, editable: bool }
+export struct ProfileRoleItem { id: string, name: string, color: color, assigned: bool, editable: bool }
+export struct OverwriteItem { id: string, label: string, kind: string, allow: string, deny: string }
+export struct OverwritePermissionItem { bit: string, label: string, description: string, state: string }
+export struct PermissionItem { bit: string, label: string, description: string, group: string, checked: bool, danger: string }
+export struct AdminMemberItem { id: string, initials: string, has-avatar: bool, avatar: image, name: string, handle: string, roles: string, timed-out: bool, manageable: bool }
+export struct AdminChannelItem { id: string, name: string, kind: string, topic: string, parent: string, position: int, synced: bool, slow-mode: int }
+export struct AdminRecordItem { id: string, title: string, subtitle: string, kind: string }
+export struct VoiceMemberItem { id: string, initials: string, has-avatar: bool, avatar: image, name: string, muted: bool, deafened: bool }
+export struct VideoTileItem { participant: string, frame: image }
+export struct AccountItem { instance: string, account-key: string, label: string }
+export struct SessionItem { id: string, title: string, detail: string, current: bool }
+export struct CompletionItem { value: string, label: string, detail: string, kind: string }
+
+global Theme {
+    out property <color> canvas: #111210;
+    out property <color> rail: #0b0c0b;
+    out property <color> sidebar: #171816;
+    out property <color> surface: #20211e;
+    out property <color> raised: #292a26;
+    out property <color> border: #3b3c36;
+    out property <color> text: #f4eee5;
+    out property <color> muted: #aaa298;
+    out property <color> accent: #f2765d;
+    out property <color> accent-soft: #503029;
+    out property <color> green: #4fbd83;
+    out property <color> red: #ef6b68;
+}
+
+component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> selected: false;
+    callback clicked;
+    width: 44px; height: 44px; border-radius: 14px;
+    background: selected ? Theme.accent : touch.has-hover ? Theme.raised : transparent;
+    Text { text: root.icon; color: selected ? #161616 : Theme.text; font-size: 19px; horizontal-alignment: center; vertical-alignment: center; }
+    touch := TouchArea { accessible-role: button; accessible-label: root.label; clicked => { root.clicked(); } }
+}
+
+component SidebarButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> selected: false;
+    callback clicked;
+    height: 44px; border-radius: 10px; background: selected ? Theme.accent-soft : touch.has-hover ? Theme.raised : transparent;
+    HorizontalLayout {
+        padding-left: 13px; padding-right: 12px; spacing: 12px;
+        Text { text: root.icon; color: selected ? Theme.accent : Theme.muted; font-size: 17px; vertical-alignment: center; }
+        Text { text: root.label; color: selected ? Theme.text : Theme.muted; font-size: 15px; font-weight: selected ? 700 : 500; vertical-alignment: center; }
+    }
+    touch := TouchArea { accessible-role: button; accessible-label: root.label; clicked => { root.clicked(); } }
+}
+
+component PillButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> destructive: false;
+    in property <bool> enabled: true;
+    callback clicked;
+    callback press-state(bool);
+    height: 40px; min-width: 96px; border-radius: 11px;
+    opacity: root.enabled ? 1 : 0.48;
+    background: destructive ? Theme.red : primary ? Theme.accent : touch.has-hover ? Theme.raised : Theme.surface;
+    border-width: primary || destructive ? 0px : 1px; border-color: Theme.border;
+    Text { text: root.text; color: primary || destructive ? #171412 : Theme.text; font-size: 14px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+    touch := TouchArea { enabled: root.enabled; accessible-role: button; accessible-label: root.text; clicked => { root.clicked(); } pointer-event(event) => { if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) { root.press-state(true); } if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) { root.press-state(false); } } }
+}
+
+component LoginPane inherits Rectangle {
+    callback login(string, string, string);
+    callback register-requested;
+    callback recovery-requested;
+    callback account-selected(string, string);
+    callback account-forgotten(string);
+    in property <[AccountItem]> accounts;
+    in property <bool> busy;
+    in property <string> error;
+    background: Theme.canvas;
+    Rectangle {
+        x: max(28px, (parent.width - self.width) / 2); y: max(24px, (parent.height - self.height) / 2);
+        width: min(620px, parent.width - 56px); height: min(780px, parent.height - 48px); border-radius: 26px;
+        background: Theme.surface; border-width: 1px; border-color: Theme.border;
+        ScrollView { VerticalLayout {
+            padding: 42px; spacing: 19px;
+            Text { text: "KAEDE"; color: Theme.accent; font-size: 14px; font-weight: 900; letter-spacing: 3px; }
+            Text { text: "Welcome home."; color: Theme.text; font-size: 42px; font-weight: 900; }
+            Text { text: "Sign in to your home instance. Federation stays behind your server boundary."; color: Theme.muted; font-size: 14px; wrap: word-wrap; }
+            if root.accounts.length > 0: Text { text: "SAVED ACCOUNTS"; color: Theme.muted; font-size: 11px; font-weight: 800; }
+            for account in root.accounts: Rectangle { height: 64px; border-radius: 12px; background: Theme.raised; HorizontalLayout { padding: 10px; spacing: 10px; VerticalLayout { alignment: center; Text { text: account.label; color: Theme.text; font-weight: 800; } Text { text: account.instance; color: Theme.muted; font-size: 11px; } } Rectangle { horizontal-stretch: 1; } PillButton { text: "Continue"; primary: true; clicked => { root.account-selected(account.instance, account.account-key); } } IconButton { icon: "×"; label: "Forget saved account"; clicked => { root.account-forgotten(account.account-key); } } } }
+            if root.accounts.length > 0: Rectangle { height: 1px; background: Theme.border; }
+            Text { text: "INSTANCE"; color: Theme.muted; font-size: 11px; font-weight: 800; }
+            instance := LineEdit { placeholder-text: "chat.example.com"; }
+            Text { text: "USERNAME OR EMAIL"; color: Theme.muted; font-size: 11px; font-weight: 800; }
+            identifier := LineEdit { placeholder-text: "you@example.com"; }
+            Text { text: "PASSWORD"; color: Theme.muted; font-size: 11px; font-weight: 800; }
+            password := LineEdit { input-type: InputType.password; placeholder-text: "Password"; }
+            if root.error != "": Rectangle { height: 48px; border-radius: 9px; background: #542a28; Text { text: root.error; color: #ffaaa2; font-size: 13px; wrap: word-wrap; vertical-alignment: center; x: 14px; width: parent.width - 28px; } }
+            PillButton { text: root.busy ? "Signing in…" : "Sign in"; primary: true; clicked => { if (!root.busy) { root.login(instance.text, identifier.text, password.text); } } }
+            HorizontalLayout { alignment: center; spacing: 16px;
+                PillButton { text: "Create account"; clicked => { root.register-requested(); } }
+                PillButton { text: "Forgot password"; clicked => { root.recovery-requested(); } }
+            }
+        } }
+    }
+}
+
+component OnboardingPane inherits Rectangle {
+    in-out property <string> mode: "register";
+    in-out property <string> instance-value;
+    in-out property <string> username-value;
+    in-out property <string> email-value;
+    in-out property <string> token-value;
+    in-out property <string> password-value;
+    in property <bool> busy;
+    in property <string> error;
+    in property <string> notice;
+    callback close;
+    callback register(string, string, string, string);
+    callback forgot(string, string);
+    callback verify(string, string);
+    callback reset(string, string, string);
+    background: Theme.canvas;
+    Rectangle {
+        x: max(28px, (parent.width - self.width) / 2); y: max(24px, (parent.height - self.height) / 2);
+        width: min(600px, parent.width - 56px); height: min(760px, parent.height - 48px); border-radius: 26px;
+        background: Theme.surface; border-width: 1px; border-color: Theme.border;
+        ScrollView { VerticalLayout {
+            padding: 42px; spacing: 16px;
+            HorizontalLayout { Text { text: "KAEDE ACCOUNT"; color: Theme.accent; font-size: 12px; font-weight: 900; letter-spacing: 2px; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "×"; label: "Back to sign in"; clicked => { root.close(); } } }
+            Text { text: root.mode == "register" ? "Create your account" : root.mode == "forgot" ? "Recover your account" : root.mode == "verify" ? "Verify your email" : "Choose a new password"; color: Theme.text; font-size: 34px; font-weight: 900; wrap: word-wrap; }
+            Text { text: "Everything is sent directly to your selected home instance. If verification is required, Kaede opens a restricted in-app challenge window—never an external browser."; color: Theme.muted; font-size: 14px; wrap: word-wrap; }
+            Text { text: "INSTANCE"; color: Theme.muted; font-size: 11px; font-weight: 800; }
+            LineEdit { text <=> root.instance-value; placeholder-text: "chat.example.com"; }
+            if root.mode == "register": Text { text: "USERNAME"; color: Theme.muted; font-size: 11px; font-weight: 800; }
+            if root.mode == "register": LineEdit { text <=> root.username-value; placeholder-text: "yourname"; }
+            if root.mode == "register" || root.mode == "forgot": Text { text: "EMAIL"; color: Theme.muted; font-size: 11px; font-weight: 800; }
+            if root.mode == "register" || root.mode == "forgot": LineEdit { text <=> root.email-value; placeholder-text: "you@example.com"; }
+            if root.mode == "verify" || root.mode == "reset": Text { text: root.mode == "verify" ? "VERIFICATION TOKEN" : "RESET TOKEN"; color: Theme.muted; font-size: 11px; font-weight: 800; }
+            if root.mode == "verify" || root.mode == "reset": LineEdit { text <=> root.token-value; placeholder-text: "Paste the token from your email"; }
+            if root.mode == "register" || root.mode == "reset": Text { text: "PASSWORD"; color: Theme.muted; font-size: 11px; font-weight: 800; }
+            if root.mode == "register" || root.mode == "reset": LineEdit { text <=> root.password-value; input-type: InputType.password; placeholder-text: "At least 12 characters"; }
+            if root.error != "": Rectangle { height: 52px; border-radius: 9px; background: #542a28; Text { text: root.error; color: #ffaaa2; font-size: 13px; wrap: word-wrap; vertical-alignment: center; x: 14px; width: parent.width - 28px; } }
+            if root.notice != "": Rectangle { height: 52px; border-radius: 9px; background: #203c30; Text { text: root.notice; color: #93e5b8; font-size: 13px; wrap: word-wrap; vertical-alignment: center; x: 14px; width: parent.width - 28px; } }
+            if root.mode == "register": PillButton { text: root.busy ? "Creating…" : "Create account"; primary: true; enabled: !root.busy; clicked => { root.register(root.instance-value, root.username-value, root.email-value, root.password-value); } }
+            if root.mode == "forgot": PillButton { text: root.busy ? "Requesting…" : "Send recovery email"; primary: true; enabled: !root.busy; clicked => { root.forgot(root.instance-value, root.email-value); } }
+            if root.mode == "verify": PillButton { text: root.busy ? "Verifying…" : "Verify email"; primary: true; enabled: !root.busy; clicked => { root.verify(root.instance-value, root.token-value); } }
+            if root.mode == "reset": PillButton { text: root.busy ? "Resetting…" : "Reset password"; primary: true; enabled: !root.busy; clicked => { root.reset(root.instance-value, root.token-value, root.password-value); } }
+            HorizontalLayout { alignment: center; spacing: 8px;
+                PillButton { text: "Register"; primary: root.mode == "register"; clicked => { root.mode = "register"; } }
+                PillButton { text: "Recovery"; primary: root.mode == "forgot"; clicked => { root.mode = "forgot"; } }
+                PillButton { text: "Verify"; primary: root.mode == "verify"; clicked => { root.mode = "verify"; } }
+                PillButton { text: "Reset"; primary: root.mode == "reset"; clicked => { root.mode = "reset"; } }
+            }
+        } }
+    }
+}
+
+component MfaPane inherits Rectangle {
+    callback submit(string);
+    callback cancel;
+    in property <bool> busy;
+    in property <string> error;
+    background: Theme.canvas;
+    Rectangle {
+        x: max(28px, (parent.width - self.width) / 2); y: max(24px, (parent.height - self.height) / 2);
+        width: min(500px, parent.width - 56px); height: 420px; border-radius: 26px;
+        background: Theme.surface; border-width: 1px; border-color: Theme.border;
+        VerticalLayout {
+            padding: 42px; spacing: 19px;
+            Text { text: "SECURITY CHECK"; color: Theme.accent; font-size: 12px; font-weight: 900; letter-spacing: 2px; }
+            Text { text: "Two-factor authentication"; color: Theme.text; font-size: 32px; font-weight: 900; wrap: word-wrap; }
+            Text { text: "Enter a code from your authenticator or one of your recovery codes."; color: Theme.muted; font-size: 14px; wrap: word-wrap; }
+            Text { text: "AUTHENTICATION CODE"; color: Theme.muted; font-size: 11px; font-weight: 800; }
+            code := LineEdit { placeholder-text: "000000 or recovery code"; }
+            if root.error != "": Rectangle { height: 48px; border-radius: 9px; background: #542a28; Text { text: root.error; color: #ffaaa2; font-size: 13px; wrap: word-wrap; vertical-alignment: center; x: 14px; width: parent.width - 28px; } }
+            HorizontalLayout {
+                spacing: 10px;
+                PillButton { text: "Back"; clicked => { if (!root.busy) { root.cancel(); } } }
+                PillButton { text: root.busy ? "Checking…" : "Continue"; primary: true; clicked => { if (!root.busy && code.text != "") { root.submit(code.text); } } }
+            }
+        }
+    }
+}
+
+component ServerRail inherits Rectangle {
+    in property <[GuildItem]> guilds;
+    in property <string> selected-guild;
+    in property <int> home-mentions;
+    callback home;
+    callback guild(string);
+    width: 76px; background: Theme.rail;
+    VerticalLayout {
+        padding-top: 12px; padding-bottom: 12px; spacing: 10px; alignment: start;
+        Rectangle {
+            width: 50px; height: 50px; border-radius: 16px; background: root.selected-guild == "" ? Theme.accent : Theme.raised;
+            Text { text: "⌂"; color: Theme.text; font-size: 24px; horizontal-alignment: center; vertical-alignment: center; }
+            if root.home-mentions > 0: Rectangle { x: 37px; y: -3px; width: 20px; height: 20px; border-radius: 10px; background: Theme.red; Text { text: root.home-mentions > 9 ? "9+" : "\{root.home-mentions}"; color: white; font-size: 10px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; } }
+            TouchArea { accessible-role: button; accessible-label: "Home"; clicked => { root.home(); } }
+        }
+        Rectangle { width: 34px; height: 1px; background: Theme.border; }
+        for item[i] in root.guilds: Rectangle {
+            width: 50px; height: 50px; border-radius: root.selected-guild == item.id ? 14px : 24px;
+            background: root.selected-guild == item.id ? Theme.accent : Theme.raised;
+            clip: true;
+            if item.has-icon: Image { source: item.icon; image-fit: cover; }
+            if !item.has-icon: Text { text: item.initials; color: Theme.text; font-size: 14px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+            if item.mentions > 0: Rectangle { x: 37px; y: -3px; width: 20px; height: 20px; border-radius: 10px; background: Theme.red; Text { text: item.mentions > 9 ? "9+" : "\{item.mentions}"; color: white; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; } }
+            TouchArea { accessible-role: button; accessible-label: item.name; clicked => { root.guild(item.id); } }
+        }
+        Rectangle { width: 50px; height: 50px; border-radius: 24px; background: Theme.surface; Text { text: "+"; color: Theme.green; font-size: 25px; horizontal-alignment: center; vertical-alignment: center; } }
+    }
+}
+
+component ChannelSidebar inherits Rectangle {
+    in property <string> title;
+    in property <[ChannelItem]> channels;
+    in property <string> selected-channel;
+    in property <string> current-user;
+    callback channel(string);
+    callback guild-settings;
+    callback settings;
+    width: 292px; background: Theme.sidebar;
+    VerticalLayout {
+        Rectangle { height: 74px; border-width: 1px; border-color: Theme.border; HorizontalLayout { padding-left: 18px; padding-right: 14px; Text { text: root.title; color: Theme.text; font-size: 17px; font-weight: 800; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "⚙"; label: "Guild settings"; clicked => { root.guild-settings(); } } } }
+        Rectangle { height: 52px; HorizontalLayout { padding-left: 13px; padding-right: 13px; SidebarButton { icon: "⌕"; label: "Search"; } } }
+        ScrollView {
+            VerticalLayout {
+                padding-left: 10px; padding-right: 10px; spacing: 3px;
+                Text { text: "CHANNELS"; color: Theme.muted; font-size: 11px; font-weight: 900; letter-spacing: 1.4px; }
+                for item[i] in root.channels: SidebarButton { icon: item.kind == "voice" ? "◖))" : "#"; label: item.name; selected: item.id == root.selected-channel; clicked => { root.channel(item.id); } }
+            }
+        }
+        Rectangle {
+            height: 68px; background: Theme.surface; border-width: 1px; border-color: Theme.border;
+            HorizontalLayout { padding-left: 12px; padding-right: 10px; spacing: 10px;
+                Rectangle { width: 40px; height: 40px; border-radius: 14px; background: Theme.green; Text { text: root.current-user == "" ? "?" : root.current-user; color: #152019; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; } }
+                VerticalLayout { alignment: center; Text { text: root.current-user; color: Theme.text; font-size: 14px; font-weight: 800; } Text { text: "● Online"; color: Theme.green; font-size: 11px; } }
+                IconButton { icon: "⚙"; label: "User settings"; clicked => { root.settings(); } }
+            }
+        }
+    }
+}
+
+component HomeSidebar inherits Rectangle {
+    in property <[ChannelItem]> direct-messages;
+    in property <string> selected-page;
+    in property <string> selected-channel;
+    in property <string> current-user;
+    callback page(string);
+    callback channel(string);
+    callback new-message;
+    callback settings;
+    width: 292px; background: Theme.sidebar;
+    VerticalLayout {
+        Rectangle {
+            height: 74px; border-width: 1px; border-color: Theme.border;
+            HorizontalLayout { padding-left: 18px; spacing: 11px;
+                Rectangle { width: 40px; height: 40px; border-radius: 13px; background: Theme.accent-soft; Text { text: "K"; color: Theme.accent; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; } }
+                VerticalLayout { alignment: center; Text { text: "Kaede"; color: Theme.text; font-size: 17px; font-weight: 900; } Text { text: "Home instance"; color: Theme.muted; font-size: 10px; } }
+            }
+        }
+        VerticalLayout { padding: 10px; spacing: 4px;
+            SidebarButton { icon: "⌂"; label: "Overview"; selected: root.selected-page == "overview"; clicked => { root.page("overview"); } }
+            SidebarButton { icon: "♙"; label: "Friends & requests"; selected: root.selected-page == "friends"; clicked => { root.page("friends"); } }
+        }
+        HorizontalLayout { padding-left: 18px; padding-right: 10px; Text { text: "DIRECT MESSAGES"; color: Theme.muted; font-size: 11px; font-weight: 900; letter-spacing: 1.2px; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "+"; label: "New direct message"; clicked => { root.new-message(); } } }
+        ScrollView { vertical-stretch: 1; VerticalLayout { padding-left: 10px; padding-right: 10px; spacing: 3px;
+            for item[i] in root.direct-messages: SidebarButton { icon: "@"; label: item.name; selected: item.id == root.selected-channel; clicked => { root.channel(item.id); } }
+        } }
+        Rectangle { height: 68px; background: Theme.surface; border-width: 1px; border-color: Theme.border;
+            HorizontalLayout { padding-left: 12px; padding-right: 10px; spacing: 10px;
+                Rectangle { width: 40px; height: 40px; border-radius: 14px; background: Theme.green; Text { text: root.current-user; color: #152019; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; } }
+                VerticalLayout { alignment: center; Text { text: root.current-user; color: Theme.text; font-size: 14px; font-weight: 800; } Text { text: "● Online"; color: Theme.green; font-size: 11px; } }
+                IconButton { icon: "⚙"; label: "User settings"; clicked => { root.settings(); } }
+            }
+        }
+    }
+}
+
+component FriendRow inherits Rectangle {
+    in property <FriendItem> friend;
+    callback profile(string);
+    callback message(string);
+    callback accept(string);
+    callback remove(string);
+    height: 66px; border-radius: 12px; background: touch.has-hover ? Theme.raised : Theme.surface;
+    HorizontalLayout { padding-left: 12px; padding-right: 10px; spacing: 11px;
+        Rectangle { width: 42px; height: 42px; border-radius: 15px; background: Theme.green; clip: true; if root.friend.has-avatar: Image { source: root.friend.avatar; image-fit: cover; } if !root.friend.has-avatar: Text { text: root.friend.initials; color: #152019; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; } if root.friend.online: Rectangle { x: 31px; y: 31px; width: 11px; height: 11px; border-radius: 6px; background: Theme.green; border-width: 2px; border-color: Theme.surface; } }
+        VerticalLayout { alignment: center; Text { text: root.friend.name; color: Theme.text; font-size: 15px; font-weight: 800; } Text { text: root.friend.status == "" ? root.friend.handle : root.friend.status; color: Theme.muted; font-size: 11px; } }
+        Rectangle { horizontal-stretch: 1; }
+        if root.friend.relationship == "incoming": PillButton { text: "Accept"; primary: true; clicked => { root.accept(root.friend.id); } }
+        if root.friend.relationship == "friend": PillButton { text: "Message"; clicked => { root.message(root.friend.id); } }
+        PillButton { text: "Profile"; clicked => { root.profile(root.friend.id); } }
+        PillButton { text: root.friend.relationship == "blocked" ? "Unblock" : "Remove"; destructive: root.friend.relationship != "blocked"; clicked => { root.remove(root.friend.id); } }
+    }
+    touch := TouchArea { }
+}
+
+component HomePane inherits Rectangle {
+    in property <string> page;
+    in property <[FriendItem]> friends;
+    callback add-friend(string);
+    callback friend-profile(string);
+    callback friend-message(string);
+    callback friend-accept(string);
+    callback friend-remove(string);
+    callback create-guild(string);
+    callback join-guild(string);
+    background: Theme.canvas;
+    VerticalLayout {
+        Rectangle { height: 62px; background: Theme.surface; border-width: 1px; border-color: Theme.border; HorizontalLayout { padding-left: 22px; Text { text: root.page == "friends" ? "Friends" : "Home"; color: Theme.text; font-size: 18px; font-weight: 900; vertical-alignment: center; } } }
+        ScrollView { VerticalLayout { padding: 34px; spacing: 18px;
+            Text { text: root.page == "friends" ? "Friends & requests" : "Your gathering places"; color: Theme.accent; font-size: 12px; font-weight: 900; letter-spacing: 2px; }
+            Text { text: root.page == "friends" ? "Your people" : "Welcome home."; color: Theme.text; font-size: 42px; font-weight: 900; }
+            Text { text: root.page == "friends" ? "Friends and pending requests across your home instance and the fediverse." : "Pick a conversation from the left, or continue into one of your guilds."; color: Theme.muted; font-size: 14px; wrap: word-wrap; }
+            if root.page == "friends": Rectangle { height: 92px; border-radius: 15px; background: Theme.surface; border-width: 1px; border-color: Theme.border; HorizontalLayout { padding: 15px; spacing: 10px; VerticalLayout { Text { text: "ADD A FRIEND"; color: Theme.accent; font-size: 11px; font-weight: 900; } friend-handle := LineEdit { placeholder-text: "@friend@example.net"; } } PillButton { text: "Send request"; primary: true; clicked => { if (friend-handle.text != "") { root.add-friend(friend-handle.text); friend-handle.text = ""; } } } } }
+            if root.page == "friends": Text { text: "PEOPLE"; color: Theme.muted; font-size: 11px; font-weight: 900; letter-spacing: 1.4px; }
+            if root.page == "friends": VerticalLayout { spacing: 7px; for item[i] in root.friends: FriendRow { friend: item; profile(id) => { root.friend-profile(id); } message(id) => { root.friend-message(id); } accept(id) => { root.friend-accept(id); } remove(id) => { root.friend-remove(id); } } }
+            if root.page == "overview": Rectangle { height: 280px; border-radius: 22px; background: Theme.surface; border-width: 1px; border-color: Theme.border; VerticalLayout { alignment: center; spacing: 12px; Text { text: "K"; color: Theme.accent; font-size: 54px; font-weight: 900; horizontal-alignment: center; } Text { text: "Conversations without borders"; color: Theme.text; font-size: 24px; font-weight: 900; horizontal-alignment: center; } Text { text: "Your home instance keeps your identity, privacy, and federation policy under your control."; color: Theme.muted; font-size: 14px; horizontal-alignment: center; wrap: word-wrap; } } }
+            if root.page == "overview": HorizontalLayout { spacing: 14px;
+                Rectangle { height: 150px; border-radius: 16px; background: Theme.surface; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 16px; spacing: 9px; Text { text: "Create a guild"; color: Theme.text; font-size: 18px; font-weight: 900; } new-guild-name := LineEdit { placeholder-text: "Guild name"; } PillButton { text: "Create guild"; primary: true; clicked => { if (new-guild-name.text != "") { root.create-guild(new-guild-name.text); new-guild-name.text = ""; } } } } }
+                Rectangle { height: 150px; border-radius: 16px; background: Theme.surface; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 16px; spacing: 9px; Text { text: "Join with an invite"; color: Theme.text; font-size: 18px; font-weight: 900; } invite-code := LineEdit { placeholder-text: "Invite code or URL"; } PillButton { text: "Preview and join"; primary: true; clicked => { if (invite-code.text != "") { root.join-guild(invite-code.text); } } } } }
+            }
+        } }
+    }
+}
+
+component MessageRow inherits Rectangle {
+    in property <MessageItem> message;
+    callback context(int, int);
+    callback open-media;
+    min-height: 66px; background: touch.has-hover ? #242521 : transparent;
+    HorizontalLayout { padding-left: 18px; padding-right: 18px; padding-top: 7px; padding-bottom: 7px; spacing: 12px;
+        Rectangle { width: 42px; height: 42px; border-radius: 15px; background: Theme.accent-soft; clip: true; if root.message.has-avatar: Image { source: root.message.avatar-image; image-fit: cover; } if !root.message.has-avatar: Text { text: root.message.avatar; color: Theme.text; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; } }
+        VerticalLayout { spacing: 3px;
+            if root.message.has-reference: Rectangle { height: 27px; border-radius: 7px; background: Theme.raised; HorizontalLayout { padding-left: 9px; padding-right: 9px; spacing: 7px; Text { text: "↪"; color: Theme.muted; vertical-alignment: center; } Text { text: root.message.reference-author; color: Theme.text; font-size: 11px; font-weight: 800; vertical-alignment: center; } Text { text: root.message.reference-body; color: Theme.muted; font-size: 11px; overflow: elide; vertical-alignment: center; } } }
+            HorizontalLayout { spacing: 8px; Text { text: root.message.author; color: Theme.text; font-size: 15px; font-weight: 800; } Text { text: root.message.time; color: Theme.muted; font-size: 11px; vertical-alignment: center; } if root.message.edited: Text { text: "(edited)"; color: Theme.muted; font-size: 10px; vertical-alignment: center; } }
+            Text { text: root.message.body; color: root.message.failed ? Theme.red : root.message.pending ? #77736d : Theme.text; font-size: 15px; wrap: word-wrap; }
+            if root.message.has-attachment-preview: media-preview := Rectangle { height: 260px; max-width: 520px; border-radius: 10px; clip: true; background: Theme.raised; Image { source: root.message.attachment-preview; image-fit: contain; } if root.message.attachment-kind == "video": Rectangle { width: 66px; height: 66px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; border-radius: 33px; background: #b0000000; Text { text: "▶"; color: white; font-size: 27px; horizontal-alignment: center; vertical-alignment: center; } } TouchArea { accessible-role: button; accessible-label: root.message.attachment-kind == "video" ? "Play video" : "Open image"; clicked => { root.open-media(); } } }
+            if root.message.attachments != "": Rectangle { height: 38px; border-radius: 9px; background: Theme.raised; Text { x: 12px; text: "Attachment · " + root.message.attachments; color: Theme.accent; vertical-alignment: center; } }
+            if root.message.preview-url != "": Rectangle { min-height: 82px; max-width: 560px; border-radius: 10px; background: Theme.raised; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 11px; spacing: 3px; Text { text: root.message.preview-site; color: Theme.muted; font-size: 10px; } Text { text: root.message.preview-title == "" ? root.message.preview-url : root.message.preview-title; color: Theme.accent; font-size: 14px; font-weight: 800; wrap: word-wrap; } if root.message.preview-description != "": Text { text: root.message.preview-description; color: Theme.muted; font-size: 12px; max-height: 42px; overflow: elide; wrap: word-wrap; } if root.message.preview-media-type != "": Text { text: root.message.preview-media-type == "video" ? "Video preview" : "Image preview"; color: Theme.muted; font-size: 10px; } } }
+            if root.message.failed: Text { text: root.message.failure-reason == "" ? "Message not delivered · Right-click to retry" : root.message.failure-reason + " · Right-click to retry"; color: Theme.red; font-size: 12px; font-weight: 700; wrap: word-wrap; }
+        }
+    }
+    touch := TouchArea { pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.context(self.mouse-x / 1px, self.mouse-y / 1px); } } }
+}
+
+component Composer inherits Rectangle {
+    in-out property <string> text;
+    in property <string> channel-name;
+    in property <bool> can-send: true;
+    in property <string> blocked-reason;
+    in property <bool> attachment-busy: false;
+    in property <string> pending-attachments;
+    in property <[CompletionItem]> completions;
+    callback send(string);
+    callback attach;
+    callback gif;
+    callback emoji;
+    callback clear-attachments;
+    callback draft-edited(string);
+    callback completion-selected(string);
+    height: max(58px, min(188px, editor.preferred-height + 24px));
+    border-radius: 16px; background: Theme.raised; border-width: 1px; border-color: Theme.border;
+    HorizontalLayout { padding: 8px; spacing: 6px;
+        IconButton { icon: root.attachment-busy ? "…" : "+"; label: "Attach file"; clicked => { if (!root.attachment-busy) { root.attach(); } } }
+        editor := TextEdit { text <=> root.text; enabled: root.can-send; wrap: word-wrap; font-size: 15px; vertical-stretch: 1; edited => { root.draft-edited(self.text); } }
+        IconButton { icon: "GIF"; label: "Open GIF picker"; clicked => { root.gif(); } }
+        IconButton { icon: "☺"; label: "Open emoji picker"; clicked => { root.emoji(); } }
+        PillButton { text: "Send"; primary: true; clicked => { if (root.can-send && (root.text != "" || root.pending-attachments != "")) { root.send(root.text); } } }
+    }
+    if root.pending-attachments != "": Rectangle { x: 58px; y: -36px; width: min(parent.width - 76px, 560px); height: 32px; border-radius: 9px; background: Theme.surface; border-width: 1px; border-color: Theme.border; HorizontalLayout { padding-left: 10px; spacing: 8px; Text { text: "Ready · " + root.pending-attachments; color: Theme.text; overflow: elide; vertical-alignment: center; } IconButton { width: 30px; height: 30px; icon: "×"; label: "Remove attachments"; clicked => { root.clear-attachments(); } } } }
+    if root.completions.length > 0: Rectangle { x: 58px; y: -min(310px, root.completions.length * 54px + 16px); width: min(parent.width - 76px, 620px); height: min(300px, root.completions.length * 54px + 12px); border-radius: 13px; background: Theme.surface; border-width: 1px; border-color: Theme.border; ScrollView { VerticalLayout { padding: 6px; spacing: 3px; for item in root.completions: Rectangle { height: 49px; border-radius: 9px; background: completion-touch.has-hover ? Theme.raised : transparent; HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 10px; Rectangle { width: 32px; height: 32px; border-radius: 10px; background: Theme.accent-soft; Text { text: item.kind == "emoji" ? item.value : item.kind == "channel" ? "#" : "@"; color: Theme.accent; horizontal-alignment: center; vertical-alignment: center; } } VerticalLayout { alignment: center; Text { text: item.label; color: Theme.text; font-weight: 800; } Text { text: item.detail; color: Theme.muted; font-size: 10px; } } } completion-touch := TouchArea { accessible-role: button; accessible-label: item.label; clicked => { root.completion-selected(item.value); } } } } } }
+    if !root.can-send: Text { text: root.blocked-reason == "" ? "You do not have permission to send messages in this channel." : root.blocked-reason; color: Theme.muted; x: 60px; vertical-alignment: center; }
+}
+
+component ChatPane inherits Rectangle {
+    in property <string> channel-name;
+    in property <bool> direct-message: false;
+    in property <string> call-state;
+    in property <bool> call-incoming: false;
+    in property <[MessageItem]> messages;
+    in property <bool> can-send: true;
+    in property <int> slow-mode-remaining: 0;
+    in-out property <string> draft;
+    in property <bool> attachment-busy: false;
+    in property <string> pending-attachments;
+    in property <[CompletionItem]> completions;
+    in property <string> typing-indicator;
+    in property <string> replying-author;
+    in-out property <bool> reply-notify: true;
+    in property <bool> reply-can-notify: false;
+    callback send(string);
+    callback toggle-members;
+    callback open-pins;
+    callback open-message-media(string);
+    callback message-context(string, bool, bool, string, int, int);
+    callback load-older;
+    callback attach;
+    callback gif;
+    callback emoji;
+    callback clear-attachments;
+    callback start-call;
+    callback accept-call;
+    callback decline-call;
+    callback end-call;
+    callback draft-edited(string);
+    callback completion-selected(string);
+    callback cancel-reply;
+    private property <int> previous-message-count: 0;
+    private property <int> message-count: root.messages.length;
+    changed message-count => {
+        if (root.previous-message-count == 0 || -message-list.viewport-y + message-list.height >= message-list.viewport-height - 96px) {
+            message-list.viewport-y = min(0px, message-list.height - message-list.viewport-height);
+        }
+        root.previous-message-count = root.message-count;
+    }
+    background: Theme.canvas;
+    VerticalLayout {
+        Rectangle { height: 62px; background: Theme.surface; border-width: 1px; border-color: Theme.border; HorizontalLayout { padding-left: 18px; padding-right: 12px; Text { text: (root.direct-message ? "@  " : "#  ") + root.channel-name; color: Theme.text; font-size: 17px; font-weight: 800; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "⚑"; label: "Pinned messages"; clicked => { root.open-pins(); } } if root.direct-message && root.call-state == "": IconButton { icon: "☎"; label: "Start voice call"; clicked => { root.start-call(); } } if !root.direct-message: IconButton { icon: "♟"; label: "Toggle member list"; clicked => { root.toggle-members(); } } } }
+        if root.direct-message && root.call-state != "": Rectangle { height: 58px; background: Theme.accent-soft; HorizontalLayout { padding-left: 18px; padding-right: 18px; spacing: 9px; Text { text: root.call-incoming ? "Incoming voice call" : root.call-state == "ringing" ? "Calling…" : "Voice call in progress"; color: Theme.text; font-weight: 800; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } if root.call-incoming: PillButton { text: "Decline"; destructive: true; clicked => { root.decline-call(); } } if root.call-incoming: PillButton { text: "Join"; primary: true; clicked => { root.accept-call(); } } if !root.call-incoming: PillButton { text: "End call"; destructive: true; clicked => { root.end-call(); } } } }
+        Rectangle { height: 42px; PillButton { x: (parent.width - self.width) / 2; text: "Load earlier messages"; clicked => { root.load-older(); } } }
+        message-list := ListView { vertical-stretch: 1; for item[i] in root.messages: MessageRow { message: item; context(x, y) => { root.message-context(item.id, item.mine, item.failed, item.gif-url, x, y); } open-media => { root.open-message-media(item.id); } } }
+        if root.typing-indicator != "": Text { height: 20px; text: root.typing-indicator; color: Theme.muted; font-size: 11px; font-weight: 700; x: 22px; vertical-alignment: center; }
+        if root.replying-author != "": Rectangle { height: 42px; background: Theme.surface; border-width: 1px; border-color: Theme.border; HorizontalLayout { padding-left: 18px; padding-right: 12px; spacing: 9px; Text { text: "Replying to " + root.replying-author; color: Theme.text; font-size: 12px; font-weight: 700; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } if root.reply-can-notify: CheckBox { text: "Notify author"; checked <=> root.reply-notify; } IconButton { width: 32px; height: 32px; icon: "×"; label: "Cancel reply"; clicked => { root.cancel-reply(); } } } }
+        Rectangle { height: composer.height + 20px + (root.pending-attachments == "" ? 0px : 36px); composer := Composer { x: 16px; y: 4px + (root.pending-attachments == "" ? 0px : 36px); width: parent.width - 32px; text <=> root.draft; channel-name: root.channel-name; can-send: root.can-send && root.slow-mode-remaining == 0; blocked-reason: root.slow-mode-remaining > 0 ? "Slow mode is active. You can send again in " + root.slow-mode-remaining + " seconds." : ""; attachment-busy: root.attachment-busy; pending-attachments: root.pending-attachments; completions: root.completions; send(value) => { root.send(value); } attach => { root.attach(); } clear-attachments => { root.clear-attachments(); } gif => { root.gif(); } emoji => { root.emoji(); } draft-edited(value) => { root.draft-edited(value); } completion-selected(value) => { root.completion-selected(value); } } }
+    }
+}
+
+component PinnedMessagesOverlay inherits Rectangle {
+    in property <[MessageItem]> messages;
+    callback close;
+    background: #00000099;
+    TouchArea { clicked => { root.close(); } }
+    Rectangle { x: parent.width - min(560px, parent.width - 32px); y: 0px; width: min(560px, parent.width - 32px); height: parent.height; background: Theme.sidebar; border-width: 1px; border-color: Theme.border; TouchArea { }
+        VerticalLayout {
+            Rectangle { height: 62px; HorizontalLayout { padding-left: 18px; Text { text: "Pinned messages"; color: Theme.text; font-size: 20px; font-weight: 900; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "×"; label: "Close pinned messages"; clicked => { root.close(); } } } }
+            if root.messages.length == 0: Text { text: "No pinned messages in this channel."; color: Theme.muted; horizontal-alignment: center; vertical-alignment: center; }
+            if root.messages.length > 0: ListView { vertical-stretch: 1; for item in root.messages: MessageRow { message: item; } }
+        }
+    }
+}
+
+component EmojiPicker inherits Rectangle {
+    in property <[EmojiItem]> emojis;
+    callback choose(string);
+    callback close;
+    background: #00000099;
+    TouchArea { clicked => { root.close(); } }
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: min(600px, parent.width - 48px); height: min(620px, parent.height - 48px); border-radius: 22px; background: Theme.surface; border-width: 1px; border-color: Theme.border; TouchArea { }
+        VerticalLayout { padding: 20px; spacing: 12px;
+            HorizontalLayout { Text { text: "Emoji"; color: Theme.text; font-size: 25px; font-weight: 900; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "×"; label: "Close emoji picker"; clicked => { root.close(); } } }
+            search := LineEdit { placeholder-text: "Search emoji"; }
+            ScrollView { vertical-stretch: 1; VerticalLayout { spacing: 4px;
+                for item[i] in root.emojis: Rectangle { height: 46px; border-radius: 9px; background: item-touch.has-hover ? Theme.raised : transparent; HorizontalLayout { padding-left: 12px; spacing: 14px; Text { text: item.value; color: Theme.text; font-size: 23px; vertical-alignment: center; } Text { text: item.label; color: Theme.muted; vertical-alignment: center; } } item-touch := TouchArea { accessible-role: button; accessible-label: item.label; clicked => { root.choose(item.value); } } }
+            } }
+        }
+    }
+}
+
+component GifPicker inherits Rectangle {
+    in property <[GifItem]> gifs;
+    in-out property <string> query;
+    callback search(string);
+    callback choose(string);
+    callback favorite(string, string, string);
+    callback close;
+    background: #00000099;
+    TouchArea { clicked => { root.close(); } }
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: min(680px, parent.width - 48px); height: min(650px, parent.height - 48px); border-radius: 22px; background: Theme.surface; border-width: 1px; border-color: Theme.border; TouchArea { }
+        VerticalLayout { padding: 20px; spacing: 12px;
+            HorizontalLayout { Text { text: "GIFs"; color: Theme.text; font-size: 25px; font-weight: 900; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "×"; label: "Close GIF picker"; clicked => { root.close(); } } }
+            HorizontalLayout { query-input := LineEdit { text <=> root.query; placeholder-text: "Search KLIPY"; } PillButton { text: "Search"; primary: true; clicked => { root.search(query-input.text); } } }
+            ScrollView { vertical-stretch: 1; VerticalLayout { spacing: 7px;
+                for item[i] in root.gifs: Rectangle { height: 72px; border-radius: 12px; background: gif-touch.has-hover ? Theme.raised : Theme.canvas; HorizontalLayout { padding: 12px; spacing: 12px; Rectangle { width: 54px; height: 48px; border-radius: 9px; background: Theme.accent-soft; Text { text: "GIF"; color: Theme.accent; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; } } Text { text: item.title; color: Theme.text; font-weight: 700; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } IconButton { icon: item.favorite ? "★" : "☆"; label: item.favorite ? "Remove from favorites" : "Add to favorites"; selected: item.favorite; clicked => { root.favorite(item.id, item.title, item.url); } } } gif-touch := TouchArea { width: parent.width - 68px; accessible-role: button; accessible-label: "Send " + item.title; clicked => { root.choose(item.url); } } }
+            } }
+            Text { text: "Powered by KLIPY"; color: Theme.muted; font-size: 11px; }
+        }
+    }
+}
+
+component MessageMenu inherits Rectangle {
+    in property <bool> mine;
+    in property <bool> failed;
+    in property <string> gif-url;
+    callback retry;
+    callback reply;
+    callback edit;
+    callback remove;
+    callback react;
+    callback pin;
+    callback copy;
+    callback favorite-gif(string);
+    callback close;
+    background: #00000055;
+    TouchArea { clicked => { root.close(); } }
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: 300px; height: failed ? (gif-url == "" ? 386px : 432px) : (gif-url == "" ? 340px : 386px); border-radius: 16px; background: Theme.surface; border-width: 1px; border-color: Theme.border; TouchArea { }
+        VerticalLayout { padding: 12px; spacing: 5px;
+            if root.failed: SidebarButton { icon: "↻"; label: "Retry message"; clicked => { root.retry(); } }
+            SidebarButton { icon: "↩"; label: "Reply"; clicked => { root.reply(); } }
+            SidebarButton { icon: "☺"; label: "Add reaction"; clicked => { root.react(); } }
+            SidebarButton { icon: "⌖"; label: "Pin or unpin"; clicked => { root.pin(); } }
+            if root.gif-url != "": SidebarButton { icon: "★"; label: "Favorite GIF"; clicked => { root.favorite-gif(root.gif-url); } }
+            SidebarButton { icon: "□"; label: "Copy text"; clicked => { root.copy(); } }
+            if root.mine && !root.failed: SidebarButton { icon: "✎"; label: "Edit message"; clicked => { root.edit(); } }
+            if root.mine && !root.failed: SidebarButton { icon: "⌫"; label: "Delete message"; clicked => { root.remove(); } }
+            Rectangle { vertical-stretch: 1; }
+            PillButton { text: "Close"; clicked => { root.close(); } }
+        }
+    }
+}
+
+component VoicePane inherits Rectangle {
+    in property <string> channel-name;
+    in property <string> status;
+    in-out property <bool> muted;
+    in-out property <bool> deafened;
+    in property <bool> can-speak;
+    in property <bool> can-stream;
+    in-out property <bool> screen-sharing;
+    in-out property <bool> camera-enabled;
+    in property <[VoiceMemberItem]> participants;
+    in property <[VideoTileItem]> remote-videos;
+    in property <[ChannelItem]> channels;
+    in property <bool> can-mute-voice: false;
+    in property <bool> can-deafen-voice: false;
+    in property <bool> can-move-voice: false;
+    in-out property <string> move-user;
+    callback join;
+    callback leave;
+    callback mute(bool);
+    callback deafen(bool);
+    callback push-to-talk(bool);
+    callback camera(bool);
+    callback screen-share(bool);
+    callback toggle-members;
+    callback moderate-participant(string, string);
+    background: Theme.canvas;
+    VerticalLayout {
+        Rectangle { height: 62px; background: Theme.surface; border-width: 1px; border-color: Theme.border; HorizontalLayout { padding-left: 18px; padding-right: 12px; Text { text: "◖))  \{root.channel-name}"; color: Theme.text; font-size: 17px; font-weight: 800; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "♟"; label: "Toggle member list"; clicked => { root.toggle-members(); } } } }
+        Rectangle { vertical-stretch: 1; background: Theme.canvas;
+            VerticalLayout { alignment: center; spacing: 16px;
+                Rectangle { width: 92px; height: 92px; border-radius: 32px; background: root.status == "connected" ? #234b39 : Theme.accent-soft; Text { text: "◖))"; color: root.status == "connected" ? Theme.green : Theme.accent; font-size: 32px; horizontal-alignment: center; vertical-alignment: center; } }
+                Text { text: root.status == "connected" ? "Voice connected" : root.status == "connecting" ? "Connecting…" : root.status == "reconnecting" ? "Reconnecting…" : "Ready when you are"; color: Theme.text; font-size: 27px; font-weight: 900; horizontal-alignment: center; }
+                Text { text: root.status == "connected" ? (root.can-speak ? "Native audio is routed through your selected input and output devices." : "Listen-only: you do not have permission to speak in this channel.") : "Join to talk, share video, or present your screen."; color: Theme.muted; font-size: 14px; horizontal-alignment: center; }
+                if root.status == "disconnected": PillButton { text: "Join voice"; primary: true; clicked => { root.join(); } }
+                if root.status == "connected": HorizontalLayout { alignment: center; spacing: 10px;
+                    PillButton { text: root.can-speak ? (root.muted ? "Unmute" : "Mute") : "Microphone unavailable"; enabled: root.can-speak; primary: root.muted; clicked => { root.muted = !root.muted; root.mute(root.muted); } }
+                    PillButton { text: root.deafened ? "Undeafen" : "Deafen"; primary: root.deafened; clicked => { root.deafened = !root.deafened; root.deafen(root.deafened); } }
+                    PillButton { text: "Push to talk"; enabled: root.can-speak; press-state(pressed) => { root.push-to-talk(pressed); } }
+                    PillButton { text: root.camera-enabled ? "Camera off" : root.can-stream ? "Camera on" : "Camera unavailable"; enabled: root.can-stream; primary: root.camera-enabled; clicked => { root.camera-enabled = !root.camera-enabled; root.camera(root.camera-enabled); } }
+                    PillButton { text: root.screen-sharing ? "Stop sharing" : root.can-stream ? "Share screen" : "Sharing unavailable"; enabled: root.can-stream; primary: root.screen-sharing; clicked => { root.screen-sharing = !root.screen-sharing; root.screen-share(root.screen-sharing); } }
+                    PillButton { text: "Leave"; destructive: true; clicked => { root.leave(); } }
+                }
+                if root.remote-videos.length > 0: ScrollView { width: 640px; height: root.remote-videos.length == 1 ? 360px : 260px; horizontal-stretch: 0;
+                    HorizontalLayout { spacing: 12px;
+                        for tile[i] in root.remote-videos: Rectangle { width: root.remote-videos.length == 1 ? 640px : 420px; height: root.remote-videos.length == 1 ? 350px : 236px; border-radius: 18px; clip: true; background: #090a09; border-width: 1px; border-color: Theme.border;
+                            Image { source: tile.frame; image-fit: contain; }
+                            Rectangle { x: 12px; y: parent.height - 38px; width: tile-name.width + 20px; height: 27px; border-radius: 9px; background: #000000aa; tile-name := Text { x: 10px; text: tile.participant; color: #ffffff; font-size: 12px; font-weight: 800; vertical-alignment: center; } }
+                        }
+                    }
+                }
+                if root.participants.length > 0: Rectangle { width: 620px; height: min(280px, root.participants.length * 64px + 54px); border-radius: 18px; background: Theme.surface; border-width: 1px; border-color: Theme.border;
+                    VerticalLayout { padding: 14px; spacing: 8px;
+                        Text { text: "IN THIS ROOM — \{root.participants.length}"; color: Theme.muted; font-size: 11px; font-weight: 900; }
+                        ScrollView { VerticalLayout { spacing: 6px; for participant[i] in root.participants: Rectangle { height: 50px; border-radius: 11px; background: Theme.raised; HorizontalLayout { padding-left: 9px; padding-right: 10px; spacing: 7px; Rectangle { width: 34px; height: 34px; border-radius: 12px; background: Theme.accent-soft; clip: true; if participant.has-avatar: Image { source: participant.avatar; image-fit: cover; } if !participant.has-avatar: Text { text: participant.initials; color: Theme.text; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; } } Text { text: participant.name; color: Theme.text; font-weight: 750; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } if participant.muted: Text { text: "Muted"; color: Theme.red; font-size: 11px; vertical-alignment: center; } if participant.deafened: Text { text: "Deafened"; color: Theme.muted; font-size: 11px; vertical-alignment: center; } if root.can-mute-voice: PillButton { min-width: 72px; text: participant.muted ? "Unmute" : "Mute"; clicked => { root.moderate-participant(participant.id, participant.muted ? "unmute" : "mute"); } } if root.can-deafen-voice: PillButton { min-width: 72px; text: participant.deafened ? "Undeafen" : "Deafen"; clicked => { root.moderate-participant(participant.id, participant.deafened ? "undeafen" : "deafen"); } } if root.can-move-voice: PillButton { min-width: 58px; text: "Move"; clicked => { root.move-user = participant.id; } } if root.can-move-voice: PillButton { min-width: 86px; text: "Disconnect"; destructive: true; clicked => { root.moderate-participant(participant.id, "disconnect"); } } } } } }
+                    }
+                }
+            }
+        }
+    }
+    if root.move-user != "": Rectangle {
+        background: #00000099;
+        TouchArea { clicked => { root.move-user = ""; } }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(420px, parent.width - 48px);
+            height: min(520px, parent.height - 48px);
+            border-radius: 20px;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+            TouchArea { }
+            VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                HorizontalLayout {
+                    Text { text: "Move to voice channel"; color: Theme.text; font-size: 22px; font-weight: 900; }
+                    Rectangle { horizontal-stretch: 1; }
+                    IconButton { icon: "×"; label: "Cancel move"; clicked => { root.move-user = ""; } }
+                }
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 6px;
+                        for channel in root.channels: PillButton {
+                            visible: channel.kind == "voice";
+                            text: channel.name;
+                            clicked => {
+                                root.moderate-participant(root.move-user, "move:" + channel.id);
+                                root.move-user = "";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component MemberRail inherits Rectangle {
+    in property <[MemberItem]> members;
+    callback close;
+    callback profile(string);
+    width: 260px; background: Theme.sidebar; border-width: 1px; border-color: Theme.border;
+    VerticalLayout {
+        Rectangle { height: 62px; HorizontalLayout { padding-left: 16px; Text { text: "Members"; color: Theme.text; font-size: 16px; font-weight: 800; vertical-alignment: center; } IconButton { icon: "×"; label: "Close members"; clicked => { root.close(); } } } }
+        ScrollView { VerticalLayout { padding: 12px; spacing: 7px;
+            Text { text: "ONLINE"; color: Theme.muted; font-size: 10px; font-weight: 900; }
+            for item[i] in root.members: Rectangle { height: 46px; opacity: item.online ? 1 : 0.48; background: member-touch.has-hover ? Theme.raised : transparent; border-radius: 9px; HorizontalLayout { padding-left: 5px; spacing: 9px; Rectangle { width: 34px; height: 34px; border-radius: 12px; background: item.role-color; clip: true; if item.has-avatar: Image { source: item.avatar; image-fit: cover; } if !item.has-avatar: Text { text: item.initials; color: Theme.text; horizontal-alignment: center; vertical-alignment: center; } if item.online: Rectangle { x: 25px; y: 25px; width: 9px; height: 9px; border-radius: 5px; background: Theme.green; } } VerticalLayout { alignment: center; Text { text: item.name; color: item.role-color; font-weight: 700; } Text { text: item.status; color: Theme.muted; font-size: 10px; } } } member-touch := TouchArea { accessible-role: button; accessible-label: "View " + item.name + " profile"; clicked => { root.profile(item.id); } } }
+        } }
+    }
+}
+
+component SettingsPane inherits Rectangle {
+    in property <string> current-user;
+    in property <bool> has-avatar;
+    in property <image> avatar;
+    in property <bool> has-banner;
+    in property <image> banner;
+    in-out property <string> display-name;
+    in-out property <string> custom-status;
+    in-out property <string> presence-status: "online";
+    in-out property <string> bio;
+    in-out property <string> theme-name;
+    in-out property <string> dm-privacy;
+    in-out property <bool> desktop-notifications: true;
+    in-out property <bool> developer-mode: false;
+    in property <[string]> input-devices;
+    in property <[string]> output-devices;
+    in property <[string]> camera-devices;
+    in property <[string]> screen-sources;
+    in-out property <string> selected-input-device;
+    in-out property <string> selected-output-device;
+    in-out property <string> selected-camera-device;
+    in-out property <string> selected-screen-source;
+    in-out property <string> input-mode: "voice_activity";
+    in-out property <string> push-to-talk-hotkey;
+    in property <string> global-hotkey-status;
+    in property <string> update-status;
+    in property <string> security-result;
+    in property <[SessionItem]> sessions;
+    in-out property <string> page: "profile";
+    callback close;
+    callback save-profile(string, string, string);
+    callback set-presence(string);
+    callback upload-profile-asset(string);
+    callback save-preferences(string, string, bool, bool);
+    callback logout;
+    callback input-device-selected(string);
+    callback output-device-selected(string);
+    callback camera-device-selected(string);
+    callback screen-source-selected(string);
+    callback refresh-media-devices;
+    callback input-mode-selected(string);
+    callback push-to-talk-hotkey-selected(string);
+    callback check-for-updates;
+    callback request-email-change(string, string);
+    callback setup-mfa(string, string);
+    callback enable-mfa(string);
+    callback disable-mfa(string, string);
+    callback refresh-sessions;
+    callback revoke-session(string);
+    callback switch-account;
+    background: Theme.canvas;
+    HorizontalLayout {
+        Rectangle { width: 300px; background: Theme.sidebar; VerticalLayout { padding: 26px; spacing: 6px;
+            Text { text: "USER SETTINGS"; color: Theme.muted; font-size: 11px; font-weight: 900; }
+            SidebarButton { icon: "◉"; label: "Profile"; selected: root.page == "profile"; clicked => { root.page = "profile"; } }
+            SidebarButton { icon: "♢"; label: "Security"; selected: root.page == "security"; clicked => { root.page = "security"; root.refresh-sessions(); } }
+            SidebarButton { icon: "◐"; label: "Appearance"; selected: root.page == "appearance"; clicked => { root.page = "appearance"; } }
+            SidebarButton { icon: "♩"; label: "Voice & video"; selected: root.page == "voice"; clicked => { root.page = "voice"; } }
+            SidebarButton { icon: "♢"; label: "Notifications"; selected: root.page == "notifications"; clicked => { root.page = "notifications"; } }
+            SidebarButton { icon: "⌘"; label: "Keybinds"; selected: root.page == "keybinds"; clicked => { root.page = "keybinds"; } }
+            SidebarButton { icon: "↻"; label: "Updates"; selected: root.page == "updates"; clicked => { root.page = "updates"; } }
+            SidebarButton { icon: "⚙"; label: "Advanced"; selected: root.page == "advanced"; clicked => { root.page = "advanced"; } }
+            Rectangle { vertical-stretch: 1; }
+            SidebarButton { icon: "⇄"; label: "Switch account"; clicked => { root.switch-account(); } }
+            SidebarButton { icon: "⇥"; label: "Sign out"; clicked => { root.logout(); } }
+        } }
+        ScrollView { horizontal-stretch: 1; VerticalLayout { padding: 44px; spacing: 18px;
+            HorizontalLayout { Text { text: "Settings"; color: Theme.text; font-size: 44px; font-weight: 900; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "×"; label: "Close settings"; clicked => { root.close(); } } }
+            if root.page == "profile": Text { text: "Profile"; color: Theme.text; font-size: 24px; font-weight: 800; }
+            if root.page == "profile": Rectangle { height: 230px; border-radius: 20px; background: Theme.surface; border-width: 1px; border-color: Theme.border;
+                Rectangle { height: 92px; background: @linear-gradient(90deg, Theme.green 0%, Theme.accent 100%); border-radius: 20px; clip: true; if root.has-banner: Image { source: root.banner; image-fit: cover; } }
+                Rectangle { x: 28px; y: 58px; width: 82px; height: 82px; border-radius: 28px; background: Theme.green; border-width: 6px; border-color: Theme.surface; clip: true; if root.has-avatar: Image { source: root.avatar; image-fit: cover; } if !root.has-avatar: Text { text: root.current-user; color: #17201a; font-size: 30px; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; } }
+                Text { x: 30px; y: 154px; text: root.current-user; color: Theme.text; font-size: 22px; font-weight: 900; }
+                HorizontalLayout { x: parent.width - 260px; y: 165px; width: 230px; spacing: 8px; PillButton { text: "Avatar"; clicked => { root.upload-profile-asset("avatar"); } } PillButton { text: "Banner"; clicked => { root.upload-profile-asset("banner"); } } }
+            }
+            if root.page == "profile": HorizontalLayout { spacing: 14px; VerticalLayout { Text { text: "Display name"; color: Theme.text; font-weight: 700; } LineEdit { text <=> root.display-name; placeholder-text: root.current-user; } } VerticalLayout { Text { text: "Custom status"; color: Theme.text; font-weight: 700; } LineEdit { text <=> root.custom-status; placeholder-text: "What are you up to?"; } } }
+            if root.page == "profile": HorizontalLayout { spacing: 10px; Text { text: "Presence"; color: Theme.text; font-weight: 700; vertical-alignment: center; } ComboBox { model: ["online", "idle", "dnd", "invisible"]; current-value <=> root.presence-status; selected(value) => { root.set-presence(value); } } Text { text: root.presence-status == "invisible" ? "You appear offline while remaining connected." : root.presence-status == "dnd" ? "Do not disturb suppresses desktop notifications." : "Published to friends and shared guilds while Kaede is running."; color: Theme.muted; wrap: word-wrap; vertical-alignment: center; } }
+            if root.page == "profile": Text { text: "About me"; color: Theme.text; font-weight: 700; }
+            if root.page == "profile": TextEdit { height: 110px; text <=> root.bio; wrap: word-wrap; }
+            if root.page == "profile": HorizontalLayout { Rectangle { horizontal-stretch: 1; } PillButton { text: "Save profile"; primary: true; clicked => { root.save-profile(root.display-name, root.custom-status, root.bio); } } }
+
+            if root.page == "security": Text { text: "Security"; color: Theme.text; font-size: 24px; font-weight: 800; }
+            if root.page == "security": Rectangle { min-height: 640px; border-radius: 16px; background: Theme.surface; VerticalLayout { padding: 20px; spacing: 12px;
+                Text { text: "Email"; color: Theme.text; font-size: 18px; font-weight: 800; }
+                new-email := LineEdit { placeholder-text: "New email address"; }
+                email-password := LineEdit { input-type: InputType.password; placeholder-text: "Current password"; }
+                PillButton { text: "Send email-change verification"; clicked => { root.request-email-change(new-email.text, email-password.text); } }
+                Rectangle { height: 1px; background: Theme.border; }
+                Text { text: "Multi-factor authentication"; color: Theme.text; font-size: 18px; font-weight: 800; }
+                Text { text: "Setup returns a secret and authenticator URI once. Recovery codes are shown once after enabling; store them somewhere safe."; color: Theme.muted; wrap: word-wrap; }
+                mfa-password := LineEdit { input-type: InputType.password; placeholder-text: "Current password"; }
+                current-code := LineEdit { placeholder-text: "Current code when replacing MFA (optional)"; }
+                HorizontalLayout { spacing: 8px; PillButton { text: "Start setup"; clicked => { root.setup-mfa(mfa-password.text, current-code.text); } } PillButton { text: "Enable with code"; clicked => { root.enable-mfa(current-code.text); } } PillButton { text: "Disable"; destructive: true; clicked => { root.disable-mfa(mfa-password.text, current-code.text); } } }
+                Rectangle { height: 1px; background: Theme.border; }
+                HorizontalLayout { Text { text: "Signed-in devices"; color: Theme.text; font-size: 18px; font-weight: 800; } Rectangle { horizontal-stretch: 1; } PillButton { text: "Refresh"; clicked => { root.refresh-sessions(); } } }
+                Text { text: "Revoke a device you no longer recognize. The current device remains signed in unless you explicitly sign out."; color: Theme.muted; wrap: word-wrap; }
+                for session in root.sessions: Rectangle { height: 62px; border-radius: 10px; background: Theme.raised; HorizontalLayout { padding: 10px; spacing: 10px; VerticalLayout { alignment: center; Text { text: session.title + (session.current ? " · This device" : ""); color: Theme.text; font-weight: 800; } Text { text: session.detail; color: Theme.muted; font-size: 11px; } } Rectangle { horizontal-stretch: 1; } if !session.current: PillButton { text: "Revoke"; destructive: true; clicked => { root.revoke-session(session.id); } } } }
+                if root.security-result != "": Rectangle { min-height: 78px; border-radius: 10px; background: Theme.raised; Text { x: 12px; y: 10px; width: parent.width - 24px; height: parent.height - 20px; text: root.security-result; color: Theme.text; wrap: word-wrap; } }
+            } }
+
+            if root.page == "appearance": Text { text: "Appearance"; color: Theme.text; font-size: 24px; font-weight: 800; }
+            if root.page == "appearance": Rectangle { height: 170px; border-radius: 16px; background: Theme.surface; VerticalLayout { padding: 20px; spacing: 12px; Text { text: "Theme"; color: Theme.text; font-weight: 800; } HorizontalLayout { PillButton { text: "Dark"; primary: root.theme-name == "dark"; clicked => { root.theme-name = "dark"; } } PillButton { text: "System"; primary: root.theme-name == "system"; clicked => { root.theme-name = "system"; } } } } }
+
+            if root.page == "voice": Text { text: "Voice & video"; color: Theme.text; font-size: 24px; font-weight: 800; }
+            if root.page == "voice": Rectangle { height: 450px; border-radius: 16px; background: Theme.surface; VerticalLayout { padding: 18px; spacing: 10px; HorizontalLayout { Text { text: "Devices"; color: Theme.text; font-size: 18px; font-weight: 800; } Rectangle { horizontal-stretch: 1; } PillButton { text: "Refresh devices"; clicked => { root.refresh-media-devices(); } } } Text { text: "Input device"; color: Theme.text; font-weight: 700; } ComboBox { model: root.input-devices; current-value <=> root.selected-input-device; selected(value) => { root.input-device-selected(value); } } Text { text: "Output device"; color: Theme.text; font-weight: 700; } ComboBox { model: root.output-devices; current-value <=> root.selected-output-device; selected(value) => { root.output-device-selected(value); } } Text { text: "Camera"; color: Theme.text; font-weight: 700; } ComboBox { model: root.camera-devices; current-value <=> root.selected-camera-device; selected(value) => { root.camera-device-selected(value); } } Text { text: "Screen or window to share"; color: Theme.text; font-weight: 700; } ComboBox { model: root.screen-sources; current-value <=> root.selected-screen-source; selected(value) => { root.screen-source-selected(value); } } Text { text: "Input mode"; color: Theme.text; font-weight: 700; } HorizontalLayout { CheckBox { text: "Voice activity"; checked: root.input-mode == "voice_activity"; toggled => { if (self.checked) { root.input-mode = "voice_activity"; root.input-mode-selected(root.input-mode); } } } CheckBox { text: "Push to talk"; checked: root.input-mode == "push_to_talk"; toggled => { if (self.checked) { root.input-mode = "push_to_talk"; root.input-mode-selected(root.input-mode); } } } } Text { text: "Kaede owns the selected devices through CPAL. DSP is applied before microphone PCM enters LiveKit, leaving a stable boundary for echo cancellation and noise suppression."; color: Theme.muted; wrap: word-wrap; } } }
+
+            if root.page == "notifications": Text { text: "Notifications"; color: Theme.text; font-size: 24px; font-weight: 800; }
+            if root.page == "notifications": Rectangle { height: 155px; border-radius: 16px; background: Theme.surface; VerticalLayout { padding: 20px; spacing: 12px; CheckBox { text: "Show desktop notifications while Kaede is running"; checked <=> root.desktop-notifications; } Text { text: "Guild-level All messages / Mentions / Nothing preferences continue to be enforced by your home instance."; color: Theme.muted; wrap: word-wrap; } } }
+
+            if root.page == "keybinds": Text { text: "Keybinds"; color: Theme.text; font-size: 24px; font-weight: 800; }
+            if root.page == "keybinds": Rectangle { height: 205px; border-radius: 16px; background: Theme.surface; VerticalLayout { padding: 20px; spacing: 12px; Text { text: "Global push to talk"; color: Theme.text; font-weight: 800; } Text { text: "Enter a shortcut such as Shift+Backquote or Control+Space."; color: Theme.muted; } HorizontalLayout { spacing: 10px; ptt-hotkey := LineEdit { text <=> root.push-to-talk-hotkey; placeholder-text: "Shift+Backquote"; } PillButton { text: "Apply"; primary: true; clicked => { root.push-to-talk-hotkey-selected(ptt-hotkey.text); } } } Text { text: root.global-hotkey-status; color: Theme.muted; wrap: word-wrap; } Text { text: "Global shortcuts require operating-system permission and may be unavailable on some Wayland compositors."; color: Theme.muted; wrap: word-wrap; } } }
+
+            if root.page == "updates": Text { text: "Updates"; color: Theme.text; font-size: 24px; font-weight: 800; }
+            if root.page == "updates": Rectangle { height: 180px; border-radius: 16px; background: Theme.surface; VerticalLayout { padding: 20px; spacing: 12px; Text { text: "Signed desktop updates"; color: Theme.text; font-weight: 800; } Text { text: "Kaede verifies the release signature and package digest before staging it. Your operating system still verifies the installed package's publisher signature."; color: Theme.muted; wrap: word-wrap; } HorizontalLayout { PillButton { text: "Check and stage update"; primary: true; clicked => { root.check-for-updates(); } } Rectangle { horizontal-stretch: 1; } } Text { text: root.update-status; color: Theme.muted; wrap: word-wrap; } } }
+
+            if root.page == "advanced": Text { text: "Advanced"; color: Theme.text; font-size: 24px; font-weight: 800; }
+            if root.page == "advanced": Rectangle { height: 175px; border-radius: 16px; background: Theme.surface; VerticalLayout { padding: 20px; spacing: 12px; CheckBox { text: "Developer mode"; checked <=> root.developer-mode; } Text { text: "Developer mode exposes composite IDs and protocol diagnostics. It never reveals tokens or federation signing material."; color: Theme.muted; wrap: word-wrap; } Text { text: "Direct-message privacy"; color: Theme.text; font-weight: 700; } ComboBox { model: ["friends", "guild_members", "everyone", "nobody"]; } } }
+            if root.page != "profile" && root.page != "security" && root.page != "voice" && root.page != "keybinds" && root.page != "updates": HorizontalLayout { Rectangle { horizontal-stretch: 1; } PillButton { text: "Save preferences"; primary: true; clicked => { root.save-preferences(root.theme-name, root.dm-privacy, root.desktop-notifications, root.developer-mode); } } }
+        } }
+    }
+}
+
+component GuildSettingsPane inherits Rectangle {
+    in property <string> guild-name;
+    in property <bool> has-guild-icon;
+    in property <image> guild-icon;
+    in property <bool> has-guild-banner;
+    in property <image> guild-banner;
+    in-out property <string> guild-description;
+    in-out property <string> guild-history-policy;
+    in-out property <string> page: "overview";
+    in property <[RoleItem]> roles;
+    in property <[PermissionItem]> permissions;
+    in property <[AdminMemberItem]> admin-members;
+    in-out property <int> member-page: 0;
+    private property <int> member-pages: max(1, (root.admin-members.length + 49) / 50);
+    in property <[AdminChannelItem]> admin-channels;
+    in property <[OverwriteItem]> overwrites;
+    in property <[OverwritePermissionItem]> overwrite-permissions;
+    in property <[AdminRecordItem]> audit-records;
+    in property <[AdminRecordItem]> webhook-records;
+    in property <[AdminRecordItem]> invite-records;
+    in property <[AdminRecordItem]> ban-records;
+    in property <[AdminRecordItem]> instance-ban-records;
+    in property <[AdminRecordItem]> emoji-records;
+    in-out property <string> selected-role;
+    in-out property <string> selected-role-name;
+    in-out property <string> selected-role-color;
+    in-out property <bool> selected-role-hoist;
+    in-out property <bool> selected-role-mentionable;
+    in property <bool> can-manage-guild;
+    in property <bool> can-manage-channels;
+    in property <bool> can-manage-roles;
+    in property <bool> can-kick;
+    in property <bool> can-ban;
+    in property <bool> can-timeout;
+    in property <bool> can-invite;
+    in property <bool> is-owner;
+    in-out property <string> moderation-user;
+    in-out property <string> moderation-name;
+    in-out property <string> moderation-action;
+    in-out property <string> selected-admin-channel;
+    in-out property <string> selected-admin-channel-name;
+    in-out property <string> selected-admin-channel-topic;
+    in-out property <string> selected-admin-channel-parent;
+    in-out property <int> selected-admin-channel-slow-mode;
+    in-out property <bool> selected-admin-channel-synced;
+    in-out property <string> selected-overwrite;
+    in-out property <string> selected-overwrite-kind;
+    callback close;
+    callback role-selected(string);
+    callback create-role(string);
+    callback save-role(string, string, string, bool, bool);
+    callback delete-role(string);
+    callback toggle-role-permission(string, string, bool);
+    callback create-channel(string, string);
+    callback select-channel(string);
+    callback save-channel(string, string, string, string, int);
+    callback delete-channel(string);
+    callback sync-channel(string);
+    callback select-overwrite(string, string);
+    callback set-overwrite-permission(string, string, string, string);
+    callback delete-overwrite(string, string);
+    callback move-channel(string, int);
+    callback moderate-member(string, string, string, string);
+    callback move-role(string, int);
+    callback create-invite;
+    callback copy-invite(string);
+    callback revoke-invite(string);
+    callback upload-guild-asset(string);
+    callback upload-emoji(string);
+    callback delete-emoji(string);
+    callback create-webhook(string, string);
+    callback update-webhook(string, string);
+    callback delete-webhook(string);
+    callback rotate-webhook(string);
+    callback unban-member(string);
+    callback ban-instance(string, string, string);
+    callback unban-instance(string);
+    callback set-notification-level(string);
+    callback save-guild(string, string, string);
+    callback leave-guild;
+    callback transfer-guild(string);
+    callback delete-guild;
+    background: Theme.canvas;
+    HorizontalLayout {
+        Rectangle { width: 300px; background: Theme.sidebar; VerticalLayout { padding: 26px; spacing: 5px;
+            Text { text: root.guild-name; color: Theme.muted; font-size: 11px; font-weight: 900; }
+            SidebarButton { icon: "◉"; label: "Overview"; selected: root.page == "overview"; clicked => { root.page = "overview"; } }
+            SidebarButton { icon: "#"; label: "Channels"; selected: root.page == "channels"; clicked => { root.page = "channels"; } }
+            SidebarButton { icon: "◆"; label: "Roles"; selected: root.page == "roles"; clicked => { root.page = "roles"; } }
+            SidebarButton { icon: "♙"; label: "Members"; selected: root.page == "members"; clicked => { root.page = "members"; } }
+            SidebarButton { icon: "!"; label: "Bans & instances"; selected: root.page == "bans"; clicked => { root.page = "bans"; } }
+            SidebarButton { icon: "+"; label: "Invites"; selected: root.page == "invites"; clicked => { root.page = "invites"; } }
+            SidebarButton { icon: "☺"; label: "Emoji"; selected: root.page == "emoji"; clicked => { root.page = "emoji"; } }
+            SidebarButton { icon: "⌁"; label: "Webhooks"; selected: root.page == "webhooks"; clicked => { root.page = "webhooks"; } }
+            SidebarButton { icon: "▤"; label: "Audit log"; selected: root.page == "audit"; clicked => { root.page = "audit"; } }
+            Rectangle { vertical-stretch: 1; }
+            SidebarButton { icon: "←"; label: "Leave guild"; clicked => { root.leave-guild(); } }
+            if root.is-owner: SidebarButton { icon: "⌫"; label: "Delete guild"; clicked => { root.delete-guild(); } }
+        } }
+        Rectangle { horizontal-stretch: 1; background: Theme.canvas;
+            VerticalLayout { padding: 38px; spacing: 17px;
+                HorizontalLayout { Text { text: root.page == "roles" ? "Roles" : root.page == "members" ? "Members" : root.page == "bans" ? "Bans & instances" : root.page == "channels" ? "Channels" : root.page == "invites" ? "Invites" : root.page == "emoji" ? "Emoji" : root.page == "webhooks" ? "Webhooks" : root.page == "audit" ? "Audit log" : "Guild overview"; color: Theme.text; font-size: 34px; font-weight: 900; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "×"; label: "Close guild settings"; clicked => { root.close(); } } }
+                if root.page == "overview": ScrollView { VerticalLayout { spacing: 14px;
+                    Rectangle { height: 475px; border-radius: 18px; background: Theme.surface; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 20px; spacing: 10px; Text { text: "Guild profile"; color: Theme.text; font-size: 20px; font-weight: 900; }
+                        Rectangle { height: 92px; border-radius: 14px; background: @linear-gradient(90deg, Theme.accent-soft 0%, Theme.green 100%); clip: true;
+                            if root.has-guild-banner: Image { source: root.guild-banner; image-fit: cover; }
+                            Rectangle { x: 16px; y: 16px; width: 60px; height: 60px; border-radius: 18px; background: Theme.surface; border-width: 4px; border-color: Theme.surface; clip: true;
+                                if root.has-guild-icon: Image { source: root.guild-icon; image-fit: cover; }
+                                if !root.has-guild-icon: Text { text: "#"; color: Theme.text; font-size: 22px; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        HorizontalLayout { spacing: 8px; PillButton { text: "Change icon"; enabled: root.can-manage-guild; clicked => { root.upload-guild-asset("icon"); } } PillButton { text: "Change banner"; enabled: root.can-manage-guild; clicked => { root.upload-guild-asset("banner"); } } } Text { text: "Name"; color: Theme.muted; } guild-name-edit := LineEdit { text: root.guild-name; enabled: root.can-manage-guild; } Text { text: "Description"; color: Theme.muted; } TextEdit { height: 82px; text <=> root.guild-description; enabled: root.can-manage-guild; wrap: word-wrap; } Text { text: "Federated message history"; color: Theme.muted; } ComboBox { model: ["disabled", "full_retained"]; current-value <=> root.guild-history-policy; enabled: root.can-manage-guild; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } PillButton { text: "Save guild"; primary: true; clicked => { root.save-guild(guild-name-edit.text, root.guild-description, root.guild-history-policy); } } } } }
+                    Rectangle { height: 160px; border-radius: 18px; background: Theme.surface; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 20px; spacing: 10px; Text { text: "Notifications"; color: Theme.text; font-size: 18px; font-weight: 900; } Text { text: "Notification level"; color: Theme.muted; } HorizontalLayout { spacing: 8px; PillButton { text: "All messages"; clicked => { root.set-notification-level("all"); } } PillButton { text: "Mentions"; clicked => { root.set-notification-level("mentions"); } } PillButton { text: "Nothing"; clicked => { root.set-notification-level("none"); } } } } }
+                    Rectangle { height: root.is-owner ? 210px : 120px; border-radius: 18px; background: Theme.surface; VerticalLayout { padding: 20px; spacing: 10px; Text { text: "Federation and ownership"; color: Theme.text; font-size: 18px; font-weight: 800; } Text { text: "Guild identity, permissions, media, history policy, and moderation changes are published by the guild's home instance. Remote replicas are untrusted caches and deletion is best effort."; color: Theme.muted; wrap: word-wrap; } if root.is-owner: Text { text: "Transfer ownership to a local member"; color: Theme.text; font-weight: 800; } if root.is-owner: HorizontalLayout { transfer-target := LineEdit { placeholder-text: "user-id@this-instance"; } PillButton { text: "Transfer"; destructive: true; clicked => { if (transfer-target.text != "") { root.transfer-guild(transfer-target.text); } } } } } }
+                } }
+                if root.page == "channels": HorizontalLayout {
+                    spacing: 14px;
+                    Rectangle {
+                        width: 270px; background: Theme.surface; border-radius: 15px;
+                        VerticalLayout {
+                            padding: 12px; spacing: 7px;
+                            Text { text: "CHANNELS & CATEGORIES"; color: Theme.muted; font-size: 10px; font-weight: 900; }
+                            ScrollView { vertical-stretch: 1; VerticalLayout { spacing: 4px;
+                                for channel[i] in root.admin-channels: Rectangle {
+                                    height: 44px; border-radius: 9px;
+                                    background: root.selected-admin-channel == channel.id ? Theme.accent-soft : channel-touch.has-hover ? Theme.raised : transparent;
+                                    HorizontalLayout { padding-left: 9px; spacing: 7px; Text { text: channel.kind == "voice" ? "◖))" : channel.kind == "category" ? "▾" : "#"; color: Theme.muted; } Text { text: channel.name; color: Theme.text; font-weight: 700; } }
+                                    channel-touch := TouchArea { clicked => { root.selected-admin-channel = channel.id; root.select-channel(channel.id); } }
+                                }
+                            } }
+                            Text { text: "Create a channel"; color: Theme.text; font-weight: 800; }
+                            channel-name := LineEdit { placeholder-text: "new-channel"; enabled: root.can-manage-channels; }
+                            HorizontalLayout { spacing: 5px;
+                                PillButton { text: "Text"; primary: true; clicked => { if (channel-name.text != "") { root.create-channel(channel-name.text, "text"); channel-name.text = ""; } } }
+                                PillButton { text: "Voice"; clicked => { if (channel-name.text != "") { root.create-channel(channel-name.text, "voice"); channel-name.text = ""; } } }
+                                PillButton { text: "Category"; clicked => { if (channel-name.text != "") { root.create-channel(channel-name.text, "category"); channel-name.text = ""; } } }
+                            }
+                        }
+                    }
+                    ScrollView {
+                        horizontal-stretch: 1;
+                        if root.selected-admin-channel == "": Text { text: "Choose a channel to edit it."; color: Theme.muted; }
+                        if root.selected-admin-channel != "": VerticalLayout {
+                            spacing: 12px;
+                            Text { text: "Channel overview"; color: Theme.text; font-size: 20px; font-weight: 900; }
+                            Text { text: "Name"; color: Theme.muted; }
+                            LineEdit { text <=> root.selected-admin-channel-name; enabled: root.can-manage-channels; }
+                            Text { text: "Topic"; color: Theme.muted; }
+                            TextEdit { height: 90px; text <=> root.selected-admin-channel-topic; enabled: root.can-manage-channels; wrap: word-wrap; }
+                            Text { text: "Slow mode (seconds)"; color: Theme.muted; }
+                            slow-mode := LineEdit { text: "\{root.selected-admin-channel-slow-mode}"; enabled: root.can-manage-channels; }
+                            Text { text: root.selected-admin-channel-synced ? "Permissions are synced with the category." : "Permissions are independent from the category."; color: root.selected-admin-channel-synced ? Theme.green : Theme.muted; wrap: word-wrap; }
+                            HorizontalLayout { spacing: 8px;
+                                PillButton { text: "Save channel"; primary: true; clicked => { root.save-channel(root.selected-admin-channel, root.selected-admin-channel-name, root.selected-admin-channel-topic, root.selected-admin-channel-parent, slow-mode.text.to-float()); } }
+                                if !root.selected-admin-channel-synced: PillButton { text: "Sync permissions"; clicked => { root.sync-channel(root.selected-admin-channel); } }
+                                PillButton { text: "Delete channel"; destructive: true; clicked => { root.delete-channel(root.selected-admin-channel); } }
+                            }
+                            Text { text: "Channel permissions"; color: Theme.text; font-size: 20px; font-weight: 900; }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Rectangle { width: 210px; min-height: 320px; border-radius: 12px; background: Theme.raised;
+                                    ScrollView { VerticalLayout { padding: 8px; spacing: 4px;
+                                        for target in root.overwrites: SidebarButton { icon: target.kind == "role" ? "●" : "@"; label: target.label; selected: target.id == root.selected-overwrite && target.kind == root.selected-overwrite-kind; clicked => { root.select-overwrite(target.id, target.kind); } }
+                                    } }
+                                }
+                                Rectangle { horizontal-stretch: 1; min-height: 320px; border-radius: 12px; background: Theme.surface;
+                                    if root.selected-overwrite == "": Text { text: "Choose a role or member."; color: Theme.muted; horizontal-alignment: center; vertical-alignment: center; }
+                                    if root.selected-overwrite != "": ScrollView { VerticalLayout { padding: 10px; spacing: 6px;
+                                        for permission in root.overwrite-permissions: Rectangle { height: 68px; border-width: 1px; border-color: Theme.border;
+                                            HorizontalLayout { padding: 8px;
+                                                VerticalLayout { Text { text: permission.label; color: Theme.text; font-weight: 800; } Text { text: permission.description; color: Theme.muted; font-size: 10px; wrap: word-wrap; } }
+                                                Rectangle { horizontal-stretch: 1; }
+                                                PillButton { text: "Deny"; destructive: permission.state == "deny"; clicked => { root.set-overwrite-permission(root.selected-overwrite, root.selected-overwrite-kind, permission.bit, "deny"); } }
+                                                PillButton { text: "Inherit"; primary: permission.state == "inherit"; clicked => { root.set-overwrite-permission(root.selected-overwrite, root.selected-overwrite-kind, permission.bit, "inherit"); } }
+                                                PillButton { text: "Allow"; primary: permission.state == "allow"; clicked => { root.set-overwrite-permission(root.selected-overwrite, root.selected-overwrite-kind, permission.bit, "allow"); } }
+                                            }
+                                        }
+                                        PillButton { text: "Reset overwrite"; destructive: true; clicked => { root.delete-overwrite(root.selected-overwrite, root.selected-overwrite-kind); } }
+                                    } }
+                                }
+                            }
+                        }
+                    }
+                }
+                if root.page == "roles": HorizontalLayout { spacing: 14px;
+                    Rectangle { width: 280px; background: Theme.surface; border-radius: 15px; VerticalLayout { padding: 12px; spacing: 5px; HorizontalLayout { Text { text: "ROLE ORDER"; color: Theme.muted; font-size: 10px; font-weight: 900; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "+"; label: "Create role"; clicked => { if (root.can-manage-roles) { root.create-role("new role"); } } } } ScrollView { vertical-stretch: 1; VerticalLayout { spacing: 4px; for role[i] in root.roles: Rectangle { height: 44px; border-radius: 9px; background: root.selected-role == role.id ? Theme.accent-soft : role-touch.has-hover ? Theme.raised : transparent; HorizontalLayout { padding-left: 10px; padding-right: 5px; spacing: 7px; Text { text: "●"; color: role.color; } Text { text: role.name; color: Theme.text; font-weight: 700; } Rectangle { horizontal-stretch: 1; } if role.editable && root.can-manage-roles: IconButton { width: 30px; height: 30px; icon: "↑"; label: "Move role up"; clicked => { root.move-role(role.id, 1); } } if role.editable && root.can-manage-roles: IconButton { width: 30px; height: 30px; icon: "↓"; label: "Move role down"; clicked => { root.move-role(role.id, -1); } } } role-touch := TouchArea { clicked => { root.selected-role = role.id; root.role-selected(role.id); } } } } } } }
+                    ScrollView { horizontal-stretch: 1; if root.selected-role == "": Text { text: "Choose a role to edit its display and permissions."; color: Theme.muted; } if root.selected-role != "": VerticalLayout { spacing: 13px; Text { text: "Role display"; color: Theme.text; font-size: 20px; font-weight: 900; } LineEdit { text <=> root.selected-role-name; enabled: root.can-manage-roles; } Text { text: "Role color (hex)"; color: Theme.muted; } LineEdit { text <=> root.selected-role-color; placeholder-text: "#99aab5"; enabled: root.can-manage-roles; } CheckBox { text: "Display members separately"; checked <=> root.selected-role-hoist; enabled: root.can-manage-roles; } CheckBox { text: "Allow anyone to mention this role"; checked <=> root.selected-role-mentionable; enabled: root.can-manage-roles; } HorizontalLayout { PillButton { text: "Save role"; primary: true; clicked => { root.save-role(root.selected-role, root.selected-role-name, root.selected-role-color, root.selected-role-hoist, root.selected-role-mentionable); } } PillButton { text: "Delete role"; destructive: true; clicked => { root.delete-role(root.selected-role); } } } Text { text: "PERMISSIONS"; color: Theme.muted; font-size: 11px; font-weight: 900; } for permission[i] in root.permissions: Rectangle { min-height: 70px; border-radius: 11px; background: Theme.surface; HorizontalLayout { padding: 13px; spacing: 12px; VerticalLayout { Text { text: permission.label; color: permission.danger == "critical" ? Theme.red : Theme.text; font-weight: 800; } Text { text: permission.description; color: Theme.muted; font-size: 11px; wrap: word-wrap; } } CheckBox { checked: permission.checked; enabled: root.can-manage-roles; toggled => { root.toggle-role-permission(root.selected-role, permission.bit, self.checked); } } } } } }
+                }
+                if root.page == "members": VerticalLayout { spacing: 8px; Text { text: "Actions are constrained by role hierarchy and are rechecked by the server."; color: Theme.muted; } ListView { vertical-stretch: 1; for member[i] in root.admin-members: Rectangle { visible: i >= root.member-page * 50 && i < (root.member-page + 1) * 50; height: self.visible ? 72px : 0px; border-radius: 12px; background: Theme.surface; HorizontalLayout { padding: 11px; spacing: 10px; Rectangle { width: 42px; height: 42px; border-radius: 14px; background: Theme.green; clip: true; if member.has-avatar: Image { source: member.avatar; image-fit: cover; } if !member.has-avatar: Text { text: member.initials; color: #152019; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; } } VerticalLayout { Text { text: member.name; color: Theme.text; font-weight: 800; } Text { text: member.handle + (member.roles == "" ? "" : " · " + member.roles); color: Theme.muted; font-size: 10px; } } Rectangle { horizontal-stretch: 1; } if member.manageable && root.can-timeout: PillButton { text: member.timed-out ? "Remove timeout" : "Timeout"; clicked => { root.moderation-user = member.id; root.moderation-name = member.name; root.moderation-action = member.timed-out ? "untimeout" : "timeout"; } } if member.manageable && root.can-kick: PillButton { text: "Kick"; clicked => { root.moderation-user = member.id; root.moderation-name = member.name; root.moderation-action = "kick"; } } if member.manageable && root.can-ban: PillButton { text: "Ban"; destructive: true; clicked => { root.moderation-user = member.id; root.moderation-name = member.name; root.moderation-action = "ban"; } } } } } HorizontalLayout { PillButton { text: "Previous"; enabled: root.member-page > 0; clicked => { if (root.member-page > 0) { root.member-page = root.member-page - 1; } } } Rectangle { horizontal-stretch: 1; } Text { text: "Page " + (root.member-page + 1) + " of " + root.member-pages; color: Theme.muted; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } PillButton { text: "Next"; enabled: root.member-page + 1 < root.member-pages; clicked => { if (root.member-page + 1 < root.member-pages) { root.member-page = root.member-page + 1; } } } } }
+                if root.page == "bans": ScrollView { VerticalLayout { spacing: 12px; Text { text: "Member bans"; color: Theme.text; font-size: 20px; font-weight: 900; } for item[i] in root.ban-records: Rectangle { height: 62px; border-radius: 12px; background: Theme.surface; HorizontalLayout { padding: 11px; VerticalLayout { Text { text: item.title; color: Theme.text; font-weight: 800; } Text { text: item.subtitle; color: Theme.muted; font-size: 11px; } } Rectangle { horizontal-stretch: 1; } PillButton { text: "Unban"; clicked => { root.unban-member(item.id); } } } } Text { text: "Blocked federated instances"; color: Theme.text; font-size: 20px; font-weight: 900; } Text { text: "Blocking an instance removes its members and prevents them from rejoining. Remote deletion is best effort and a malicious peer may retain prior data."; color: Theme.red; wrap: word-wrap; } HorizontalLayout { block-domain := LineEdit { placeholder-text: "blocked.example"; } block-duration := ComboBox { model: ["Permanent", "1 day", "7 days", "30 days"]; current-value: "Permanent"; } PillButton { text: "Block instance"; destructive: true; clicked => { if (block-domain.text != "") { root.ban-instance(block-domain.text, block-duration.current-value, ""); } } } } for item[i] in root.instance-ban-records: Rectangle { height: 62px; border-radius: 12px; background: Theme.surface; HorizontalLayout { padding: 11px; VerticalLayout { Text { text: item.title; color: Theme.text; font-weight: 800; } Text { text: item.subtitle; color: Theme.muted; font-size: 11px; } } Rectangle { horizontal-stretch: 1; } PillButton { text: "Unblock"; clicked => { root.unban-instance(item.id); } } } } } }
+                if root.page == "invites": ScrollView { VerticalLayout { spacing: 13px; Text { text: "Create an invitation for the currently selected channel. Federated invite acceptance remains brokered by each user's home instance."; color: Theme.muted; wrap: word-wrap; } PillButton { text: "Create invite"; primary: true; clicked => { if (root.can-invite) { root.create-invite(); } } } Text { text: "ACTIVE INVITES"; color: Theme.muted; font-size: 11px; font-weight: 900; } for item[i] in root.invite-records: Rectangle { height: 62px; border-radius: 12px; background: Theme.surface; HorizontalLayout { padding: 10px; VerticalLayout { Text { text: item.title; color: Theme.text; font-weight: 800; } Text { text: item.subtitle; color: Theme.muted; font-size: 11px; } } Rectangle { horizontal-stretch: 1; } PillButton { text: "Copy"; clicked => { root.copy-invite(item.id); } } PillButton { text: "Revoke"; destructive: true; clicked => { root.revoke-invite(item.id); } } } } } }
+                if root.page == "emoji": ScrollView { VerticalLayout { spacing: 10px; Text { text: "Custom emoji"; color: Theme.text; font-size: 20px; font-weight: 800; } Text { text: "Upload an image, GIF, or WebP. External use is controlled by the Use external emojis permission."; color: Theme.muted; wrap: word-wrap; } HorizontalLayout { emoji-name := LineEdit { placeholder-text: "emoji_name"; } PillButton { text: "Choose image"; primary: true; clicked => { if (emoji-name.text != "") { root.upload-emoji(emoji-name.text); } } } } for item[i] in root.emoji-records: Rectangle { height: 58px; border-radius: 12px; background: Theme.surface; HorizontalLayout { padding: 10px; Text { text: item.title; color: Theme.text; font-weight: 800; } Text { text: item.subtitle; color: Theme.muted; } Rectangle { horizontal-stretch: 1; } PillButton { text: "Delete"; destructive: true; clicked => { root.delete-emoji(item.id); } } } } } }
+                if root.page == "webhooks": ScrollView { VerticalLayout { spacing: 10px; Text { text: "Webhooks"; color: Theme.text; font-size: 20px; font-weight: 800; } Text { text: "Tokens are displayed only when created or rotated and are never written to logs or desktop preferences."; color: Theme.muted; wrap: word-wrap; } HorizontalLayout { webhook-name := LineEdit { placeholder-text: "Webhook name"; } webhook-channel := LineEdit { placeholder-text: "channel-id@domain"; } PillButton { text: "Create"; primary: true; clicked => { if (webhook-name.text != "" && webhook-channel.text != "") { root.create-webhook(webhook-channel.text, webhook-name.text); } } } } for item[i] in root.webhook-records: Rectangle { height: 68px; border-radius: 12px; background: Theme.surface; HorizontalLayout { padding: 10px; spacing: 8px; VerticalLayout { webhook-edit := LineEdit { text: item.title; } Text { text: item.subtitle; color: Theme.muted; font-size: 11px; } } Rectangle { horizontal-stretch: 1; } PillButton { text: "Save"; clicked => { if (webhook-edit.text != "") { root.update-webhook(item.id, webhook-edit.text); } } } PillButton { text: "Rotate token"; clicked => { root.rotate-webhook(item.id); } } PillButton { text: "Delete"; destructive: true; clicked => { root.delete-webhook(item.id); } } } } } }
+                if root.page == "audit": ScrollView { VerticalLayout { spacing: 8px; Text { text: "Moderation, permissions, role, channel, invite, webhook, and federation policy actions are recorded by the guild home instance."; color: Theme.muted; wrap: word-wrap; } for item[i] in root.audit-records: Rectangle { min-height: 64px; border-radius: 12px; background: Theme.surface; VerticalLayout { padding: 11px; Text { text: item.title; color: Theme.text; font-weight: 800; } Text { text: item.subtitle; color: Theme.muted; font-size: 11px; wrap: word-wrap; } } } } }
+            }
+        }
+    }
+    if root.moderation-action != "": Rectangle { background: #00000099; TouchArea { clicked => { root.moderation-action = ""; } } Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: min(520px, parent.width - 48px); height: root.moderation-action == "timeout" ? 390px : 320px; border-radius: 22px; background: Theme.surface; border-width: 1px; border-color: Theme.border; TouchArea { } VerticalLayout { padding: 24px; spacing: 13px; Text { text: root.moderation-action == "untimeout" ? "Remove timeout" : root.moderation-action == "timeout" ? "Timeout member" : root.moderation-action == "kick" ? "Kick member" : "Ban member"; color: Theme.text; font-size: 25px; font-weight: 900; } Text { text: root.moderation-name; color: Theme.muted; } duration := ComboBox { visible: root.moderation-action == "timeout" || root.moderation-action == "ban"; model: root.moderation-action == "timeout" ? ["10 minutes", "1 hour", "1 day", "7 days", "28 days", "Permanent"] : ["Permanent", "1 day", "7 days", "30 days"]; current-value: root.moderation-action == "timeout" ? "1 hour" : "Permanent"; } reason := TextEdit { height: 90px; placeholder-text: "Reason (optional)"; wrap: word-wrap; } Text { text: "This action is checked against your permissions and role hierarchy by the guild home instance."; color: Theme.muted; font-size: 11px; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } PillButton { text: "Cancel"; clicked => { root.moderation-action = ""; } } PillButton { text: root.moderation-action == "untimeout" ? "Remove" : "Apply"; destructive: root.moderation-action == "kick" || root.moderation-action == "ban"; primary: root.moderation-action == "timeout"; clicked => { root.moderate-member(root.moderation-user, root.moderation-action, duration.current-value, reason.text); root.moderation-action = ""; } } } } } }
+}
+
+// All modal surfaces are controlled by AppWindow.active-overlay. This keeps
+// profile cards, menus, settings and pickers mutually exclusive.
+component ProfileOverlay inherits Rectangle {
+    in property <string> user-id;
+    in property <string> name;
+    in property <string> handle;
+    in property <string> status;
+    in property <string> bio;
+    in property <string> relationship;
+    in property <bool> has-avatar;
+    in property <image> avatar;
+    in property <bool> has-banner;
+    in property <image> banner;
+    in property <[ProfileRoleItem]> roles;
+    callback close;
+    callback message(string);
+    callback relationship-action(string, string);
+    callback block(string, bool);
+    callback role(string, string, bool);
+    background: #00000099;
+    TouchArea { clicked => { root.close(); } }
+    Rectangle {
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        width: min(560px, parent.width - 48px); height: min(650px, parent.height - 48px); border-radius: 24px;
+        background: Theme.surface; border-width: 1px; border-color: Theme.border;
+        TouchArea { }
+        Rectangle { height: 128px; border-radius: 24px; background: @linear-gradient(90deg, Theme.green 0%, Theme.accent 100%); clip: true; if root.has-banner: Image { source: root.banner; image-fit: cover; } }
+        Rectangle { x: 28px; y: 82px; width: 92px; height: 92px; border-radius: 32px; background: Theme.green; border-width: 7px; border-color: Theme.surface; clip: true; if root.has-avatar: Image { source: root.avatar; image-fit: cover; } if !root.has-avatar: Text { text: "@"; color: #152019; font-size: 34px; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; } }
+        IconButton { x: parent.width - 58px; y: 16px; icon: "×"; label: "Close profile"; clicked => { root.close(); } }
+        VerticalLayout { x: 28px; y: 194px; width: parent.width - 56px; height: parent.height - 218px; spacing: 10px;
+            Text { text: root.name; color: Theme.text; font-size: 27px; font-weight: 900; }
+            Text { text: root.handle; color: Theme.muted; font-size: 14px; }
+            if root.status != "": Rectangle { height: 38px; border-radius: 19px; background: Theme.raised; Text { x: 13px; text: "●  \{root.status}"; color: Theme.green; vertical-alignment: center; } }
+            if root.bio != "": Text { text: root.bio; color: Theme.text; font-size: 13px; wrap: word-wrap; }
+            Text { text: "ROLES"; color: Theme.muted; font-size: 10px; font-weight: 900; }
+            ScrollView { vertical-stretch: 1; VerticalLayout { spacing: 5px; for role in root.roles: Rectangle { height: 38px; border-radius: 9px; background: Theme.raised; HorizontalLayout { padding-left: 10px; padding-right: 7px; spacing: 8px; Rectangle { width: 12px; height: 12px; border-radius: 6px; background: role.color; } Text { text: role.name; color: Theme.text; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } if role.editable: PillButton { text: role.assigned ? "Remove" : "Add"; destructive: role.assigned; clicked => { root.role(root.user-id, role.id, !role.assigned); } } } } } }
+            HorizontalLayout { spacing: 8px; if root.relationship != "self": PillButton { text: "Message"; primary: true; clicked => { root.message(root.user-id); } } if root.relationship != "outgoing" && root.relationship != "self": PillButton { text: root.relationship == "friend" ? "Remove friend" : root.relationship == "incoming" ? "Accept friend" : root.relationship == "blocked" ? "Unblock" : "Add friend"; clicked => { root.relationship-action(root.user-id, root.relationship); } } if root.relationship != "self": PillButton { text: root.relationship == "blocked" ? "Unblock" : "Block"; destructive: root.relationship != "blocked"; clicked => { root.block(root.user-id, root.relationship != "blocked"); } } }
+        }
+    }
+}
+
+component NewDirectMessageOverlay inherits Rectangle {
+    in property <[FriendItem]> friends;
+    callback close;
+    callback open(string);
+    background: #00000099;
+    TouchArea { clicked => { root.close(); } }
+    Rectangle {
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        width: min(540px, parent.width - 48px); height: min(620px, parent.height - 60px);
+        border-radius: 22px; background: Theme.surface; border-width: 1px; border-color: Theme.border;
+        TouchArea { }
+        VerticalLayout { padding: 24px; spacing: 13px;
+            HorizontalLayout { Text { text: "New message"; color: Theme.text; font-size: 26px; font-weight: 900; } Rectangle { horizontal-stretch: 1; } IconButton { icon: "×"; label: "Close"; clicked => { root.close(); } } }
+            Text { text: "Type a federated username or choose a friend."; color: Theme.muted; font-size: 13px; }
+            handle := LineEdit { placeholder-text: "@friend@example.net"; }
+            PillButton { text: "Start conversation"; primary: true; clicked => { if (handle.text != "") { root.open(handle.text); } } }
+            Text { text: "FRIENDS"; color: Theme.muted; font-size: 11px; font-weight: 900; letter-spacing: 1.4px; }
+            ScrollView { vertical-stretch: 1; VerticalLayout { spacing: 7px;
+                for item[i] in root.friends: Rectangle {
+                    visible: item.relationship == "friend"; height: item.relationship == "friend" ? 58px : 0px; border-radius: 12px; background: row-touch.has-hover ? Theme.raised : transparent;
+                    HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 10px; Rectangle { width: 38px; height: 38px; border-radius: 13px; background: Theme.green; clip: true; if item.has-avatar: Image { source: item.avatar; image-fit: cover; } if !item.has-avatar: Text { text: item.initials; color: #152019; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; } } VerticalLayout { alignment: center; Text { text: item.name; color: Theme.text; font-weight: 800; } Text { text: item.handle; color: Theme.muted; font-size: 10px; } } }
+                    row-touch := TouchArea { accessible-role: button; accessible-label: "Message " + item.name; clicked => { root.open(item.id); } }
+                }
+            } }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Kaede Chat";
+    preferred-width: 1440px; preferred-height: 900px; min-width: 980px; min-height: 640px;
+    background: Theme.canvas;
+    in-out property <bool> authenticated: false;
+    in-out property <bool> mfa-required: false;
+    in-out property <string> auth-page: "login";
+    in-out property <bool> busy: false;
+    in-out property <string> error-message;
+    in-out property <string> realtime-status: "connecting";
+    in-out property <string> auth-notice;
+    in-out property <string> current-user: "Kaede";
+    in-out property <string> guild-title: "Kaede Community";
+    in-out property <string> home-page: "overview";
+    in-out property <string> selected-guild;
+    in-out property <string> selected-channel;
+    in-out property <string> selected-channel-name;
+    in-out property <string> selected-channel-kind;
+    in-out property <string> draft;
+    in-out property <string> typing-indicator;
+    in-out property <bool> members-visible: true;
+    in-out property <string> active-overlay;
+    // Keep the signed-in account editor independent from the transient
+    // profile viewer. Realtime refreshes must not replace an open remote
+    // profile, and viewing somebody else must not alter the settings form.
+    in-out property <string> current-profile-name;
+    in-out property <string> current-profile-handle;
+    in-out property <string> current-profile-status;
+    in-out property <string> presence-status: "online";
+    in-out property <string> current-profile-bio;
+    in-out property <bool> current-profile-has-avatar: false;
+    in-out property <image> current-profile-avatar;
+    in-out property <bool> current-profile-has-banner: false;
+    in-out property <image> current-profile-banner;
+    in-out property <string> profile-id;
+    in-out property <string> profile-name;
+    in-out property <string> profile-handle;
+    in-out property <string> profile-status;
+    in-out property <string> profile-bio;
+    in-out property <bool> profile-has-avatar: false;
+    in-out property <image> profile-avatar;
+    in-out property <bool> profile-has-banner: false;
+    in-out property <image> profile-banner;
+    in-out property <string> profile-relationship;
+    in-out property <string> settings-theme: "dark";
+    in-out property <string> settings-dm-privacy: "friends";
+    in-out property <bool> desktop-notifications: true;
+    in-out property <bool> developer-mode: false;
+    in-out property <string> voice-status: "disconnected";
+    in-out property <bool> voice-muted: false;
+    in-out property <bool> voice-deafened: false;
+    in-out property <bool> voice-can-speak: false;
+    in-out property <bool> voice-can-stream: false;
+    in-out property <bool> voice-screen-sharing: false;
+    in-out property <bool> voice-camera-enabled: false;
+    in-out property <[VideoTileItem]> voice-remote-videos;
+    in-out property <string> active-call-id;
+    in-out property <string> active-call-state;
+    in-out property <bool> active-call-incoming: false;
+    in-out property <bool> can-send: true;
+    in-out property <int> slow-mode-remaining: 0;
+    in-out property <string> selected-message;
+    in-out property <bool> selected-message-mine;
+    in-out property <bool> selected-message-failed;
+    in-out property <string> selected-message-gif-url;
+    in-out property <string> replying-message;
+    in-out property <string> replying-author;
+    in-out property <bool> reply-notify: true;
+    in-out property <bool> reply-can-notify: false;
+    in-out property <string> gif-query;
+    in-out property <string> editing-message;
+    in-out property <string> pending-attachments;
+    in-out property <bool> attachment-busy: false;
+    in-out property <string> guild-settings-page: "overview";
+    in-out property <string> guild-description;
+    in-out property <string> guild-history-policy: "disabled";
+    in-out property <bool> guild-has-icon: false;
+    in-out property <image> guild-icon;
+    in-out property <bool> guild-has-banner: false;
+    in-out property <image> guild-banner;
+    in-out property <string> selected-role;
+    in-out property <string> selected-role-name;
+    in-out property <string> selected-role-color: "#99aab5";
+    in-out property <bool> selected-role-hoist;
+    in-out property <bool> selected-role-mentionable;
+    in-out property <bool> can-manage-guild: false;
+    in-out property <bool> can-manage-channels: false;
+    in-out property <bool> can-manage-roles: false;
+    in-out property <bool> can-kick: false;
+    in-out property <bool> can-ban: false;
+    in-out property <bool> can-timeout: false;
+    in-out property <bool> can-invite: false;
+    in-out property <bool> can-mute-voice: false;
+    in-out property <bool> can-deafen-voice: false;
+    in-out property <bool> can-move-voice: false;
+    in-out property <string> voice-move-user;
+    in-out property <bool> is-guild-owner: false;
+    in-out property <string> selected-admin-channel;
+    in-out property <string> selected-admin-channel-name;
+    in-out property <string> selected-admin-channel-topic;
+    in-out property <string> selected-admin-channel-parent;
+    in-out property <int> selected-admin-channel-slow-mode;
+    in-out property <bool> selected-admin-channel-synced;
+    in-out property <string> selected-overwrite;
+    in-out property <string> selected-overwrite-kind;
+    in-out property <string> selected-input-device: "System default";
+    in-out property <string> selected-output-device: "System default";
+    in-out property <string> selected-camera-device: "System default";
+    in-out property <string> selected-screen-source: "Operating-system picker";
+    in-out property <string> input-mode: "voice_activity";
+    in-out property <string> push-to-talk-hotkey;
+    in-out property <string> global-hotkey-status: "No global push-to-talk shortcut configured.";
+    in-out property <string> update-status: "Update checks are not configured for this build.";
+    in-out property <string> security-result;
+    in property <[AccountItem]> known-accounts;
+    in property <[SessionItem]> sessions;
+    in property <[CompletionItem]> completions;
+    in property <[GuildItem]> guilds;
+    in property <[ChannelItem]> channels;
+    in property <[MessageItem]> messages;
+    in property <[MessageItem]> pinned-messages;
+    in property <[MemberItem]> members;
+    in property <[FriendItem]> friends;
+    in property <[ChannelItem]> direct-messages;
+    in property <[EmojiItem]> emojis;
+    in property <[GifItem]> gifs;
+    in property <[RoleItem]> roles;
+    in property <[ProfileRoleItem]> profile-roles;
+    in property <[PermissionItem]> role-permissions;
+    in property <[AdminMemberItem]> admin-members;
+    in property <[AdminChannelItem]> admin-channels;
+    in property <[OverwriteItem]> overwrites;
+    in property <[OverwritePermissionItem]> overwrite-permissions;
+    in property <[AdminRecordItem]> audit-records;
+    in property <[AdminRecordItem]> webhook-records;
+    in property <[AdminRecordItem]> invite-records;
+    in property <[AdminRecordItem]> ban-records;
+    in property <[AdminRecordItem]> instance-ban-records;
+    in property <[AdminRecordItem]> emoji-records;
+    in property <[VoiceMemberItem]> voice-members;
+    in property <[string]> input-devices;
+    in property <[string]> output-devices;
+    in property <[string]> camera-devices;
+    in property <[string]> screen-sources;
+    callback login(string, string, string);
+    callback submit-mfa(string);
+    callback cancel-mfa;
+    callback register-requested;
+    callback register-account(string, string, string, string);
+    callback forgot-password(string, string);
+    callback verify-email(string, string);
+    callback reset-password(string, string, string);
+    callback guild-selected(string);
+    callback channel-selected(string);
+    callback send-message(string);
+    callback open-settings;
+    callback open-guild-settings;
+    callback home-page-selected(string);
+    callback create-guild(string);
+    callback join-guild(string);
+    callback friend-request(string);
+    callback friend-profile(string);
+    callback friend-message(string);
+    callback friend-accept(string);
+    callback friend-remove(string);
+    callback profile-relationship-action(string, string);
+    callback profile-block(string, bool);
+    callback profile-role(string, string, bool);
+    callback new-direct-message;
+    callback save-profile(string, string, string);
+    callback set-presence(string);
+    callback upload-profile-asset(string);
+    callback save-preferences(string, string, bool, bool);
+    callback logout;
+    callback join-voice(string);
+    callback leave-voice;
+    callback set-voice-muted(bool);
+    callback set-voice-deafened(bool);
+    callback set-push-to-talk(bool);
+    callback set-camera(bool);
+    callback set-screen-share(bool);
+    callback select-screen-source(string);
+    callback start-call(string);
+    callback accept-call(string);
+    callback decline-call(string);
+    callback end-call(string);
+    callback load-older;
+    callback retry-message(string);
+    callback reply-message(string);
+    callback cancel-reply;
+    callback edit-message(string);
+    callback delete-message(string);
+    callback react-message(string, string);
+    callback pin-message(string);
+    callback open-pins;
+    callback open-message-media(string);
+    callback copy-message(string);
+    callback search-gifs(string);
+    callback favorite-gif(string, string, string);
+    callback attach-file;
+    callback clear-attachments;
+    callback update-completions(string);
+    callback choose-completion(string);
+    callback guild-role-selected(string);
+    callback guild-create-role(string);
+    callback guild-save-role(string, string, string, bool, bool);
+    callback guild-delete-role(string);
+    callback guild-toggle-role-permission(string, string, bool);
+    callback guild-create-channel(string, string);
+    callback guild-select-channel(string);
+    callback guild-save-channel(string, string, string, string, int);
+    callback guild-delete-channel(string);
+    callback guild-sync-channel(string);
+    callback guild-select-overwrite(string, string);
+    callback guild-set-overwrite-permission(string, string, string, string);
+    callback guild-delete-overwrite(string, string);
+    callback guild-move-channel(string, int);
+    callback guild-moderate-member(string, string, string, string);
+    callback guild-move-role(string, int);
+    callback guild-create-invite;
+    callback guild-copy-invite(string);
+    callback guild-revoke-invite(string);
+    callback guild-upload-asset(string);
+    callback guild-upload-emoji(string);
+    callback guild-delete-emoji(string);
+    callback guild-create-webhook(string, string);
+    callback guild-update-webhook(string, string);
+    callback guild-delete-webhook(string);
+    callback guild-rotate-webhook(string);
+    callback guild-voice-moderate(string, string);
+    callback guild-unban-member(string);
+    callback guild-ban-instance(string, string, string);
+    callback guild-unban-instance(string);
+    callback guild-notification-level(string);
+    callback guild-save(string, string, string);
+    callback guild-leave;
+    callback guild-transfer(string);
+    callback guild-delete;
+    callback select-input-device(string);
+    callback select-output-device(string);
+    callback select-camera-device(string);
+    callback refresh-media-devices;
+    callback select-input-mode(string);
+    callback select-push-to-talk-hotkey(string);
+    callback check-for-updates;
+    callback request-email-change(string, string);
+    callback setup-mfa(string, string);
+    callback enable-mfa(string);
+    callback disable-mfa(string, string);
+    callback restore-account(string, string);
+    callback forget-account(string);
+    callback refresh-sessions;
+    callback revoke-session(string);
+    callback switch-account;
+
+    if !root.authenticated && !root.mfa-required && root.auth-page == "login": LoginPane { accounts: root.known-accounts; busy: root.busy; error: root.error-message; login(instance, identifier, password) => { root.login(instance, identifier, password); } account-selected(instance, key) => { root.restore-account(instance, key); } account-forgotten(key) => { root.forget-account(key); } register-requested => { root.auth-page = "register"; root.register-requested(); } recovery-requested => { root.auth-page = "forgot"; } }
+    if !root.authenticated && !root.mfa-required && root.auth-page != "login": OnboardingPane { mode <=> root.auth-page; busy: root.busy; error: root.error-message; notice: root.auth-notice; close => { root.auth-page = "login"; root.error-message = ""; root.auth-notice = ""; } register(instance, username, email, password) => { root.register-account(instance, username, email, password); } forgot(instance, email) => { root.forgot-password(instance, email); } verify(instance, token) => { root.verify-email(instance, token); } reset(instance, token, password) => { root.reset-password(instance, token, password); } }
+    if !root.authenticated && root.mfa-required: MfaPane { busy: root.busy; error: root.error-message; submit(code) => { root.submit-mfa(code); } cancel => { root.cancel-mfa(); } }
+    if root.authenticated: HorizontalLayout {
+        spacing: 0px;
+        ServerRail { guilds: root.guilds; selected-guild: root.selected-guild; home => { root.selected-guild = ""; root.selected-channel = ""; } guild(id) => { root.selected-guild = id; root.guild-selected(id); } }
+        if root.selected-guild == "": HomeSidebar { direct-messages: root.direct-messages; selected-page: root.home-page; selected-channel: root.selected-channel; current-user: root.current-user; page(value) => { root.home-page = value; root.selected-channel = ""; root.home-page-selected(value); } channel(id) => { root.selected-channel = id; root.channel-selected(id); } new-message => { root.active-overlay = "new-dm"; root.new-direct-message(); } settings => { root.active-overlay = "settings"; root.open-settings(); } }
+        if root.selected-guild != "": ChannelSidebar { title: root.guild-title; channels: root.channels; selected-channel: root.selected-channel; current-user: root.current-user; channel(id) => { root.selected-channel = id; root.channel-selected(id); } guild-settings => { root.active-overlay = "guild-settings"; root.open-guild-settings(); } settings => { root.active-overlay = "settings"; root.open-settings(); } }
+        if root.selected-guild == "" && root.selected-channel == "": HomePane { horizontal-stretch: 1; page: root.home-page; friends: root.friends; add-friend(handle) => { root.friend-request(handle); } friend-profile(id) => { root.friend-profile(id); } friend-message(id) => { root.friend-message(id); } friend-accept(id) => { root.friend-accept(id); } friend-remove(id) => { root.friend-remove(id); } create-guild(name) => { root.create-guild(name); } join-guild(invite) => { root.join-guild(invite); } }
+        if root.selected-channel != "" && root.selected-channel-kind != "voice": ChatPane { horizontal-stretch: 1; channel-name: root.selected-channel-name; direct-message: root.selected-channel-kind == "dm"; call-state: root.active-call-state; call-incoming: root.active-call-incoming; messages: root.messages; completions: root.completions; typing-indicator: root.typing-indicator; replying-author: root.replying-author; reply-notify <=> root.reply-notify; reply-can-notify: root.reply-can-notify; draft <=> root.draft; can-send: root.can-send; slow-mode-remaining: root.slow-mode-remaining; attachment-busy: root.attachment-busy; pending-attachments: root.pending-attachments; send(value) => { root.send-message(value); root.draft = ""; root.update-completions(""); } draft-edited(value) => { root.update-completions(value); } completion-selected(value) => { root.choose-completion(value); } cancel-reply => { root.cancel-reply(); } toggle-members => { root.members-visible = !root.members-visible; } open-pins => { root.open-pins(); } open-message-media(id) => { root.open-message-media(id); } load-older => { root.load-older(); } attach => { root.attach-file(); } clear-attachments => { root.clear-attachments(); } gif => { root.active-overlay = "gif"; root.search-gifs(""); } emoji => { root.active-overlay = "emoji"; } start-call => { root.start-call(root.selected-channel); } accept-call => { root.accept-call(root.active-call-id); } decline-call => { root.decline-call(root.active-call-id); } end-call => { root.end-call(root.active-call-id); } message-context(id, mine, failed, gif-url, x, y) => { root.selected-message = id; root.selected-message-mine = mine; root.selected-message-failed = failed; root.selected-message-gif-url = gif-url; root.active-overlay = "message"; } }
+        if root.selected-channel != "" && root.selected-channel-kind == "voice": VoicePane { horizontal-stretch: 1; channel-name: root.selected-channel-name; status: root.voice-status; muted <=> root.voice-muted; deafened <=> root.voice-deafened; can-speak: root.voice-can-speak; can-stream: root.voice-can-stream; screen-sharing <=> root.voice-screen-sharing; camera-enabled <=> root.voice-camera-enabled; participants: root.voice-members; channels: root.channels; remote-videos: root.voice-remote-videos; can-mute-voice: root.can-mute-voice; can-deafen-voice: root.can-deafen-voice; can-move-voice: root.can-move-voice; move-user <=> root.voice-move-user; join => { root.join-voice(root.selected-channel); } leave => { root.leave-voice(); } mute(value) => { root.set-voice-muted(value); } deafen(value) => { root.set-voice-deafened(value); } push-to-talk(value) => { root.set-push-to-talk(value); } camera(value) => { root.set-camera(value); } screen-share(value) => { root.set-screen-share(value); } toggle-members => { root.members-visible = !root.members-visible; } moderate-participant(id, action) => { root.guild-voice-moderate(id, action); } }
+        if root.selected-guild != "" && root.members-visible: MemberRail { members: root.members; close => { root.members-visible = false; } profile(id) => { root.friend-profile(id); } }
+    }
+    if root.authenticated && root.realtime-status != "connected": Rectangle { x: (parent.width - self.width) / 2; y: 12px; width: 360px; height: 38px; border-radius: 11px; background: root.realtime-status == "authentication_failed" ? #542a28 : Theme.raised; border-width: 1px; border-color: Theme.border; Text { text: root.realtime-status == "authentication_failed" ? "Realtime authentication failed. Sign in again." : root.realtime-status == "reconnecting" ? "Reconnecting to realtime updates…" : "Connecting to realtime updates…"; color: root.realtime-status == "authentication_failed" ? #ffaaa2 : Theme.muted; horizontal-alignment: center; vertical-alignment: center; font-size: 12px; font-weight: 700; } }
+    if root.active-overlay == "settings": SettingsPane { current-user: root.current-user; has-avatar: root.current-profile-has-avatar; avatar: root.current-profile-avatar; has-banner: root.current-profile-has-banner; banner: root.current-profile-banner; display-name <=> root.current-profile-name; custom-status <=> root.current-profile-status; presence-status <=> root.presence-status; bio <=> root.current-profile-bio; theme-name <=> root.settings-theme; dm-privacy <=> root.settings-dm-privacy; desktop-notifications <=> root.desktop-notifications; developer-mode <=> root.developer-mode; security-result: root.security-result; sessions: root.sessions; input-devices: root.input-devices; output-devices: root.output-devices; camera-devices: root.camera-devices; screen-sources: root.screen-sources; selected-input-device <=> root.selected-input-device; selected-output-device <=> root.selected-output-device; selected-camera-device <=> root.selected-camera-device; selected-screen-source <=> root.selected-screen-source; input-mode <=> root.input-mode; push-to-talk-hotkey <=> root.push-to-talk-hotkey; global-hotkey-status: root.global-hotkey-status; update-status: root.update-status; input-device-selected(value) => { root.select-input-device(value); } output-device-selected(value) => { root.select-output-device(value); } camera-device-selected(value) => { root.select-camera-device(value); } screen-source-selected(value) => { root.select-screen-source(value); } refresh-media-devices => { root.refresh-media-devices(); } input-mode-selected(value) => { root.select-input-mode(value); } push-to-talk-hotkey-selected(value) => { root.select-push-to-talk-hotkey(value); } check-for-updates => { root.check-for-updates(); } request-email-change(email, password) => { root.request-email-change(email, password); } setup-mfa(password, code) => { root.setup-mfa(password, code); } enable-mfa(code) => { root.enable-mfa(code); } disable-mfa(password, code) => { root.disable-mfa(password, code); } refresh-sessions => { root.refresh-sessions(); } revoke-session(id) => { root.revoke-session(id); } switch-account => { root.switch-account(); } close => { root.active-overlay = ""; root.security-result = ""; } save-profile(name, status, bio) => { root.save-profile(name, status, bio); } set-presence(value) => { root.set-presence(value); } upload-profile-asset(kind) => { root.upload-profile-asset(kind); } save-preferences(theme, privacy, notifications, developer) => { root.save-preferences(theme, privacy, notifications, developer); } logout => { root.logout(); } }
+    if root.active-overlay == "guild-settings": GuildSettingsPane { guild-name: root.guild-title; has-guild-icon: root.guild-has-icon; guild-icon: root.guild-icon; has-guild-banner: root.guild-has-banner; guild-banner: root.guild-banner; guild-description <=> root.guild-description; guild-history-policy <=> root.guild-history-policy; page <=> root.guild-settings-page; roles: root.roles; permissions: root.role-permissions; admin-members: root.admin-members; admin-channels: root.admin-channels; overwrites: root.overwrites; overwrite-permissions: root.overwrite-permissions; audit-records: root.audit-records; webhook-records: root.webhook-records; invite-records: root.invite-records; ban-records: root.ban-records; instance-ban-records: root.instance-ban-records; emoji-records: root.emoji-records; selected-role <=> root.selected-role; selected-role-name <=> root.selected-role-name; selected-role-color <=> root.selected-role-color; selected-role-hoist <=> root.selected-role-hoist; selected-role-mentionable <=> root.selected-role-mentionable; selected-admin-channel <=> root.selected-admin-channel; selected-admin-channel-name <=> root.selected-admin-channel-name; selected-admin-channel-topic <=> root.selected-admin-channel-topic; selected-admin-channel-parent <=> root.selected-admin-channel_parent; selected-admin-channel-slow-mode <=> root.selected-admin-channel-slow-mode; selected-admin-channel-synced <=> root.selected-admin-channel-synced; selected-overwrite <=> root.selected-overwrite; selected-overwrite-kind <=> root.selected-overwrite-kind; can-manage-guild: root.can-manage-guild; can-manage-channels: root.can-manage-channels; can-manage-roles: root.can-manage-roles; can-kick: root.can-kick; can-ban: root.can-ban; can-timeout: root.can-timeout; can-invite: root.can-invite; is-owner: root.is-guild-owner; close => { root.active-overlay = ""; } role-selected(id) => { root.guild-role-selected(id); } create-role(name) => { root.guild-create-role(name); } save-role(id, name, color, hoist, mentionable) => { root.guild-save-role(id, name, color, hoist, mentionable); } delete-role(id) => { root.guild-delete-role(id); } toggle-role-permission(id, bit, enabled) => { root.guild-toggle-role-permission(id, bit, enabled); } move-role(id, delta) => { root.guild-move-role(id, delta); } create-channel(name, kind) => { root.guild-create-channel(name, kind); } select-channel(id) => { root.guild-select-channel(id); } save-channel(id, name, topic, parent, slow) => { root.guild-save-channel(id, name, topic, parent, slow); } delete-channel(id) => { root.guild-delete-channel(id); } sync-channel(id) => { root.guild-sync-channel(id); } select-overwrite(id, kind) => { root.guild-select-overwrite(id, kind); } set-overwrite-permission(id, kind, bit, state) => { root.guild-set-overwrite-permission(id, kind, bit, state); } delete-overwrite(id, kind) => { root.guild-delete-overwrite(id, kind); } move-channel(id, delta) => { root.guild-move-channel(id, delta); } moderate-member(id, action, duration, reason) => { root.guild-moderate-member(id, action, duration, reason); } create-invite => { root.guild-create-invite(); } copy-invite(code) => { root.guild-copy-invite(code); } revoke-invite(code) => { root.guild-revoke-invite(code); } upload-guild-asset(kind) => { root.guild-upload-asset(kind); } upload-emoji(name) => { root.guild-upload-emoji(name); } delete-emoji(id) => { root.guild-delete-emoji(id); } create-webhook(channel, name) => { root.guild-create-webhook(channel, name); } update-webhook(id, name) => { root.guild-update-webhook(id, name); } delete-webhook(id) => { root.guild-delete-webhook(id); } rotate-webhook(id) => { root.guild-rotate-webhook(id); } unban-member(id) => { root.guild-unban-member(id); } ban-instance(domain, duration, reason) => { root.guild-ban-instance(domain, duration, reason); } unban-instance(domain) => { root.guild-unban-instance(domain); } set-notification-level(level) => { root.guild-notification-level(level); } save-guild(name, description, history) => { root.guild-save(name, description, history); } leave-guild => { root.guild-leave(); } transfer-guild(id) => { root.guild-transfer(id); } delete-guild => { root.guild-delete(); } }
+    if root.active-overlay == "profile": ProfileOverlay { user-id: root.profile-id; name: root.profile-name; handle: root.profile-handle; status: root.profile-status; bio: root.profile-bio; relationship: root.profile-relationship; has-avatar: root.profile-has-avatar; avatar: root.profile-avatar; has-banner: root.profile-has-banner; banner: root.profile-banner; roles: root.profile-roles; close => { root.active-overlay = ""; } message(id) => { root.friend-message(id); } relationship-action(id, action) => { root.profile-relationship-action(id, action); } block(id, value) => { root.profile-block(id, value); } role(user, role, assign) => { root.profile-role(user, role, assign); } }
+    if root.active-overlay == "new-dm": NewDirectMessageOverlay { friends: root.friends; close => { root.active-overlay = ""; } open(value) => { root.friend-message(value); } }
+    if root.active-overlay == "emoji": EmojiPicker { emojis: root.emojis; close => { root.active-overlay = ""; } choose(value) => { root.draft += value; root.active-overlay = ""; } }
+    if root.active-overlay == "reaction": EmojiPicker { emojis: root.emojis; close => { root.active-overlay = ""; } choose(value) => { root.react-message(root.selected-message, value); root.active-overlay = ""; } }
+    if root.active-overlay == "gif": GifPicker { gifs: root.gifs; query <=> root.gif-query; close => { root.active-overlay = ""; } search(query) => { root.search-gifs(query); } choose(url) => { root.send-message(url); root.active-overlay = ""; } favorite(id, title, url) => { root.favorite-gif(id, title, url); } }
+    if root.active-overlay == "message": MessageMenu { mine: root.selected-message-mine; failed: root.selected-message-failed; gif-url: root.selected-message-gif-url; close => { root.active-overlay = ""; } retry => { root.retry-message(root.selected-message); root.active-overlay = ""; } reply => { root.reply-message(root.selected-message); root.active-overlay = ""; } edit => { root.edit-message(root.selected-message); root.active-overlay = ""; } remove => { root.delete-message(root.selected-message); root.active-overlay = ""; } react => { root.active-overlay = "reaction"; } pin => { root.pin-message(root.selected-message); root.active-overlay = ""; } copy => { root.copy-message(root.selected-message); root.active-overlay = ""; } favorite-gif(url) => { root.favorite-gif(url, "Saved GIF", url); root.active-overlay = ""; } }
+    if root.active-overlay == "pins": PinnedMessagesOverlay { messages: root.pinned-messages; close => { root.active-overlay = ""; } }
+}

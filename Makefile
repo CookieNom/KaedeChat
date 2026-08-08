@@ -18,14 +18,17 @@ MEDIA_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-media-validation-$(V
 VOICE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-voice-validation-$(VALIDATION_RUN_ID)
 RELEASE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-release-validation-$(VALIDATION_RUN_ID)
 
-.PHONY: help setup lock generate check test audit env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
+.PHONY: help setup lock generate check test audit desktop-check desktop-lint desktop-test env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
 help:
 	@echo "setup            Run the interactive, configuration-only deployment wizard"
 	@echo "lock             Generate uv and pnpm lockfiles in one-off containers"
-	@echo "generate         Regenerate shared TypeScript protocol constants"
+	@echo "generate         Regenerate shared TypeScript and Rust protocol constants"
 	@echo "check            Run lint, type, codegen, and unit checks in containers"
 	@echo "test             Run backend and frontend tests in containers"
 	@echo "audit            Check locked Python and JavaScript dependencies for advisories"
+	@echo "desktop-check    Format and compile the portable native desktop workspace"
+	@echo "desktop-lint     Run strict Clippy checks across all portable desktop targets"
+	@echo "desktop-test     Run desktop protocol, state, platform, auth, and media tests"
 	@echo "env-check        Validate ENV_FILE and run the production preflight in isolation"
 	@echo "migration        Generate an Alembic revision with m=\"description\""
 	@echo "migration-check  Run Alembic up/down/up against disposable PostgreSQL"
@@ -69,6 +72,19 @@ audit:
 	trap '$(AUDIT_COMPOSE) --profile validation down -v' EXIT INT TERM; \
 	$(AUDIT_COMPOSE) run --rm --no-deps --build backend-check pip-audit --skip-editable; \
 	$(AUDIT_COMPOSE) run --rm --no-deps --build frontend-check pnpm audit --audit-level=moderate
+
+desktop-check:
+	cargo +1.92.0 fmt --all --manifest-path desktop/Cargo.toml -- --check
+	cargo +1.92.0 check --locked --manifest-path desktop/Cargo.toml -p kaede-desktop --no-default-features
+
+desktop-lint:
+	cargo +1.92.0 clippy --locked --manifest-path desktop/Cargo.toml \
+		--workspace --all-targets --no-default-features -- -D warnings
+
+desktop-test:
+	cargo +1.92.0 test --locked --manifest-path desktop/Cargo.toml \
+		-p kaede-protocol -p kaede-core -p kaede-platform -p kaede-api \
+		-p kaede-cache -p kaede-auth -p kaede-media -p kaede-app --no-default-features
 
 env-check:
 	@test -f "$(ENV_FILE)" || { echo 'missing ENV_FILE: $(ENV_FILE)' >&2; exit 2; }
