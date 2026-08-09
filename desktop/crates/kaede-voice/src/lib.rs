@@ -13,8 +13,8 @@ use std::{
 use futures_util::StreamExt;
 use kaede_api::{ApiClient, ApiClientError};
 use kaede_audio::{
-    CaptureSettings, NativeCapture, NativePlayback, ProcessorChain, VOICE_CHANNELS,
-    VOICE_SAMPLE_RATE,
+    CaptureGate, CaptureSettings, NativeCapture, NativePlayback, ProcessorChain, SpeechProcessor,
+    VOICE_CHANNELS, VOICE_SAMPLE_RATE,
 };
 use kaede_capture::{PackedFrame, PackedPixelFormat};
 use kaede_protocol::EntityRef;
@@ -40,7 +40,7 @@ use nokhwa::{
     utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
 };
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, watch},
@@ -115,6 +115,7 @@ pub struct VoiceHandle {
     pub commands: mpsc::Sender<VoiceCommand>,
     pub status: watch::Receiver<VoiceStatus>,
     pub video_frames: Option<mpsc::Receiver<RemoteVideoFrame>>,
+    pub input_level: Option<Arc<CaptureGate>>,
     task: JoinHandle<()>,
 }
 
@@ -181,6 +182,8 @@ async fn join(
     // A modest buffer gives several simultaneous tracks a fair chance to publish
     // without retaining a large amount of decoded RGBA data.
     let (video_tx, video_rx) = mpsc::channel(16);
+    let mut processor_chain = ProcessorChain::default();
+    processor_chain.push(Box::new(SpeechProcessor::from_settings(&capture_settings)));
     // Do not open the operating-system microphone when the server grant is
     // listen-only. This avoids an unnecessary privacy prompt and ensures that
     // a missing SPEAK grant cannot accidentally feed a local capture graph.
@@ -189,6 +192,7 @@ async fn join(
         .then(|| NativeCapture::open(&capture_settings))
         .transpose()?;
     let playback = NativePlayback::open(output_device.as_deref())?;
+    let input_level = capture.as_ref().map(|capture| capture.gate.clone());
     let room_name = grant.room.clone();
     let (room, events) = Box::pin(Room::connect(
         &grant.url,
@@ -239,11 +243,13 @@ async fn join(
         grant.can_speak,
         grant.can_stream,
         video_tx,
+        processor_chain,
     ));
     Ok(VoiceHandle {
         commands: command_tx,
         status: status_rx,
         video_frames: Some(video_rx),
+        input_level,
         task,
     })
 }
@@ -267,18 +273,25 @@ async fn run_room(
     can_speak: bool,
     can_stream: bool,
     video_frames: mpsc::Sender<RemoteVideoFrame>,
+    mut processor_chain: ProcessorChain,
 ) {
     let playback_sink = playback.sink();
+    let playback_mixer = playback.mixer();
     let render_reference = playback.render_reference();
-    let mut processor_chain = ProcessorChain::default();
     let mut explicitly_muted = false;
     let mut deafened = false;
     let mut capture_tick = time::interval(AUDIO_FRAME_TIME);
+    let mut playback_tick = time::interval(AUDIO_FRAME_TIME);
     let mut screen_share: Option<PublishedVideo> = None;
     let mut camera: Option<PublishedVideo> = None;
     capture_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    playback_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = playback_tick.tick() => {
+                let frame = playback_mixer.drain((VOICE_SAMPLE_RATE / 100) as usize);
+                playback_sink.push_voice_frame(&frame, VOICE_SAMPLE_RATE, VOICE_CHANNELS);
+            }
             _ = capture_tick.tick(), if can_speak && source.is_some() && capture.is_some() => {
                 let Some(capture) = capture.as_ref() else { continue };
                 let render = render_reference.drain((VOICE_SAMPLE_RATE / 100) as usize);
@@ -383,8 +396,9 @@ async fn run_room(
             }
             event = events.recv() => {
                 match event {
-                    Some(RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(track), .. }) => {
-                        let sink = playback_sink.clone();
+                    Some(RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(track), participant, .. }) => {
+                        let mixer = playback_mixer.clone();
+                        let participant = participant.identity().to_string();
                         tokio::spawn(async move {
                             let sample_rate = VOICE_SAMPLE_RATE.cast_signed();
                             let mut stream = NativeAudioStream::new(track.rtc_track(), sample_rate, i32::from(VOICE_CHANNELS));
@@ -396,8 +410,9 @@ async fn run_room(
                                 let samples: Vec<f32> = frame.data.iter()
                                     .map(|sample| f32::from(*sample) / f32::from(i16::MAX))
                                     .collect();
-                                sink.push_voice_frame(&samples, frame.sample_rate, channels);
+                                mixer.push(&participant, &samples, frame.sample_rate, channels);
                             }
+                            mixer.remove(&participant);
                         });
                     }
                     Some(RoomEvent::TrackSubscribed { track: RemoteTrack::Video(track), participant, .. }) => {
@@ -524,13 +539,13 @@ async fn publish_screen_share(
     })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CameraDevice {
     pub id: String,
     pub label: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ScreenSource {
     pub id: String,
     pub label: String,

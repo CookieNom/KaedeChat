@@ -34,7 +34,7 @@
       <dl class="landing-stats">
         <div>
           <dt>Your identity</dt>
-          <dd>Stays with your home instance</dd>
+          <dd>Stays on the server where you signed up</dd>
         </div>
         <div>
           <dt>Your communities</dt>

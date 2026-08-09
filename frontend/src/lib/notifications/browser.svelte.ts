@@ -1,8 +1,9 @@
 import { entityKey } from '$lib/chat/refs';
-import type { Message, UserSummary } from '$lib/chat/types';
+import type { Message, PresenceStatus, UserSummary } from '$lib/chat/types';
 import { assetUrl } from '$lib/media/assets';
 import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
 import { chatEntities } from '$lib/stores/entities.svelte';
+import { isNativeDesktop, nativeInvoke } from '$lib/platform/native';
 
 export type GuildNotificationLevel = 'all' | 'mentions' | 'none';
 
@@ -14,6 +15,18 @@ export interface GuildNotificationPreference {
 
 export function browserNotificationsFromSettings(settings: Record<string, unknown>): boolean {
   return settings.browser_notifications === true;
+}
+
+export function resolveNotificationPresence(
+  storedPreference: string | null,
+  projectedPresence: PresenceStatus
+): PresenceStatus {
+  if (storedPreference === 'dnd' || projectedPresence === 'dnd') return 'dnd';
+  if (storedPreference === 'online' || storedPreference === 'idle') {
+    return storedPreference;
+  }
+  if (storedPreference === 'invisible') return 'offline';
+  return projectedPresence;
 }
 
 export function shouldOfferBrowserNotificationPrompt(
@@ -30,8 +43,10 @@ export function shouldNotifyForMessage(
   message: Message,
   currentUser: UserSummary,
   isDirectMessage: boolean,
-  guildLevel: GuildNotificationLevel = 'mentions'
+  guildLevel: GuildNotificationLevel = 'mentions',
+  currentPresence: PresenceStatus = 'online'
 ): boolean {
+  if (currentPresence === 'dnd') return false;
   if (message.author_id === currentUser.id && message.author_domain === currentUser.origin_domain) {
     return false;
   }
@@ -52,7 +67,7 @@ class BrowserNotifications {
   #guildLevels = new Map<string, GuildNotificationLevel>();
 
   get supported(): boolean {
-    return typeof window !== 'undefined' && 'Notification' in window;
+    return isNativeDesktop() || (typeof window !== 'undefined' && 'Notification' in window);
   }
 
   apply(settings: Record<string, unknown>): void {
@@ -78,7 +93,11 @@ class BrowserNotifications {
   }
 
   refreshPermission(): void {
-    this.permission = this.supported ? Notification.permission : 'denied';
+    this.permission = isNativeDesktop()
+      ? 'granted'
+      : this.supported
+        ? Notification.permission
+        : 'denied';
   }
 
   refreshPromptPreference(): void {
@@ -102,6 +121,10 @@ class BrowserNotifications {
   }
 
   async requestPermission(): Promise<NotificationPermission> {
+    if (isNativeDesktop()) {
+      this.permission = 'granted';
+      return this.permission;
+    }
     if (!this.supported) {
       this.permission = 'denied';
       return this.permission;
@@ -118,11 +141,24 @@ class BrowserNotifications {
   }
 
   notifyMessage(message: Message): void {
-    if (!this.enabled || !this.supported || Notification.permission !== 'granted') return;
+    if (
+      !this.enabled ||
+      !this.supported ||
+      (!isNativeDesktop() && Notification.permission !== 'granted')
+    )
+      return;
     if (document.visibilityState === 'visible' && document.hasFocus()) return;
 
     const currentUser = chatEntities.currentUser;
     if (!currentUser) return;
+    const projectedPresence = chatEntities.presenceFor(currentUser);
+    let storedPresence: string | null = null;
+    try {
+      storedPresence = window.localStorage.getItem('kaede.presence');
+    } catch {
+      // The live presence projection remains authoritative when storage is unavailable.
+    }
+    const currentPresence = resolveNotificationPresence(storedPresence, projectedPresence);
     const channel = chatEntities.channels.get(`${message.channel_id}@${message.channel_domain}`);
     if (!channel) return;
     const isDirectMessage = channel.guild_id === null;
@@ -131,7 +167,8 @@ class BrowserNotifications {
       channel.guild_id && channel.guild_domain
         ? (this.#guildLevels.get(`${channel.guild_id}@${channel.guild_domain}`) ?? 'mentions')
         : 'mentions';
-    if (!shouldNotifyForMessage(message, currentUser, isDirectMessage, guildLevel)) return;
+    if (!shouldNotifyForMessage(message, currentUser, isDirectMessage, guildLevel, currentPresence))
+      return;
 
     const author =
       message.author ?? chatEntities.users.get(`${message.author_id}@${message.author_domain}`);
@@ -147,6 +184,15 @@ class BrowserNotifications {
     const icon = author?.avatar_hash
       ? new URL(assetUrl(author.avatar_hash, 'thumbnail_128', author), window.location.origin).href
       : undefined;
+    if (isNativeDesktop()) {
+      void nativeInvoke('native_notify', {
+        title,
+        body,
+        sensitive: false,
+        deepLink: guild ? guildChannelPath(guild, channel) : directMessagePath(channel)
+      });
+      return;
+    }
     try {
       const notification = new Notification(title, {
         body,

@@ -159,6 +159,14 @@
       : defaultLabel;
   }
 
+  function dismissRolePicker(event: PointerEvent) {
+    if (!rolePickerOpen) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest('.user-role-add, .user-role-picker')) return;
+    rolePickerOpen = false;
+    roleSearch = '';
+  }
+
   async function changeRole(role: Role, enabled: boolean) {
     if (!onRoleChange || roleBusy) return false;
     roleBusy = role.id;
@@ -214,6 +222,7 @@
       event.preventDefault();
       event.stopPropagation();
     }}
+    onpointerdown={dismissRolePicker}
   >
     <div class="user-popover-banner">
       {#if user.banner_hash}

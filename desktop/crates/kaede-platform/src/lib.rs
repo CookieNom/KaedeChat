@@ -105,7 +105,7 @@ impl GifFavorites {
 /// Preferences that must survive application upgrades and audio-device
 /// renumbering.  Device labels are retained as a conservative fallback because
 /// CPAL/Nokhwa identifiers are not guaranteed to be stable across reboots.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct DesktopPreferences {
     pub input_device: Option<DevicePreference>,
@@ -115,6 +115,35 @@ pub struct DesktopPreferences {
     pub input_mode: InputModePreference,
     pub vad_threshold: f32,
     pub push_to_talk_hotkey: Option<String>,
+    pub noise_suppression: NoiseSuppressionPreference,
+    pub echo_cancellation: bool,
+    pub automatic_gain_control: bool,
+}
+
+impl Default for DesktopPreferences {
+    fn default() -> Self {
+        Self {
+            input_device: None,
+            output_device: None,
+            camera_device: None,
+            screen_source: None,
+            input_mode: InputModePreference::VoiceActivity,
+            vad_threshold: 0.025,
+            push_to_talk_hotkey: None,
+            noise_suppression: NoiseSuppressionPreference::Standard,
+            echo_cancellation: true,
+            automatic_gain_control: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseSuppressionPreference {
+    Off,
+    #[default]
+    Standard,
+    VoiceIsolation,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -146,10 +175,9 @@ impl DesktopPreferences {
                 value.vad_threshold = value.vad_threshold.clamp(0.001, 1.0);
                 Ok(value)
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
-                vad_threshold: 0.025,
-                ..Self::default()
-            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(Self { ..Self::default() })
+            }
             Err(error) => Err(PlatformError::Io(error)),
         }
     }
@@ -407,101 +435,35 @@ pub trait NotificationService: Send + Sync {
     async fn show(&self, notification: Notification) -> Result<(), PlatformError>;
 }
 
-/// OS notification bridge that never routes message contents through a web
-/// service. A missing desktop notifier is reported instead of silently
-/// pretending the notification was delivered.
+/// Cross-platform native notification service. Notification delivery stays
+/// inside the application process; it never launches a shell or script host.
 #[derive(Clone, Default)]
 pub struct SystemNotificationService;
 
 #[async_trait]
 impl NotificationService for SystemNotificationService {
     async fn show(&self, notification: Notification) -> Result<(), PlatformError> {
-        let title = notification.title;
         let body = if notification.sensitive {
             "Open Kaede Chat to view this message.".to_owned()
         } else {
             notification.body
         };
-        let status = platform_notification(&title, &body).await?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(PlatformError::Other(format!(
-                "notification helper exited with {status}"
-            )))
-        }
+        task::spawn_blocking(move || {
+            let mut native = notify_rust::Notification::new();
+            native
+                .appname("Kaede Chat")
+                .summary(&notification.title)
+                .body(&body);
+            #[cfg(target_os = "windows")]
+            native.app_id(SERVICE);
+            native
+                .show()
+                .map(|_| ())
+                .map_err(|error| PlatformError::Other(error.to_string()))
+        })
+        .await
+        .map_err(PlatformError::Worker)?
     }
-}
-
-#[cfg(target_os = "linux")]
-async fn platform_notification(
-    title: &str,
-    body: &str,
-) -> Result<std::process::ExitStatus, PlatformError> {
-    tokio::process::Command::new("notify-send")
-        .args(["--app-name=Kaede Chat", "--", title, body])
-        .status()
-        .await
-        .map_err(PlatformError::Io)
-}
-
-#[cfg(target_os = "macos")]
-async fn platform_notification(
-    title: &str,
-    body: &str,
-) -> Result<std::process::ExitStatus, PlatformError> {
-    fn apple_string(value: &str) -> String {
-        value.replace('\\', "\\\\").replace('"', "\\\"")
-    }
-    let script = format!(
-        "display notification \"{}\" with title \"{}\"",
-        apple_string(body),
-        apple_string(title)
-    );
-    tokio::process::Command::new("osascript")
-        .args(["-e", &script])
-        .status()
-        .await
-        .map_err(PlatformError::Io)
-}
-
-#[cfg(target_os = "windows")]
-async fn platform_notification(
-    title: &str,
-    body: &str,
-) -> Result<std::process::ExitStatus, PlatformError> {
-    // PowerShell receives independently encoded UTF-16 values, preventing
-    // message text from becoming executable script syntax.
-    let encode = |value: &str| {
-        STANDARD.encode(
-            value
-                .encode_utf16()
-                .flat_map(u16::to_le_bytes)
-                .collect::<Vec<_>>(),
-        )
-    };
-    let script = format!(
-        "$t=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'));\
-         $b=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'));\
-         Add-Type -AssemblyName System.Windows.Forms;\
-         $n=New-Object System.Windows.Forms.NotifyIcon;\
-         $n.Icon=[System.Drawing.SystemIcons]::Information;$n.Visible=$true;\
-         $n.ShowBalloonTip(5000,$t,$b,[System.Windows.Forms.ToolTipIcon]::None);\
-         Start-Sleep -Milliseconds 5500;$n.Dispose()",
-        encode(title),
-        encode(body)
-    );
-    tokio::process::Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &script,
-        ])
-        .status()
-        .await
-        .map_err(PlatformError::Io)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -885,6 +847,9 @@ mod tests {
             input_mode: InputModePreference::PushToTalk,
             vad_threshold: 0.04,
             push_to_talk_hotkey: Some("Shift+Backquote".to_owned()),
+            noise_suppression: NoiseSuppressionPreference::VoiceIsolation,
+            echo_cancellation: true,
+            automatic_gain_control: false,
         };
         preferences.save(&paths).await.expect("save preferences");
         assert_eq!(

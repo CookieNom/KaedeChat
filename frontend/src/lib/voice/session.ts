@@ -1,5 +1,6 @@
 import { Room, RoomEvent, Track, type Participant } from 'livekit-client';
 import type { LocalTrackPublication, RemoteTrack, RemoteTrackPublication } from 'livekit-client';
+import { isNativeDesktop, nativeInvoke, type NativeVoiceStatus } from '$lib/platform/native';
 
 export interface VoiceToken {
   token: string;
@@ -16,9 +17,16 @@ export interface VoiceTile {
   key: string;
   identity: string;
   name: string;
-  source: Track.Source;
-  track: Track;
+  source: Track.Source | 'native_camera';
+  track?: Track;
+  nativeFrame?: NativeVideoFrame;
   local: boolean;
+}
+
+interface NativeVideoFrame {
+  width: number;
+  height: number;
+  rgba: Uint8ClampedArray;
 }
 
 export interface VoiceParticipant {
@@ -83,6 +91,11 @@ export class VoiceSession extends EventTarget {
   canSpeak = false;
   canStream = false;
   error = '';
+  #nativePoll: ReturnType<typeof setInterval> | null = null;
+  #nativeVideoGeneration = 0;
+  #nativeVideo = new Map<string, NativeVideoFrame>();
+  #nativeMuted = false;
+  #nativeDeafened = false;
 
   constructor() {
     super();
@@ -130,8 +143,87 @@ export class VoiceSession extends EventTarget {
     }
   }
 
+  async connectNative(reference: string, isCall: boolean): Promise<void> {
+    if (!isNativeDesktop()) throw new Error('Native voice is unavailable.');
+    if (this.connected || this.connecting) return;
+    this.connecting = true;
+    this.error = '';
+    this.#changed();
+    try {
+      await nativeInvoke('native_voice_join', { reference, isCall });
+      this.#startNativePolling();
+      await this.#pollNativeStatus();
+      this.#startNativeVideoPolling();
+    } catch (caught) {
+      this.error = caught instanceof Error ? caught.message : 'Could not join voice.';
+      throw caught;
+    } finally {
+      this.connecting = false;
+      this.#changed();
+    }
+  }
+
+  #startNativePolling(): void {
+    if (this.#nativePoll) clearInterval(this.#nativePoll);
+    this.#nativePoll = setInterval(() => void this.#pollNativeStatus(), 250);
+  }
+
+  async #pollNativeStatus(): Promise<void> {
+    try {
+      const status = await nativeInvoke<NativeVoiceStatus>('native_voice_status');
+      this.connected = status.state === 'connected' || status.state === 'media_error';
+      this.connecting = status.state === 'connecting' || status.state === 'reconnecting';
+      this.canSpeak = status.can_speak ?? false;
+      this.canStream = status.can_stream ?? false;
+      this.camera = status.camera ?? false;
+      this.screen = status.screen ?? false;
+      this.#nativeMuted = status.muted ?? this.#nativeMuted;
+      this.#nativeDeafened = status.deafened ?? this.#nativeDeafened;
+      this.microphone = this.connected && this.canSpeak && !this.#nativeMuted;
+      this.error = status.message ?? '';
+      if (status.state === 'disconnected' || status.state === 'failed') {
+        if (this.#nativePoll) clearInterval(this.#nativePoll);
+        this.#nativePoll = null;
+      }
+      this.#changed();
+    } catch {
+      // A transient bridge failure must not tear down a still-live native room.
+    }
+  }
+
+  #startNativeVideoPolling(): void {
+    const generation = ++this.#nativeVideoGeneration;
+    void (async () => {
+      while (generation === this.#nativeVideoGeneration && this.connected) {
+        try {
+          const response = await nativeInvoke<ArrayBuffer | Uint8Array>('native_voice_next_video');
+          const bytes = response instanceof Uint8Array ? response : new Uint8Array(response);
+          if (bytes.byteLength === 0) continue;
+          const frame = decodeNativeVideoFrame(bytes);
+          if (!frame) continue;
+          if (frame.removed) this.#nativeVideo.delete(frame.participant);
+          else this.#nativeVideo.set(frame.participant, frame.image);
+          this.#changed();
+        } catch {
+          if (generation === this.#nativeVideoGeneration) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+        }
+      }
+    })();
+  }
+
   async toggleMicrophone(): Promise<void> {
     if (!this.connected || !this.canSpeak) return;
+    if (isNativeDesktop()) {
+      this.#nativeMuted = !this.#nativeMuted;
+      await nativeInvoke('native_voice_control', {
+        control: this.#nativeMuted ? 'mute' : 'unmute'
+      });
+      this.microphone = !this.#nativeMuted;
+      this.#changed();
+      return;
+    }
     const enabled = !this.microphone;
     await this.room.localParticipant.setMicrophoneEnabled(enabled);
     this.microphone = enabled;
@@ -141,6 +233,14 @@ export class VoiceSession extends EventTarget {
   async toggleCamera(): Promise<void> {
     if (!this.connected || !this.canStream) return;
     const enabled = !this.camera;
+    if (isNativeDesktop()) {
+      await nativeInvoke('native_voice_control', {
+        control: enabled ? 'camera_on' : 'camera_off'
+      });
+      this.camera = enabled;
+      this.#changed();
+      return;
+    }
     await this.room.localParticipant.setCameraEnabled(enabled);
     this.camera = enabled;
     this.#changed();
@@ -149,18 +249,47 @@ export class VoiceSession extends EventTarget {
   async toggleScreen(): Promise<void> {
     if (!this.connected || !this.canStream) return;
     const enabled = !this.screen;
+    if (isNativeDesktop()) {
+      await nativeInvoke('native_voice_control', {
+        control: enabled ? 'screen_on' : 'screen_off'
+      });
+      this.screen = enabled;
+      this.#changed();
+      return;
+    }
     await this.room.localParticipant.setScreenShareEnabled(enabled, { audio: true });
     this.screen = enabled;
     this.#changed();
   }
 
   async disconnect(): Promise<void> {
+    if (isNativeDesktop()) {
+      if (this.#nativePoll) clearInterval(this.#nativePoll);
+      this.#nativePoll = null;
+      this.#nativeVideoGeneration += 1;
+      this.#nativeVideo.clear();
+      await nativeInvoke('native_voice_leave');
+      this.connected = false;
+      this.connecting = false;
+      this.#changed();
+      return;
+    }
     await this.room.disconnect(true);
     this.connected = false;
     this.#changed();
   }
 
   tiles(): VoiceTile[] {
+    if (isNativeDesktop()) {
+      return [...this.#nativeVideo.entries()].map(([identity, nativeFrame]) => ({
+        key: `native:${identity}`,
+        identity,
+        name: identity.split('@', 1)[0] || identity,
+        source: 'native_camera',
+        nativeFrame,
+        local: false
+      }));
+    }
     const tiles: VoiceTile[] = [];
     const addParticipant = (participant: Participant, local: boolean) => {
       for (const publication of participant.trackPublications.values()) {
@@ -188,6 +317,22 @@ export class VoiceSession extends EventTarget {
   }
 
   participants(): VoiceParticipant[] {
+    if (isNativeDesktop()) {
+      return this.connected
+        ? [
+            {
+              key: 'native-local',
+              identity: 'native-local',
+              name: 'You',
+              local: true,
+              speaking: false,
+              microphone: this.microphone,
+              camera: this.camera,
+              screen: this.screen
+            }
+          ]
+        : [];
+    }
     const participants: VoiceParticipant[] = [];
     const addParticipant = (participant: Participant, local: boolean) => {
       const publications = [...participant.trackPublications.values()];
@@ -215,6 +360,7 @@ export class VoiceSession extends EventTarget {
   }
 
   attachAudio(element: HTMLElement): () => void {
+    if (isNativeDesktop()) return () => undefined;
     const attached: HTMLMediaElement[] = [];
     const attachPublication = (
       publication: RemoteTrackPublication | LocalTrackPublication
@@ -249,16 +395,71 @@ export class VoiceSession extends EventTarget {
   }
 }
 
-export function attachVideo(node: HTMLElement, tile: VoiceTile): { destroy: () => void } {
-  const media = tile.track.attach();
+export function attachVideo(
+  node: HTMLElement,
+  tile: VoiceTile
+): { update: (next: VoiceTile) => void; destroy: () => void } {
+  if (tile.nativeFrame) {
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    node.append(canvas);
+    const draw = (next: VoiceTile) => {
+      const frame = next.nativeFrame;
+      if (!frame || !context) return;
+      canvas.width = frame.width;
+      canvas.height = frame.height;
+      // Tauri may deserialize the frame onto a SharedArrayBuffer-backed view.
+      // ImageData deliberately accepts only an owned ArrayBuffer, so copy at
+      // this UI boundary instead of weakening the native frame type.
+      const pixels = new Uint8ClampedArray(frame.rgba.length);
+      pixels.set(frame.rgba);
+      context.putImageData(new ImageData(pixels, frame.width, frame.height), 0, 0);
+    };
+    draw(tile);
+    return { update: draw, destroy: () => canvas.remove() };
+  }
+  if (!tile.track) return { update: () => undefined, destroy: () => undefined };
+  const track = tile.track;
+  const media = track.attach();
   media.autoplay = true;
   if (media instanceof HTMLVideoElement) media.playsInline = true;
   media.muted = tile.local;
   node.append(media);
   return {
     destroy: () => {
-      tile.track.detach(media);
+      track.detach(media);
       media.remove();
+    },
+    update: () => undefined
+  };
+}
+
+function decodeNativeVideoFrame(
+  bytes: Uint8Array
+):
+  | { participant: string; removed: true; image: NativeVideoFrame }
+  | { participant: string; removed: false; image: NativeVideoFrame }
+  | null {
+  if (bytes.byteLength < 15 || new TextDecoder().decode(bytes.subarray(0, 4)) !== 'KVD1') {
+    return null;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const width = view.getUint32(4, true);
+  const height = view.getUint32(8, true);
+  const identityLength = view.getUint16(12, true);
+  const removed = view.getUint8(14) === 1;
+  const imageOffset = 15 + identityLength;
+  if (imageOffset > bytes.byteLength) return null;
+  const participant = new TextDecoder().decode(bytes.subarray(15, imageOffset));
+  const expected = width * height * 4;
+  if (!removed && (expected === 0 || bytes.byteLength - imageOffset !== expected)) return null;
+  return {
+    participant,
+    removed,
+    image: {
+      width,
+      height,
+      rgba: new Uint8ClampedArray(bytes.slice(imageOffset).buffer)
     }
   };
 }

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Kaede uses your microphone when you join voice chat.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>Kaede uses your camera only when you enable video.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Kaede captures a screen or window only when you start sharing it.</string>
+</dict>
+</plist>

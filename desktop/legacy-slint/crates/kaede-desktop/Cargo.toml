@@ -22,19 +22,19 @@ base64.workspace = true
 chrono.workspace = true
 copypasta.workspace = true
 global-hotkey.workspace = true
-kaede-api = { path = "../kaede-api" }
-kaede-app = { path = "../kaede-app" }
-kaede-audio = { path = "../kaede-audio", optional = true }
-kaede-auth = { path = "../kaede-auth" }
-kaede-core = { path = "../kaede-core" }
-kaede-gateway = { path = "../kaede-gateway" }
-kaede-media = { path = "../kaede-media" }
+kaede-api = { path = "../../../crates/kaede-api" }
+kaede-app = { path = "../../../crates/kaede-app" }
+kaede-audio = { path = "../../../crates/kaede-audio", optional = true }
+kaede-auth = { path = "../../../crates/kaede-auth" }
+kaede-core = { path = "../../../crates/kaede-core" }
+kaede-gateway = { path = "../../../crates/kaede-gateway" }
+kaede-media = { path = "../../../crates/kaede-media" }
 kaede-media-viewer = { path = "../kaede-media-viewer", default-features = false }
-kaede-platform = { path = "../kaede-platform" }
-kaede-protocol = { path = "../kaede-protocol" }
-kaede-turnstile = { path = "../kaede-turnstile", default-features = false }
+kaede-platform = { path = "../../../crates/kaede-platform" }
+kaede-protocol = { path = "../../../crates/kaede-protocol" }
+kaede-turnstile = { path = "../../../crates/kaede-turnstile", default-features = false }
 kaede-ui = { path = "../kaede-ui" }
-kaede-voice = { path = "../kaede-voice", optional = true }
+kaede-voice = { path = "../../../crates/kaede-voice", optional = true }
 secrecy.workspace = true
 serde_json.workspace = true
 slint.workspace = true

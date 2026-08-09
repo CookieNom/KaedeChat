@@ -7,6 +7,7 @@
     shouldOfferBrowserNotificationPrompt,
     type GuildNotificationPreference
   } from '$lib/notifications/browser.svelte';
+  import { isNativeDesktop } from '$lib/platform/native';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import { applyLocale } from '$lib/ui/locale';
   import { applyTheme, type ThemePreference } from '$lib/ui/theme';
@@ -29,6 +30,7 @@
   interface UserSettingsPayload {
     theme: ThemePreference;
     locale: string;
+    presence_preference: 'online' | 'idle' | 'dnd' | 'invisible';
     notification_settings: Record<string, unknown>;
   }
 
@@ -40,9 +42,15 @@
     void api<UserSettingsPayload>('/users/@me/settings', {
       signal: controller.signal
     })
-      .then(({ theme, locale, notification_settings }) => {
+      .then(({ theme, locale, presence_preference, notification_settings }) => {
         applyTheme(theme);
         applyLocale(locale);
+        try {
+          localStorage.setItem('kaede.presence', presence_preference);
+        } catch {
+          // The gateway still applies the account preference for this session.
+        }
+        authenticatedGateway.client.setPresence(presence_preference);
         developerMode.apply(notification_settings);
         browserNotifications.apply(notification_settings);
         notificationSettingsLoaded = true;
@@ -96,7 +104,7 @@
       browserNotifications.apply(updated.notification_settings);
       browserNotifications.markPromptHandled();
     } catch {
-      notificationPromptError = 'Could not enable browser notifications. Try again in settings.';
+      notificationPromptError = `Could not enable ${isNativeDesktop() ? 'desktop' : 'browser'} notifications. Try again in settings.`;
     } finally {
       notificationPromptBusy = false;
     }
@@ -110,7 +118,10 @@
   <aside class="notification-opt-in" aria-labelledby="notification-opt-in-title">
     <div>
       <strong id="notification-opt-in-title">Stay up to date</strong>
-      <p>Enable browser notifications for direct messages and the guild alerts you choose.</p>
+      <p>
+        Enable {isNativeDesktop() ? 'desktop' : 'browser'} notifications for direct messages and the
+        guild alerts you choose. Do Not Disturb silences them.
+      </p>
       {#if notificationPromptError}<small role="alert">{notificationPromptError}</small>{/if}
     </div>
     <div class="notification-opt-in-actions">

@@ -45,7 +45,11 @@
             >{message.author?.username.slice(0, 1).toUpperCase() ?? '•'}</span
           >
           <span>
-            <strong>{message.author?.display_name ?? message.author?.username ?? 'Unknown author'}</strong>
+            <strong
+              >{message.author?.display_name ??
+                message.author?.username ??
+                'Unknown author'}</strong
+            >
             <time datetime={message.created_at}
               >{new Date(message.created_at).toLocaleString(preferredLocale(), {
                 dateStyle: 'medium',

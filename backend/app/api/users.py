@@ -105,11 +105,20 @@ async def load_settings(session: AsyncSession, auth: AuthenticatedUser) -> UserS
 
 
 def settings_payload(settings: UserSettings) -> dict[str, object]:
+    presence_preference = settings.notification_settings.get("presence_preference", "online")
+    if presence_preference not in {"online", "idle", "dnd", "invisible"}:
+        presence_preference = "online"
+    notification_settings = {
+        key: value
+        for key, value in settings.notification_settings.items()
+        if key != "presence_preference"
+    }
     return {
         "locale": settings.locale,
         "theme": settings.theme,
         "dm_privacy": settings.dm_privacy,
-        "notification_settings": settings.notification_settings,
+        "presence_preference": presence_preference,
+        "notification_settings": notification_settings,
     }
 
 
@@ -127,11 +136,37 @@ async def patch_user_settings(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
-    settings = await load_settings(session, auth)
+    settings = await session.scalar(
+        select(UserSettings)
+        .where(
+            UserSettings.user_id == auth.user.id,
+            UserSettings.user_domain == auth.user.origin_domain,
+        )
+        .with_for_update()
+    )
+    if settings is None:
+        raise HTTPException(status_code=500, detail={"code": "SETTINGS_MISSING"})
     if "dm_privacy" in payload.model_fields_set:
         await lock_dm_privacy(session, auth.user)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    presence_preference = changes.pop("presence_preference", None)
+    notification_settings = changes.pop("notification_settings", None)
+    for field, value in changes.items():
         setattr(settings, field, value)
+    if notification_settings is not None:
+        # Presence is an account-level preference. Generic notification updates
+        # must not erase a concurrent presence selection made by another client.
+        merged_notification_settings = dict(notification_settings)
+        merged_notification_settings.pop("presence_preference", None)
+        existing_presence = settings.notification_settings.get("presence_preference")
+        if existing_presence is not None:
+            merged_notification_settings["presence_preference"] = existing_presence
+        settings.notification_settings = merged_notification_settings
+    if presence_preference is not None:
+        settings.notification_settings = {
+            **settings.notification_settings,
+            "presence_preference": presence_preference,
+        }
     await session.commit()
     return settings_payload(settings)
 

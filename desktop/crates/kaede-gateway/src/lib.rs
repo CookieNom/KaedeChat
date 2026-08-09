@@ -236,19 +236,25 @@ fn command_payload(command: GatewayCommand) -> Value {
             guild_domain,
             query,
             limit,
-        } => json!({
-            "op": GatewayOp::RequestMembers as u8,
-            "d": {"guild_id": guild_id, "guild_domain": guild_domain, "query": query, "limit": limit.min(100)},
-        }),
+        } => {
+            let guild_ref = gateway_guild_reference(&guild_id, &guild_domain);
+            json!({
+                "op": GatewayOp::RequestMembers as u8,
+                "d": {"guild_id": guild_ref, "query": query, "limit": limit.min(100)},
+            })
+        }
         GatewayCommand::SubscribeMemberList {
             guild_id,
             guild_domain,
             ranges,
-        } => json!({
-            "op": GatewayOp::SubscribeMemberList as u8,
-            "d": {"guild_id": guild_id, "guild_domain": guild_domain,
-                "ranges": ranges.into_iter().take(3).map(|(start, end)| [start, end.min(start.saturating_add(99))]).collect::<Vec<_>>()},
-        }),
+        } => {
+            let guild_ref = gateway_guild_reference(&guild_id, &guild_domain);
+            json!({
+                "op": GatewayOp::SubscribeMemberList as u8,
+                "d": {"guild_id": guild_ref,
+                    "ranges": ranges.into_iter().take(3).map(|(start, end)| [start, end.min(start.saturating_add(99))]).collect::<Vec<_>>()},
+            })
+        }
         GatewayCommand::VoiceState {
             guild_id,
             guild_domain,
@@ -262,6 +268,14 @@ fn command_payload(command: GatewayCommand) -> Value {
                 "channel_domain": channel_domain, "self_mute": self_mute, "self_deaf": self_deaf},
         }),
         GatewayCommand::Shutdown => Value::Null,
+    }
+}
+
+fn gateway_guild_reference(guild_id: &str, guild_domain: &str) -> String {
+    if guild_domain.is_empty() || guild_id.contains('@') {
+        guild_id.to_owned()
+    } else {
+        format!("{guild_id}@{guild_domain}")
     }
 }
 
@@ -313,6 +327,8 @@ mod tests {
         });
         assert_eq!(payload["op"], GatewayOp::RequestMembers as u8);
         assert_eq!(payload["d"]["limit"], 100);
+        assert_eq!(payload["d"]["guild_id"], "1@home.example");
+        assert!(payload["d"].get("guild_domain").is_none());
     }
 
     #[test]
@@ -327,6 +343,7 @@ mod tests {
         assert_eq!(ranges[0], json!([0, 99]));
         assert_eq!(ranges[1], json!([100, 199]));
         assert_eq!(ranges[2], json!([200, 299]));
+        assert_eq!(payload["d"]["guild_id"], "1@home.example");
     }
 
     #[test]

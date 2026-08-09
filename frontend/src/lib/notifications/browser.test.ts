@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { Message, UserSummary } from '$lib/chat/types';
 import {
   browserNotificationsFromSettings,
+  resolveNotificationPresence,
   shouldNotifyForMessage,
   shouldOfferBrowserNotificationPrompt
 } from './browser.svelte';
@@ -63,5 +64,29 @@ describe('browser notification settings', () => {
     };
     expect(shouldNotifyForMessage(mention, currentUser, false, 'mentions')).toBe(true);
     expect(shouldNotifyForMessage(mention, currentUser, false, 'none')).toBe(false);
+  });
+
+  it('suppresses every notification while the current user is in do not disturb', () => {
+    expect(shouldNotifyForMessage(message, currentUser, true, 'all', 'dnd')).toBe(false);
+    expect(
+      shouldNotifyForMessage(
+        {
+          ...message,
+          mention_user_refs: [{ id: currentUser.id, origin_domain: currentUser.origin_domain }]
+        },
+        currentUser,
+        false,
+        'mentions',
+        'dnd'
+      )
+    ).toBe(false);
+  });
+
+  it('uses the locally selected presence immediately instead of waiting for projection sync', () => {
+    expect(resolveNotificationPresence('dnd', 'online')).toBe('dnd');
+    expect(resolveNotificationPresence('online', 'dnd')).toBe('dnd');
+    expect(resolveNotificationPresence('invisible', 'online')).toBe('offline');
+    expect(resolveNotificationPresence(null, 'dnd')).toBe('dnd');
+    expect(resolveNotificationPresence('invalid', 'idle')).toBe('idle');
   });
 });

@@ -4,6 +4,8 @@
   import { loadAuthConfiguration } from '$lib/auth/config';
   import { safeReturnPath } from '$lib/auth/return-path';
   import TurnstileWidget from '$lib/components/TurnstileWidget.svelte';
+  import NativeInstanceField from '$lib/components/NativeInstanceField.svelte';
+  import { initializeNativeInstance } from '$lib/platform/native';
   import { onMount, tick } from 'svelte';
 
   interface LoginResult {
@@ -24,10 +26,12 @@
   let turnstileToken = $state<string | null>(null);
   let turnstileWidget = $state<TurnstileWidget | null>(null);
   let codeInput = $state<HTMLInputElement | null>(null);
+  let instanceField = $state<NativeInstanceField | null>(null);
 
   onMount(() => {
     const controller = new AbortController();
-    void loadAuthConfiguration(controller.signal)
+    void initializeNativeInstance()
+      .then(() => loadAuthConfiguration(controller.signal))
       .then((configuration) => {
         recoveryEnabled = configuration.password_recovery_enabled;
         turnstileEnabled = configuration.turnstile.enabled;
@@ -46,6 +50,7 @@
     busy = true;
     error = '';
     try {
+      if (!(await instanceField?.apply())) return;
       if (ticket) {
         await api('/auth/mfa', {
           method: 'POST',
@@ -123,6 +128,7 @@
     >
     <p class="field-note">Enter the current code from your authenticator or one recovery code.</p>
   {:else}
+    <NativeInstanceField bind:this={instanceField} disabled={busy} />
     <label
       >Email, username, or handle <input
         bind:value={identifier}

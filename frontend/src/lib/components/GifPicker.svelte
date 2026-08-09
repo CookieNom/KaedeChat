@@ -1,11 +1,6 @@
 <script lang="ts">
   import { api, ApiError } from '$lib/api/client';
-  import {
-    loadGifFavorites,
-    saveGifFavorites,
-    type GifPage,
-    type GifResult
-  } from '$lib/chat/gifs';
+  import { loadGifFavorites, saveGifFavorites, type GifPage, type GifResult } from '$lib/chat/gifs';
   import { onDestroy, onMount } from 'svelte';
 
   let { onSelect, onClose }: { onSelect: (gif: GifResult) => void; onClose: () => void } = $props();

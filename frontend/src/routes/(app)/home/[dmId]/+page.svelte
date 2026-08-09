@@ -399,6 +399,13 @@
       // Presence still applies to this connection when persistent storage is unavailable.
     }
     gateway?.setPresence(status);
+    void api('/users/@me/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ presence_preference: status })
+    }).catch(() => {
+      // The live gateway preference remains effective for this session. A
+      // later settings refresh will reconcile a failed durable update.
+    });
     if (currentUser) entities.setPresence(currentUser, status === 'invisible' ? 'offline' : status);
   }
 
@@ -574,11 +581,19 @@
         user_id: string;
         user_domain: string;
         status: import('$lib/chat/types').PresenceStatus;
+        preference?: 'online' | 'idle' | 'dnd' | 'invisible';
       };
       entities.setPresence(
         { id: update.user_id, origin_domain: update.user_domain },
         update.status
       );
+      if (
+        update.preference &&
+        currentUser?.id === update.user_id &&
+        currentUser.origin_domain === update.user_domain
+      ) {
+        presencePreference = update.preference;
+      }
     }
   }
 
@@ -1344,14 +1359,24 @@
 
   function jumpToPinnedMessage(message: Message) {
     pinsOpen = false;
-    const element = document.getElementById(`message-${entityRef(message)}`);
+    jumpToMessageReference(entityRef(message));
+  }
+
+  function jumpToMessageReference(reference: string | Message) {
+    const target = typeof reference === 'string' ? reference : entityRef(reference);
+    const element = document.getElementById(`message-${target}`);
     if (element) {
       element.scrollIntoView({ block: 'center', behavior: 'smooth' });
       return;
     }
     const url = new URL(window.location.href);
-    url.searchParams.set('around', entityRef(message));
+    url.searchParams.set('around', target);
     window.location.assign(url);
+  }
+
+  function jumpToReply(message: Message) {
+    if (!message.referenced_message_id || !message.referenced_message_domain) return;
+    jumpToMessageReference(`${message.referenced_message_id}@${message.referenced_message_domain}`);
   }
 
   function finishEditing() {
@@ -1667,8 +1692,8 @@
           aria-label={pinsOpen ? 'Hide pinned messages' : 'Show pinned messages'}
           aria-pressed={pinsOpen}
           title="Pinned messages"
-          onclick={togglePins}
-        >📌</button>
+          onclick={togglePins}>📌</button
+        >
         <button
           class="icon-button"
           type="button"
@@ -1757,6 +1782,7 @@
                   onRetry={retryMessage}
                   onViewProfile={openMessageProfile}
                   onReply={startReply}
+                  onJumpToReference={jumpToReply}
                   onTogglePin={togglePinnedMessage}
                 />
               {/if}
@@ -1771,7 +1797,11 @@
         <div class="reply-banner">
           <span>
             Replying to
-            <strong>{replyingMessage.author?.display_name ?? replyingMessage.author?.username ?? 'Unknown author'}</strong>
+            <strong
+              >{replyingMessage.author?.display_name ??
+                replyingMessage.author?.username ??
+                'Unknown author'}</strong
+            >
           </span>
           <div class="reply-banner-actions">
             <button type="button" onclick={cancelReply} aria-label="Cancel reply">×</button>

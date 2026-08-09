@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resolve } from '$app/paths';
   import type { Attachment } from '$lib/chat/types';
   import { portal } from '$lib/ui/portal';
   import { onDestroy, onMount } from 'svelte';
@@ -7,6 +8,9 @@
   const originalUrl = $derived(
     `/media/${encodeURIComponent(attachment.origin_domain)}/${encodeURIComponent(attachment.id)}/original`
   );
+  // Media is an authenticated API route rather than a Svelte page. The cast
+  // keeps SvelteKit's base-path handling without pretending this dynamic URL
+  // is part of the generated page-route union.
   const isVideo = $derived(attachment.content_type.startsWith('video/'));
 
   function keydown(event: KeyboardEvent) {
@@ -38,7 +42,7 @@
         <strong>{attachment.filename}</strong>
         <small>{attachment.content_type}</small>
       </div>
-      <a href={originalUrl} download={attachment.filename}>Download</a>
+      <a href={resolve(originalUrl as '/')} download={attachment.filename}>Download</a>
       <button type="button" aria-label="Close media viewer" onclick={onClose}>×</button>
     </header>
     <div class="media-viewer-stage">

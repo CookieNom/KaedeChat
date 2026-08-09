@@ -378,9 +378,8 @@
     const domain = userDomain ?? localDomain;
     if (currentUser?.id === userId && currentUser.origin_domain === domain) return;
     const user =
-      members.find(
-        (member) => member.user.id === userId && member.user.origin_domain === domain
-      )?.user ??
+      members.find((member) => member.user.id === userId && member.user.origin_domain === domain)
+        ?.user ??
       entities.users.values.find(
         (candidate) => candidate.id === userId && candidate.origin_domain === domain
       );
@@ -963,7 +962,7 @@
     }
     if (!draggedChannelKey || !canManageChannels || reorderingChannels) return;
     const dragged = guild?.channels?.find((item) => entityKey(item) === draggedChannelKey);
-    if (!dragged || (dragged.type === 4 && target && target.type !== 4)) return;
+    if (!dragged) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
     dragOverChannelKey = target ? entityKey(target) : 'ungrouped';
@@ -1128,6 +1127,13 @@
       // Presence still applies to this connection when persistent storage is unavailable.
     }
     gateway?.setPresence(status);
+    void api('/users/@me/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ presence_preference: status })
+    }).catch(() => {
+      // The live gateway preference remains effective for this session. A
+      // later settings refresh will reconcile a failed durable update.
+    });
     if (currentUser) entities.setPresence(currentUser, status === 'invisible' ? 'offline' : status);
   }
 
@@ -1857,11 +1863,19 @@
         user_id: string;
         user_domain: string;
         status: import('$lib/chat/types').PresenceStatus;
+        preference?: 'online' | 'idle' | 'dnd' | 'invisible';
       };
       entities.setPresence(
         { id: update.user_id, origin_domain: update.user_domain },
         update.status
       );
+      if (
+        update.preference &&
+        currentUser?.id === update.user_id &&
+        currentUser.origin_domain === update.user_domain
+      ) {
+        presencePreference = update.preference;
+      }
     } else if (dispatch.t === 'VOICE_STATE_UPDATE') {
       voiceOccupancy = applyVoiceStateUpdate(
         voiceOccupancy,
@@ -2664,8 +2678,8 @@
     replyingMessage = message;
     replyNotify = Boolean(
       message.author &&
-        (message.author.id !== currentUser?.id ||
-          message.author.origin_domain !== currentUser?.origin_domain)
+      (message.author.id !== currentUser?.id ||
+        message.author.origin_domain !== currentUser?.origin_domain)
     );
     void tick().then(() => composerInput?.focus());
   }
@@ -2713,14 +2727,24 @@
 
   function jumpToPinnedMessage(message: Message) {
     pinsOpen = false;
-    const element = document.getElementById(`message-${entityRef(message)}`);
+    jumpToMessageReference(entityRef(message));
+  }
+
+  function jumpToMessageReference(reference: string | Message) {
+    const target = typeof reference === 'string' ? reference : entityRef(reference);
+    const element = document.getElementById(`message-${target}`);
     if (element) {
       element.scrollIntoView({ block: 'center', behavior: 'smooth' });
       return;
     }
     const url = new URL(window.location.href);
-    url.searchParams.set('around', entityRef(message));
+    url.searchParams.set('around', target);
     window.location.assign(url);
+  }
+
+  function jumpToReply(message: Message) {
+    if (!message.referenced_message_id || !message.referenced_message_domain) return;
+    jumpToMessageReference(`${message.referenced_message_id}@${message.referenced_message_domain}`);
   }
 
   function finishEditing() {
@@ -3044,8 +3068,8 @@
             aria-label={pinsOpen ? 'Hide pinned messages' : 'Show pinned messages'}
             aria-pressed={pinsOpen}
             title="Pinned messages"
-            onclick={togglePins}
-          >📌</button>
+            onclick={togglePins}>📌</button
+          >
         {/if}
         <button
           class="icon-button"
@@ -3081,7 +3105,7 @@
       aria-busy={reorderingChannels}
       oncontextmenu={(event) => showChannelMenu(event, null)}
     >
-      {#each channelGroups as group (group.category ? entityKey(group.category) : 'ungrouped')}
+      {#each channelGroups as group (group.key)}
         {#if group.category}
           <section class="channel-category">
             <div
@@ -3396,6 +3420,7 @@
                   onRetry={retryMessage}
                   onViewProfile={openMessageProfile}
                   onReply={startReply}
+                  onJumpToReference={jumpToReply}
                   onTogglePin={canManageMessages ? togglePinnedMessage : undefined}
                   moderationActions={item.message.author
                     ? moderationActionsFor(item.message.author)
@@ -3413,12 +3438,14 @@
           <div class="reply-banner">
             <span>
               Replying to
-              <strong>{replyingMessage.author?.display_name ?? replyingMessage.author?.username ?? 'Unknown author'}</strong>
+              <strong
+                >{replyingMessage.author?.display_name ??
+                  replyingMessage.author?.username ??
+                  'Unknown author'}</strong
+              >
             </span>
             <div class="reply-banner-actions">
-              {#if replyingMessage.author &&
-              (replyingMessage.author.id !== currentUser?.id ||
-                replyingMessage.author.origin_domain !== currentUser?.origin_domain)}
+              {#if replyingMessage.author && (replyingMessage.author.id !== currentUser?.id || replyingMessage.author.origin_domain !== currentUser?.origin_domain)}
                 <label class="reply-notify-toggle">
                   <input type="checkbox" bind:checked={replyNotify} />
                   Notify author

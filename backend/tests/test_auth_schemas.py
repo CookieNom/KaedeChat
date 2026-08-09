@@ -30,6 +30,12 @@ def test_settings_patch_distinguishes_absent_fields() -> None:
     assert patch.model_dump(exclude_unset=True) == {"theme": "dark"}
 
 
+def test_settings_patch_validates_presence_preference() -> None:
+    assert SettingsPatch(presence_preference="dnd").presence_preference == "dnd"
+    with pytest.raises(ValidationError):
+        SettingsPatch(presence_preference="busy")  # type: ignore[arg-type]
+
+
 def test_mfa_setup_requires_password_and_bounds_the_current_factor() -> None:
     payload = MfaSetupRequest(password="current password", current_code="123456")
     assert payload.current_code == "123456"

@@ -101,6 +101,7 @@ class SettingsPatch(BaseModel):
     locale: str | None = Field(default=None, min_length=2, max_length=16)
     theme: Literal["system", "light", "dark"] | None = None
     dm_privacy: Literal["everyone", "shared_guild", "friends"] | None = None
+    presence_preference: Literal["online", "idle", "dnd", "invisible"] | None = None
     notification_settings: dict[str, object] | None = None
 
     @model_validator(mode="after")

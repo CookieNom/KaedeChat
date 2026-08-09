@@ -47,6 +47,7 @@ from app.db.models import (
     MemberRole,
     ReadState,
     User,
+    UserSettings,
 )
 from app.db.models import Session as AuthSession
 from app.db.session import create_engine_and_sessionmaker
@@ -105,6 +106,32 @@ async def visible_presence_status(redis: Redis, user: User) -> str | None:
     if status == "invisible":
         return "offline"
     return str(status) if status in {"online", "idle", "dnd"} else None
+
+
+async def current_presence_preference(
+    sessionmaker: async_sessionmaker[AsyncSession], redis: Redis, user: User
+) -> str:
+    raw = await redis.get(f"presence:{user.origin_domain}:{user.id}")
+    if raw:
+        try:
+            state = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            state = None
+        status = state.get("status") if isinstance(state, dict) else None
+        if status in {"online", "idle", "dnd", "invisible"}:
+            return str(status)
+    async with sessionmaker() as session:
+        notification_settings = await session.scalar(
+            select(UserSettings.notification_settings).where(
+                UserSettings.user_id == user.id,
+                UserSettings.user_domain == user.origin_domain,
+            )
+        )
+    if isinstance(notification_settings, dict):
+        preference = notification_settings.get("presence_preference")
+        if preference in {"online", "idle", "dnd", "invisible"}:
+            return str(preference)
+    return "online"
 
 
 IDENTIFY_LIMIT_SCRIPT = """
@@ -822,10 +849,12 @@ def ready_payload(
     states: list[ReadState],
     dm_channels: list[dict[str, object]],
     gateway_session_id: str,
+    presence_preference: str,
 ) -> dict[str, object]:
     return {
         "v": PROTOCOL_VERSION,
         "session_id": gateway_session_id,
+        "presence_preference": presence_preference,
         "user": user_payload(user),
         "guilds": [guild_payload(guild) for guild in guilds],
         "dm_channels": dm_channels,
@@ -1762,6 +1791,17 @@ async def fanout_loop(
                             user_id=user.id,
                             generation=generation,
                         )
+                    elif topic == user_topic(user.origin_domain, user.id):
+                        # Only the account's private topic receives the actual
+                        # preference. Guild subscribers see Invisible as Offline.
+                        await publish_presence(
+                            redis,
+                            topic,
+                            {**presence, "preference": status_value},
+                            user_domain=user.origin_domain,
+                            user_id=user.id,
+                            generation=generation,
+                        )
                 schedule_presence_fanout(user, visible_status, generation)
             elif op == GatewayOp.VOICE_STATE_UPDATE:
                 raw_data = payload.get("d")
@@ -2045,6 +2085,7 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                     sequence,
                 )
             sequence += 1
+            presence_preference = await current_presence_preference(sessionmaker, redis, user)
             await websocket.send_json(
                 {
                     "op": GatewayOp.DISPATCH,
@@ -2053,6 +2094,7 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                     "d": {
                         "session_id": gateway_session_id,
                         "replayed": sequence - start_sequence - 1,
+                        "presence_preference": presence_preference,
                     },
                 }
             )
@@ -2124,12 +2166,20 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                 await websocket.send_json({"op": GatewayOp.INVALID_SESSION, "d": False})
                 return
             visibility = await build_visibility_summary(sessionmaker, redis, user, guilds)
+            presence_preference = await current_presence_preference(sessionmaker, redis, user)
             await websocket.send_json(
                 {
                     "op": GatewayOp.DISPATCH,
                     "t": "READY",
                     "s": 0,
-                    "d": ready_payload(user, guilds, states, dm_channels, gateway_session_id),
+                    "d": ready_payload(
+                        user,
+                        guilds,
+                        states,
+                        dm_channels,
+                        gateway_session_id,
+                        presence_preference,
+                    ),
                 }
             )
             replay = await replay_topic_events(redis, topics, cursors)

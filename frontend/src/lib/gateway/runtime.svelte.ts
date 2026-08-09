@@ -24,7 +24,26 @@ type ReadyPayload = {
   guilds: Guild[];
   dm_channels: Channel[];
   read_states: ReadStateStatus[];
+  presence_preference?: 'online' | 'idle' | 'dnd' | 'invisible';
 };
+
+function applyOwnPresencePreference(
+  preference: 'online' | 'idle' | 'dnd' | 'invisible' | undefined
+): void {
+  if (!preference) return;
+  authenticatedGateway.client.rememberPresence(preference);
+  if (chatEntities.currentUser) {
+    chatEntities.setPresence(
+      chatEntities.currentUser,
+      preference === 'invisible' ? 'offline' : preference
+    );
+  }
+  try {
+    globalThis.localStorage?.setItem('kaede.presence', preference);
+  } catch {
+    // Live state still updates when persistent storage is unavailable.
+  }
+}
 
 function applyEntityDispatch(dispatch: Dispatch): void {
   switch (dispatch.t) {
@@ -35,6 +54,14 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       chatEntities.ingestGuilds(ready.guilds);
       chatEntities.channels.upsertMany(ready.dm_channels);
       chatEntities.readStates.upsertMany(ready.read_states);
+      applyOwnPresencePreference(ready.presence_preference);
+      return;
+    }
+    case 'RESUMED': {
+      const resumed = dispatch.d as {
+        presence_preference?: 'online' | 'idle' | 'dnd' | 'invisible';
+      };
+      applyOwnPresencePreference(resumed.presence_preference);
       return;
     }
     case 'MESSAGE_CREATE': {
@@ -173,11 +200,19 @@ function applyEntityDispatch(dispatch: Dispatch): void {
         user_id: string;
         user_domain: string;
         status: PresenceStatus;
+        preference?: 'online' | 'idle' | 'dnd' | 'invisible';
       };
       chatEntities.setPresence(
         { id: presence.user_id, origin_domain: presence.user_domain },
         presence.status
       );
+      if (
+        presence.preference &&
+        chatEntities.currentUser?.id === presence.user_id &&
+        chatEntities.currentUser.origin_domain === presence.user_domain
+      ) {
+        applyOwnPresencePreference(presence.preference);
+      }
       return;
     }
     case 'USER_UPDATE': {

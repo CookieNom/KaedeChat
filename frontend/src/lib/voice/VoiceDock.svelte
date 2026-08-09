@@ -3,6 +3,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import { Permission } from '$lib/generated/permissions';
   import { onDestroy, onMount } from 'svelte';
+  import { isNativeDesktop } from '$lib/platform/native';
 
   import { attachVideo, VoiceSession, type VoiceToken } from './session';
 
@@ -82,6 +83,11 @@
       try {
         await voice.disconnect();
         if (!mounted || generation !== connectionGeneration) return;
+        if (isNativeDesktop()) {
+          const reference = callRef ?? channelRef;
+          if (reference) await voice.connectNative(reference, Boolean(callRef));
+          return;
+        }
         await voice.connect(grant);
         if (!mounted || generation !== connectionGeneration) await voice.disconnect();
       } catch (caught) {
@@ -122,6 +128,12 @@
     joinController = controller;
     error = '';
     try {
+      if (isNativeDesktop()) {
+        const reference = callRef ?? channelRef;
+        if (!reference) throw new Error('Voice channel is unavailable.');
+        await voice.connectNative(reference, Boolean(callRef));
+        return;
+      }
       const path = callRef
         ? `/calls/${encodeURIComponent(callRef)}/voice/token`
         : `/channels/${encodeURIComponent(channelRef ?? '')}/voice/token`;
@@ -486,6 +498,13 @@
   }
 
   .video-host :global(video) {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .video-host :global(canvas) {
     display: block;
     width: 100%;
     height: 100%;

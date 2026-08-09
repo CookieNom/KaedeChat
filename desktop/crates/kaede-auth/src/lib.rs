@@ -64,7 +64,7 @@ struct RegisterRequest<'a> {
     turnstile_token: Option<&'a str>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RegistrationResult {
     pub id: String,
     pub handle: String,

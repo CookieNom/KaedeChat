@@ -11,6 +11,7 @@ function grant(overrides: Partial<VoiceToken> = {}): VoiceToken {
     expires_at: '2026-07-19T12:15:00Z',
     can_speak: true,
     can_stream: true,
+    can_use_vad: true,
     ...overrides
   };
 }

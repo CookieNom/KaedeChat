@@ -296,7 +296,7 @@ pub enum IdError {
     InvalidDomain,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ApiError {
     pub code: String,
     pub message: String,
@@ -307,7 +307,7 @@ pub struct ApiError {
     pub errors: Vec<ValidationIssue>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ValidationIssue {
     #[serde(default)]
     pub loc: Vec<serde_json::Value>,
@@ -316,7 +316,7 @@ pub struct ValidationIssue {
     pub kind: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayEnvelope {
     pub op: u8,
     #[serde(default)]

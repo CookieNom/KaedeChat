@@ -1,4 +1,5 @@
 import { api } from '$lib/api/client';
+import { isNativeDesktop, nativeInvokeBytes } from '$lib/platform/native';
 
 export interface UploadTicket {
   id: string;
@@ -8,6 +9,7 @@ export interface UploadTicket {
   size: number;
   upload_url: string;
   upload_method: 'PUT';
+  upload_headers?: Record<string, string>;
   expires_at: string;
 }
 
@@ -34,6 +36,21 @@ export function uploadObject(
   onProgress: (progress: number) => void,
   signal?: AbortSignal
 ): Promise<void> {
+  if (isNativeDesktop()) {
+    return (async () => {
+      if (signal?.aborted) throw new DOMException('Upload cancelled', 'AbortError');
+      onProgress(1);
+      const ticketBytes = new TextEncoder().encode(JSON.stringify(ticket));
+      const fileBytes = new Uint8Array(await file.arrayBuffer());
+      const payload = new Uint8Array(4 + ticketBytes.length + fileBytes.length);
+      new DataView(payload.buffer).setUint32(0, ticketBytes.length, true);
+      payload.set(ticketBytes, 4);
+      payload.set(fileBytes, 4 + ticketBytes.length);
+      await nativeInvokeBytes('native_upload_object', payload);
+      if (signal?.aborted) throw new DOMException('Upload cancelled', 'AbortError');
+      onProgress(100);
+    })();
+  }
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     const finish = (action: () => void) => {

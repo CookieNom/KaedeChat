@@ -1,25 +1,37 @@
-# Kaede Desktop
+# Kaede Chat desktop
 
-Kaede Desktop is the native Slint client for Kaede Chat. It connects only to a
-user's home instance; federation, history replication, remote media, and voice
-authorization remain server responsibilities.
+The supported desktop application is a Tauri 2 shell around Kaede's static
+Svelte build. It keeps the web and desktop feature surfaces aligned while Rust
+provides the parts that browsers cannot provide reliably: secure credential
+storage, a resumable gateway, native device selection, CPAL audio, LiveKit,
+global push to talk, voice activity, local speech processing, notifications,
+camera capture, screen capture, and safe object uploads.
 
-The workspace targets Windows 10/11, macOS 14 or newer, and current Linux
-desktops using Wayland or X11. The application UI is native Slint. A restricted
-system web view is used only when an instance requires a Cloudflare Turnstile
-challenge; it is not used to render the application.
+The previous Slint client is preserved in `legacy-slint/`. It is not built by
+the normal Make targets or release workflow.
 
-Development status and the web-to-desktop coverage contract are tracked in
-[`parity.toml`](parity.toml). Architecture and platform constraints are in
-[`docs/architecture.md`](docs/architecture.md).
+## Development
+
+Install Node 22, pnpm 10.34, Rust 1.92, the Tauri CLI, and the native libraries
+listed in [platform support](docs/platform-support.md). Then:
 
 ```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-cargo run -p kaede-desktop
+pnpm --dir frontend install --frozen-lockfile
+pnpm --dir frontend build
+make desktop-check desktop-test
+cargo +1.92.0 run --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
 ```
 
-Platform packaging, signing, and notarization require the credentials described
-in [`docs/releasing.md`](docs/releasing.md).
+For live frontend development, run `make desktop-dev`. A release binary can be
+compiled with `make desktop-build`; installers are produced by the desktop
+release workflow and must pass the signing/notarization approval described in
+[releasing](docs/releasing.md) before publication.
 
+## Security boundary
+
+The application loads only the bundled frontend. The Svelte code invokes a
+narrow command allowlist and cannot use a shell or unrestricted filesystem API.
+Access and refresh tokens remain in Rust and the operating system credential
+vault. Presigned object uploads are performed without Kaede bearer credentials.
+Turnstile uses an isolated helper window restricted to Cloudflare's challenge
+origin. See [architecture](docs/architecture.md) for the complete boundary.

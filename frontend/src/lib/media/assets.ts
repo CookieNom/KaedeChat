@@ -1,3 +1,5 @@
+import { isNativeDesktop, storedNativeInstance } from '$lib/platform/native';
+
 interface FederatedAssetOwner {
   origin_domain: string;
 }
@@ -16,7 +18,11 @@ export function assetUrl(
   owner?: FederatedAssetOwner | string | null
 ): string {
   if (!CONTENT_HASH.test(contentHash) || !VARIANT.test(variant)) return '';
-  const domain = typeof owner === 'string' ? owner : owner?.origin_domain;
+  const suppliedDomain = typeof owner === 'string' ? owner : owner?.origin_domain;
+  // The bundled Tauri UI is served from a loopback origin. An asset without an
+  // explicit owner still belongs to the signed-in account's home instance, not
+  // to that local webview server.
+  const domain = suppliedDomain || (isNativeDesktop() ? storedNativeInstance() : '');
   const localDomain = typeof window === 'undefined' ? '' : window.location.hostname.toLowerCase();
   const path = `/media/assets/${contentHash}/${variant}?v=${MEDIA_ASSET_VERSION}`;
   if (!domain || domain.toLowerCase() === localDomain) return path;

@@ -1,91 +1,53 @@
 # Desktop architecture
 
-## Trust boundary
+## Application boundary
 
-The client accepts an instance domain, establishes HTTPS using the operating
-system trust store, and talks only to that home instance's `/api/v1` and
-`/gateway` endpoints. It never signs or sends federation requests. Entity keys
-are always the composite `(snowflake, origin domain)` pair.
+Tauri packages `frontend/build`; the main window never navigates to an instance
+or another remote site. The existing Svelte routes remain authoritative for
+chat, DMs, friends, guild management, permissions, moderation, media, calls,
+settings, and federation-aware UI. Platform calls are selected through the
+small adapter in `frontend/src/lib/platform/native.ts`, so browser behavior is
+unchanged.
 
-Opaque access and refresh tokens are returned only to an explicit
-`X-Kaede-Client: desktop` client. They are stored in the platform credential
-vault. SQLite contains cached entities and UI state but no bearer credentials.
-Cross-origin redirects and presigned uploads strip Kaede authorization headers.
+Rust accepts an HTTPS home-instance domain, owns the API client and rotating
+session, stores secrets in the platform credential vault, and owns gateway
+resume state. The client never talks directly to federation peer endpoints.
+All entity keys retain both snowflake and origin domain.
 
-## Runtime
+## Voice and media
 
-Slint owns the main thread. Tokio owns HTTP, gateway, cache coordination, and
-background work. Media decoding, database work, audio callbacks, and capture run
-outside the UI thread. UI updates cross a bounded command channel and are
-coalesced before being dispatched with `slint::invoke_from_event_loop`.
+Desktop voice has one owner. CPAL captures the chosen input into a bounded
+queue. A worker resamples/downmixes to 48 kHz mono ten-millisecond frames, keeps
+the DSP state warm while muted, applies echo/noise/gain processing, evaluates
+voice activity or global push to talk, and feeds a LiveKit native audio source.
+Remote LiveKit tracks use per-participant bounded queues and one normalized
+mixer. The exact post-mix signal sent to CPAL is also the echo canceller's render
+reference. CPAL callbacks only move samples through bounded queues.
 
-One overlay controller owns context menus, profiles, dialogs, emoji/GIF
-pickers, and Turnstile. Opening an overlay closes the previous incompatible
-overlay, preventing the stacked-context-menu failures that the web client has
-encountered.
+Camera and screen capture stay in Rust and use LiveKit native video sources.
+Decoded remote frames cross the bridge as bounded binary frames for the bundled
+UI. Control, state, meters, and video frames cross IPC; microphone and speaker
+PCM do not.
 
-## Realtime state
+Media uses Kaede's ticket, direct-upload, and commit protocol. Rust streams the
+object to the presigned URL with its declared content type and length but no
+Kaede authorization header. API media redirects are subject to the API client's
+cross-origin credential stripping rules.
 
-REST snapshots and gateway dispatches feed a single reducer. Dispatch sequence
-and session ID are resumable. A missing sequence or rejected resume triggers a
-fresh snapshot. Ephemeral presence, typing, and voice occupancy are reconciled
-periodically because they are not replayed. Channel access revocation removes
-entities, decoded media, thumbnails, and downloads immediately.
+## Lifecycle
 
-## Audio and capture
+One application process is allowed per user session. Closing the window hides
+it to the tray so calls, gateway events, notifications, and global push to talk
+continue. Quit is explicit. Changing a native device or DSP preference fences
+the old voice generation and reconnects the active room. Device scans occur on
+demand and the saved ID has a friendly-name fallback because operating-system
+device IDs can change.
 
-The native voice graph is:
+## Trust controls
 
-`CPAL input -> ring buffer -> channel map/resample -> DSP -> PTT/VAD gate -> LiveKit`
-
-`LiveKit participant PCM -> mixer -> CPAL output`
-
-The graph uses 48 kHz, mono, 10 ms capture frames. DSP stages implement a stable
-trait boundary so echo cancellation, noise suppression, automatic gain control,
-and optional model-based processing can be replaced without changing UI or room
-state. The processor boundary also reserves a render-reference input for a
-future acoustic echo canceller; until such a processor is installed, the output
-mix is not advertised as echo-cancelled. LiveKit's platform audio device remains
-a fallback when a native platform cannot expose raw PCM reliably.
-
-Screen capture is provided by LiveKit's native WebRTC capture implementation:
-Windows Graphics Capture on Windows, ScreenCaptureKit on macOS, and the XDG
-ScreenCast portal/PipeWire where available on Linux. The settings view lists
-displays and windows on platforms that permit enumeration and otherwise defers
-selection to the secure operating-system picker.
-
-Global push-to-talk uses platform keyboard hooks. Windows, macOS, and X11 are
-supported; Wayland compositors may prohibit global key capture. In that case
-Kaede reports that the shortcut is unavailable and voice activity remains
-usable. A future XDG Global Shortcuts portal implementation can remove that
-Wayland limitation without changing the audio input-mode contract.
-
-## Application lifecycle
-
-Only one process owns an account cache at a time. Later launches authenticate a
-bounded loopback message with a per-run secret, forward validated `kaede://`
-links to the first process, and bring its window forward. Closing the window
-hides it in the system tray when tray integration is available; Quit performs a
-normal gateway and credential lifecycle shutdown.
-
-Audio, camera, and screen-source lists are reconciled periodically and on an
-explicit refresh. A removed idle device falls back to the operating-system
-default on the next connection. If an active device disappears, the media
-session reports the failure and can be rejoined without tearing down message
-state. Suspend/resume and capture revocation use the same recoverable path.
-
-## Encrypted-message readiness
-
-Message storage and rendering distinguish plaintext from an opaque versioned
-envelope. Search, link previews, notifications, and indexing operate only on
-plaintext supplied by the crypto provider. Device identity and key distribution
-remain a future protocol milestone; the desktop client does not invent a local
-wire format.
-
-## Updates
-
-Release artifacts use the native package format for each platform. The updater
-accepts only HTTPS manifests signed with the compiled Ed25519 public key, checks
-the package SHA-256 before staging, and never executes a downloaded file. The
-platform installer applies the staged update so Windows and macOS signature and
-notarization policy remain authoritative.
+The main CSP denies frames, objects, arbitrary scripts, and remote connections;
+all network access goes through Rust commands. Tauri capabilities expose only
+core window operations and the explicit command handler. Turnstile starts a
+separate short-lived helper process/window with an unpredictable request ID and
+strict origin validation. Logs and UI errors must not contain tokens, presigned
+URLs, password material, or raw media buffers.

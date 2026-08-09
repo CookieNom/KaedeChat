@@ -5,6 +5,8 @@
   import type { UserSummary } from '$lib/chat/types';
   import Icon from '$lib/components/Icon.svelte';
   import Toast from '$lib/components/Toast.svelte';
+  import NativeVoiceSettings from '$lib/components/NativeVoiceSettings.svelte';
+  import { isNativeDesktop } from '$lib/platform/native';
   import { assetUrl } from '$lib/media/assets';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
   import {
@@ -284,9 +286,11 @@
       if (controller.signal.aborted || generation !== lifecycle) return;
       if (permission !== 'granted') {
         browserNotificationsDraft = false;
-        error = browserNotifications.supported
-          ? 'Browser notifications are blocked. Allow them in this site’s browser settings.'
-          : 'This browser does not support notifications.';
+        error = isNativeDesktop()
+          ? 'Desktop notifications could not be enabled on this computer.'
+          : browserNotifications.supported
+            ? 'Browser notifications are blocked. Allow them in this site’s browser settings.'
+            : 'This browser does not support notifications.';
         return;
       }
     }
@@ -314,12 +318,15 @@
       browserNotificationsDraft = browserNotificationsFromSettings(updated.notification_settings);
       browserNotifications.apply(updated.notification_settings);
       browserNotifications.markPromptHandled();
-      notice = `Browser notifications ${browserNotificationsDraft ? 'enabled' : 'disabled'}.`;
+      notice = `${isNativeDesktop() ? 'Desktop' : 'Browser'} notifications ${browserNotificationsDraft ? 'enabled' : 'disabled'}.`;
     } catch (caught) {
       if (controller.signal.aborted || generation !== lifecycle) return;
       browserNotificationsDraft = previous;
       browserNotifications.apply(settings.notification_settings);
-      actionError(caught, 'Could not update browser notifications.');
+      actionError(
+        caught,
+        `Could not update ${isNativeDesktop() ? 'desktop' : 'browser'} notifications.`
+      );
     } finally {
       if (generation === lifecycle) busy = false;
     }
@@ -540,6 +547,9 @@
       <a href="#security"><Icon name="shield" size={18} />Security</a>
       <p>Preferences</p>
       <a href="#appearance"><Icon name="palette" size={18} />Appearance</a>
+      {#if isNativeDesktop()}<a href="#voice-devices"
+          ><Icon name="volume" size={18} />Voice & devices</a
+        >{/if}
       <a href="#notifications"><Icon name="bell" size={18} />Notifications</a>
       <a href="#privacy"><Icon name="lock" size={18} />Privacy</a>
       <a href="#advanced"><Icon name="settings" size={18} />Advanced</a>
@@ -774,6 +784,8 @@
         </form>
       </section>
 
+      <NativeVoiceSettings />
+
       <section id="notifications" class="settings-section">
         <div class="settings-section-heading">
           <span class="section-icon"><Icon name="bell" /></span>
@@ -786,11 +798,18 @@
           <div class="toggle-list">
             <label class="toggle-row">
               <span>
-                <strong>Browser notifications</strong>
+                <strong
+                  >{isNativeDesktop() ? 'Desktop notifications' : 'Browser notifications'}</strong
+                >
                 <small>
-                  Notify you about direct messages and messages allowed by each guild’s notification
-                  setting while Kaede is in the background. Your browser will ask for permission
-                  before this is enabled.
+                  {#if isNativeDesktop()}
+                    Show operating-system notifications for direct messages and guild alerts while
+                    Kaede is minimized or running in the background. Do Not Disturb suppresses them.
+                  {:else}
+                    Notify you about direct messages and messages allowed by each guild’s
+                    notification setting while Kaede is in the background. Your browser will ask for
+                    permission before this is enabled.
+                  {/if}
                 </small>
               </span>
               <input
@@ -803,7 +822,7 @@
           </div>
           {#if !browserNotifications.supported}
             <p class="settings-helper">This browser does not support system notifications.</p>
-          {:else if browserNotifications.permission === 'denied'}
+          {:else if !isNativeDesktop() && browserNotifications.permission === 'denied'}
             <p class="settings-helper">
               Notifications are blocked in your browser. Allow them in this site’s permissions to
               turn them on.
@@ -829,8 +848,10 @@
         >
           <label class="form-field">
             <span>Direct messages</span>
-            <small>This rule is enforced by your home instance, including federated requests.</small
-            >
+            <small>
+              This rule is enforced by the server where your account lives (your home instance),
+              including federated requests.
+            </small>
             <select bind:value={settings.dm_privacy} disabled={busy}>
               <option value="everyone">Anyone on a known instance</option>
               <option value="shared_guild">Friends and people who share a guild with me</option>

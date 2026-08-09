@@ -18,7 +18,7 @@ MEDIA_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-media-validation-$(V
 VOICE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-voice-validation-$(VALIDATION_RUN_ID)
 RELEASE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-release-validation-$(VALIDATION_RUN_ID)
 
-.PHONY: help setup lock generate check test audit desktop-check desktop-lint desktop-test env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
+.PHONY: help setup lock generate check test audit desktop-check desktop-lint desktop-test desktop-build desktop-dev env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
 help:
 	@echo "setup            Run the interactive, configuration-only deployment wizard"
 	@echo "lock             Generate uv and pnpm lockfiles in one-off containers"
@@ -29,6 +29,8 @@ help:
 	@echo "desktop-check    Format and compile the portable native desktop workspace"
 	@echo "desktop-lint     Run strict Clippy checks across all portable desktop targets"
 	@echo "desktop-test     Run desktop protocol, state, platform, auth, and media tests"
+	@echo "desktop-build    Build the bundled frontend and native Tauri application"
+	@echo "desktop-dev      Run the Tauri application against the frontend dev server"
 	@echo "env-check        Validate ENV_FILE and run the production preflight in isolation"
 	@echo "migration        Generate an Alembic revision with m=\"description\""
 	@echo "migration-check  Run Alembic up/down/up against disposable PostgreSQL"
@@ -75,16 +77,31 @@ audit:
 
 desktop-check:
 	cargo +1.92.0 fmt --all --manifest-path desktop/Cargo.toml -- --check
-	cargo +1.92.0 check --locked --manifest-path desktop/Cargo.toml -p kaede-desktop --no-default-features
+	test -f frontend/build/index.html || { echo 'frontend/build is missing; run pnpm --dir frontend build' >&2; exit 2; }
+	cargo +1.92.0 check --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
 
 desktop-lint:
 	cargo +1.92.0 clippy --locked --manifest-path desktop/Cargo.toml \
-		--workspace --all-targets --no-default-features -- -D warnings
+		-p kaede-protocol -p kaede-core -p kaede-platform -p kaede-api \
+		-p kaede-cache -p kaede-auth -p kaede-media -p kaede-gateway \
+		-p kaede-capture -p kaede-audio -p kaede-voice -p kaede-turnstile \
+		-p kaede-tauri --all-targets -- -D warnings
 
 desktop-test:
 	cargo +1.92.0 test --locked --manifest-path desktop/Cargo.toml \
 		-p kaede-protocol -p kaede-core -p kaede-platform -p kaede-api \
-		-p kaede-cache -p kaede-auth -p kaede-media -p kaede-app --no-default-features
+		-p kaede-cache -p kaede-auth -p kaede-media -p kaede-app \
+		-p kaede-gateway -p kaede-capture -p kaede-audio -p kaede-voice
+
+desktop-build:
+	pnpm --dir frontend install --frozen-lockfile
+	pnpm --dir frontend build
+	cd desktop/tauri && cargo +1.92.0 tauri build --config src-tauri/tauri.conf.json
+
+desktop-dev:
+	pnpm --dir frontend dev --host 127.0.0.1 & \
+	frontend_pid=$$!; trap 'kill $$frontend_pid 2>/dev/null || true' EXIT INT TERM; \
+	cd desktop/tauri && cargo +1.92.0 tauri dev --config src-tauri/tauri.dev.conf.json
 
 env-check:
 	@test -f "$(ENV_FILE)" || { echo 'missing ENV_FILE: $(ENV_FILE)' >&2; exit 2; }

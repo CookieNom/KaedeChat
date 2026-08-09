@@ -3,6 +3,12 @@
   import { api, ApiError } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import TurnstileWidget from '$lib/components/TurnstileWidget.svelte';
+  import NativeInstanceField from '$lib/components/NativeInstanceField.svelte';
+  import {
+    initializeNativeInstance,
+    isNativeDesktop,
+    storedNativeInstance
+  } from '$lib/platform/native';
   import { onMount, tick } from 'svelte';
 
   interface RegistrationResult {
@@ -25,16 +31,41 @@
   let turnstileToken = $state<string | null>(null);
   let turnstileWidget = $state<TurnstileWidget | null>(null);
   let successPanel = $state<HTMLElement | null>(null);
+  let instanceField = $state<NativeInstanceField | null>(null);
+  let nativeDesktop = $state(false);
+  let registrationStep = $state<1 | 2>(1);
+  let selectedInstance = $state('');
+
+  function applyConfiguration(configuration: Awaited<ReturnType<typeof loadAuthConfiguration>>) {
+    emailRequired = configuration.email_required;
+    turnstileEnabled = configuration.turnstile.enabled;
+    turnstileSiteKey = configuration.turnstile.site_key;
+    if (!emailRequired) email = '';
+  }
+
+  async function continueFromServer() {
+    if (busy) return;
+    busy = true;
+    error = '';
+    try {
+      if (!(await instanceField?.apply())) return;
+      selectedInstance = storedNativeInstance();
+      applyConfiguration(await loadAuthConfiguration());
+      registrationStep = 2;
+    } catch {
+      error = 'Could not reach that Kaede server. Check the domain and try again.';
+    } finally {
+      busy = false;
+    }
+  }
 
   onMount(() => {
+    nativeDesktop = isNativeDesktop();
+    selectedInstance = storedNativeInstance();
     const controller = new AbortController();
-    void loadAuthConfiguration(controller.signal)
-      .then((configuration) => {
-        emailRequired = configuration.email_required;
-        turnstileEnabled = configuration.turnstile.enabled;
-        turnstileSiteKey = configuration.turnstile.site_key;
-        if (!emailRequired) email = '';
-      })
+    void initializeNativeInstance()
+      .then(() => loadAuthConfiguration(controller.signal))
+      .then(applyConfiguration)
       .catch(() => {
         // Registration still fails closed on the server if this discovery call
         // is unavailable, so requiring email is the safe fallback.
@@ -98,67 +129,105 @@
       <p class="form-foot"><a href={resolve('/login')}>Continue to sign in</a></p>
     {/if}
   </div>
+{:else if nativeDesktop && registrationStep === 1}
+  <p class="eyebrow">Create account</p>
+  <h1 class="auth-title">Choose your server.</h1>
+  <p class="auth-intro">
+    Your server stores your account and connects it to communities across the Kaede network.
+  </p>
+  <form
+    class="registration-server-form"
+    onsubmit={(event) => {
+      event.preventDefault();
+      void continueFromServer();
+    }}
+  >
+    <NativeInstanceField bind:this={instanceField} disabled={busy} suggestedInstance="kaede.chat" />
+    {#if error}<p class="form-error" role="alert">{error}</p>{/if}
+    <button class="primary-button" disabled={busy}>
+      {busy ? 'Checking server…' : 'Continue'}
+    </button>
+  </form>
 {:else if emailRequired === null}
   <p class="eyebrow">Create account</p>
   <h1 class="auth-title">Checking registration options…</h1>
 {:else}
   <p class="eyebrow">Your place, your name</p>
-  <h1 class="auth-title">Join this instance.</h1>
+  <h1 class="auth-title">Create your account.</h1>
+  {#if nativeDesktop}
+    <div class="registration-server-summary">
+      <span>Account server</span>
+      <strong>{selectedInstance}</strong>
+      <button
+        type="button"
+        class="quiet-button"
+        disabled={busy}
+        onclick={() => {
+          error = '';
+          registrationStep = 1;
+        }}>Change</button
+      >
+    </div>
+  {/if}
   <form
+    class="registration-details-form"
     onsubmit={(event) => {
       event.preventDefault();
       submit();
     }}
   >
-    <label
-      >Username <input
-        bind:value={username}
-        pattern={'[a-z0-9_.]{2,32}'}
-        maxlength="32"
-        autocomplete="username"
-        required
-        disabled={busy}
-      /></label
-    >
-    <p class="field-note">
-      This becomes your permanent federated address. Usernames use lowercase letters, numbers, dots,
-      and underscores.
-    </p>
-    {#if emailRequired}
+    <div class="registration-details-grid" class:single-email-column={!emailRequired}>
       <label
-        >Email <input
-          bind:value={email}
-          type="email"
-          autocomplete="email"
-          maxlength="320"
+        >Username
+        <input
+          bind:value={username}
+          pattern={'[a-z0-9_.]{2,32}'}
+          maxlength="32"
+          autocomplete="username"
+          required
+          disabled={busy}
+        />
+        <small>Lowercase letters, numbers, dots, and underscores.</small></label
+      >
+      {#if emailRequired}
+        <label
+          >Email
+          <input
+            bind:value={email}
+            type="email"
+            autocomplete="email"
+            maxlength="320"
+            required
+            disabled={busy}
+          /></label
+        >
+      {/if}
+      <label
+        >Password
+        <input
+          bind:value={password}
+          type="password"
+          minlength="10"
+          maxlength="256"
+          autocomplete="new-password"
+          required
+          disabled={busy}
+        />
+        <small>At least 10 characters; a password manager is recommended.</small></label
+      >
+      <label
+        >Confirm password
+        <input
+          bind:value={confirmPassword}
+          type="password"
+          minlength="10"
+          maxlength="256"
+          autocomplete="new-password"
           required
           disabled={busy}
         /></label
       >
-    {/if}
-    <label
-      >Password <input
-        bind:value={password}
-        type="password"
-        minlength="10"
-        maxlength="256"
-        autocomplete="new-password"
-        required
-        disabled={busy}
-      /></label
-    >
-    <p class="field-note">Use at least 10 characters. A password manager is recommended.</p>
-    <label
-      >Confirm password <input
-        bind:value={confirmPassword}
-        type="password"
-        minlength="10"
-        maxlength="256"
-        autocomplete="new-password"
-        required
-        disabled={busy}
-      /></label
-    >
+    </div>
     {#if turnstileEnabled && turnstileSiteKey}
       <TurnstileWidget
         bind:this={turnstileWidget}

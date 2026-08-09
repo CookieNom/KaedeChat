@@ -5,8 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+aec3.workspace = true
 cpal.workspace = true
 crossbeam-queue.workspace = true
+nnnoiseless.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 thiserror.workspace = true

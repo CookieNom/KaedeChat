@@ -80,9 +80,41 @@ describe('channel grouping and reordering', () => {
     expect(moved.map((item) => item.position)).toEqual([0, 1, 2, 3]);
   });
 
+  it('preserves categories above uncategorized channels', () => {
+    const category = channel('10', 0, 4);
+    const child = channel('11', 1, 0, category);
+    const groups = groupChannels([category, child, channel('20', 2)]);
+
+    expect(groups.map((group) => group.category?.id ?? null)).toEqual(['10', null]);
+    expect(flattenIds(groups)).toEqual(['10', '11', '20']);
+  });
+
+  it('moves a category before an uncategorized channel', () => {
+    const ungrouped = channel('10', 0);
+    const category = channel('20', 1, 4);
+    const child = channel('21', 2, 0, category);
+    const moved = moveChannel(
+      [ungrouped, category, child],
+      entityKey(category),
+      entityKey(ungrouped),
+      'before'
+    );
+
+    expect(moved.map((item) => item.id)).toEqual(['20', '21', '10']);
+    expect(groupChannels(moved).map((group) => group.category?.id ?? null)).toEqual(['20', null]);
+  });
+
   it('never selects a category as the guild landing channel', () => {
     const category = channel('10', 0, 4);
     const child = channel('11', 1, 0, category);
     expect(firstNavigableChannel([category, child])).toBe(child);
   });
 });
+
+function flattenIds(groups: ReturnType<typeof groupChannels>): string[] {
+  return groups.flatMap((group) =>
+    group.category
+      ? [group.category.id, ...group.channels.map((item) => item.id)]
+      : group.channels.map((item) => item.id)
+  );
+}

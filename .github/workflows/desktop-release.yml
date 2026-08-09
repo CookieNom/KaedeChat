@@ -15,96 +15,50 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            artifact: kaede-desktop-linux-x86_64
+            artifact: kaede-chat-linux-x86_64
           - os: windows-2025
-            artifact: kaede-desktop-windows-x86_64
+            artifact: kaede-chat-windows-x86_64
           - os: macos-15
-            artifact: kaede-desktop-macos-arm64
+            artifact: kaede-chat-macos-arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 75
-    env:
-      KAEDE_DESKTOP_UPDATE_MANIFEST_URL: ${{ vars.KAEDE_DESKTOP_UPDATE_MANIFEST_URL }}
-      KAEDE_DESKTOP_UPDATE_PUBLIC_KEY_BASE64: ${{ vars.KAEDE_DESKTOP_UPDATE_PUBLIC_KEY_BASE64 }}
-      WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
-      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libayatana-appindicator3-dev libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev dpkg-dev
+        run: sudo apt-get update && sudo apt-get install -y clang cmake file libasound2-dev libayatana-appindicator3-dev libdbus-1-dev libgtk-3-dev librsvg2-dev libssl-dev libudev-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config wget
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with: { version: "10.34.0", run_install: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "22.23.1", cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.92.0 --profile minimal
-      - name: Build locked release
-        run: cargo +1.92.0 build --locked --release --manifest-path desktop/Cargo.toml -p kaede-desktop
-
-      - name: Package Linux
-        if: runner.os == 'Linux'
-        working-directory: desktop
+      - name: Cache Cargo artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/target
+          key: desktop-release-${{ runner.os }}-${{ hashFiles('desktop/Cargo.lock') }}
+      - run: pnpm --dir frontend install --frozen-lockfile
+      - run: pnpm --dir frontend lint
+      - run: pnpm --dir frontend check
+      - run: pnpm --dir frontend test
+      - run: pnpm --dir frontend build
+      - name: Install pinned Tauri CLI
+        run: cargo +1.92.0 install tauri-cli --version 2.11.4 --locked
+      - name: Build platform bundles
+        working-directory: desktop/tauri
+        run: cargo +1.92.0 tauri build --config src-tauri/tauri.conf.json
+      - name: Write checksums
         shell: bash
         run: |
-          chmod +x packaging/linux/build-package.sh
-          packaging/linux/build-package.sh "${GITHUB_REF_NAME#desktop-v}" amd64
-
-      - name: Install WiX
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: dotnet tool install --global wix --version 6.0.2
-      - name: Package Windows MSI
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force desktop/dist | Out-Null
-          wix build desktop/packaging/windows/Package.wxs `
-            -d BinaryPath="$pwd/desktop/target/release/kaede-desktop.exe" `
-            -d ProductVersion="$($env:GITHUB_REF_NAME -replace '^desktop-v','')" `
-            -o desktop/dist/kaede-desktop-windows-x86_64.msi
-          Compress-Archive desktop/target/release/kaede-desktop.exe desktop/dist/kaede-desktop-windows-x86_64.zip
-      - name: Sign Windows package
-        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_BASE64 != ''
-        shell: pwsh
-        run: |
-          $cert = Join-Path $env:RUNNER_TEMP kaede-signing.pfx
-          [IO.File]::WriteAllBytes($cert, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
-          signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $cert /p $env:WINDOWS_CERTIFICATE_PASSWORD desktop/dist/kaede-desktop-windows-x86_64.msi
-          Remove-Item $cert
-
-      - name: Assemble macOS application
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          app="desktop/dist/Kaede Chat.app"
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp desktop/target/release/kaede-desktop "$app/Contents/MacOS/kaede-desktop"
-          cp desktop/packaging/macos/Info.plist "$app/Contents/Info.plist"
-          plutil -replace CFBundleShortVersionString -string "${GITHUB_REF_NAME#desktop-v}" "$app/Contents/Info.plist"
-      - name: Sign and notarize macOS application
-        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
-        shell: bash
-        run: |
-          codesign --force --deep --options runtime --timestamp \
-            --entitlements desktop/packaging/macos/KaedeChat.entitlements \
-            --sign "$APPLE_SIGNING_IDENTITY" "desktop/dist/Kaede Chat.app"
-          ditto -c -k --keepParent "desktop/dist/Kaede Chat.app" desktop/dist/kaede-desktop-notarize.zip
-          xcrun notarytool submit desktop/dist/kaede-desktop-notarize.zip --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
-          xcrun stapler staple "desktop/dist/Kaede Chat.app"
-          rm desktop/dist/kaede-desktop-notarize.zip
-      - name: Package macOS
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent "desktop/dist/Kaede Chat.app" desktop/dist/kaede-desktop-macos-arm64.zip
-          hdiutil create -volname "Kaede Chat" -srcfolder "desktop/dist/Kaede Chat.app" -ov -format UDZO desktop/dist/kaede-desktop-macos-arm64.dmg
-
-      - name: Write package checksums
-        shell: bash
-        run: |
+          mkdir -p desktop/dist
+          find desktop/target/release/bundle -type f -exec cp {} desktop/dist/ \;
           cd desktop/dist
           if command -v sha256sum >/dev/null; then sha256sum * > SHA256SUMS; else shasum -a 256 * > SHA256SUMS; fi
-      - name: Upload packaged build for release signing
+      - name: Upload packaged build for release approval
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.artifact }}

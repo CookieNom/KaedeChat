@@ -5,6 +5,7 @@
 //! clamped by the backend's much tighter limits and callback resources are
 //! moved by value into `'static` closures.
 
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -63,6 +64,8 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
 };
 
+mod emoji;
+
 type ActiveAccount = Arc<RwLock<Option<Arc<AccountRuntime>>>>;
 type PendingMfaState = Arc<RwLock<Option<PendingMfa>>>;
 #[cfg(feature = "native-voice")]
@@ -75,6 +78,23 @@ type NativeGifFavorites = Arc<RwLock<GifFavorites>>;
 type VoicePreferences = Arc<RwLock<VoicePreferenceState>>;
 
 static PENDING_DEEP_LINK: OnceLock<tokio::sync::Mutex<Option<DeepLink>>> = OnceLock::new();
+/// Local cache paths for downloaded KLIPY GIF stills, keyed by source URL.
+/// Slint cannot animate GIFs, so messages and the picker render a decoded
+/// still frame the same way the web client renders the moving image.
+static GIF_STILLS: OnceLock<std::sync::RwLock<HashMap<String, String>>> = OnceLock::new();
+static GIF_STILL_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+/// Sidebar categories the user collapsed this session. The web client also
+/// keeps this in memory only.
+static COLLAPSED_CATEGORIES: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    OnceLock::new();
+
+fn gif_stills() -> &'static std::sync::RwLock<HashMap<String, String>> {
+    GIF_STILLS.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+fn collapsed_categories() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    COLLAPSED_CATEGORIES.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
 #[cfg(feature = "native-voice")]
 static ACTIVE_VOICE: OnceLock<ActiveVoice> = OnceLock::new();
 #[cfg(feature = "native-voice")]
@@ -150,6 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let paths = PlatformPaths::discover()?;
+    let _ = GIF_STILL_DIR.set(paths.cache_dir.join("gif-stills"));
     let instance = SingleInstance::new("chat.kaede.desktop")?;
     if !instance.is_single() {
         if let Some(link) = arguments
@@ -281,7 +302,7 @@ fn install_system_tray(window: &AppWindow) -> Option<SystemTray> {
     let mut rgba = Vec::with_capacity(32 * 32 * 4);
     for y in 0..32_u32 {
         for x in 0..32_u32 {
-            let rounded = (x >= 4 && x < 28) && (y >= 4 && y < 28);
+            let rounded = (4..28).contains(&x) && (4..28).contains(&y);
             let bubble = rounded && !(x < 10 && y > 23);
             let (red, green, blue, alpha) = if bubble {
                 (242, 112, 88, 255)
@@ -478,8 +499,14 @@ fn install_instance_listener(
                         show_account_error(&weak, error.to_string());
                         return;
                     }
+                    let selected_channel = match hydrate_guild_landing(&account, &guild_ref).await {
+                        Ok(channel) => channel,
+                        Err(error) => {
+                            show_account_error(&weak, error.to_string());
+                            return;
+                        }
+                    };
                     let state = account.state.read().await;
-                    let selected_channel = first_navigable_channel(&state, &guild_ref);
                     let snapshot = ui_snapshot(&state);
                     drop(state);
                     let _ = weak.upgrade_in_event_loop(move |window| {
@@ -538,10 +565,18 @@ fn install_instance_listener(
                 show_account_error(&weak, error.to_string());
                 return;
             }
+            let selected_channel = if let Some(guild) = guild_ref.as_ref() {
+                match hydrate_guild_landing(&account, guild).await {
+                    Ok(channel) => channel,
+                    Err(error) => {
+                        show_account_error(&weak, error.to_string());
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
             let state = account.state.read().await;
-            let selected_channel = guild_ref
-                .as_ref()
-                .and_then(|guild| first_navigable_channel(&state, guild));
             let snapshot = ui_snapshot(&state);
             drop(state);
             let _ = weak.upgrade_in_event_loop(move |window| {
@@ -705,34 +740,34 @@ fn install_voice(
 
     let mute_voice = voice.clone();
     window.on_set_voice_muted(move |muted| {
-        if let Ok(guard) = mute_voice.try_lock() {
-            if let Some(handle) = guard.as_ref() {
-                let _ = handle
-                    .commands
-                    .try_send(kaede_voice::VoiceCommand::SetMuted(muted));
-            }
+        if let Ok(guard) = mute_voice.try_lock()
+            && let Some(handle) = guard.as_ref()
+        {
+            let _ = handle
+                .commands
+                .try_send(kaede_voice::VoiceCommand::SetMuted(muted));
         }
     });
 
     let deafen_voice = voice.clone();
     window.on_set_voice_deafened(move |deafened| {
-        if let Ok(guard) = deafen_voice.try_lock() {
-            if let Some(handle) = guard.as_ref() {
-                let _ = handle
-                    .commands
-                    .try_send(kaede_voice::VoiceCommand::SetDeafened(deafened));
-            }
+        if let Ok(guard) = deafen_voice.try_lock()
+            && let Some(handle) = guard.as_ref()
+        {
+            let _ = handle
+                .commands
+                .try_send(kaede_voice::VoiceCommand::SetDeafened(deafened));
         }
     });
 
     let ptt_voice = voice.clone();
     window.on_set_push_to_talk(move |pressed| {
-        if let Ok(guard) = ptt_voice.try_lock() {
-            if let Some(handle) = guard.as_ref() {
-                let _ = handle
-                    .commands
-                    .try_send(kaede_voice::VoiceCommand::SetPushToTalk(pressed));
-            }
+        if let Ok(guard) = ptt_voice.try_lock()
+            && let Some(handle) = guard.as_ref()
+        {
+            let _ = handle
+                .commands
+                .try_send(kaede_voice::VoiceCommand::SetPushToTalk(pressed));
         }
     });
 
@@ -755,16 +790,16 @@ fn install_voice(
     let screen_voice = voice.clone();
     let screen_preferences = preferences.clone();
     window.on_set_screen_share(move |enabled| {
-        if let Ok(guard) = screen_voice.try_lock() {
-            if let Some(handle) = guard.as_ref() {
-                let source_id = screen_preferences
-                    .try_read()
-                    .ok()
-                    .and_then(|preferences| preferences.screen_source.clone());
-                let _ = handle
-                    .commands
-                    .try_send(kaede_voice::VoiceCommand::SetScreenShare { enabled, source_id });
-            }
+        if let Ok(guard) = screen_voice.try_lock()
+            && let Some(handle) = guard.as_ref()
+        {
+            let source_id = screen_preferences
+                .try_read()
+                .ok()
+                .and_then(|preferences| preferences.screen_source.clone());
+            let _ = handle
+                .commands
+                .try_send(kaede_voice::VoiceCommand::SetScreenShare { enabled, source_id });
         }
     });
 
@@ -970,10 +1005,8 @@ fn install_voice(
                     show_async_error(&weak, &error.to_string());
                     return;
                 }
-                if end_local {
-                    if let Some(handle) = voice.lock().await.take() {
-                        handle.leave().await;
-                    }
+                if end_local && let Some(handle) = voice.lock().await.take() {
+                    handle.leave().await;
                 }
                 let _ = weak.upgrade_in_event_loop(|window| {
                     window.set_active_call_id(SharedString::default());
@@ -1302,10 +1335,10 @@ fn refresh_audio_devices(weak: &slint::Weak<AppWindow>, preferences: &VoicePrefe
         let selected_input = current.input_device.clone();
         let selected_output = current.output_device.clone();
         let selected_camera = current.camera_device.clone();
-        current.input_devices = refreshed.input_devices.clone();
-        current.output_devices = refreshed.output_devices.clone();
-        current.camera_devices = refreshed.camera_devices.clone();
-        current.screen_sources = refreshed.screen_sources.clone();
+        current.input_devices.clone_from(&refreshed.input_devices);
+        current.output_devices.clone_from(&refreshed.output_devices);
+        current.camera_devices.clone_from(&refreshed.camera_devices);
+        current.screen_sources.clone_from(&refreshed.screen_sources);
         current.input_device = selected_input.filter(|id| {
             current
                 .input_devices
@@ -1354,6 +1387,7 @@ fn desktop_preferences(state: &VoicePreferenceState) -> DesktopPreferences {
         },
         vad_threshold: state.vad_threshold,
         push_to_talk_hotkey: state.push_to_talk_hotkey.clone(),
+        ..DesktopPreferences::default()
     }
 }
 
@@ -2093,29 +2127,15 @@ struct UiCompletion {
 }
 
 fn standard_emoji_completions(needle: &str) -> Vec<UiCompletion> {
-    [
-        ("grinning", "😀"),
-        ("joy", "😂"),
-        ("heart", "❤️"),
-        ("thumbsup", "👍"),
-        ("tada", "🎉"),
-        ("fire", "🔥"),
-        ("eyes", "👀"),
-        ("thinking", "🤔"),
-        ("sob", "😭"),
-        ("pray", "🙏"),
-        ("wave", "👋"),
-        ("white_check_mark", "✅"),
-    ]
-    .into_iter()
-    .filter(|(name, _)| name.contains(needle))
-    .map(|(name, emoji)| UiCompletion {
-        value: emoji.to_owned(),
-        label: format!(":{name}:"),
-        detail: "Unicode emoji".to_owned(),
-        kind: "emoji".to_owned(),
-    })
-    .collect()
+    emoji::search(needle, 12)
+        .into_iter()
+        .map(|emoji| UiCompletion {
+            value: emoji.e.clone(),
+            label: format!(":{}:", emoji.s),
+            detail: "Unicode emoji".to_owned(),
+            kind: "emoji".to_owned(),
+        })
+        .collect()
 }
 
 fn set_completion_rows(weak: &slint::Weak<AppWindow>, rows: Vec<UiCompletion>) {
@@ -2240,6 +2260,7 @@ fn show_account_error(weak: &slint::Weak<AppWindow>, error: String) {
     let message = friendly_error(&error);
     let _ = weak.upgrade_in_event_loop(move |window| {
         window.set_busy(false);
+        window.set_channel_loading(false);
         window.set_error_message(message.into());
     });
 }
@@ -2264,6 +2285,10 @@ fn install_navigation(
         let Ok(guild) = value.as_str().parse::<EntityRef>() else {
             return;
         };
+        if let Some(window) = weak.upgrade() {
+            window.set_channel_loading(true);
+            window.set_error_message(SharedString::default());
+        }
         let weak = weak.clone();
         let active = guild_active.clone();
         guild_runtime.spawn(async move {
@@ -2272,9 +2297,21 @@ fn install_navigation(
             };
             match account.load_guild(&guild).await {
                 Ok(()) => {
+                    let selected_channel = match hydrate_guild_landing(&account, &guild).await {
+                        Ok(channel) => channel,
+                        Err(error) => {
+                            show_account_error(&weak, error.to_string());
+                            return;
+                        }
+                    };
                     let snapshot = ui_snapshot(&*account.state.read().await);
                     let _ = weak.upgrade_in_event_loop(move |window| {
-                        window.set_selected_channel(SharedString::default());
+                        window.set_selected_channel(
+                            selected_channel.map_or_else(SharedString::default, |value| {
+                                value.to_string().into()
+                            }),
+                        );
+                        window.set_channel_loading(false);
                         apply_snapshot(&window, snapshot);
                     });
                 }
@@ -2292,10 +2329,17 @@ fn install_navigation(
             return;
         };
         if let Some(window) = weak.upgrade() {
+            window.set_channel_loading(true);
+            window.set_error_message(SharedString::default());
+            window.set_messages(ModelRc::from(Rc::new(VecModel::<MessageItem>::default())));
             window.set_replying_message(SharedString::default());
             window.set_replying_author(SharedString::default());
             window.set_reply_can_notify(false);
             window.set_reply_notify(true);
+            window.set_editing_message(SharedString::default());
+            window.set_new_marker_message(SharedString::default());
+            window.set_history_loading(false);
+            window.set_history_complete(false);
         }
         let weak = weak.clone();
         let active = load_active.clone();
@@ -2331,14 +2375,32 @@ fn install_navigation(
                                     .checked_duration_since(std::time::Instant::now())
                                     .map_or(0, |duration| duration.as_secs().saturating_add(1) as i32)
                             });
-                        let newest = account
-                            .state
-                            .read()
-                            .await
-                            .message_order
-                            .get(&channel)
-                            .and_then(|order| order.back())
-                            .cloned();
+                        // Capture the "New messages" divider position before
+                        // acknowledging, exactly like the web client captures
+                        // the read state at load time.
+                        let (newest, new_marker) = {
+                            let state = account.state.read().await;
+                            let newest = state
+                                .message_order
+                                .get(&channel)
+                                .and_then(|order| order.back())
+                                .cloned();
+                            let new_marker = state
+                                .read_states
+                                .get(&channel)
+                                .filter(|read| read.unread || read.mention_count > 0)
+                                .and_then(|read| read.last_read_message_id)
+                                .and_then(|last_read| {
+                                    state.message_order.get(&channel).and_then(|order| {
+                                        order
+                                            .iter()
+                                            .find(|message| message.id > last_read)
+                                            .map(ToString::to_string)
+                                    })
+                                })
+                                .unwrap_or_default();
+                            (newest, new_marker)
+                        };
                         if let Err(error) = account
                             .acknowledge_channel(&channel, newest.as_ref())
                             .await
@@ -2349,16 +2411,20 @@ fn install_navigation(
                         let _ = weak
                             .upgrade_in_event_loop(move |window| {
                                 window.set_slow_mode_remaining(remaining);
+                                window.set_channel_loading(false);
+                                window.set_new_marker_message(new_marker.into());
                                 apply_snapshot(&window, snapshot);
                             });
                         if !matches!(kind, Some(ChannelKind::Voice)) {
                             account.refresh_link_previews(&channel).await;
                             account.refresh_message_media(&channel).await;
+                            refresh_gif_stills(account.clone(), weak.clone()).await;
                         }
                     }
                     Err(error) => {
                         let message = friendly_error(&error.to_string());
                         let _ = weak.upgrade_in_event_loop(move |window| {
+                            window.set_channel_loading(false);
                             window.set_error_message(message.into())
                         });
                     }
@@ -2484,19 +2550,97 @@ fn install_navigation(
         let Some(window) = weak.upgrade() else {
             return;
         };
+        if window.get_history_loading() || window.get_history_complete() {
+            return;
+        }
         let Ok(channel) = window.get_selected_channel().as_str().parse::<EntityRef>() else {
             return;
         };
+        window.set_history_loading(true);
         let weak = weak.clone();
         let active = older_active.clone();
         older_runtime.spawn(async move {
             let Some(account) = active.read().await.clone() else {
+                let _ = weak.upgrade_in_event_loop(|window| window.set_history_loading(false));
                 return;
             };
-            if let Err(error) = account.load_older_messages(&channel).await {
-                show_account_error(&weak, error.to_string());
+            match account.load_older_messages(&channel).await {
+                Ok(batch) => {
+                    let complete = batch.len() < 100;
+                    let _ = weak.upgrade_in_event_loop(move |window| {
+                        window.set_history_loading(false);
+                        if complete {
+                            window.set_history_complete(true);
+                        }
+                    });
+                }
+                Err(error) => {
+                    let _ = weak.upgrade_in_event_loop(|window| window.set_history_loading(false));
+                    show_account_error(&weak, error.to_string());
+                }
             }
         });
+    });
+
+    let weak = window.as_weak();
+    let category_runtime = runtime.clone();
+    let category_active = active.clone();
+    window.on_toggle_category(move |id| {
+        if let Ok(mut set) = collapsed_categories().lock() {
+            let id = id.to_string();
+            if !set.remove(&id) {
+                set.insert(id);
+            }
+        }
+        let weak = weak.clone();
+        let active = category_active.clone();
+        category_runtime.spawn(async move {
+            let Some(account) = active.read().await.clone() else {
+                return;
+            };
+            let snapshot = ui_snapshot(&*account.state.read().await);
+            let _ = weak.upgrade_in_event_loop(move |window| apply_snapshot(&window, snapshot));
+        });
+    });
+
+    let weak = window.as_weak();
+    window.on_cancel_edit(move || {
+        if let Some(window) = weak.upgrade() {
+            window.set_editing_message(SharedString::default());
+            window.set_draft(SharedString::default());
+        }
+    });
+
+    let copy_handle_active = active.clone();
+    window.on_copy_user_handle(move |value| {
+        let Ok(user_ref) = value.as_str().parse::<EntityRef>() else {
+            return;
+        };
+        let Ok(account) = copy_handle_active.try_read() else {
+            return;
+        };
+        let Some(account) = account.as_ref() else {
+            return;
+        };
+        let Ok(state) = account.state.try_read() else {
+            return;
+        };
+        if let Some(user) = state.users.get(&user_ref) {
+            let handle = if user.handle.is_empty() {
+                format!("@{}@{}", user.username, user.origin_domain)
+            } else {
+                user.handle.clone()
+            };
+            copy_to_clipboard(&handle);
+        }
+    });
+
+    let weak = window.as_weak();
+    window.on_search_emojis(move |query| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        set_emoji_grid(&window, query.as_str());
     });
 
     let weak = window.as_weak();
@@ -2528,7 +2672,9 @@ fn install_navigation(
                     drop(state);
                     let _ = weak.upgrade_in_event_loop(move |window| {
                         window.set_pinned_messages(ModelRc::from(Rc::new(VecModel::from(
-                            rows.into_iter().map(message_item).collect::<Vec<_>>(),
+                            rows.into_iter()
+                                .map(|item| message_item(item, false))
+                                .collect::<Vec<_>>(),
                         ))));
                     });
                 }
@@ -2663,6 +2809,48 @@ fn install_navigation(
     });
 
     let weak = window.as_weak();
+    let edit_last_active = active.clone();
+    window.on_edit_last_message(move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let Ok(channel) = window.get_selected_channel().as_str().parse::<EntityRef>() else {
+            return;
+        };
+        let Ok(account) = edit_last_active.try_read() else {
+            return;
+        };
+        let Some(account) = account.as_ref() else {
+            return;
+        };
+        let Ok(state) = account.state.try_read() else {
+            return;
+        };
+        let Some(current) = state.current_user.as_ref().map(kaede_core::User::key) else {
+            return;
+        };
+        let Some(message) = state
+            .channel_messages(&channel)
+            .into_iter()
+            .rev()
+            .find(|message| {
+                message.deleted_at.is_none()
+                    && message
+                        .author
+                        .as_ref()
+                        .is_some_and(|author| author.key() == current)
+            })
+        else {
+            return;
+        };
+        window.set_draft(message.content.clone().unwrap_or_default().into());
+        window.set_editing_message(message.key().to_string().into());
+        window.set_replying_message(SharedString::default());
+        window.set_replying_author(SharedString::default());
+        window.set_reply_can_notify(false);
+    });
+
+    let weak = window.as_weak();
     let delete_runtime = runtime.clone();
     let delete_active = active.clone();
     window.on_delete_message(move |value| {
@@ -2767,48 +2955,108 @@ fn install_navigation(
     let gif_runtime = runtime.clone();
     let gif_active = active.clone();
     let gif_saved = gif_favorites.clone();
+    let gif_page = Arc::new(RwLock::new((String::new(), 1u16)));
+    let search_page = gif_page.clone();
     window.on_search_gifs(move |query| {
         let weak = weak.clone();
         let active = gif_active.clone();
         let saved = gif_saved.clone();
+        let page_state = search_page.clone();
         gif_runtime.spawn(async move {
             let Some(account) = active.read().await.clone() else {
                 return;
             };
+            *page_state.write().await = (query.to_string(), 1);
             let saved_items = saved.read().await.items.clone();
             if query.trim().is_empty() && !saved_items.is_empty() {
                 let rows = saved_items
                     .into_iter()
-                    .map(|item| GifItem {
-                        id: item.id.into(),
-                        title: item.title.into(),
-                        url: item.url.into(),
-                        favorite: true,
-                    })
+                    .map(|item| (item.id, item.title, item.url, true))
+                    .collect::<Vec<_>>();
+                let targets = rows
+                    .iter()
+                    .map(|row| (row.2.clone(), row.2.clone()))
                     .collect::<Vec<_>>();
                 let _ = weak.upgrade_in_event_loop(move |window| {
-                    window.set_gifs(ModelRc::from(Rc::new(VecModel::from(rows))));
+                    window.set_gifs(gif_model(rows));
                 });
+                hydrate_gif_previews(&account, &weak, targets).await;
                 return;
             }
             let media = kaede_media::MediaClient::new(account.api.clone());
             match media.gifs(Some(query.as_str()), 1).await {
                 Ok(page) => {
+                    let mut targets = Vec::new();
                     let rows = page
                         .items
                         .into_iter()
-                        .map(|item| GifItem {
-                            favorite: saved_items
+                        .map(|item| {
+                            targets.push((item.url.to_string(), item.preview_url.to_string()));
+                            let favorite = saved_items
                                 .iter()
-                                .any(|saved| saved.url == item.url.as_str()),
-                            id: item.id.into(),
-                            title: item.title.into(),
-                            url: item.url.to_string().into(),
+                                .any(|saved| saved.url == item.url.as_str());
+                            (item.id, item.title, item.url.to_string(), favorite)
                         })
                         .collect::<Vec<_>>();
                     let _ = weak.upgrade_in_event_loop(move |window| {
-                        window.set_gifs(ModelRc::from(Rc::new(VecModel::from(rows))));
+                        window.set_gifs(gif_model(rows));
                     });
+                    hydrate_gif_previews(&account, &weak, targets).await;
+                }
+                Err(error) => show_account_error(&weak, error.to_string()),
+            }
+        });
+    });
+
+    let weak = window.as_weak();
+    let more_runtime = runtime.clone();
+    let more_active = active.clone();
+    let more_saved = gif_favorites.clone();
+    window.on_load_more_gifs(move || {
+        let weak = weak.clone();
+        let active = more_active.clone();
+        let saved = more_saved.clone();
+        let page_state = gif_page.clone();
+        more_runtime.spawn(async move {
+            let Some(account) = active.read().await.clone() else {
+                return;
+            };
+            let (query, page) = {
+                let mut state = page_state.write().await;
+                state.1 = state.1.saturating_add(1);
+                state.clone()
+            };
+            let saved_items = saved.read().await.items.clone();
+            let media = kaede_media::MediaClient::new(account.api.clone());
+            match media.gifs(Some(query.as_str()), page).await {
+                Ok(result) => {
+                    let mut targets = Vec::new();
+                    let rows = result
+                        .items
+                        .into_iter()
+                        .map(|item| {
+                            targets.push((item.url.to_string(), item.preview_url.to_string()));
+                            let favorite = saved_items
+                                .iter()
+                                .any(|saved| saved.url == item.url.as_str());
+                            (item.id, item.title, item.url.to_string(), favorite)
+                        })
+                        .collect::<Vec<_>>();
+                    let _ = weak.upgrade_in_event_loop(move |window| {
+                        let mut existing = window.get_gifs().iter().collect::<Vec<_>>();
+                        for (id, title, url, favorite) in rows {
+                            existing.push(GifItem {
+                                id: id.into(),
+                                title: title.into(),
+                                url: url.into(),
+                                favorite,
+                                has_preview: false,
+                                preview: Image::default(),
+                            });
+                        }
+                        window.set_gifs(ModelRc::from(Rc::new(VecModel::from(existing))));
+                    });
+                    hydrate_gif_previews(&account, &weak, targets).await;
                 }
                 Err(error) => show_account_error(&weak, error.to_string()),
             }
@@ -5264,7 +5512,19 @@ async fn consume_account_events(
             AccountEvent::StateChanged => {
                 account.refresh_public_assets().await;
                 let snapshot = ui_snapshot(&*account.state.read().await);
-                let _ = weak.upgrade_in_event_loop(move |window| apply_snapshot(&window, snapshot));
+                let ack_account = account.clone();
+                let runtime = tokio::runtime::Handle::current();
+                let _ = weak.upgrade_in_event_loop(move |window| {
+                    apply_snapshot(&window, snapshot);
+                    // Messages that arrive while their conversation is open
+                    // are acknowledged immediately, like the web client's
+                    // bottom-pinned timeline.
+                    if let Ok(channel) = window.get_selected_channel().as_str().parse::<EntityRef>()
+                    {
+                        runtime.spawn(acknowledge_open_channel(ack_account, channel));
+                    }
+                });
+                tokio::spawn(refresh_gif_stills(account.clone(), weak.clone()));
             }
             AccountEvent::PurgeChannel(_channel) => {
                 // Persistent media and entity cache removal is performed by the
@@ -5337,6 +5597,7 @@ async fn reauthorize_voice(
         device_id: preferences.input_device.clone(),
         mode: preferences.mode,
         vad_threshold: preferences.vad_threshold,
+        ..kaede_audio::CaptureSettings::default()
     };
     let output_device = preferences.output_device.clone();
     drop(preferences);
@@ -5415,23 +5676,37 @@ async fn follow_pending_deep_link(account: &Arc<AccountRuntime>, weak: &slint::W
         show_account_error(weak, error.to_string());
         return;
     }
-    let state = account.state.read().await;
-    let selected_channel = requested_channel.or_else(|| {
-        invite_guild.as_ref().and_then(|guild| {
-            state
-                .channels
-                .values()
-                .filter(|channel| channel.guild_key().as_ref() == Some(guild))
-                .filter(|channel| channel.kind != ChannelKind::Category)
-                .min_by_key(|channel| channel.position)
-                .map(kaede_core::Channel::key)
+    let selected_channel = {
+        let state = account.state.read().await;
+        requested_channel.or_else(|| {
+            invite_guild.as_ref().and_then(|guild| {
+                state
+                    .channels
+                    .values()
+                    .filter(|channel| channel.guild_key().as_ref() == Some(guild))
+                    .filter(|channel| channel.kind != ChannelKind::Category)
+                    .min_by_key(|channel| channel.position)
+                    .map(kaede_core::Channel::key)
+            })
         })
-    });
+    };
     let Some(selected_channel) = selected_channel else {
+        let state = account.state.read().await;
         let snapshot = ui_snapshot(&state);
         let _ = weak.upgrade_in_event_loop(move |window| apply_snapshot(&window, snapshot));
         return;
     };
+    let needs_hydration = !account
+        .state
+        .read()
+        .await
+        .message_order
+        .contains_key(&selected_channel);
+    if needs_hydration && let Err(error) = account.load_channel(&selected_channel).await {
+        show_account_error(weak, error.to_string());
+        return;
+    }
+    let state = account.state.read().await;
     let guild = state
         .channels
         .get(&selected_channel)
@@ -5470,6 +5745,7 @@ struct UiSnapshot {
     admin_members: Vec<UiAdminMember>,
     calls: Vec<UiCall>,
     voice_members: Vec<UiVoiceMember>,
+    home_mentions: i32,
 }
 
 struct UiGuild {
@@ -5503,9 +5779,13 @@ struct UiChannel {
 struct UiMessage {
     id: String,
     author: String,
+    author_id: String,
     avatar: String,
     avatar_path: String,
     time: String,
+    epoch: i64,
+    date: String,
+    day_label: String,
     body: String,
     pending: bool,
     failed: bool,
@@ -5529,6 +5809,10 @@ struct UiMember {
     name: String,
     status: String,
     online: bool,
+    presence: String,
+    group: String,
+    group_color: u32,
+    group_rank: i32,
     guild: String,
     avatar_path: String,
 }
@@ -5592,6 +5876,18 @@ struct UiAdminRecord {
     title: String,
     subtitle: String,
     kind: String,
+}
+
+fn day_label(time: &chrono::DateTime<chrono::Local>) -> String {
+    let today = chrono::Local::now().date_naive();
+    let date = time.date_naive();
+    if date == today {
+        "Today".to_owned()
+    } else if today.pred_opt() == Some(date) {
+        "Yesterday".to_owned()
+    } else {
+        time.format("%B %e, %Y").to_string().replace("  ", " ")
+    }
 }
 
 fn render_message_body(state: &AppState, content: &str) -> String {
@@ -5665,6 +5961,7 @@ fn message_to_ui(
         .referenced_message_id
         .zip(message.referenced_message_domain.clone())
         .and_then(|(id, domain)| state.messages.get(&EntityRef::new(id, domain)));
+    let local_time = message.created_at.with_timezone(&chrono::Local);
     UiMessage {
         id: message_key.to_string(),
         avatar: initials(&author),
@@ -5677,7 +5974,14 @@ fn message_to_ui(
             )
         }),
         author,
-        time: message.created_at.format("%H:%M").to_string(),
+        author_id: message
+            .author
+            .as_ref()
+            .map_or_else(String::new, |user| user.key().to_string()),
+        time: local_time.format("%H:%M").to_string(),
+        epoch: message.created_at.timestamp(),
+        date: local_time.format("%Y-%m-%d").to_string(),
+        day_label: day_label(&local_time),
         body: render_message_body(state, &content),
         pending: message.delivery_status.as_deref() == Some("pending"),
         failed: message.delivery_status.as_deref() == Some("failed"),
@@ -5752,15 +6056,246 @@ fn klipy_gif_url(content: &str) -> Option<String> {
     .then(|| url.to_string())
 }
 
-fn message_item(item: UiMessage) -> MessageItem {
+/// Populate the emoji picker grid: custom guild emojis first, then either
+/// every category of the embedded Unicode catalog or the search results.
+fn set_emoji_grid(window: &AppWindow, query: &str) {
+    const COLUMNS: usize = 9;
+    let needle = query.trim().to_lowercase();
+    let mut rows: Vec<ModelRc<EmojiItem>> = Vec::new();
+    let push_section = |rows: &mut Vec<ModelRc<EmojiItem>>, label: &str, items: Vec<EmojiItem>| {
+        if items.is_empty() {
+            return;
+        }
+        rows.push(ModelRc::from(Rc::new(VecModel::from(vec![EmojiItem {
+            value: SharedString::default(),
+            label: label.to_uppercase().into(),
+            header: true,
+        }]))));
+        for chunk in items.chunks(COLUMNS) {
+            rows.push(ModelRc::from(Rc::new(VecModel::from(chunk.to_vec()))));
+        }
+    };
+    // The picker's category tabs filter with a "cat:<id>" query.
+    let category = needle.strip_prefix("cat:").map(str::to_owned);
+    let custom = window
+        .get_emojis()
+        .iter()
+        .filter(|item| {
+            category.is_none() && (needle.is_empty() || item.label.to_lowercase().contains(&needle))
+        })
+        .collect::<Vec<_>>();
+    push_section(&mut rows, "Custom", custom);
+    if let Some(category) = category {
+        if let Some((id, label, _)) = emoji::CATEGORIES.iter().find(|(id, _, _)| *id == category) {
+            let items = emoji::catalog()
+                .iter()
+                .filter(|emoji| emoji.g == *id)
+                .map(|emoji| EmojiItem {
+                    value: emoji.e.clone().into(),
+                    label: format!(":{}:", emoji.s).into(),
+                    header: false,
+                })
+                .collect::<Vec<_>>();
+            push_section(&mut rows, label, items);
+        }
+    } else if needle.is_empty() {
+        for (id, label, _) in emoji::CATEGORIES {
+            let items = emoji::catalog()
+                .iter()
+                .filter(|emoji| emoji.g == id)
+                .map(|emoji| EmojiItem {
+                    value: emoji.e.clone().into(),
+                    label: format!(":{}:", emoji.s).into(),
+                    header: false,
+                })
+                .collect::<Vec<_>>();
+            push_section(&mut rows, label, items);
+        }
+    } else {
+        let items = emoji::search(&needle, 270)
+            .into_iter()
+            .map(|emoji| EmojiItem {
+                value: emoji.e.clone().into(),
+                label: format!(":{}:", emoji.s).into(),
+                header: false,
+            })
+            .collect::<Vec<_>>();
+        push_section(&mut rows, "Results", items);
+    }
+    window.set_emoji_grid(ModelRc::from(Rc::new(VecModel::from(rows))));
+}
+
+/// Download and cache a still image for a trusted KLIPY URL. Returns the
+/// local path, or `None` when the URL is untrusted or the fetch fails.
+async fn cached_gif_still(account: &Arc<AccountRuntime>, url: &str) -> Option<String> {
+    klipy_gif_url(url)?;
+    if let Some(path) = gif_stills()
+        .read()
+        .ok()
+        .and_then(|map| map.get(url).cloned())
+    {
+        return Some(path);
+    }
+    let dir = GIF_STILL_DIR.get()?;
+    let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(url.as_bytes());
+    let digest = &digest[digest.len().saturating_sub(96)..];
+    let path = dir.join(format!("{digest}.img"));
+    if tokio::fs::metadata(&path).await.is_err() {
+        let parsed = url::Url::parse(url).ok()?;
+        let bytes = account
+            .api
+            .get_public_bytes(&parsed, 8 * 1024 * 1024)
+            .await
+            .ok()?;
+        if bytes.is_empty() {
+            return None;
+        }
+        tokio::fs::create_dir_all(dir).await.ok()?;
+        tokio::fs::write(&path, &bytes).await.ok()?;
+    }
+    let path = path.to_string_lossy().into_owned();
+    if let Ok(mut map) = gif_stills().write() {
+        map.insert(url.to_owned(), path.clone());
+    }
+    Some(path)
+}
+
+/// Build the GIF picker model on the UI thread from plain row data.
+fn gif_model(rows: Vec<(String, String, String, bool)>) -> ModelRc<GifItem> {
+    ModelRc::from(Rc::new(VecModel::from(
+        rows.into_iter()
+            .map(|(id, title, url, favorite)| GifItem {
+                id: id.into(),
+                title: title.into(),
+                url: url.into(),
+                favorite,
+                has_preview: false,
+                preview: Image::default(),
+            })
+            .collect::<Vec<_>>(),
+    )))
+}
+
+/// Download preview stills for GIF picker rows and patch them into the model
+/// as each one arrives, matched by row URL so stale results are ignored.
+async fn hydrate_gif_previews(
+    account: &Arc<AccountRuntime>,
+    weak: &slint::Weak<AppWindow>,
+    targets: Vec<(String, String)>,
+) {
+    for (key, fetch) in targets.into_iter().take(48) {
+        let Some(path) = cached_gif_still(account, &fetch).await else {
+            continue;
+        };
+        let _ = weak.upgrade_in_event_loop(move |window| {
+            let gifs = window.get_gifs();
+            for row in 0..gifs.row_count() {
+                if let Some(mut item) = gifs.row_data(row)
+                    && item.url.as_str() == key
+                {
+                    item.has_preview = true;
+                    item.preview = load_ui_image(&path);
+                    gifs.set_row_data(row, item);
+                }
+            }
+        });
+    }
+}
+
+/// Acknowledge the newest message of the open conversation when it is still
+/// marked unread. `acknowledge_channel` clears the local read state, so this
+/// converges instead of looping on its own `StateChanged` event.
+async fn acknowledge_open_channel(account: Arc<AccountRuntime>, channel: EntityRef) {
+    let newest = {
+        let state = account.state.read().await;
+        let Some(newest) = state
+            .message_order
+            .get(&channel)
+            .and_then(|order| order.back())
+            .cloned()
+        else {
+            return;
+        };
+        let unread = state.read_states.get(&channel).is_none_or(|read| {
+            read.unread
+                || read.mention_count > 0
+                || read
+                    .last_read_message_id
+                    .is_none_or(|read_id| read_id < newest.id)
+        });
+        if !unread {
+            return;
+        }
+        newest
+    };
+    if let Err(error) = account.acknowledge_channel(&channel, Some(&newest)).await {
+        tracing::debug!(%error, %channel, "read acknowledgement was not persisted");
+    }
+}
+
+/// Fetch still frames for any KLIPY GIF messages that are not cached yet and
+/// re-render once they are available.
+async fn refresh_gif_stills(account: Arc<AccountRuntime>, weak: slint::Weak<AppWindow>) {
+    let urls = {
+        let state = account.state.read().await;
+        let cached = gif_stills().read().ok();
+        state
+            .messages
+            .values()
+            .filter_map(|message| message.content.as_deref().and_then(klipy_gif_url))
+            .filter(|url| {
+                cached
+                    .as_ref()
+                    .is_none_or(|map| !map.contains_key(url.as_str()))
+            })
+            .take(24)
+            .collect::<std::collections::HashSet<_>>()
+    };
+    if urls.is_empty() {
+        return;
+    }
+    let mut changed = false;
+    for url in urls {
+        if cached_gif_still(&account, &url).await.is_some() {
+            changed = true;
+        }
+    }
+    if changed {
+        let snapshot = ui_snapshot(&*account.state.read().await);
+        let _ = weak.upgrade_in_event_loop(move |window| apply_snapshot(&window, snapshot));
+    }
+}
+
+fn message_item(item: UiMessage, compact: bool) -> MessageItem {
+    // Slint cannot animate GIFs, so a sent KLIPY GIF renders its downloaded
+    // still frame where the web client shows the animation.
+    let gif_still = if item.gif_url.is_empty() {
+        None
+    } else {
+        gif_stills()
+            .read()
+            .ok()
+            .and_then(|stills| stills.get(&item.gif_url).cloned())
+    };
+    let (preview_path, preview_kind) = match &gif_still {
+        Some(path) => (path.clone(), "gif".to_owned()),
+        None => (item.attachment_preview.clone(), item.attachment_kind),
+    };
+    let body = if gif_still.is_some() {
+        String::new()
+    } else {
+        item.body
+    };
     MessageItem {
+        kind: "message".into(),
         id: item.id.into(),
         author: item.author.into(),
+        author_id: item.author_id.into(),
         avatar: item.avatar.into(),
         has_avatar: !item.avatar_path.is_empty(),
         avatar_image: load_ui_image(&item.avatar_path),
         time: item.time.into(),
-        body: item.body.into(),
+        body: body.into(),
         pending: item.pending,
         failed: item.failed,
         edited: item.edited,
@@ -5772,13 +6307,47 @@ fn message_item(item: UiMessage) -> MessageItem {
         preview_description: item.preview_description.into(),
         preview_site: item.preview_site.into(),
         preview_media_type: item.preview_media_type.into(),
-        has_attachment_preview: !item.attachment_preview.is_empty(),
-        attachment_preview: load_ui_image(&item.attachment_preview),
-        attachment_kind: item.attachment_kind.into(),
+        has_attachment_preview: !preview_path.is_empty(),
+        attachment_preview: load_ui_image(&preview_path),
+        attachment_kind: preview_kind.into(),
         has_reference: !item.reference_body.is_empty(),
         reference_author: item.reference_author.into(),
         reference_body: item.reference_body.into(),
         gif_url: item.gif_url.into(),
+        compact,
+    }
+}
+
+fn divider_item(kind: &str, label: &str) -> MessageItem {
+    MessageItem {
+        kind: kind.into(),
+        id: SharedString::default(),
+        author: SharedString::default(),
+        author_id: SharedString::default(),
+        avatar: SharedString::default(),
+        has_avatar: false,
+        avatar_image: Image::default(),
+        time: label.into(),
+        body: SharedString::default(),
+        pending: false,
+        failed: false,
+        edited: false,
+        attachments: SharedString::default(),
+        failure_reason: SharedString::default(),
+        mine: false,
+        preview_url: SharedString::default(),
+        preview_title: SharedString::default(),
+        preview_description: SharedString::default(),
+        preview_site: SharedString::default(),
+        preview_media_type: SharedString::default(),
+        has_attachment_preview: false,
+        attachment_preview: Image::default(),
+        attachment_kind: SharedString::default(),
+        has_reference: false,
+        reference_author: SharedString::default(),
+        reference_body: SharedString::default(),
+        gif_url: SharedString::default(),
+        compact: false,
     }
 }
 
@@ -5867,24 +6436,53 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
         })
         .collect::<Vec<_>>();
     guilds.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    let current_user_key = state.current_user.as_ref().map(kaede_core::User::key);
     let all_channels = state
         .channels
         .values()
         .map(|channel| UiChannel {
             id: channel.key().to_string(),
-            name: channel.name.clone().unwrap_or_else(|| "channel".to_owned()),
+            name: channel.name.clone().unwrap_or_else(|| {
+                if channel.kind == ChannelKind::DirectMessage {
+                    let recipients = channel
+                        .recipients
+                        .iter()
+                        .filter(|user| current_user_key.as_ref() != Some(&user.key()))
+                        .map(|user| user.label().to_owned())
+                        .collect::<Vec<_>>();
+                    if recipients.is_empty() {
+                        "Direct message".to_owned()
+                    } else {
+                        recipients.join(", ")
+                    }
+                } else {
+                    "Untitled channel".to_owned()
+                }
+            }),
             kind: match channel.kind {
+                ChannelKind::DirectMessage => "dm",
                 ChannelKind::Voice => "voice",
                 ChannelKind::Category => "category",
                 _ => "text",
             }
             .to_owned(),
-            unread: false,
+            unread: !matches!(channel.kind, ChannelKind::Voice | ChannelKind::Category)
+                && channel.last_message_id.is_some_and(|last| {
+                    state.read_states.get(&channel.key()).is_none_or(|read| {
+                        read.unread
+                            || read
+                                .last_read_message_id
+                                .is_none_or(|read_id| read_id < last)
+                    })
+                }),
             mentions: state
                 .read_states
                 .get(&channel.key())
                 .map_or(0, |read| read.mention_count as i32),
-            can_send: channel.permissions.contains(permission::SEND_MESSAGES),
+            // DM payloads carry no permission bits; like the web client,
+            // direct messages are never permission-gated.
+            can_send: channel.kind == ChannelKind::DirectMessage
+                || channel.permissions.contains(permission::SEND_MESSAGES),
             guild: channel.guild_key().map(|guild| guild.to_string()),
             topic: channel.topic.clone().unwrap_or_default(),
             parent: channel
@@ -5903,13 +6501,29 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
         .filter(|channel| channel.guild.is_some())
         .cloned()
         .collect::<Vec<_>>();
-    channels.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    channels.sort_by_key(|channel| channel.position);
     let mut direct_messages = all_channels
         .into_iter()
         .filter(|channel| channel.guild.is_none())
         .collect::<Vec<_>>();
     direct_messages.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
-    let current_user_key = state.current_user.as_ref().map(kaede_core::User::key);
+    // Badge math mirrors the web client: a guild tile shows the sum of its
+    // channels' mention counts; the home tile counts each unread DM as at
+    // least one.
+    let mut guild_mentions: HashMap<String, i32> = HashMap::new();
+    for channel in &channels {
+        if let Some(guild) = &channel.guild {
+            *guild_mentions.entry(guild.clone()).or_default() += channel.mentions;
+        }
+    }
+    for guild in &mut guilds {
+        guild.mentions = guild_mentions.get(&guild.id).copied().unwrap_or(0);
+    }
+    let home_mentions = direct_messages
+        .iter()
+        .filter(|channel| channel.unread)
+        .map(|channel| channel.mentions.max(1))
+        .sum::<i32>();
     let mut typing_names: HashMap<String, Vec<String>> = HashMap::new();
     for ((channel, user), started) in &state.typing {
         if current_user_key.as_ref() == Some(user)
@@ -5973,6 +6587,7 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
                             .users
                             .get(&pending.author)
                             .map_or_else(|| "You".to_owned(), |user| user.label().to_owned());
+                        let pending_local = pending.created_at.with_timezone(&chrono::Local);
                         UiMessage {
                             id: format!("pending:{}", pending.client_nonce),
                             avatar: initials(&author),
@@ -5988,7 +6603,11 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
                                 },
                             ),
                             author,
-                            time: pending.created_at.format("%H:%M").to_string(),
+                            author_id: pending.author.to_string(),
+                            time: pending_local.format("%H:%M").to_string(),
+                            epoch: pending.created_at.timestamp(),
+                            date: pending_local.format("%Y-%m-%d").to_string(),
+                            day_label: day_label(&pending_local),
                             body: pending.content.clone(),
                             pending: pending.state != kaede_core::PendingMessageState::Failed,
                             failed: pending.state == kaede_core::PendingMessageState::Failed,
@@ -6035,12 +6654,30 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
         .map(|member| {
             let key = member.user.key();
             let presence = state.presences.get(&key);
-            let online = presence.is_some_and(|presence| {
-                !matches!(
-                    presence.status,
-                    kaede_core::PresenceStatus::Offline | kaede_core::PresenceStatus::Invisible
-                )
-            });
+            let status = presence.map_or(kaede_core::PresenceStatus::Offline, |value| value.status);
+            let online = !matches!(
+                status,
+                kaede_core::PresenceStatus::Offline | kaede_core::PresenceStatus::Invisible
+            );
+            // Roster grouping mirrors the web client: a member appears under
+            // their highest hoisted role while online, otherwise under
+            // Online/Offline.
+            let hoisted = state
+                .roles
+                .values()
+                .filter(|role| {
+                    role.guild_id == member.guild_id
+                        && role.guild_domain == member.guild_domain
+                        && role.hoist
+                        && role.position > 0
+                        && member.role_ids.contains(&role.id)
+                })
+                .max_by_key(|role| role.position);
+            let (group, group_color, group_rank) = match hoisted {
+                Some(role) if online => (role.name.clone(), role.color, role.position),
+                _ if online => ("Online".to_owned(), 0, -1),
+                _ => ("Offline".to_owned(), 0, -2),
+            };
             UiMember {
                 id: key.to_string(),
                 name: member
@@ -6049,8 +6686,20 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
                     .unwrap_or_else(|| member.user.label().to_owned()),
                 status: presence
                     .and_then(|presence| presence.custom_status.clone())
-                    .unwrap_or_else(|| if online { "Online" } else { "Offline" }.to_owned()),
+                    .unwrap_or_default(),
                 online,
+                presence: match status {
+                    kaede_core::PresenceStatus::Online => "online",
+                    kaede_core::PresenceStatus::Idle => "idle",
+                    kaede_core::PresenceStatus::Dnd => "dnd",
+                    kaede_core::PresenceStatus::Invisible | kaede_core::PresenceStatus::Offline => {
+                        "offline"
+                    }
+                }
+                .to_owned(),
+                group,
+                group_color,
+                group_rank,
                 guild: EntityRef::new(member.guild_id, member.guild_domain.clone()).to_string(),
                 avatar_path: public_asset_path(
                     state,
@@ -6063,8 +6712,8 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
         .collect::<Vec<_>>();
     members.sort_by(|left, right| {
         right
-            .online
-            .cmp(&left.online)
+            .group_rank
+            .cmp(&left.group_rank)
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
     let mut friends = state
@@ -6115,29 +6764,9 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
             .cmp(&left.online)
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
-    let mut emojis = vec![
-        ("😀", ":grinning:"),
-        ("😂", ":joy:"),
-        ("❤️", ":heart:"),
-        ("👍", ":thumbsup:"),
-        ("🎉", ":tada:"),
-        ("🔥", ":fire:"),
-        ("👀", ":eyes:"),
-        ("✅", ":white_check_mark:"),
-        ("❌", ":x:"),
-        ("🤔", ":thinking:"),
-        ("😭", ":sob:"),
-        ("🙏", ":pray:"),
-    ]
-    .into_iter()
-    .map(|(value, label)| UiEmoji {
-        id: String::new(),
-        guild: String::new(),
-        value: value.to_owned(),
-        label: label.to_owned(),
-    })
-    .collect::<Vec<_>>();
-    let mut custom = state
+    // The Unicode catalog is embedded client-side (see `emoji`); the
+    // snapshot carries only the custom guild emojis.
+    let mut emojis = state
         .emojis
         .values()
         .map(|emoji| UiEmoji {
@@ -6153,8 +6782,7 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
             label: format!(":{}:", emoji.name),
         })
         .collect::<Vec<_>>();
-    custom.sort_by(|left, right| left.label.cmp(&right.label));
-    emojis.append(&mut custom);
+    emojis.sort_by(|left, right| left.label.cmp(&right.label));
     let current_user_ref = state.current_user.as_ref().map(kaede_core::User::key);
     let mut roles = state
         .roles
@@ -6286,10 +6914,12 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
         admin_members,
         calls,
         voice_members,
+        home_mentions,
     }
 }
 
 fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
+    window.set_current_user_initials(initials(&snapshot.current_user).into());
     window.set_current_user(snapshot.current_user.into());
     window.set_current_profile_name(snapshot.profile_name.into());
     window.set_current_profile_handle(snapshot.profile_handle.clone().into());
@@ -6361,6 +6991,7 @@ fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
             })
             .collect::<Vec<_>>(),
     ))));
+    window.set_home_mentions(snapshot.home_mentions);
     let channel_metadata = snapshot
         .channels
         .iter()
@@ -6368,25 +6999,98 @@ fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
         .map(|channel| {
             (
                 channel.id.clone(),
-                (channel.name.clone(), channel.kind.clone(), channel.can_send),
+                (
+                    channel.name.clone(),
+                    channel.kind.clone(),
+                    channel.can_send,
+                    channel.topic.clone(),
+                ),
             )
         })
         .collect::<HashMap<_, _>>();
     let current_channel = window.get_selected_channel().to_string();
-    let channels = snapshot
+    // Sidebar ordering mirrors the web client: ungrouped channels first,
+    // then each category followed by its children. Collapsed categories
+    // hide their children; voice channels list their occupants inline.
+    let guild_channels = snapshot
         .channels
         .iter()
         .filter(|channel| channel.guild.as_deref() == Some(selected_guild.as_str()))
-        .map(|item| ChannelItem {
-            id: item.id.clone().into(),
-            name: item.name.clone().into(),
-            kind: item.kind.clone().into(),
-            unread: item.unread,
-            mentions: item.mentions,
-        })
         .collect::<Vec<_>>();
+    let mut ordered: Vec<&UiChannel> = Vec::new();
+    let mut ungrouped = guild_channels
+        .iter()
+        .copied()
+        .filter(|channel| channel.kind != "category" && channel.parent.is_empty())
+        .collect::<Vec<_>>();
+    ungrouped.sort_by_key(|channel| channel.position);
+    ordered.extend(ungrouped);
+    let mut categories = guild_channels
+        .iter()
+        .copied()
+        .filter(|channel| channel.kind == "category")
+        .collect::<Vec<_>>();
+    categories.sort_by_key(|channel| channel.position);
+    for category in categories {
+        ordered.push(category);
+        let mut children = guild_channels
+            .iter()
+            .copied()
+            .filter(|channel| channel.kind != "category" && channel.parent == category.id)
+            .collect::<Vec<_>>();
+        children.sort_by_key(|channel| channel.position);
+        ordered.extend(children);
+    }
+    let collapsed = collapsed_categories()
+        .lock()
+        .map(|set| set.clone())
+        .unwrap_or_default();
+    let mut channels: Vec<ChannelItem> = Vec::new();
+    for channel in &ordered {
+        let is_category = channel.kind == "category";
+        if !is_category && !channel.parent.is_empty() && collapsed.contains(&channel.parent) {
+            continue;
+        }
+        let occupants = snapshot
+            .voice_members
+            .iter()
+            .filter(|member| member.channel == channel.id)
+            .collect::<Vec<_>>();
+        channels.push(ChannelItem {
+            id: channel.id.clone().into(),
+            name: channel.name.clone().into(),
+            kind: channel.kind.clone().into(),
+            unread: channel.unread,
+            mentions: channel.mentions,
+            collapsed: is_category && collapsed.contains(&channel.id),
+            voice_count: occupants.len() as i32,
+            has_avatar: false,
+            avatar: Image::default(),
+            muted: false,
+            deafened: false,
+        });
+        if channel.kind == "voice" {
+            for occupant in occupants {
+                channels.push(ChannelItem {
+                    id: occupant.id.clone().into(),
+                    name: occupant.name.clone().into(),
+                    kind: "voice-member".into(),
+                    unread: false,
+                    mentions: 0,
+                    collapsed: false,
+                    voice_count: 0,
+                    has_avatar: !occupant.avatar_path.is_empty(),
+                    avatar: load_ui_image(&occupant.avatar_path),
+                    muted: occupant.muted,
+                    deafened: occupant.deafened,
+                });
+            }
+        }
+    }
     if current_channel.is_empty()
-        && let Some(first) = channels.first()
+        && let Some(first) = channels
+            .iter()
+            .find(|channel| channel.kind == "text" || channel.kind == "dm")
     {
         window.set_selected_channel(first.id.clone());
     }
@@ -6400,14 +7104,16 @@ fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
         window.set_active_call_state(SharedString::default());
         window.set_active_call_incoming(false);
     }
-    if let Some((name, kind, can_send)) = channel_metadata.get(&selected) {
+    if let Some((name, kind, can_send, topic)) = channel_metadata.get(&selected) {
         window.set_selected_channel_name(name.clone().into());
         window.set_selected_channel_kind(kind.clone().into());
         window.set_can_send(*can_send);
+        window.set_selected_channel_topic(topic.clone().into());
     } else {
         window.set_selected_channel_name(SharedString::default());
         window.set_selected_channel_kind(SharedString::default());
         window.set_can_send(false);
+        window.set_selected_channel_topic(SharedString::default());
     }
     window.set_channels(ModelRc::from(Rc::new(VecModel::from(channels))));
     let mut admin_channels = snapshot
@@ -6447,14 +7153,31 @@ fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
             })
             .collect::<Vec<_>>(),
     ))));
-    let rows = snapshot
-        .messages
-        .get(&selected)
-        .into_iter()
-        .flatten()
-        .cloned()
-        .map(message_item)
-        .collect::<Vec<_>>();
+    // Timeline construction mirrors the web client: day dividers, a single
+    // "New messages" divider captured at channel-open time, and compact rows
+    // for same-author messages within a seven-minute window.
+    let new_marker = window.get_new_marker_message().to_string();
+    let mut rows: Vec<MessageItem> = Vec::new();
+    let mut previous_message: Option<(String, i64)> = None;
+    let mut previous_date = String::new();
+    for item in snapshot.messages.get(&selected).into_iter().flatten() {
+        if item.date != previous_date {
+            previous_date.clone_from(&item.date);
+            rows.push(divider_item("day", &item.day_label));
+            previous_message = None;
+        }
+        if !new_marker.is_empty() && item.id == new_marker {
+            rows.push(divider_item("new", "New messages"));
+            previous_message = None;
+        }
+        let compact = previous_message.as_ref().is_some_and(|(author, epoch)| {
+            !item.author_id.is_empty()
+                && author == &item.author_id
+                && item.epoch.saturating_sub(*epoch) <= 420
+        }) && item.reference_body.is_empty();
+        previous_message = Some((item.author_id.clone(), item.epoch));
+        rows.push(message_item(item.clone(), compact));
+    }
     window.set_messages(ModelRc::from(Rc::new(VecModel::from(rows))));
     window.set_typing_indicator(
         snapshot
@@ -6480,27 +7203,54 @@ fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
             })
             .collect::<Vec<_>>(),
     ))));
-    window.set_members(ModelRc::from(Rc::new(VecModel::from(
-        snapshot
-            .members
-            .into_iter()
-            .filter(|item| item.guild == selected_guild)
-            .map(|item| MemberItem {
-                id: item.id.into(),
-                initials: initials(&item.name).into(),
-                name: item.name.into(),
-                status: item.status.into(),
-                online: item.online,
-                role_color: if item.online {
-                    Color::from_rgb_u8(79, 189, 131)
+    // Roster rows are flattened with inline group headers ("{Role} — n",
+    // "Online — n", "Offline — n") the way the web roster renders them.
+    let roster_members = snapshot
+        .members
+        .into_iter()
+        .filter(|item| item.guild == selected_guild)
+        .collect::<Vec<_>>();
+    let mut group_counts: HashMap<String, usize> = HashMap::new();
+    for member in &roster_members {
+        *group_counts.entry(member.group.clone()).or_default() += 1;
+    }
+    let mut roster_rows: Vec<MemberItem> = Vec::new();
+    let mut current_group = String::new();
+    for item in roster_members {
+        if item.group != current_group {
+            current_group.clone_from(&item.group);
+            let count = group_counts.get(&item.group).copied().unwrap_or(0);
+            roster_rows.push(MemberItem {
+                id: SharedString::default(),
+                initials: SharedString::default(),
+                name: format!("{} — {count}", item.group.to_uppercase()).into(),
+                status: SharedString::default(),
+                online: false,
+                presence: SharedString::default(),
+                header: true,
+                role_color: if item.group_color == 0 {
+                    Color::from_rgb_u8(170, 160, 150)
                 } else {
-                    Color::from_rgb_u8(120, 116, 110)
+                    role_color(item.group_color)
                 },
-                has_avatar: !item.avatar_path.is_empty(),
-                avatar: load_ui_image(&item.avatar_path),
-            })
-            .collect::<Vec<_>>(),
-    ))));
+                has_avatar: false,
+                avatar: Image::default(),
+            });
+        }
+        roster_rows.push(MemberItem {
+            id: item.id.into(),
+            initials: initials(&item.name).into(),
+            name: item.name.into(),
+            status: item.status.into(),
+            online: item.online,
+            presence: item.presence.into(),
+            header: false,
+            role_color: Color::from_rgb_u8(244, 238, 229),
+            has_avatar: !item.avatar_path.is_empty(),
+            avatar: load_ui_image(&item.avatar_path),
+        });
+    }
+    window.set_members(ModelRc::from(Rc::new(VecModel::from(roster_rows))));
     window.set_friends(ModelRc::from(Rc::new(VecModel::from(
         snapshot
             .friends
@@ -6528,6 +7278,12 @@ fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
                 kind: item.kind.into(),
                 unread: item.unread,
                 mentions: item.mentions,
+                collapsed: false,
+                voice_count: 0,
+                has_avatar: false,
+                avatar: Image::default(),
+                muted: false,
+                deafened: false,
             })
             .collect::<Vec<_>>(),
     ))));
@@ -6538,6 +7294,7 @@ fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
             .map(|item| EmojiItem {
                 value: item.value.clone().into(),
                 label: item.label.clone().into(),
+                header: false,
             })
             .collect::<Vec<_>>(),
     ))));
@@ -6915,6 +7672,10 @@ fn install_empty_models(window: &AppWindow) {
     window.set_completions(ModelRc::from(
         Rc::new(VecModel::<CompletionItem>::default()),
     ));
+    window.set_emoji_grid(ModelRc::from(Rc::new(
+        VecModel::<ModelRc<EmojiItem>>::default(),
+    )));
+    window.set_pinned_messages(ModelRc::from(Rc::new(VecModel::<MessageItem>::default())));
 }
 
 fn first_navigable_channel(state: &AppState, guild: &EntityRef) -> Option<EntityRef> {
@@ -6925,6 +7686,40 @@ fn first_navigable_channel(state: &AppState, guild: &EntityRef) -> Option<Entity
         .filter(|channel| channel.kind != ChannelKind::Category)
         .min_by_key(|channel| channel.position)
         .map(kaede_core::Channel::key)
+}
+
+/// Hydrate the first channel shown when entering a guild.
+///
+/// Selecting a guild and selecting a channel are separate UI actions.  The
+/// snapshot renderer may choose a default channel for presentation, but it
+/// must never be responsible for network I/O.  Keeping the initial fetch here
+/// prevents the shell from presenting a selected, empty channel until the
+/// user clicks it a second time.
+async fn hydrate_guild_landing(
+    account: &AccountRuntime,
+    guild: &EntityRef,
+) -> Result<Option<EntityRef>, kaede_app::AccountError> {
+    let selected = {
+        let state = account.state.read().await;
+        first_navigable_channel(&state, guild)
+    };
+    let Some(channel) = selected else {
+        return Ok(None);
+    };
+    let kind = account
+        .state
+        .read()
+        .await
+        .channels
+        .get(&channel)
+        .map(|value| value.kind);
+    match kind {
+        Some(ChannelKind::Voice) => account.refresh_voice_occupancy(&channel).await?,
+        _ => {
+            account.load_channel(&channel).await?;
+        }
+    }
+    Ok(Some(channel))
 }
 
 fn invite_code_from_input(input: &str) -> Option<String> {

@@ -21,8 +21,9 @@ allowed to access and send writes back to the authority for validation.
   derivatives; Garage is included as the default self-hosted backend
 - LiveKit voice, video, and screen sharing
 - A static SvelteKit web client backed by FastAPI, PostgreSQL, and Dragonfly
-- A native Slint desktop client for Windows, macOS, and Linux with selectable
-  audio devices, push-to-talk, voice activity, camera, and desktop capture
+- A Tauri desktop client for Windows, macOS, and Linux that shares the web UI
+  while Rust provides native audio devices, push-to-talk, voice activity,
+  speech processing, camera, and desktop capture
 
 The federation wire format is documented in
 [docs/kaede-fed-v1.md](docs/kaede-fed-v1.md). Architectural and operational
@@ -89,11 +90,16 @@ only when you intend to start both development instances.
 
 ### Native desktop client
 
-The Rust workspace under `desktop/` uses the same home-instance REST, gateway,
-media, federation, and LiveKit contracts as the web client. The chat interface
-is native Slint; adaptive Turnstile challenges use a restricted, short-lived
-system web view inside the application rather than opening the full client in a
-browser.
+The supported desktop client packages the same Svelte interface as the web app
+inside a locked-down Tauri shell. Rust owns credentials, gateway sessions,
+object uploads, operating-system notifications, native camera and screen
+capture, CPAL input/output, LiveKit voice, global push to talk, voice activity,
+echo cancellation, and local noise suppression. No microphone PCM crosses the
+JavaScript bridge. Adaptive Turnstile challenges use a restricted, short-lived
+in-app verification window rather than an external browser.
+
+The former Slint client remains under `desktop/legacy-slint/` as an archived
+experimental client and is not part of current builds or releases.
 
 Install Rust 1.92 and the platform dependencies listed in
 [desktop/README.md](desktop/README.md), then run:
@@ -101,7 +107,8 @@ Install Rust 1.92 and the platform dependencies listed in
 ```sh
 make desktop-check
 make desktop-test
-cargo +1.92.0 run --locked --manifest-path desktop/Cargo.toml -p kaede-desktop
+make desktop-build
+cargo +1.92.0 run --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
 ```
 
 The [desktop architecture](desktop/docs/architecture.md),

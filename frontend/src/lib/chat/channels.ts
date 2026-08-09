@@ -2,6 +2,7 @@ import { compareEntityRefs, entityKey } from './refs';
 import type { Channel } from './types';
 
 export interface ChannelGroup {
+  key: string;
   category: Channel | null;
   channels: Channel[];
 }
@@ -20,20 +21,45 @@ export function groupChannels(channels: Channel[]): ChannelGroup[] {
   const ordered = [...channels].sort(compareChannels);
   const categories = ordered.filter((channel) => channel.type === 4);
   const categoryKeys = new Set(categories.map(entityKey));
-  const ungrouped = ordered.filter(
+  const topLevel = ordered.filter(
     (channel) =>
-      channel.type !== 4 &&
-      (channel.parent_id === null ||
-        channel.parent_domain === null ||
-        !categoryKeys.has(`${channel.parent_id}@${channel.parent_domain}`))
+      channel.type === 4 ||
+      channel.parent_id === null ||
+      channel.parent_domain === null ||
+      !categoryKeys.has(`${channel.parent_id}@${channel.parent_domain}`)
   );
-  return [
-    { category: null, channels: ungrouped },
-    ...categories.map((category) => ({
-      category,
-      channels: ordered.filter((channel) => channel.type !== 4 && belongsTo(channel, category))
-    }))
-  ];
+  const groups: ChannelGroup[] = [];
+  let ungroupedRun: Channel[] = [];
+
+  function finishUngroupedRun() {
+    if (!ungroupedRun.length) return;
+    groups.push({
+      key: `ungrouped:${entityKey(ungroupedRun[0])}`,
+      category: null,
+      channels: ungroupedRun
+    });
+    ungroupedRun = [];
+  }
+
+  for (const channel of topLevel) {
+    if (channel.type !== 4) {
+      ungroupedRun.push(channel);
+      continue;
+    }
+    finishUngroupedRun();
+    groups.push({
+      key: entityKey(channel),
+      category: channel,
+      channels: ordered.filter((candidate) => candidate.type !== 4 && belongsTo(candidate, channel))
+    });
+  }
+  finishUngroupedRun();
+
+  // Keep an empty top-level drop target available when every channel belongs to a category.
+  if (!groups.some((group) => group.category === null)) {
+    groups.push({ key: 'ungrouped:empty', category: null, channels: [] });
+  }
+  return groups;
 }
 
 export function flattenChannelGroups(groups: ChannelGroup[]): Channel[] {
@@ -79,11 +105,23 @@ export function moveChannel(
   let insertAt = remaining.length;
 
   if (dragged.type === 4) {
-    if (target && target.type !== 4) return ordered;
     if (target) {
-      const targetBlock = categoryBlock(remaining, target);
+      const targetCategory =
+        target.type === 4
+          ? target
+          : target.parent_id && target.parent_domain
+            ? remaining.find(
+                (candidate) =>
+                  candidate.type === 4 &&
+                  candidate.id === target.parent_id &&
+                  candidate.origin_domain === target.parent_domain
+              )
+            : null;
+      const targetAnchor = targetCategory ?? target;
+      const targetBlock =
+        targetAnchor.type === 4 ? categoryBlock(remaining, targetAnchor) : [targetAnchor];
       const targetStart = remaining.findIndex(
-        (channel) => entityKey(channel) === entityKey(target)
+        (channel) => entityKey(channel) === entityKey(targetAnchor)
       );
       insertAt = placement === 'after' ? targetStart + targetBlock.length : targetStart;
     }

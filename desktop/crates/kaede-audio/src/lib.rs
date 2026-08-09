@@ -12,24 +12,30 @@
 //! frame indices between the scalar types required by native audio APIs.
 
 use std::{
+    collections::{HashMap, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
+        mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
     },
+    thread::JoinHandle,
     time::Duration,
 };
 
+use aec3::{nodes::audio::AudioFormat, pipelines::linear};
 use cpal::{
     Device, SampleFormat, Stream, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use crossbeam_queue::ArrayQueue;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const VOICE_SAMPLE_RATE: u32 = 48_000;
 pub const VOICE_CHANNELS: u16 = 1;
 const QUEUE_SECONDS: usize = 2;
+const VAD_HANGOVER_FRAMES: u32 = 28;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +59,18 @@ pub struct CaptureSettings {
     pub device_id: Option<String>,
     pub mode: InputMode,
     pub vad_threshold: f32,
+    pub noise_suppression: NoiseSuppression,
+    pub echo_cancellation: bool,
+    pub automatic_gain_control: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseSuppression {
+    Off,
+    #[default]
+    Standard,
+    VoiceIsolation,
 }
 
 impl Default for CaptureSettings {
@@ -61,6 +79,9 @@ impl Default for CaptureSettings {
             device_id: None,
             mode: InputMode::VoiceActivity,
             vad_threshold: 0.015,
+            noise_suppression: NoiseSuppression::Standard,
+            echo_cancellation: true,
+            automatic_gain_control: true,
         }
     }
 }
@@ -72,6 +93,7 @@ pub struct CaptureGate {
     use_push_to_talk: AtomicBool,
     vad_threshold_bits: AtomicU32,
     level_bits: AtomicU32,
+    vad_hangover: AtomicU32,
 }
 
 impl CaptureGate {
@@ -110,7 +132,18 @@ impl CaptureGate {
         if self.use_push_to_talk.load(Ordering::Acquire) {
             self.push_to_talk.load(Ordering::Acquire)
         } else {
-            level >= f32::from_bits(self.vad_threshold_bits.load(Ordering::Acquire))
+            let threshold = f32::from_bits(self.vad_threshold_bits.load(Ordering::Acquire));
+            if level >= threshold {
+                self.vad_hangover
+                    .store(VAD_HANGOVER_FRAMES, Ordering::Release);
+                true
+            } else {
+                self.vad_hangover
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+            }
         }
     }
 }
@@ -144,6 +177,250 @@ impl ProcessorChain {
     pub fn observe_render(&mut self, samples: &[f32], sample_rate: u32) {
         for processor in &mut self.processors {
             processor.observe_render(samples, sample_rate);
+        }
+    }
+}
+
+/// Low-latency desktop speech processing. This implementation intentionally
+/// lives behind [`AudioProcessor`], so a pinned neural denoiser can replace the
+/// isolation stage without changing CPAL or `LiveKit` ownership.
+struct SpeechProcessorCore {
+    noise_suppression: NoiseSuppression,
+    echo_cancellation: bool,
+    automatic_gain_control: bool,
+    render: Vec<f32>,
+    dc_previous_input: f32,
+    dc_previous_output: f32,
+    gain: f32,
+    standard: Option<linear::LinearPipeline>,
+    isolation: Option<Box<nnnoiseless::DenoiseState<'static>>>,
+    isolation_warmed: bool,
+}
+
+impl SpeechProcessorCore {
+    #[must_use]
+    pub fn from_settings(settings: &CaptureSettings) -> Self {
+        let format = AudioFormat::ten_ms(VOICE_SAMPLE_RATE, VOICE_CHANNELS);
+        let standard = (settings.echo_cancellation
+            || settings.noise_suppression == NoiseSuppression::Standard)
+            .then(|| {
+                linear::builder(format, format)
+                    .initial_delay_ms(80)
+                    .build()
+                    .ok()
+            })
+            .flatten();
+        Self {
+            noise_suppression: settings.noise_suppression,
+            echo_cancellation: settings.echo_cancellation,
+            automatic_gain_control: settings.automatic_gain_control,
+            render: Vec::new(),
+            dc_previous_input: 0.0,
+            dc_previous_output: 0.0,
+            gain: 1.0,
+            standard,
+            isolation: (settings.noise_suppression == NoiseSuppression::VoiceIsolation)
+                .then(nnnoiseless::DenoiseState::new),
+            isolation_warmed: false,
+        }
+    }
+}
+
+impl SpeechProcessorCore {
+    fn observe_render(&mut self, samples: &[f32], _sample_rate: u32) {
+        self.render.clear();
+        self.render.extend_from_slice(samples);
+        if samples.len() == nnnoiseless::DenoiseState::FRAME_SIZE
+            && let Some(pipeline) = &mut self.standard
+            && let Err(error) = pipeline.handle_render_frame(samples)
+        {
+            tracing::debug!(%error, "native echo render frame was rejected");
+        }
+    }
+
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32) {
+        if sample_rate == VOICE_SAMPLE_RATE
+            && samples.len() == nnnoiseless::DenoiseState::FRAME_SIZE
+            && let Some(pipeline) = &mut self.standard
+        {
+            let capture = samples.to_vec();
+            if let Ok(true) = pipeline.process_capture_frame(&capture, samples) {
+                self.apply_voice_isolation(samples);
+                return;
+            }
+        }
+
+        // DC blocking is cheap and stable enough to run on every 10 ms frame.
+        for sample in samples.iter_mut() {
+            let output = *sample - self.dc_previous_input + 0.995 * self.dc_previous_output;
+            self.dc_previous_input = *sample;
+            self.dc_previous_output = output;
+            *sample = output;
+        }
+
+        if self.echo_cancellation && self.render.len() == samples.len() {
+            let capture_energy = samples.iter().map(|value| value * value).sum::<f32>();
+            let render_energy = self.render.iter().map(|value| value * value).sum::<f32>();
+            let correlation = samples
+                .iter()
+                .zip(&self.render)
+                .map(|(capture, render)| capture * render)
+                .sum::<f32>();
+            let normalized = correlation.abs()
+                / (capture_energy.sqrt() * render_energy.sqrt()).max(f32::EPSILON);
+            if render_energy > 0.000_01 && normalized > 0.45 {
+                let attenuation = (1.0 - normalized * 0.7).clamp(0.2, 1.0);
+                for sample in samples.iter_mut() {
+                    *sample *= attenuation;
+                }
+            }
+        }
+
+        let floor = match self.noise_suppression {
+            NoiseSuppression::Off => 0.0,
+            NoiseSuppression::Standard => 0.004,
+            NoiseSuppression::VoiceIsolation => 0.009,
+        };
+        if floor > 0.0 {
+            for sample in samples.iter_mut() {
+                let magnitude = sample.abs();
+                if magnitude < floor {
+                    *sample *= (magnitude / floor).powi(2);
+                }
+            }
+        }
+
+        if self.automatic_gain_control {
+            let rms = (samples.iter().map(|value| value * value).sum::<f32>()
+                / samples.len().max(1) as f32)
+                .sqrt();
+            let target = if rms > 0.001 {
+                (0.12 / rms).clamp(0.5, 4.0)
+            } else {
+                1.0
+            };
+            self.gain = self.gain * 0.92 + target * 0.08;
+            for sample in samples.iter_mut() {
+                *sample = (*sample * self.gain).clamp(-0.98, 0.98);
+            }
+        }
+        self.apply_voice_isolation(samples);
+    }
+}
+
+impl SpeechProcessorCore {
+    fn apply_voice_isolation(&mut self, samples: &mut [f32]) {
+        let Some(denoiser) = &mut self.isolation else {
+            return;
+        };
+        if samples.len() != nnnoiseless::DenoiseState::FRAME_SIZE {
+            return;
+        }
+        let input = samples
+            .iter()
+            .map(|sample| sample.clamp(-1.0, 1.0) * 32_767.0)
+            .collect::<Vec<_>>();
+        let mut output = vec![0.0; nnnoiseless::DenoiseState::FRAME_SIZE];
+        denoiser.process_frame(&mut output, &input);
+        if self.isolation_warmed {
+            for (sample, denoised) in samples.iter_mut().zip(output) {
+                *sample = (denoised / 32_767.0).clamp(-1.0, 1.0);
+            }
+        } else {
+            // RNNoise's first synthesized frame contains a documented fade-in.
+            // Keep the already processed frame once, while still warming state.
+            self.isolation_warmed = true;
+        }
+    }
+}
+
+enum ProcessorCommand {
+    Render(Vec<f32>, u32),
+    Capture(Vec<f32>, u32, SyncSender<Vec<f32>>),
+}
+
+/// Send-safe handle for the native DSP worker.
+///
+/// AEC3 owns a graph containing thread-affine nodes, so the graph is created,
+/// used, and destroyed on one dedicated thread. The async room loop only
+/// exchanges bounded 10 ms frames with that worker; no unsafe `Send` shim is
+/// used and the CPAL callbacks remain limited to lock-free queue operations.
+pub struct SpeechProcessor {
+    commands: Option<SyncSender<ProcessorCommand>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl SpeechProcessor {
+    #[must_use]
+    pub fn from_settings(settings: &CaptureSettings) -> Self {
+        let settings = settings.clone();
+        let (commands, receiver) = sync_channel(4);
+        let worker = std::thread::Builder::new()
+            .name("kaede-speech-dsp".to_owned())
+            .spawn(move || run_speech_processor(&receiver, &settings))
+            .ok();
+        Self {
+            commands: worker.as_ref().map(|_| commands),
+            worker,
+        }
+    }
+}
+
+fn run_speech_processor(receiver: &Receiver<ProcessorCommand>, settings: &CaptureSettings) {
+    let mut processor = SpeechProcessorCore::from_settings(settings);
+    while let Ok(command) = receiver.recv() {
+        match command {
+            ProcessorCommand::Render(samples, sample_rate) => {
+                processor.observe_render(&samples, sample_rate);
+            }
+            ProcessorCommand::Capture(mut samples, sample_rate, reply) => {
+                processor.process(&mut samples, sample_rate);
+                let _ = reply.try_send(samples);
+            }
+        }
+    }
+}
+
+impl AudioProcessor for SpeechProcessor {
+    fn observe_render(&mut self, samples: &[f32], sample_rate: u32) {
+        let Some(commands) = &self.commands else {
+            return;
+        };
+        match commands.try_send(ProcessorCommand::Render(samples.to_vec(), sample_rate)) {
+            Ok(()) | Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Disconnected(_)) => self.commands = None,
+        }
+    }
+
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32) {
+        let Some(commands) = &self.commands else {
+            samples.fill(0.0);
+            return;
+        };
+        let (reply, processed) = sync_channel(1);
+        match commands.try_send(ProcessorCommand::Capture(
+            samples.to_vec(),
+            sample_rate,
+            reply,
+        )) {
+            Ok(()) => match processed.recv_timeout(Duration::from_millis(8)) {
+                Ok(output) if output.len() == samples.len() => samples.copy_from_slice(&output),
+                Ok(_) | Err(_) => samples.fill(0.0),
+            },
+            Err(TrySendError::Full(_)) => samples.fill(0.0),
+            Err(TrySendError::Disconnected(_)) => {
+                self.commands = None;
+                samples.fill(0.0);
+            }
+        }
+    }
+}
+
+impl Drop for SpeechProcessor {
+    fn drop(&mut self) {
+        self.commands.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }
@@ -210,14 +487,14 @@ impl NativeCapture {
         for _ in 0..wanted_source {
             source.push(self.queue.pop().unwrap_or(0.0));
         }
-        let peak = source
+        let mut output = resample_linear(&source, self.source_rate, VOICE_SAMPLE_RATE);
+        processors.process(&mut output, VOICE_SAMPLE_RATE);
+        let peak = output
             .iter()
             .fold(0.0_f32, |current, sample| current.max(sample.abs()));
         if !self.gate.permits(peak) {
-            source.fill(0.0);
+            output.fill(0.0);
         }
-        let mut output = resample_linear(&source, self.source_rate, VOICE_SAMPLE_RATE);
-        processors.process(&mut output, VOICE_SAMPLE_RATE);
         output
     }
 }
@@ -238,6 +515,58 @@ pub struct PlaybackSink {
     sink_rate: u32,
     sink_channels: u16,
     render_reference: RenderReference,
+}
+
+/// Per-participant bounded queues feeding a single deterministic speaker mix.
+///
+/// Remote tracks must never write directly into one FIFO: that serializes
+/// participants instead of mixing them. This mixer also produces the exact
+/// far-end signal supplied to echo cancellation.
+#[derive(Clone, Default)]
+pub struct VoiceMixer {
+    participants: Arc<Mutex<HashMap<String, VecDeque<f32>>>>,
+}
+
+impl VoiceMixer {
+    pub fn push(&self, participant: &str, samples: &[f32], source_rate: u32, source_channels: u16) {
+        let mono = downmix(samples, usize::from(source_channels));
+        let resampled = resample_linear(&mono, source_rate, VOICE_SAMPLE_RATE);
+        let mut participants = self.participants.lock();
+        let queue = participants.entry(participant.to_owned()).or_default();
+        queue.extend(resampled);
+        let maximum = VOICE_SAMPLE_RATE as usize * QUEUE_SECONDS;
+        if queue.len() > maximum {
+            queue.drain(..queue.len() - maximum);
+        }
+    }
+
+    pub fn remove(&self, participant: &str) {
+        self.participants.lock().remove(participant);
+    }
+
+    #[must_use]
+    pub fn drain(&self, samples: usize) -> Vec<f32> {
+        let mut participants = self.participants.lock();
+        let active = participants
+            .values()
+            .filter(|queue| !queue.is_empty())
+            .count();
+        let normalization = if active > 1 {
+            1.0 / (active as f32).sqrt()
+        } else {
+            1.0
+        };
+        let mut mixed = vec![0.0; samples];
+        for queue in participants.values_mut() {
+            for sample in &mut mixed {
+                *sample += queue.pop_front().unwrap_or(0.0) * normalization;
+            }
+        }
+        for sample in &mut mixed {
+            *sample = sample.clamp(-1.0, 1.0);
+        }
+        mixed
+    }
 }
 
 /// Bounded copy of the mono speaker mix used only by capture-side DSP. It
@@ -321,6 +650,11 @@ impl NativePlayback {
     #[must_use]
     pub fn render_reference(&self) -> RenderReference {
         self.render_reference.clone()
+    }
+
+    #[must_use]
+    pub fn mixer(&self) -> VoiceMixer {
+        VoiceMixer::default()
     }
 }
 
@@ -616,5 +950,24 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         assert_eq!(recorded, vec![0.25, -0.25]);
+    }
+
+    #[test]
+    fn mixer_combines_participants_without_serializing_tracks() {
+        let mixer = VoiceMixer::default();
+        mixer.push("one", &[0.5, 0.5], VOICE_SAMPLE_RATE, 1);
+        mixer.push("two", &[0.5, -0.5], VOICE_SAMPLE_RATE, 1);
+        let output = mixer.drain(2);
+        let scale = 1.0 / 2.0_f32.sqrt();
+        assert!((output[0] - scale).abs() < 0.000_01);
+        assert!(output[1].abs() < 0.000_01);
+    }
+
+    #[test]
+    fn removing_participant_discards_buffered_audio() {
+        let mixer = VoiceMixer::default();
+        mixer.push("gone", &[0.8; 480], VOICE_SAMPLE_RATE, 1);
+        mixer.remove("gone");
+        assert_eq!(mixer.drain(2), vec![0.0, 0.0]);
     }
 }

@@ -6,6 +6,7 @@ import {
   PROTOCOL_VERSION,
   type EventName
 } from '$lib/generated/ops';
+import { isNativeDesktop, nativeInvoke } from '$lib/platform/native';
 
 export interface Dispatch<T = unknown> {
   op: GatewayOp.DISPATCH;
@@ -33,11 +34,35 @@ export class GatewayClient extends EventTarget {
   #heartbeatAcknowledged = true;
   #lifecycle = 0;
   #reconcileOnReady = false;
+  #nativeGeneration = 0;
+  #preferredPresence: 'online' | 'idle' | 'dnd' | 'invisible' | null = null;
+  #gatewayReady = false;
+  #presencePending = false;
 
   connect(): void {
     this.#manualClose = false;
     this.#lifecycle += 1;
+    if (isNativeDesktop()) {
+      const generation = ++this.#nativeGeneration;
+      void this.#pollNative(generation);
+      return;
+    }
     this.#open();
+  }
+
+  async #pollNative(generation: number): Promise<void> {
+    while (!this.#manualClose && generation === this.#nativeGeneration) {
+      try {
+        const envelope = await nativeInvoke<GatewayEnvelope | null>('native_gateway_next');
+        if (envelope && !this.#manualClose && generation === this.#nativeGeneration) {
+          this.#receive(JSON.stringify(envelope));
+        }
+      } catch {
+        if (!this.#manualClose && generation === this.#nativeGeneration) {
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+      }
+    }
   }
 
   #open(): void {
@@ -85,20 +110,55 @@ export class GatewayClient extends EventTarget {
     if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
     this.#reconnectTimer = null;
     this.#retry = 0;
+    this.#nativeGeneration += 1;
     this.#socket?.close(1000);
     this.#cleanup();
   }
 
   requestMembers(guildRef: string, query = '', limit = 100): void {
+    if (isNativeDesktop()) {
+      const [guild_id, guild_domain = ''] = guildRef.split('@', 2);
+      void nativeInvoke('native_gateway_command', {
+        command: 'request_members',
+        payload: { guild_id, guild_domain, query, limit }
+      });
+      return;
+    }
     this.#send({ op: GatewayOp.REQUEST_MEMBERS, d: { guild_id: guildRef, query, limit } });
   }
 
   subscribeMembers(guildRef: string, ranges: [number, number][] = [[0, 99]]): void {
+    if (isNativeDesktop()) {
+      const [guild_id, guild_domain = ''] = guildRef.split('@', 2);
+      void nativeInvoke('native_gateway_command', {
+        command: 'subscribe_members',
+        payload: { guild_id, guild_domain, ranges }
+      });
+      return;
+    }
     this.#send({ op: GatewayOp.SUBSCRIBE_MEMBER_LIST, d: { guild_id: guildRef, ranges } });
   }
 
   setPresence(status: 'online' | 'idle' | 'dnd' | 'invisible'): void {
+    this.#preferredPresence = status;
+    if (isNativeDesktop()) {
+      void nativeInvoke('native_gateway_command', {
+        command: 'presence',
+        payload: { status }
+      });
+      return;
+    }
+    if (!this.#gatewayReady) {
+      this.#presencePending = true;
+      return;
+    }
     this.#send({ op: GatewayOp.PRESENCE_UPDATE, d: { status } });
+    this.#presencePending = false;
+  }
+
+  rememberPresence(status: 'online' | 'idle' | 'dnd' | 'invisible'): void {
+    this.#preferredPresence = status;
+    this.#presencePending = false;
   }
 
   #receive(raw: string): void {
@@ -156,27 +216,29 @@ export class GatewayClient extends EventTarget {
         sessionStorage.setItem('kaede.gateway.sequence', String(this.#sequence));
       }
       if (envelope.t === 'READY') {
-        const ready = envelope.d as { session_id: string };
+        const ready = envelope.d as { session_id: string; presence_preference?: string };
         if (typeof ready.session_id !== 'string' || !ready.session_id) {
           throw new TypeError('Invalid gateway session');
         }
+        if (!this.#presencePending && isPresencePreference(ready.presence_preference)) {
+          this.#preferredPresence = ready.presence_preference;
+        }
         sessionStorage.setItem('kaede.gateway.session', ready.session_id);
         this.#retry = 0;
+        this.#gatewayReady = true;
       } else if (envelope.t === 'RESUMED') {
-        this.#retry = 0;
-      }
-      if (envelope.t === 'READY' || envelope.t === 'RESUMED') {
-        let preferred: string | null = null;
-        try {
-          preferred = globalThis.localStorage?.getItem('kaede.presence') ?? null;
-        } catch {
-          // Browsers can deny storage access in hardened or ephemeral contexts.
+        const resumed = envelope.d as { presence_preference?: string };
+        if (!this.#presencePending && isPresencePreference(resumed.presence_preference)) {
+          this.#preferredPresence = resumed.presence_preference;
         }
-        this.setPresence(
-          preferred === 'idle' || preferred === 'dnd' || preferred === 'invisible'
-            ? preferred
-            : 'online'
-        );
+        this.#retry = 0;
+        this.#gatewayReady = true;
+      }
+      if (
+        (envelope.t === 'READY' || envelope.t === 'RESUMED') &&
+        this.#preferredPresence !== null
+      ) {
+        this.setPresence(this.#preferredPresence);
       }
       this.dispatchEvent(
         new CustomEvent('dispatch', {
@@ -209,6 +271,7 @@ export class GatewayClient extends EventTarget {
   }
 
   #cleanup(): void {
+    this.#gatewayReady = false;
     if (this.#heartbeat) clearInterval(this.#heartbeat);
     this.#heartbeat = null;
     this.#heartbeatAcknowledged = true;
@@ -235,4 +298,10 @@ export class GatewayClient extends EventTarget {
       expireBrowserSession();
     }
   }
+}
+
+function isPresencePreference(
+  value: unknown
+): value is 'online' | 'idle' | 'dnd' | 'invisible' {
+  return value === 'online' || value === 'idle' || value === 'dnd' || value === 'invisible';
 }

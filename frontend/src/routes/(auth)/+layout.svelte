@@ -18,8 +18,8 @@
       <p class="eyebrow">Your home on the fediverse</p>
       <h2>One account.<br />Every community.</h2>
       <p>
-        Chat locally, join guilds hosted elsewhere, and keep an identity that belongs to your home
-        instance.
+        Choose the Kaede server that stores your account, then join communities hosted anywhere on
+        the network.
       </p>
       <ul>
         <li><i></i>Independent and self-hosted</li>

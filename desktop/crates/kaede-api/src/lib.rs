@@ -22,6 +22,18 @@ pub mod service;
 const CLIENT_HEADER: &str = "X-Kaede-Client";
 const CLIENT_KIND: &str = "desktop";
 
+/// A successful JSON response with the wire metadata needed by the shared UI.
+///
+/// Status codes are significant for queued federated writes and empty
+/// responses. Selected response headers carry optimistic-concurrency and rate
+/// limit information without exposing unrelated transport details.
+#[derive(Clone, Debug)]
+pub struct JsonResponse {
+    pub status: StatusCode,
+    pub headers: HashMap<String, String>,
+    pub body: serde_json::Value,
+}
+
 #[derive(Clone, Debug)]
 pub struct InstanceEndpoint {
     domain: Domain,
@@ -102,7 +114,23 @@ impl InstanceEndpoint {
 
     fn api_url(&self, path: &str) -> Result<Url, ApiClientError> {
         let relative = path.trim_start_matches('/');
-        self.api_base.join(relative).map_err(Into::into)
+        if relative.is_empty()
+            || relative.contains("://")
+            || relative.contains('\\')
+            || relative
+                .split('/')
+                .any(|component| component == "." || component == "..")
+        {
+            return Err(ApiClientError::InvalidEndpoint);
+        }
+        let url = self.api_base.join(relative)?;
+        let same_origin = url.scheme() == self.api_base.scheme()
+            && url.host_str() == self.api_base.host_str()
+            && url.port_or_known_default() == self.api_base.port_or_known_default();
+        if !same_origin || !url.path().starts_with(self.api_base.path()) {
+            return Err(ApiClientError::InvalidEndpoint);
+        }
+        Ok(url)
     }
 }
 
@@ -198,6 +226,38 @@ impl ApiClient {
         version: Option<&ResourceVersion>,
     ) -> Result<T, ApiClientError> {
         self.request(method, path, Some(body), version).await
+    }
+
+    /// Sends a dynamically described JSON request for the shared web/native UI bridge.
+    ///
+    /// The bridge deliberately accepts only the methods used by Kaede's API and
+    /// still passes through this client's endpoint, authentication, redirect,
+    /// timeout, and error handling. It is not a generic URL fetch primitive.
+    pub async fn request_json(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        version: Option<&ResourceVersion>,
+    ) -> Result<serde_json::Value, ApiClientError> {
+        self.request(method, path, body, version).await
+    }
+
+    /// Sends a dynamically described request while preserving status and
+    /// client-relevant headers for the Tauri bridge.
+    pub async fn request_json_response(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        version: Option<&ResourceVersion>,
+    ) -> Result<JsonResponse, ApiClientError> {
+        let response = self
+            .build_request(method, path, body, version)
+            .await?
+            .send()
+            .await?;
+        decode_json_response(response).await
     }
 
     pub async fn delete_with_version<T: DeserializeOwned>(
@@ -305,6 +365,21 @@ impl ApiClient {
         body: Option<&B>,
         version: Option<&ResourceVersion>,
     ) -> Result<T, ApiClientError> {
+        let response = self
+            .build_request(method, path, body, version)
+            .await?
+            .send()
+            .await?;
+        decode_response(response).await
+    }
+
+    async fn build_request<B: Serialize + ?Sized>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+        version: Option<&ResourceVersion>,
+    ) -> Result<reqwest::RequestBuilder, ApiClientError> {
         let url = self.endpoint.api_url(path)?;
         let mut request = self
             .http
@@ -320,8 +395,7 @@ impl ApiClient {
         if let Some(version) = version {
             request = request.header(header::IF_MATCH, format!("\"{version}\""));
         }
-        let response = request.send().await?;
-        decode_response(response).await
+        Ok(request)
     }
 
     pub async fn upload_presigned(
@@ -401,6 +475,47 @@ async fn decode_response<T: DeserializeOwned>(
     })
 }
 
+async fn decode_json_response(response: reqwest::Response) -> Result<JsonResponse, ApiClientError> {
+    let status = response.status();
+    if !status.is_success() {
+        return decode_response::<serde_json::Value>(response)
+            .await
+            .map(|body| JsonResponse {
+                status,
+                headers: HashMap::new(),
+                body,
+            });
+    }
+    let headers = [
+        header::ETAG.as_str(),
+        "x-kaede-trace-id",
+        "x-ratelimit-bucket",
+        "x-ratelimit-limit",
+        "x-ratelimit-remaining",
+        "x-ratelimit-reset-after",
+        header::RETRY_AFTER.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| (name.to_owned(), value.to_owned()))
+    })
+    .collect();
+    let body = if status == StatusCode::NO_CONTENT {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&response.bytes().await?).map_err(ApiClientError::Decode)?
+    };
+    Ok(JsonResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
 #[derive(Debug, Error)]
 pub enum ApiClientError {
     #[error("instance endpoint is invalid")]
@@ -465,6 +580,26 @@ mod tests {
             local.gateway_url().as_str(),
             "ws://127.0.0.1:18081/gateway?v=1&encoding=json"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn api_paths_cannot_escape_the_home_instance_api() -> Result<(), Box<dyn Error>> {
+        let endpoint = InstanceEndpoint::production(Domain::parse("chat.example")?)?;
+
+        assert!(endpoint.api_url("channels/123/messages").is_ok());
+        assert!(matches!(
+            endpoint.api_url("https://attacker.example/steal"),
+            Err(ApiClientError::InvalidEndpoint)
+        ));
+        assert!(matches!(
+            endpoint.api_url("../.well-known/kaede/server"),
+            Err(ApiClientError::InvalidEndpoint)
+        ));
+        assert!(matches!(
+            endpoint.api_url("channels\\..\\auth/login"),
+            Err(ApiClientError::InvalidEndpoint)
+        ));
         Ok(())
     }
 }

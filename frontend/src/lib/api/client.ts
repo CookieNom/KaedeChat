@@ -1,3 +1,10 @@
+import {
+  isNativeDesktop,
+  nativeError,
+  nativeInvoke,
+  type NativeResponse
+} from '$lib/platform/native';
+
 export class ApiError extends Error {
   constructor(
     readonly code: string,
@@ -69,7 +76,7 @@ let refreshPromise: Promise<RefreshResult> | null = null;
 
 function requestHeaders(init: RequestInit): Headers {
   const headers = new Headers(init.headers);
-  headers.set('X-Kaede-Client', 'web');
+  headers.set('X-Kaede-Client', isNativeDesktop() ? 'desktop' : 'web');
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   return headers;
 }
@@ -81,6 +88,12 @@ function requestSignal(init: RequestInit): AbortSignal {
 
 async function performRefresh(): Promise<RefreshResult> {
   try {
+    if (isNativeDesktop()) {
+      await nativeInvoke('native_api_request', {
+        request: { method: 'POST', path: '/auth/refresh', body: {} }
+      });
+      return 'ok';
+    }
     const response = await fetch('/api/v1/auth/refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Kaede-Client': 'web' },
@@ -97,6 +110,12 @@ async function performRefresh(): Promise<RefreshResult> {
 
 async function accessSessionIsLive(): Promise<boolean | null> {
   try {
+    if (isNativeDesktop()) {
+      await nativeInvoke('native_api_request', {
+        request: { method: 'GET', path: '/users/@me', body: null }
+      });
+      return true;
+    }
     const response = await fetch('/api/v1/users/@me', {
       headers: { 'X-Kaede-Client': 'web' },
       credentials: 'include',
@@ -118,6 +137,7 @@ async function refreshIfNeeded(): Promise<RefreshResult> {
 }
 
 async function refreshWithBrowserLock(): Promise<RefreshResult> {
+  if (isNativeDesktop()) return refreshIfNeeded();
   if (typeof navigator !== 'undefined' && navigator.locks) {
     // Refresh cookies are shared by tabs. Serialize rotation across the origin so
     // two expired tabs cannot present the same token and trigger reuse revocation.
@@ -143,6 +163,43 @@ export function refreshSession(): Promise<RefreshResult> {
 }
 
 async function send(path: string, init: RequestInit): Promise<Response> {
+  if (isNativeDesktop()) {
+    let body: unknown = null;
+    if (typeof init.body === 'string' && init.body.length > 0) {
+      try {
+        body = JSON.parse(init.body);
+      } catch {
+        body = init.body;
+      }
+    }
+    try {
+      const headers = requestHeaders(init);
+      const result = await nativeInvoke<NativeResponse>('native_api_request', {
+        request: {
+          method: init.method ?? 'GET',
+          path,
+          body,
+          if_match: headers.get('If-Match')
+        }
+      });
+      return new Response(result.status === 204 ? null : JSON.stringify(result.body), {
+        status: result.status,
+        headers: { 'Content-Type': 'application/json', ...result.headers }
+      });
+    } catch (caught) {
+      const error = nativeError(caught);
+      const status = error.status && error.status > 0 ? error.status : 503;
+      const detail = {
+        ...(error.detail ?? {}),
+        code: error.code ?? 'NATIVE_TRANSPORT_ERROR',
+        message: error.message ?? 'The desktop transport could not complete the request.'
+      };
+      return new Response(JSON.stringify({ detail }), {
+        status,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
   return fetch(`/api/v1${path}`, {
     ...init,
     headers: requestHeaders(init),

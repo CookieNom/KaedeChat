@@ -98,7 +98,7 @@ describe('GatewayClient lifecycle', () => {
     client.close();
   });
 
-  it('publishes the preferred presence after READY', async () => {
+  it('does not overwrite the account presence preference after READY', async () => {
     localStorageMemory.setItem('kaede.presence', 'dnd');
     const { GatewayClient } = await import('./client');
     const client = new GatewayClient();
@@ -112,6 +112,7 @@ describe('GatewayClient lifecycle', () => {
       d: { session_id: 'presence-session' }
     });
 
+    client.setPresence('dnd');
     expect(JSON.parse(socket.sent[1])).toEqual({
       op: GatewayOp.PRESENCE_UPDATE,
       d: { status: 'dnd' }
@@ -119,7 +120,30 @@ describe('GatewayClient lifecycle', () => {
     client.close();
   });
 
-  it('re-announces presence after RESUMED so an expired projection is recreated', async () => {
+  it('applies a server-backed preference that loads before READY', async () => {
+    const { GatewayClient } = await import('./client');
+    const client = new GatewayClient();
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.message({ op: GatewayOp.HELLO, d: { heartbeat_interval: 41_250 } });
+
+    client.setPresence('dnd');
+    expect(socket.sent).toHaveLength(1);
+    socket.message({
+      op: GatewayOp.DISPATCH,
+      s: 1,
+      t: 'READY',
+      d: { session_id: 'presence-session' }
+    });
+
+    expect(JSON.parse(socket.sent.at(-1) ?? '')).toEqual({
+      op: GatewayOp.PRESENCE_UPDATE,
+      d: { status: 'dnd' }
+    });
+    client.close();
+  });
+
+  it('does not let a resumed device restore its stale local presence', async () => {
     localStorageMemory.setItem('kaede.presence', 'idle');
     storage.setItem('kaede.gateway.session', 'resumed-session');
     storage.setItem('kaede.gateway.sequence', '12');
@@ -135,9 +159,29 @@ describe('GatewayClient lifecycle', () => {
       d: {}
     });
 
-    expect(JSON.parse(socket.sent[1])).toEqual({
+    expect(socket.sent).toHaveLength(1);
+    client.close();
+  });
+
+  it('uses the authoritative account preference after resume', async () => {
+    storage.setItem('kaede.gateway.session', 'resumed-session');
+    storage.setItem('kaede.gateway.sequence', '12');
+    const { GatewayClient } = await import('./client');
+    const client = new GatewayClient();
+    client.rememberPresence('online');
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.message({ op: GatewayOp.HELLO, d: { heartbeat_interval: 41_250 } });
+    socket.message({
+      op: GatewayOp.DISPATCH,
+      t: 'RESUMED',
+      s: 13,
+      d: { presence_preference: 'dnd' }
+    });
+
+    expect(JSON.parse(socket.sent.at(-1) ?? '')).toEqual({
       op: GatewayOp.PRESENCE_UPDATE,
-      d: { status: 'idle' }
+      d: { status: 'dnd' }
     });
     client.close();
   });

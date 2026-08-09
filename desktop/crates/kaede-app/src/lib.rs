@@ -1289,6 +1289,36 @@ impl AccountRuntime {
         message: Option<&EntityRef>,
     ) -> Result<(), AccountError> {
         self.service.acknowledge(channel, message).await?;
+        // The server does not echo our own acknowledgement back on the
+        // gateway, so clear the local unread state immediately.
+        {
+            let mut state = self.state.write().await;
+            let (guild_id, guild_domain) = state
+                .channels
+                .get(channel)
+                .map_or((None, None), |c| (c.guild_id, c.guild_domain.clone()));
+            let entry =
+                state
+                    .read_states
+                    .entry(channel.clone())
+                    .or_insert_with(|| kaede_core::ReadState {
+                        channel_id: channel.id,
+                        channel_domain: channel.domain.clone(),
+                        guild_id,
+                        guild_domain,
+                        last_read_message_id: None,
+                        last_read_message_domain: None,
+                        unread: false,
+                        mention_count: 0,
+                    });
+            entry.unread = false;
+            entry.mention_count = 0;
+            if let Some(message) = message {
+                entry.last_read_message_id = Some(message.id);
+                entry.last_read_message_domain = Some(message.domain.clone());
+            }
+        }
+        let _ = self.events.send(AccountEvent::StateChanged);
         Ok(())
     }
 

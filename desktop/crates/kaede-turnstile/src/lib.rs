@@ -1,9 +1,9 @@
 //! Restricted in-app Cloudflare Turnstile challenge surface.
 //!
-//! The `WebView` runs in a short-lived helper process so Slint and the platform
-//! `WebView` never compete for the same UI event loop. Credentials never enter the
-//! helper; it receives only a public challenge URL and returns one nonce-bound
-//! provider token through a private stdout pipe.
+//! The challenge `WebView` runs in a short-lived helper process, isolated from
+//! the main Tauri window. Credentials never enter the helper; it receives only
+//! a public challenge URL and returns one nonce-bound provider token through a
+//! private stdout pipe.
 
 use std::{env, process::Stdio};
 
@@ -102,7 +102,7 @@ enum HelperEvent {
 }
 
 /// Run the challenge helper branch. This function owns the process UI loop and
-/// therefore must be called before Slint is initialized.
+/// therefore must be called before Tauri is initialized.
 ///
 /// # Errors
 ///
@@ -166,13 +166,14 @@ pub fn run_helper(url: &str, origin: &str, request_id: &str) -> Result<(), Platf
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(HelperEvent::Ipc(body)) => {
-                if let Ok(message) = serde_json::from_str::<ChallengeMessage>(&body) {
-                    if message.request_id == expected_request && message.kind == "complete" {
-                        if let Ok(encoded) = serde_json::to_string(&message) {
-                            println!("{encoded}");
-                        }
-                        *control_flow = ControlFlow::Exit;
+                if let Ok(message) = serde_json::from_str::<ChallengeMessage>(&body)
+                    && message.request_id == expected_request
+                    && message.kind == "complete"
+                {
+                    if let Ok(encoded) = serde_json::to_string(&message) {
+                        println!("{encoded}");
                     }
+                    *control_flow = ControlFlow::Exit;
                 }
             }
             _ => {}

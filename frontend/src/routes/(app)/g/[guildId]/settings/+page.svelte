@@ -154,6 +154,14 @@
   let membersHaveMore = $state(false);
   let membersLoadingMore = $state(false);
   let memberPage = $state(0);
+  let memberSearch = $state('');
+  let memberSearchResults = $state<MemberSummary[]>([]);
+  let memberSearchBusy = $state(false);
+  let memberSearchError = $state('');
+  let roleMemberSearch = $state('');
+  let roleMemberSearchResults = $state<MemberSummary[]>([]);
+  let roleMemberSearchBusy = $state(false);
+  let roleMemberSearchError = $state('');
   let bans = $state<BanSummary[]>([]);
   let instanceBans = $state<InstanceBanSummary[]>([]);
   let moderationReason = $state('');
@@ -373,14 +381,18 @@
   const canBanInstances = $derived(isLocalGuild && hasPermission(Permission.BAN_INSTANCES));
   const canModerateMembers = $derived(canKickMembers || canBanMembers || canTimeoutMembers);
   const visibleMembers = $derived(
-    members.slice(memberPage * MEMBER_PAGE_SIZE, (memberPage + 1) * MEMBER_PAGE_SIZE)
+    memberSearch.trim()
+      ? memberSearchResults
+      : members.slice(memberPage * MEMBER_PAGE_SIZE, (memberPage + 1) * MEMBER_PAGE_SIZE)
   );
+  const visibleRoleMembers = $derived(roleMemberSearch.trim() ? roleMemberSearchResults : members);
   const memberPageCount = $derived(
     Math.max(1, Math.ceil(members.length / MEMBER_PAGE_SIZE) + (membersHaveMore ? 1 : 0))
   );
-  const memberHasPreviousPage = $derived(memberPage > 0);
+  const memberHasPreviousPage = $derived(!memberSearch.trim() && memberPage > 0);
   const memberHasNextPage = $derived(
-    (memberPage + 1) * MEMBER_PAGE_SIZE < members.length || membersHaveMore
+    !memberSearch.trim() &&
+      ((memberPage + 1) * MEMBER_PAGE_SIZE < members.length || membersHaveMore)
   );
   const canCreateInvites = $derived(isLocalGuild && hasPermission(Permission.CREATE_INVITE));
   const canAccessInvites = $derived(canManageGuild || canCreateInvites);
@@ -1975,6 +1987,80 @@
   }
 
   $effect(() => {
+    const search = memberSearch.trim();
+    const targetGuild = guildId;
+    if (!search) {
+      memberSearchResults = [];
+      memberSearchBusy = false;
+      memberSearchError = '';
+      return;
+    }
+    const controller = new AbortController();
+    memberSearchBusy = true;
+    memberSearchError = '';
+    const timeout = window.setTimeout(() => {
+      void api<MemberSummary[]>(
+        `/guilds/${encodeURIComponent(targetGuild)}/members?limit=100&query=${encodeURIComponent(search)}`,
+        { signal: controller.signal }
+      )
+        .then((results) => {
+          if (controller.signal.aborted || targetGuild !== guildId) return;
+          memberSearchResults = results;
+        })
+        .catch((caught: unknown) => {
+          if (controller.signal.aborted || targetGuild !== guildId) return;
+          memberSearchResults = [];
+          memberSearchError =
+            caught instanceof ApiError ? caught.message : 'Could not search guild members.';
+        })
+        .finally(() => {
+          if (!controller.signal.aborted && targetGuild === guildId) memberSearchBusy = false;
+        });
+    }, 250);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  });
+
+  $effect(() => {
+    const search = roleMemberSearch.trim();
+    const targetGuild = guildId;
+    if (!search) {
+      roleMemberSearchResults = [];
+      roleMemberSearchBusy = false;
+      roleMemberSearchError = '';
+      return;
+    }
+    const controller = new AbortController();
+    roleMemberSearchBusy = true;
+    roleMemberSearchError = '';
+    const timeout = window.setTimeout(() => {
+      void api<MemberSummary[]>(
+        `/guilds/${encodeURIComponent(targetGuild)}/members?limit=100&query=${encodeURIComponent(search)}`,
+        { signal: controller.signal }
+      )
+        .then((results) => {
+          if (controller.signal.aborted || targetGuild !== guildId) return;
+          roleMemberSearchResults = results;
+        })
+        .catch((caught: unknown) => {
+          if (controller.signal.aborted || targetGuild !== guildId) return;
+          roleMemberSearchResults = [];
+          roleMemberSearchError =
+            caught instanceof ApiError ? caught.message : 'Could not search guild members.';
+        })
+        .finally(() => {
+          if (!controller.signal.aborted && targetGuild === guildId) roleMemberSearchBusy = false;
+        });
+    }, 250);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  });
+
+  $effect(() => {
     const targetGuild = guildId;
     const targetChannel = channelOnly ? channelId : '';
     const requestedPanel = channelOnly ? page.url.searchParams.get('panel') : null;
@@ -1987,6 +2073,8 @@
     membersHaveMore = false;
     membersLoadingMore = false;
     memberPage = 0;
+    memberSearch = '';
+    roleMemberSearch = '';
     bans = [];
     instanceBans = [];
     memberModerationGeneration += 1;
@@ -2176,7 +2264,7 @@
             <span class="section-icon"><Icon name="bell" /></span>
             <div>
               <h2>Notifications</h2>
-              <p>Choose which messages from this guild can send you a browser notification.</p>
+              <p>Choose which messages from this guild can send you a notification.</p>
             </div>
           </div>
           <div class="settings-card">
@@ -2221,7 +2309,7 @@
               >
                 <span>
                   <strong>Nothing</strong>
-                  <small>Do not send browser notifications for messages in this guild.</small>
+                  <small>Do not send notifications for messages in this guild.</small>
                 </span>
                 <input
                   type="radio"
@@ -2234,8 +2322,8 @@
               </label>
             </div>
             <p class="settings-helper">
-              Browser notifications must also be enabled in <a
-                href={resolve('/settings#notifications')}>User Settings</a
+              Notifications must also be enabled in <a href={resolve('/settings#notifications')}
+                >User Settings</a
               >. This preference will also be available to desktop and mobile clients when those
               clients are introduced.
             </p>
@@ -2424,7 +2512,7 @@
                 <strong>Channel list</strong>
                 <a href={donePath()}>Reorder in guild</a>
               </div>
-              {#each channelGroups as group (group.category ? entityKey(group.category) : 'ungrouped')}
+              {#each channelGroups as group (group.key)}
                 {#if group.category}
                   <button
                     class:active={selectedChannel &&
@@ -3320,10 +3408,24 @@
                   {:else}
                     <div class="role-member-picker">
                       <p class="field-hint">
-                        Assign this role to loaded members. Load additional members below if this
-                        guild is larger than the current page.
+                        Assign this role to guild members. Search includes members beyond the
+                        currently loaded page.
                       </p>
-                      {#each members as member (entityKey(member.user))}
+                      <label class="form-field member-search-field">
+                        <span>Search members</span>
+                        <input
+                          bind:value={roleMemberSearch}
+                          type="search"
+                          placeholder="Search by name, username, or instance"
+                          autocomplete="off"
+                        />
+                      </label>
+                      {#if roleMemberSearchBusy}
+                        <p class="field-hint" role="status">Searching members…</p>
+                      {:else if roleMemberSearchError}
+                        <p class="form-error" role="alert">{roleMemberSearchError}</p>
+                      {/if}
+                      {#each visibleRoleMembers as member (entityKey(member.user))}
                         <label class="permission-row role-member-row">
                           <span>
                             <strong
@@ -3349,7 +3451,14 @@
                           />
                         </label>
                       {/each}
-                      {#if membersHaveMore}
+                      {#if roleMemberSearch.trim() && !roleMemberSearchBusy && !visibleRoleMembers.length}
+                        <div class="empty-state compact-empty">
+                          <span><Icon name="search" /></span>
+                          <h3>No matching members</h3>
+                          <p>Try a display name, username, nickname, or instance domain.</p>
+                        </div>
+                      {/if}
+                      {#if membersHaveMore && !roleMemberSearch.trim()}
                         <button
                           class="secondary-button settings-load-more"
                           type="button"
@@ -3394,6 +3503,25 @@
               <p>{members.length} loaded member{members.length === 1 ? '' : 's'} in this guild.</p>
             </div>
           </div>
+          <label class="form-field member-search-field settings-card">
+            <span>Search members</span>
+            <input
+              bind:value={memberSearch}
+              type="search"
+              placeholder="Search by name, username, nickname, or instance"
+              autocomplete="off"
+            />
+            {#if memberSearchBusy}
+              <small role="status">Searching members…</small>
+            {:else if memberSearch.trim()}
+              <small
+                >{visibleMembers.length} matching member{visibleMembers.length === 1
+                  ? ''
+                  : 's'}</small
+              >
+            {/if}
+          </label>
+          {#if memberSearchError}<p class="form-error" role="alert">{memberSearchError}</p>{/if}
           <div class="settings-card member-management-list">
             {#each visibleMembers as member (entityKey(member.user))}
               <article class="member-management-row">
@@ -3479,12 +3607,16 @@
               </article>
             {:else}
               <div class="empty-state compact-empty">
-                <span><Icon name="users" /></span>
-                <h3>No members loaded</h3>
-                <p>Member information may be temporarily unavailable.</p>
+                <span><Icon name={memberSearch.trim() ? 'search' : 'users'} /></span>
+                <h3>{memberSearch.trim() ? 'No matching members' : 'No members loaded'}</h3>
+                <p>
+                  {memberSearch.trim()
+                    ? 'Try a display name, username, nickname, or instance domain.'
+                    : 'Member information may be temporarily unavailable.'}
+                </p>
               </div>
             {/each}
-            {#if members.length}
+            {#if members.length && !memberSearch.trim()}
               <nav class="member-pagination" aria-label="Guild member pages">
                 <button
                   class="secondary-button small-button"

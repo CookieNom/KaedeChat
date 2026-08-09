@@ -15,12 +15,7 @@
   import type { Attachment, Message, PresenceStatus, Role, UserSummary } from '$lib/chat/types';
   import { entityRef } from '$lib/chat/refs';
   import { inviteReferencesInMessage } from '$lib/chat/invites';
-  import {
-    gifFavoriteForUrl,
-    isGifFavorite,
-    klipyGifUrl,
-    toggleGifFavorite
-  } from '$lib/chat/gifs';
+  import { gifFavoriteForUrl, isGifFavorite, klipyGifUrl, toggleGifFavorite } from '$lib/chat/gifs';
   import { previewableLink } from '$lib/chat/links';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { DISMISS_FLOATING_LAYERS_EVENT, dismissFloatingLayers } from '$lib/ui/floating-layers';
@@ -49,6 +44,7 @@
     onRetry,
     onViewProfile,
     onReply,
+    onJumpToReference,
     onTogglePin,
     moderationActions = [],
     onModerate
@@ -67,6 +63,7 @@
     onRetry?: (message: Message) => void;
     onViewProfile?: (message: Message, event: MouseEvent) => void;
     onReply?: (message: Message) => void;
+    onJumpToReference?: (message: Message) => void;
     onTogglePin?: (message: Message, pinned: boolean) => void;
     moderationActions?: Array<{ id: 'kick' | 'timeout' | 'ban'; label: string }>;
     onModerate?: (user: UserSummary, action: 'kick' | 'timeout' | 'ban') => void;
@@ -80,7 +77,6 @@
   let deleteConfirmationButton = $state<HTMLButtonElement | null>(null);
   let feedback = $state('');
   let mediaViewer = $state<Attachment | null>(null);
-  let gifFavorited = $state(false);
   let menuListenersActive = false;
   const closeExclusiveMenu = (restoreFocus: boolean) => closeMenu(restoreFocus);
 
@@ -92,6 +88,7 @@
     message.content ? inviteReferencesInMessage(message.content) : []
   );
   const gifUrl = $derived(klipyGifUrl(message.content));
+  let gifFavorited = $derived(gifUrl ? isGifFavorite(gifUrl) : false);
   const linkPreviewUrl = $derived(previewableLink(message.content));
 
   function authorName(): string {
@@ -170,6 +167,12 @@
     event.stopPropagation();
     closeMenu(false);
     onReply?.(message);
+  }
+
+  function jumpToReference(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    onJumpToReference?.(message);
   }
 
   function togglePin(event: MouseEvent) {
@@ -335,10 +338,6 @@
     removeMenuListeners();
     releaseMessageMenu(closeExclusiveMenu);
   });
-
-  $effect(() => {
-    gifFavorited = gifUrl ? isGifFavorite(gifUrl) : false;
-  });
 </script>
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- authenticated media URLs are API resources, not Svelte routes -->
@@ -393,15 +392,29 @@
   </button>
   <div class="message-body">
     {#if message.referenced_message_id}
-      <div class="message-reply-reference">
+      <button
+        class="message-reply-reference"
+        type="button"
+        aria-label="Jump to replied message"
+        disabled={!onJumpToReference}
+        onclick={jumpToReference}
+      >
         <span aria-hidden="true">↪</span>
         {#if referencedMessage}
-          <strong>{referencedMessage.author?.display_name ?? referencedMessage.author?.username ?? 'Unknown author'}</strong>
-          <span>{referencedMessage.deleted_at ? 'Message removed' : referencedMessage.content || 'Attachment'}</span>
+          <strong
+            >{referencedMessage.author?.display_name ??
+              referencedMessage.author?.username ??
+              'Unknown author'}</strong
+          >
+          <span
+            >{referencedMessage.deleted_at
+              ? 'Message removed'
+              : referencedMessage.content || 'Attachment'}</span
+          >
         {:else}
           <span>Referenced message</span>
         {/if}
-      </div>
+      </button>
     {/if}
     {#if !compact}
       <header>
@@ -421,8 +434,8 @@
     {:else if gifUrl}
       <div class="klipy-gif-wrap">
         <a class="klipy-gif" href={gifUrl} target="_blank" rel="noopener noreferrer">
-        <img src={gifUrl} alt="GIF shared from KLIPY" loading="lazy" />
-        <small>Powered by KLIPY</small>
+          <img src={gifUrl} alt="GIF shared from KLIPY" loading="lazy" />
+          <small>Powered by KLIPY</small>
         </a>
         <button
           class:active={gifFavorited}

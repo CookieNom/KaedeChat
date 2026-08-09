@@ -83,6 +83,7 @@ async def list_members(
     guild_id: EntityRef,
     limit: int = Query(default=50, ge=1, le=1000),
     after: EntityRef | None = None,
+    query: str | None = Query(default=None, min_length=1, max_length=100),
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
@@ -99,6 +100,17 @@ async def list_members(
         conditions.append(
             tuple_(GuildMember.user_id, GuildMember.user_domain) > (after_id, after_domain)
         )
+    if query is not None:
+        search = query.strip().lstrip("@").strip()
+        if search:
+            conditions.append(
+                or_(
+                    User.username.icontains(search, autoescape=True),
+                    User.display_name.icontains(search, autoescape=True),
+                    User.origin_domain.icontains(search, autoescape=True),
+                    GuildMember.nickname.icontains(search, autoescape=True),
+                )
+            )
     rows = (
         await session.execute(
             select(GuildMember, User)

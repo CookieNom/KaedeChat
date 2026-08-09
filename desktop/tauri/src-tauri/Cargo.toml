@@ -1,0 +1,44 @@
+[package]
+name = "kaede-tauri"
+version = "0.1.7"
+edition.workspace = true
+rust-version.workspace = true
+description = "Kaede Chat native desktop shell"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+kaede-api = { path = "../../crates/kaede-api" }
+kaede-audio = { path = "../../crates/kaede-audio" }
+kaede-auth = { path = "../../crates/kaede-auth" }
+kaede-gateway = { path = "../../crates/kaede-gateway" }
+kaede-media = { path = "../../crates/kaede-media" }
+kaede-platform = { path = "../../crates/kaede-platform" }
+kaede-protocol = { path = "../../crates/kaede-protocol" }
+kaede-turnstile = { path = "../../crates/kaede-turnstile" }
+kaede-voice = { path = "../../crates/kaede-voice" }
+reqwest.workspace = true
+parking_lot.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

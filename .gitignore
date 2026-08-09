@@ -17,6 +17,7 @@ htmlcov/
 backend/.test-data/
 frontend/node_modules/
 frontend/.pnpm-store/
+/.pnpm-store/
 frontend/.svelte-kit/
 frontend/build/
 frontend/coverage/
@@ -32,4 +33,6 @@ deploy/generated/
 kaede-dev-root.crt
 .DS_Store
 desktop/target/
+desktop/dist/
+desktop/legacy-slint/dist/
 desktop/.kaede-desktop/
