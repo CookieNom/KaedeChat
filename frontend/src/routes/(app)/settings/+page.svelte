@@ -6,7 +6,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import NativeVoiceSettings from '$lib/components/NativeVoiceSettings.svelte';
-  import { isNativeDesktop } from '$lib/platform/native';
+  import { isNativeDesktop, nativeError, nativeInvoke } from '$lib/platform/native';
   import { assetUrl } from '$lib/media/assets';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
   import {
@@ -60,6 +60,7 @@
   let customStatus = $state('');
   let developerModeDraft = $state(false);
   let browserNotificationsDraft = $state(false);
+  let testingNotification = $state(false);
 
   let nextEmail = $state('');
   let emailPassword = $state('');
@@ -329,6 +330,27 @@
       );
     } finally {
       if (generation === lifecycle) busy = false;
+    }
+  }
+
+  async function testDesktopNotification() {
+    if (!isNativeDesktop() || testingNotification) return;
+    error = '';
+    notice = '';
+    testingNotification = true;
+    try {
+      await nativeInvoke('native_notify', {
+        title: 'Kaede Chat notifications',
+        body: 'Desktop notifications are working.',
+        sensitive: false,
+        deepLink: null
+      });
+      notice =
+        'Test notification sent. If it did not appear, check Windows notification settings and Do Not Disturb or Focus Assist.';
+    } catch (caught) {
+      error = nativeError(caught).message ?? 'Could not send the test desktop notification.';
+    } finally {
+      testingNotification = false;
     }
   }
 
@@ -826,6 +848,22 @@
             <p class="settings-helper">
               Notifications are blocked in your browser. Allow them in this site’s permissions to
               turn them on.
+            </p>
+          {/if}
+          {#if isNativeDesktop()}
+            <div class="form-actions">
+              <button
+                type="button"
+                class="secondary-button"
+                disabled={testingNotification || !browserNotificationsDraft}
+                onclick={() => void testDesktopNotification()}
+              >
+                {testingNotification ? 'Sending…' : 'Send test notification'}
+              </button>
+            </div>
+            <p class="settings-helper">
+              Regular message notifications are intentionally quiet while Kaede is focused. Use this
+              test to check Windows delivery without minimizing the app.
             </p>
           {/if}
         </div>

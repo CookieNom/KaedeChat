@@ -66,6 +66,11 @@ export interface NativeVoiceStatus {
   input_level?: number;
 }
 
+export interface NativeSessionBootstrap {
+  instance: string | null;
+  authenticated: boolean;
+}
+
 interface TauriGlobal {
   core: {
     invoke<T>(command: string, args?: unknown): Promise<T>;
@@ -108,7 +113,12 @@ export async function setNativeInstance(instance: string): Promise<string> {
 export async function initializeNativeInstance(): Promise<void> {
   if (!isNativeDesktop()) return;
   const instance = storedNativeInstance();
-  if (instance) await setNativeInstance(instance);
+  if (instance) {
+    await setNativeInstance(instance);
+    return;
+  }
+  const restored = await nativeInvoke<NativeSessionBootstrap>('native_restore_session');
+  if (restored.instance) localStorage.setItem('kaede.native.instance', restored.instance);
 }
 
 export function nativeError(value: unknown): NativeError {

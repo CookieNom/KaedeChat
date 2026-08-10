@@ -2902,7 +2902,7 @@ dependencies = [
 
 [[package]]
 name = "kaede-tauri"
-version = "0.1.7"
+version = "0.1.10"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2925,12 +2925,14 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
+ "tauri-winrt-notification",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
+ "winreg",
 ]
 
 [[package]]
@@ -6930,8 +6932,6 @@ dependencies = [
 [[package]]
 name = "webrtc-sys"
 version = "0.3.41"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21841b34f7edacb80525d1de89b886589e44b08b015548bfaca7beb0ba0332ef"
 dependencies = [
  "cc",
  "cxx",

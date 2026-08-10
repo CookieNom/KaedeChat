@@ -36,6 +36,28 @@
 
   onMount(() => {
     const controller = new AbortController();
+    let guildPreferenceRequest: Promise<void> | null = null;
+
+    function refreshGuildNotificationPreferences(): Promise<void> {
+      if (guildPreferenceRequest) return guildPreferenceRequest;
+      guildPreferenceRequest = api<GuildNotificationPreference[]>(
+        '/users/@me/guild-notification-settings',
+        { signal: controller.signal }
+      )
+        .then((preferences) => browserNotifications.applyGuildPreferences(preferences))
+        .catch(() => {
+          // Keep the previous snapshot. A later focus change or periodic refresh will retry.
+        })
+        .finally(() => {
+          guildPreferenceRequest = null;
+        });
+      return guildPreferenceRequest;
+    }
+
+    function refreshPreferencesWhenBackgrounded() {
+      void refreshGuildNotificationPreferences();
+    }
+
     developerMode.reset();
     authenticatedGateway.start();
     browserNotifications.refreshPromptPreference();
@@ -58,15 +80,18 @@
       .catch(() => {
         // The route's own session guard and error state handle unavailable APIs.
       });
-    void api<GuildNotificationPreference[]>('/users/@me/guild-notification-settings', {
-      signal: controller.signal
-    })
-      .then((preferences) => browserNotifications.applyGuildPreferences(preferences))
-      .catch(() => {
-        // Guild notifications remain suppressed until preferences can be loaded safely.
-      });
+    void refreshGuildNotificationPreferences();
+    window.addEventListener('blur', refreshPreferencesWhenBackgrounded);
+    document.addEventListener('visibilitychange', refreshPreferencesWhenBackgrounded);
+    const guildPreferenceRefreshTimer = window.setInterval(
+      refreshGuildNotificationPreferences,
+      60_000
+    );
     return () => {
       controller.abort();
+      window.clearInterval(guildPreferenceRefreshTimer);
+      window.removeEventListener('blur', refreshPreferencesWhenBackgrounded);
+      document.removeEventListener('visibilitychange', refreshPreferencesWhenBackgrounded);
       authenticatedGateway.stop();
       developerMode.reset();
       browserNotifications.disable();
@@ -119,8 +144,8 @@
     <div>
       <strong id="notification-opt-in-title">Stay up to date</strong>
       <p>
-        Enable {isNativeDesktop() ? 'desktop' : 'browser'} notifications for direct messages and the
-        guild alerts you choose. Do Not Disturb silences them.
+        Enable {isNativeDesktop() ? 'desktop' : 'browser'} notifications for direct messages and the guild
+        alerts you choose. Do Not Disturb silences them.
       </p>
       {#if notificationPromptError}<small role="alert">{notificationPromptError}</small>{/if}
     </div>

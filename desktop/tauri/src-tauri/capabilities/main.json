@@ -4,6 +4,5 @@
   "description": "The bundled Kaede application window.",
   "windows": ["main"],
   "local": true,
-  "permissions": ["core:default", "core:window:allow-set-title"]
+  "permissions": ["core:default", "core:window:allow-set-title", "notification:default"]
 }
-

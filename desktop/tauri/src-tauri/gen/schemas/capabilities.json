@@ -1,1 +1,1 @@
-{"main":{"identifier":"main","description":"The bundled Kaede application window.","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-set-title"]}}
+{"main":{"identifier":"main","description":"The bundled Kaede application window.","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-set-title","notification:default"]}}

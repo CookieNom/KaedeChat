@@ -23,6 +23,11 @@
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import { preferredLocale } from '$lib/ui/locale';
   import { assetUrl } from '$lib/media/assets';
+  import {
+    attachmentMediaPath,
+    authenticatedMedia,
+    downloadAuthenticatedMedia
+  } from '$lib/media/authenticated';
   import { onDestroy, tick } from 'svelte';
   import Markdown from './Markdown.svelte';
   import InviteEmbed from './InviteEmbed.svelte';
@@ -473,7 +478,14 @@
               onclick={() => (mediaViewer = attachment)}
             >
               <img
-                src={`/media/${attachment.origin_domain}/${attachment.id}/thumbnail_512`}
+                use:authenticatedMedia={{
+                  path: attachmentMediaPath(
+                    attachment.origin_domain,
+                    attachment.id,
+                    'thumbnail_512'
+                  ),
+                  contentType: attachment.content_type
+                }}
                 alt={attachment.filename}
                 width={attachment.width ?? 512}
                 height={attachment.height ?? 320}
@@ -482,7 +494,10 @@
           {:else if attachment.content_type.startsWith('video/')}
             <div class="attachment-video">
               <video
-                src={`/media/${attachment.origin_domain}/${attachment.id}/original`}
+                use:authenticatedMedia={{
+                  path: attachmentMediaPath(attachment.origin_domain, attachment.id, 'original'),
+                  contentType: attachment.content_type
+                }}
                 controls
                 playsinline
                 preload="metadata"
@@ -492,13 +507,20 @@
               <button type="button" onclick={() => (mediaViewer = attachment)}>Open viewer</button>
             </div>
           {:else}
-            <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- authenticated media is served by the API, not a Svelte route -->
-            <a
+            <button
+              type="button"
               class="attachment-file"
-              href={`/media/${attachment.origin_domain}/${attachment.id}/original`}
+              onclick={() =>
+                downloadAuthenticatedMedia(
+                  {
+                    path: attachmentMediaPath(attachment.origin_domain, attachment.id, 'original'),
+                    contentType: attachment.content_type
+                  },
+                  attachment.filename
+                )}
             >
               📎 {attachment.filename}
-            </a>
+            </button>
           {/if}
         {/each}
       </div>

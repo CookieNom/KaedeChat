@@ -1,12 +1,16 @@
 <script lang="ts">
-  import { resolve } from '$app/paths';
   import type { Attachment } from '$lib/chat/types';
+  import {
+    attachmentMediaPath,
+    authenticatedMedia,
+    downloadAuthenticatedMedia
+  } from '$lib/media/authenticated';
   import { portal } from '$lib/ui/portal';
   import { onDestroy, onMount } from 'svelte';
 
   let { attachment, onClose }: { attachment: Attachment; onClose: () => void } = $props();
   const originalUrl = $derived(
-    `/media/${encodeURIComponent(attachment.origin_domain)}/${encodeURIComponent(attachment.id)}/original`
+    attachmentMediaPath(attachment.origin_domain, attachment.id, 'original')
   );
   // Media is an authenticated API route rather than a Svelte page. The cast
   // keeps SvelteKit's base-path handling without pretending this dynamic URL
@@ -42,16 +46,31 @@
         <strong>{attachment.filename}</strong>
         <small>{attachment.content_type}</small>
       </div>
-      <a href={resolve(originalUrl as '/')} download={attachment.filename}>Download</a>
+      <button
+        type="button"
+        onclick={() =>
+          downloadAuthenticatedMedia(
+            { path: originalUrl, contentType: attachment.content_type },
+            attachment.filename
+          )}>Download</button
+      >
       <button type="button" aria-label="Close media viewer" onclick={onClose}>×</button>
     </header>
     <div class="media-viewer-stage">
       {#if isVideo}
-        <video src={originalUrl} controls playsinline preload="metadata">
+        <video
+          use:authenticatedMedia={{ path: originalUrl, contentType: attachment.content_type }}
+          controls
+          playsinline
+          preload="metadata"
+        >
           <track kind="captions" />
         </video>
       {:else}
-        <img src={originalUrl} alt={attachment.filename} />
+        <img
+          use:authenticatedMedia={{ path: originalUrl, contentType: attachment.content_type }}
+          alt={attachment.filename}
+        />
       {/if}
     </div>
   </dialog>

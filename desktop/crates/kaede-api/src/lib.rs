@@ -132,6 +132,28 @@ impl InstanceEndpoint {
         }
         Ok(url)
     }
+
+    fn root_url(&self, path: &str) -> Result<Url, ApiClientError> {
+        let relative = path.trim_start_matches('/');
+        if relative.is_empty()
+            || relative.contains("://")
+            || relative.contains('\\')
+            || relative
+                .split('/')
+                .any(|component| component == "." || component == "..")
+        {
+            return Err(ApiClientError::InvalidEndpoint);
+        }
+        let origin = self.public_origin();
+        let url = origin.join(relative)?;
+        let same_origin = url.scheme() == origin.scheme()
+            && url.host_str() == origin.host_str()
+            && url.port_or_known_default() == origin.port_or_known_default();
+        if !same_origin {
+            return Err(ApiClientError::InvalidEndpoint);
+        }
+        Ok(url)
+    }
 }
 
 #[derive(Clone)]
@@ -271,6 +293,25 @@ impl ApiClient {
 
     pub async fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<Bytes, ApiClientError> {
         let url = self.endpoint.api_url(path)?;
+        self.get_authenticated_url_bytes(url, max_bytes).await
+    }
+
+    /// Downloads an authenticated resource rooted outside `/api/v1` on the
+    /// configured home instance. This is used for Kaede's `/media` routes.
+    pub async fn get_root_bytes(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Bytes, ApiClientError> {
+        let url = self.endpoint.root_url(path)?;
+        self.get_authenticated_url_bytes(url, max_bytes).await
+    }
+
+    async fn get_authenticated_url_bytes(
+        &self,
+        url: Url,
+        max_bytes: usize,
+    ) -> Result<Bytes, ApiClientError> {
         let token = self.access_token.read().await.clone();
         let mut request = self
             .http
@@ -600,6 +641,21 @@ mod tests {
             endpoint.api_url("channels\\..\\auth/login"),
             Err(ApiClientError::InvalidEndpoint)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn root_paths_stay_on_the_home_instance() -> Result<(), Box<dyn Error>> {
+        let endpoint = InstanceEndpoint::production(Domain::parse("chat.example")?)?;
+
+        assert_eq!(
+            endpoint
+                .root_url("media/chat.example/123/original")?
+                .as_str(),
+            "https://chat.example/media/chat.example/123/original"
+        );
+        assert!(endpoint.root_url("../admin").is_err());
+        assert!(endpoint.root_url("https://evil.example/file").is_err());
         Ok(())
     }
 }

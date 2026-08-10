@@ -96,6 +96,8 @@ export class VoiceSession extends EventTarget {
   #nativeVideo = new Map<string, NativeVideoFrame>();
   #nativeMuted = false;
   #nativeDeafened = false;
+  #nativeSpeakingUntil = 0;
+  #activeSpeakers = new Set<string>();
 
   constructor() {
     super();
@@ -106,12 +108,16 @@ export class VoiceSession extends EventTarget {
     this.room.on(RoomEvent.LocalTrackUnpublished, changed);
     this.room.on(RoomEvent.ParticipantConnected, changed);
     this.room.on(RoomEvent.ParticipantDisconnected, changed);
-    this.room.on(RoomEvent.ActiveSpeakersChanged, changed);
+    this.room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+      this.#activeSpeakers = new Set(speakers.map((speaker) => speaker.identity));
+      changed();
+    });
     this.room.on(RoomEvent.Disconnected, () => {
       this.connected = false;
       this.microphone = false;
       this.camera = false;
       this.screen = false;
+      this.#activeSpeakers.clear();
       this.#changed();
     });
   }
@@ -180,6 +186,15 @@ export class VoiceSession extends EventTarget {
       this.#nativeMuted = status.muted ?? this.#nativeMuted;
       this.#nativeDeafened = status.deafened ?? this.#nativeDeafened;
       this.microphone = this.connected && this.canSpeak && !this.#nativeMuted;
+      const inputLevel = Math.max(0, status.input_level ?? 0);
+      if (this.microphone && inputLevel >= 0.015) {
+        // Keep the outline stable between native meter polls and across short
+        // syllable gaps. Audio remains entirely in Rust; only the scalar meter
+        // crosses the desktop bridge.
+        this.#nativeSpeakingUntil = Date.now() + 350;
+      } else if (!this.microphone) {
+        this.#nativeSpeakingUntil = 0;
+      }
       this.error = status.message ?? '';
       if (status.state === 'disconnected' || status.state === 'failed') {
         if (this.#nativePoll) clearInterval(this.#nativePoll);
@@ -268,6 +283,7 @@ export class VoiceSession extends EventTarget {
       this.#nativePoll = null;
       this.#nativeVideoGeneration += 1;
       this.#nativeVideo.clear();
+      this.#nativeSpeakingUntil = 0;
       await nativeInvoke('native_voice_leave');
       this.connected = false;
       this.connecting = false;
@@ -325,7 +341,7 @@ export class VoiceSession extends EventTarget {
               identity: 'native-local',
               name: 'You',
               local: true,
-              speaking: false,
+              speaking: this.microphone && Date.now() < this.#nativeSpeakingUntil,
               microphone: this.microphone,
               camera: this.camera,
               screen: this.screen
@@ -343,7 +359,10 @@ export class VoiceSession extends EventTarget {
         identity: participant.identity,
         name: participant.name || participant.identity,
         local,
-        speaking: participant.isSpeaking,
+        speaking:
+          participant.isSpeaking ||
+          this.#activeSpeakers.has(participant.identity) ||
+          (local && participant.audioLevel >= 0.015),
         microphone: liveSource(Track.Source.Microphone),
         camera: liveSource(Track.Source.Camera),
         screen: liveSource(Track.Source.ScreenShare)

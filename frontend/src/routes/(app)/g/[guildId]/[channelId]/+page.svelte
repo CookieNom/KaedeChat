@@ -82,6 +82,7 @@
   import { uploadChannelFile, type PendingUpload } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
   import {
+    channelUnreadPresentation,
     compactBadgeCount,
     directMessageUnreadCount,
     guildMentionCount
@@ -126,7 +127,15 @@
     )
   );
   const readStates = $derived(entities.readStates.values);
-  const members = $derived(entities.members.values);
+  const members = $derived(
+    entities.members.values.filter((member) =>
+      matchesEntityRef(
+        guildId,
+        { id: member.guild_id, origin_domain: member.guild_domain },
+        localDomain
+      )
+    )
+  );
   const currentUser = $derived(entities.currentUser);
   const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
@@ -1942,6 +1951,7 @@
     viewportChanged();
     client.addEventListener('dispatch', receive);
     client.addEventListener(GATEWAY_SESSION_RESET_EVENT, sessionReset);
+    client.subscribeMembers(guildId);
     return () => {
       featureController.abort();
       loadGeneration += 1;
@@ -3167,9 +3177,12 @@
             {#if !collapsedCategories.has(entityKey(group.category))}
               <div class="category-channels">
                 {#each group.channels as item (entityKey(item))}
+                  {@const unread = channelUnreadPresentation(unreadFor(item))}
                   <div class="channel-row">
                     <a
                       class:active={matchesEntityRef(channelId, item, localDomain)}
+                      class:channel-unread={unread.unread}
+                      class:channel-unread-dot={unread.showUnreadDot}
                       class:drag-over={dragOverChannelKey === entityKey(item) ||
                         voiceDropChannelKey === entityKey(item)}
                       draggable={canManageChannels && !reorderingChannels}
@@ -3194,9 +3207,9 @@
                         />
                         {item.name}
                       </span>
-                      {#if unreadFor(item)?.unread}<small class="unread-badge"
-                          >{Math.max(1, unreadFor(item)?.mention_count ?? 0)}</small
-                        >{/if}
+                      {#if unread.mentionCount > 0}
+                        <small class="unread-badge">{compactBadgeCount(unread.mentionCount)}</small>
+                      {/if}
                     </a>
                     <button
                       class="channel-row-actions"
@@ -3230,9 +3243,12 @@
             ondrop={(event) => channelDrop(event, null)}
           >
             {#each group.channels as item (entityKey(item))}
+              {@const unread = channelUnreadPresentation(unreadFor(item))}
               <div class="channel-row">
                 <a
                   class:active={matchesEntityRef(channelId, item, localDomain)}
+                  class:channel-unread={unread.unread}
+                  class:channel-unread-dot={unread.showUnreadDot}
                   class:drag-over={dragOverChannelKey === entityKey(item) ||
                     voiceDropChannelKey === entityKey(item)}
                   draggable={canManageChannels && !reorderingChannels}
@@ -3255,9 +3271,9 @@
                     />
                     {item.name}
                   </span>
-                  {#if unreadFor(item)?.unread}<small class="unread-badge"
-                      >{Math.max(1, unreadFor(item)?.mention_count ?? 0)}</small
-                    >{/if}
+                  {#if unread.mentionCount > 0}
+                    <small class="unread-badge">{compactBadgeCount(unread.mentionCount)}</small>
+                  {/if}
                 </a>
                 <button
                   class="channel-row-actions"

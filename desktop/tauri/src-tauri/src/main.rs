@@ -32,11 +32,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{
     AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder,
-    ipc::{InvokeBody, Request},
+    ipc::{InvokeBody, Request, Response},
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+#[cfg(not(target_os = "windows"))]
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
@@ -58,6 +59,7 @@ struct PendingMfa {
 struct NativeState {
     instance: RwLock<Option<Domain>>,
     account: RwLock<Option<Arc<NativeAccount>>>,
+    restore_lock: Mutex<()>,
     pending_mfa: Mutex<Option<PendingMfa>>,
     gateway_commands: RwLock<Option<mpsc::Sender<GatewayCommand>>>,
     gateway_events_tx: mpsc::UnboundedSender<Value>,
@@ -138,6 +140,12 @@ struct NativeResponse {
     headers: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Serialize)]
+struct NativeSessionBootstrap {
+    instance: Option<String>,
+    authenticated: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct NativeUploadTicket {
     upload_url: String,
@@ -202,16 +210,70 @@ async fn native_set_instance(
         *state.instance.write().await = Some(domain.clone());
         return Ok(domain.to_string());
     }
-    *state.instance.write().await = Some(domain.clone());
+    restore_known_account(&state, Some(&domain)).await?;
+    Ok(domain.to_string())
+}
+
+#[tauri::command]
+async fn native_restore_session(
+    state: State<'_, NativeState>,
+) -> Result<NativeSessionBootstrap, NativeError> {
+    let instance = restore_known_account(&state, None).await?;
+    Ok(NativeSessionBootstrap {
+        instance: instance.map(|domain| domain.to_string()),
+        authenticated: state.account.read().await.is_some(),
+    })
+}
+
+/// Restore a known account without relying on WebView storage. The account
+/// index contains no secrets; refresh credentials remain in the platform vault.
+async fn restore_known_account(
+    state: &NativeState,
+    preferred: Option<&Domain>,
+) -> Result<Option<Domain>, NativeError> {
+    let _restore = state.restore_lock.lock().await;
+
+    if let Some(account) = state.account.read().await.as_ref() {
+        let active = account.api.endpoint().domain().clone();
+        if preferred.is_none_or(|domain| domain == &active) {
+            *state.instance.write().await = Some(active.clone());
+            return Ok(Some(active));
+        }
+    }
+
+    // Selecting another instance suspends the current in-memory connection,
+    // but deliberately keeps its refresh credential in the OS vault so the
+    // user can switch back without re-entering a password.
+    if preferred.is_some() && state.account.write().await.take().is_some() {
+        if let Some(commands) = state.gateway_commands.write().await.take() {
+            let _ = commands.send(GatewayCommand::Shutdown).await;
+        }
+        leave_active_voice(state).await;
+    }
+
     let registry = AccountRegistry::load(&state.paths)
         .await
         .map_err(|error| NativeError::local("ACCOUNT_REGISTRY_FAILED", error.to_string()))?;
-    if let Some(known) = registry
-        .accounts
-        .iter()
-        .filter(|account| account.instance == domain.to_string())
-        .max_by_key(|account| account.last_used_unix_ms)
-    {
+    let known = match preferred {
+        Some(domain) => registry
+            .accounts
+            .iter()
+            .filter(|account| account.instance == domain.to_string())
+            .max_by_key(|account| account.last_used_unix_ms),
+        None => registry.most_recent(),
+    };
+
+    let domain = if let Some(known) = known {
+        Domain::parse(known.instance.clone())
+            .map_err(|error| NativeError::local("INVALID_STORED_INSTANCE", error.to_string()))?
+    } else if let Some(domain) = preferred {
+        domain.clone()
+    } else {
+        return Ok(None);
+    };
+    *state.instance.write().await = Some(domain.clone());
+
+    if let Some(known) = known {
         let api = ApiClient::new(
             InstanceEndpoint::production(domain.clone()).map_err(NativeError::from)?,
         )
@@ -237,12 +299,18 @@ async fn native_set_instance(
             ),
         }
     }
-    Ok(domain.to_string())
+    Ok(Some(domain))
 }
 
 async fn configured_api(state: &NativeState) -> Result<ApiClient, NativeError> {
     if let Some(account) = state.account.read().await.as_ref() {
         return Ok(account.api.clone());
+    }
+    if state.instance.read().await.is_none() {
+        restore_known_account(state, None).await?;
+        if let Some(account) = state.account.read().await.as_ref() {
+            return Ok(account.api.clone());
+        }
     }
     let domain = state
         .instance
@@ -580,6 +648,74 @@ async fn native_api_request(
         body: value,
         headers: BTreeMap::new(),
     })
+}
+
+const NATIVE_MEDIA_MAX_BYTES: usize = 20 * 1024 * 1024;
+
+fn validate_attachment_media_path(path: &str) -> Result<&str, NativeError> {
+    if path.contains(['?', '#', '\\']) {
+        return Err(NativeError::local(
+            "INVALID_MEDIA_PATH",
+            "The requested media path is invalid.",
+        ));
+    }
+    let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    let ["media", domain, id, variant] = parts.as_slice() else {
+        return Err(NativeError::local(
+            "INVALID_MEDIA_PATH",
+            "The requested media path is invalid.",
+        ));
+    };
+    Domain::parse(domain)
+        .map_err(|_| NativeError::local("INVALID_MEDIA_PATH", "The media domain is invalid."))?;
+    let numeric_id = id.parse::<u64>().map_err(|_| {
+        NativeError::local("INVALID_MEDIA_PATH", "The media identifier is invalid.")
+    })?;
+    if numeric_id == 0 || numeric_id > i64::MAX as u64 || numeric_id.to_string() != *id {
+        return Err(NativeError::local(
+            "INVALID_MEDIA_PATH",
+            "The media identifier is invalid.",
+        ));
+    }
+    if !matches!(
+        *variant,
+        "original" | "thumbnail_128" | "thumbnail_512" | "thumbnail_1024" | "poster"
+    ) {
+        return Err(NativeError::local(
+            "INVALID_MEDIA_PATH",
+            "The media variant is invalid.",
+        ));
+    }
+    Ok(path.trim_start_matches('/'))
+}
+
+#[tauri::command]
+async fn native_media_request(
+    path: String,
+    state: State<'_, NativeState>,
+) -> Result<Response, NativeError> {
+    let path = validate_attachment_media_path(&path)?;
+    let api = configured_api(&state).await?;
+    let bytes =
+        match api.get_root_bytes(path, NATIVE_MEDIA_MAX_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(ApiClientError::Server { status, .. }) if status.as_u16() == 401 => {
+                let account = state
+                    .account
+                    .read()
+                    .await
+                    .clone()
+                    .ok_or_else(|| NativeError::local("NOT_AUTHENTICATED", "Sign in again."))?;
+                account.session.refresh().await.map_err(|error| {
+                    NativeError::local("SESSION_REFRESH_FAILED", error.to_string())
+                })?;
+                api.get_root_bytes(path, NATIVE_MEDIA_MAX_BYTES)
+                    .await
+                    .map_err(NativeError::from)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+    Ok(Response::new(bytes.to_vec()))
 }
 
 #[tauri::command]
@@ -1107,6 +1243,59 @@ async fn native_notify(
     } else {
         &body
     };
+    show_native_notification(&app, &title, body)
+}
+
+#[tauri::command]
+fn native_notifications_prepare() -> Result<(), NativeError> {
+    prepare_native_notifications()
+}
+
+#[cfg(target_os = "windows")]
+// This is intentionally distinct from the old raw bundle identifier. Windows
+// caches unpackaged notification identities; a human-readable, stable AUMID
+// lets the registered DisplayName take effect for portable builds as well.
+const WINDOWS_NOTIFICATION_APP_ID: &str = "KaedeChat.Desktop";
+
+#[cfg(target_os = "windows")]
+fn prepare_native_notifications() -> Result<(), NativeError> {
+    use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+
+    let current_user = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = current_user
+        .create_subkey(format!(
+            r"SOFTWARE\Classes\AppUserModelId\{WINDOWS_NOTIFICATION_APP_ID}"
+        ))
+        .map_err(|error| NativeError::local("NOTIFICATION_IDENTITY_FAILED", error.to_string()))?;
+    key.set_value("DisplayName", &"Kaede Chat")
+        .and_then(|_| key.set_value("IconBackgroundColor", &"0"))
+        .map_err(|error| NativeError::local("NOTIFICATION_IDENTITY_FAILED", error.to_string()))?;
+    if let Ok(executable) = std::env::current_exe() {
+        let icon_path = executable.to_string_lossy().into_owned();
+        key.set_value("IconUri", &icon_path).map_err(|error| {
+            NativeError::local("NOTIFICATION_IDENTITY_FAILED", error.to_string())
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn prepare_native_notifications() -> Result<(), NativeError> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn show_native_notification(_app: &AppHandle, title: &str, body: &str) -> Result<(), NativeError> {
+    prepare_native_notifications()?;
+    tauri_winrt_notification::Toast::new(WINDOWS_NOTIFICATION_APP_ID)
+        .title(title)
+        .text1(body)
+        .show()
+        .map_err(|error| NativeError::local("NOTIFICATION_FAILED", error.to_string()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_native_notification(app: &AppHandle, title: &str, body: &str) -> Result<(), NativeError> {
     app.notification()
         .builder()
         .title(title)
@@ -1157,6 +1346,7 @@ fn main() {
     let state = NativeState {
         instance: RwLock::new(None),
         account: RwLock::new(None),
+        restore_lock: Mutex::new(()),
         pending_mfa: Mutex::new(None),
         gateway_commands: RwLock::new(None),
         gateway_events_tx,
@@ -1267,7 +1457,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             native_platform_info,
             native_set_instance,
+            native_restore_session,
             native_api_request,
+            native_media_request,
             native_upload_object,
             native_gateway_next,
             native_gateway_command,
@@ -1282,6 +1474,7 @@ fn main() {
             native_preferences_get,
             native_preferences_set,
             native_hotkey_status,
+            native_notifications_prepare,
             native_notify,
         ])
         .run(tauri::generate_context!())
@@ -1296,5 +1489,32 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_attachment_media_path;
+
+    #[test]
+    fn attachment_media_paths_are_narrowly_scoped() {
+        assert_eq!(
+            validate_attachment_media_path("/media/chat.example/75512661369970688/thumbnail_512")
+                .expect("valid attachment path"),
+            "media/chat.example/75512661369970688/thumbnail_512"
+        );
+        for rejected in [
+            "/media/chat.example/0/original",
+            "/media/chat.example/01/original",
+            "/media/chat.example/75512661369970688/unknown",
+            "/media/../75512661369970688/original",
+            "/media/chat.example/75512661369970688/original?token=secret",
+            "/media/chat.example/75512661369970688/original/extra",
+        ] {
+            assert!(
+                validate_attachment_media_path(rejected).is_err(),
+                "{rejected}"
+            );
+        }
     }
 }

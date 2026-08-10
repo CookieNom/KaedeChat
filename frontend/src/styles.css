@@ -1875,7 +1875,25 @@ progress {
 }
 
 .channel-row > a {
+  position: relative;
   min-width: 0;
+}
+
+.channel-row > a.channel-unread {
+  color: var(--text);
+  font-weight: 750;
+}
+
+.channel-row > a.channel-unread-dot::before {
+  position: absolute;
+  top: 50%;
+  left: -8px;
+  width: 4px;
+  height: 8px;
+  border-radius: 0 4px 4px 0;
+  background: currentcolor;
+  content: '';
+  transform: translateY(-50%);
 }
 
 .channel-row-actions {
@@ -4375,13 +4393,6 @@ progress {
 
 .virtual-message-item {
   min-width: 0;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 76px;
-}
-
-.virtual-message-spacer {
-  flex: 0 0 auto;
-  pointer-events: none;
 }
 
 .history-button {

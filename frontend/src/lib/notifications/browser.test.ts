@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { Message, UserSummary } from '$lib/chat/types';
 import {
   browserNotificationsFromSettings,
+  guildNotificationPreferenceKey,
   resolveNotificationPresence,
   shouldNotifyForMessage,
   shouldOfferBrowserNotificationPrompt
@@ -16,6 +17,15 @@ const message = {
 } as unknown as Message;
 
 describe('browser notification settings', () => {
+  it('uses the same normalized key for stored and live guild references', () => {
+    expect(
+      guildNotificationPreferenceKey({ guild_id: '10', guild_domain: 'Remote.Example ' })
+    ).toBe('10@remote.example');
+    expect(guildNotificationPreferenceKey({ id: '10', origin_domain: 'remote.example' })).toBe(
+      '10@remote.example'
+    );
+  });
+
   it('requires an explicit true value', () => {
     expect(browserNotificationsFromSettings({ browser_notifications: true })).toBe(true);
     expect(browserNotificationsFromSettings({ browser_notifications: false })).toBe(false);

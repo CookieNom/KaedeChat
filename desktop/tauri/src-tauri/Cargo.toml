@@ -1,6 +1,6 @@
 [package]
 name = "kaede-tauri"
-version = "0.1.7"
+version = "0.1.10"
 edition.workspace = true
 rust-version.workspace = true
 description = "Kaede Chat native desktop shell"
@@ -39,6 +39,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.7.3"
+winreg = "0.55.0"
 
 [lints]
 workspace = true

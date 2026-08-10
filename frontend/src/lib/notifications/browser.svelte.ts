@@ -3,7 +3,7 @@ import type { Message, PresenceStatus, UserSummary } from '$lib/chat/types';
 import { assetUrl } from '$lib/media/assets';
 import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
 import { chatEntities } from '$lib/stores/entities.svelte';
-import { isNativeDesktop, nativeInvoke } from '$lib/platform/native';
+import { isNativeDesktop, nativeError, nativeInvoke } from '$lib/platform/native';
 
 export type GuildNotificationLevel = 'all' | 'mentions' | 'none';
 
@@ -11,6 +11,14 @@ export interface GuildNotificationPreference {
   guild_id: string;
   guild_domain: string;
   level: GuildNotificationLevel;
+}
+
+export function guildNotificationPreferenceKey(
+  guild: { id: string; origin_domain: string } | { guild_id: string; guild_domain: string }
+): string {
+  const id = 'id' in guild ? guild.id : guild.guild_id;
+  const domain = 'origin_domain' in guild ? guild.origin_domain : guild.guild_domain;
+  return `${id}@${domain.trim().toLowerCase()}`;
 }
 
 export function browserNotificationsFromSettings(settings: Record<string, unknown>): boolean {
@@ -63,8 +71,11 @@ class BrowserNotifications {
   enabled = $state(false);
   permission = $state<NotificationPermission>('default');
   promptHandled = $state(false);
+  #settingsLoaded = false;
   #guildPreferencesLoaded = false;
   #guildLevels = new Map<string, GuildNotificationLevel>();
+  #pendingMessages = new Map<string, { message: Message; queuedAt: number }>();
+  #pendingTimer: ReturnType<typeof setTimeout> | null = null;
 
   get supported(): boolean {
     return isNativeDesktop() || (typeof window !== 'undefined' && 'Notification' in window);
@@ -72,24 +83,28 @@ class BrowserNotifications {
 
   apply(settings: Record<string, unknown>): void {
     this.enabled = browserNotificationsFromSettings(settings);
+    this.#settingsLoaded = true;
     this.refreshPermission();
+    this.#flushPending();
   }
 
   applyGuildPreferences(preferences: GuildNotificationPreference[]): void {
     this.#guildLevels = new Map(
       preferences.map((preference) => [
-        `${preference.guild_id}@${preference.guild_domain}`,
+        guildNotificationPreferenceKey(preference),
         preference.level
       ])
     );
     this.#guildPreferencesLoaded = true;
+    this.#flushPending();
   }
 
   setGuildPreference(
     guild: { id: string; origin_domain: string },
     level: GuildNotificationLevel
   ): void {
-    this.#guildLevels.set(`${guild.id}@${guild.origin_domain}`, level);
+    this.#guildLevels.set(guildNotificationPreferenceKey(guild), level);
+    this.#flushPending();
   }
 
   refreshPermission(): void {
@@ -122,7 +137,13 @@ class BrowserNotifications {
 
   async requestPermission(): Promise<NotificationPermission> {
     if (isNativeDesktop()) {
-      this.permission = 'granted';
+      try {
+        await nativeInvoke('native_notifications_prepare');
+        this.permission = 'granted';
+      } catch (caught) {
+        console.error('Could not prepare desktop notifications:', nativeError(caught).message);
+        this.permission = 'denied';
+      }
       return this.permission;
     }
     if (!this.supported) {
@@ -136,21 +157,33 @@ class BrowserNotifications {
   disable(): void {
     this.enabled = false;
     this.promptHandled = false;
+    this.#settingsLoaded = false;
     this.#guildPreferencesLoaded = false;
     this.#guildLevels.clear();
+    this.#pendingMessages.clear();
+    if (this.#pendingTimer) clearTimeout(this.#pendingTimer);
+    this.#pendingTimer = null;
   }
 
   notifyMessage(message: Message): void {
+    if (document.visibilityState === 'visible' && document.hasFocus()) return;
+    if (!this.#settingsLoaded || !this.#guildPreferencesLoaded) {
+      this.#queuePending(message);
+      return;
+    }
+    if (!this.#deliver(message)) this.#queuePending(message);
+  }
+
+  #deliver(message: Message): boolean {
     if (
       !this.enabled ||
       !this.supported ||
       (!isNativeDesktop() && Notification.permission !== 'granted')
     )
-      return;
-    if (document.visibilityState === 'visible' && document.hasFocus()) return;
+      return true;
 
     const currentUser = chatEntities.currentUser;
-    if (!currentUser) return;
+    if (!currentUser) return false;
     const projectedPresence = chatEntities.presenceFor(currentUser);
     let storedPresence: string | null = null;
     try {
@@ -160,15 +193,19 @@ class BrowserNotifications {
     }
     const currentPresence = resolveNotificationPresence(storedPresence, projectedPresence);
     const channel = chatEntities.channels.get(`${message.channel_id}@${message.channel_domain}`);
-    if (!channel) return;
+    if (!channel) return false;
     const isDirectMessage = channel.guild_id === null;
-    if (!isDirectMessage && !this.#guildPreferencesLoaded) return;
     const guildLevel =
       channel.guild_id && channel.guild_domain
-        ? (this.#guildLevels.get(`${channel.guild_id}@${channel.guild_domain}`) ?? 'mentions')
+        ? (this.#guildLevels.get(
+            guildNotificationPreferenceKey({
+              guild_id: channel.guild_id,
+              guild_domain: channel.guild_domain
+            })
+          ) ?? 'mentions')
         : 'mentions';
     if (!shouldNotifyForMessage(message, currentUser, isDirectMessage, guildLevel, currentPresence))
-      return;
+      return true;
 
     const author =
       message.author ?? chatEntities.users.get(`${message.author_id}@${message.author_domain}`);
@@ -190,8 +227,10 @@ class BrowserNotifications {
         body,
         sensitive: false,
         deepLink: guild ? guildChannelPath(guild, channel) : directMessagePath(channel)
+      }).catch((caught: unknown) => {
+        console.error('Desktop notification failed:', nativeError(caught).message);
       });
-      return;
+      return true;
     }
     try {
       const notification = new Notification(title, {
@@ -209,6 +248,43 @@ class BrowserNotifications {
       // Notification permission can be revoked between the permission check and construction.
       this.refreshPermission();
     }
+    return true;
+  }
+
+  #queuePending(message: Message): void {
+    this.#pendingMessages.set(entityKey(message), { message, queuedAt: Date.now() });
+    if (this.#pendingMessages.size > 50) {
+      const oldest = this.#pendingMessages.keys().next().value as string | undefined;
+      if (oldest) this.#pendingMessages.delete(oldest);
+    }
+    this.#schedulePendingFlush();
+  }
+
+  #schedulePendingFlush(): void {
+    if (this.#pendingTimer || !this.#pendingMessages.size) return;
+    this.#pendingTimer = setTimeout(() => {
+      this.#pendingTimer = null;
+      this.#flushPending();
+    }, 250);
+  }
+
+  #flushPending(): void {
+    if (!this.#settingsLoaded || !this.#guildPreferencesLoaded) {
+      const expiry = Date.now() - 15_000;
+      for (const [key, pending] of this.#pendingMessages) {
+        if (pending.queuedAt < expiry) this.#pendingMessages.delete(key);
+      }
+      this.#schedulePendingFlush();
+      return;
+    }
+    const now = Date.now();
+    const appIsActive = document.visibilityState === 'visible' && document.hasFocus();
+    for (const [key, pending] of this.#pendingMessages) {
+      if (appIsActive || now - pending.queuedAt > 15_000 || this.#deliver(pending.message)) {
+        this.#pendingMessages.delete(key);
+      }
+    }
+    this.#schedulePendingFlush();
   }
 }
 

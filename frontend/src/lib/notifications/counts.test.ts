@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Guild, ReadStateStatus } from '$lib/chat/types';
-import { compactBadgeCount, directMessageUnreadCount, guildMentionCount } from './counts';
+import {
+  channelUnreadPresentation,
+  compactBadgeCount,
+  directMessageUnreadCount,
+  guildMentionCount
+} from './counts';
 
 const guild = { id: '1', origin_domain: 'home.test' } as Guild;
 
@@ -22,6 +27,24 @@ function state(overrides: Partial<ReadStateStatus>): ReadStateStatus {
 }
 
 describe('rail notification counts', () => {
+  it('uses a dot for ordinary unread activity and reserves numbers for mentions', () => {
+    expect(channelUnreadPresentation(state({ mention_count: 0 }))).toEqual({
+      unread: true,
+      mentionCount: 0,
+      showUnreadDot: true
+    });
+    expect(channelUnreadPresentation(state({ mention_count: 3 }))).toEqual({
+      unread: true,
+      mentionCount: 3,
+      showUnreadDot: false
+    });
+    expect(channelUnreadPresentation(state({ unread: false, mention_count: 3 }))).toEqual({
+      unread: false,
+      mentionCount: 0,
+      showUnreadDot: false
+    });
+  });
+
   it('counts only actual guild mentions', () => {
     expect(
       guildMentionCount(
