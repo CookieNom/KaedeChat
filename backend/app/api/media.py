@@ -335,16 +335,20 @@ async def commit_guild_asset(
     )
     field = "icon_hash" if kind == "icon" else "banner_hash"
     setattr(guild, field, attachment.content_sha256)
-    # Render the signed event from the flushed row so its resource version
-    # describes the same guild state as the icon/banner digest.
+    # PostgreSQL's on-update expression expires ``updated_at`` during the
+    # flush.  Refresh before the synchronous payload serializer reads that
+    # resource version; otherwise AsyncSession attempts an implicit lazy load
+    # and raises MissingGreenlet after an otherwise successful upload/scan.
     await session.flush()
+    await session.refresh(guild)
+    rendered_guild = guild_payload(guild)
     await queue_guild_mutation(
         session,
         settings,
         guild,
         auth.user,
         "guild.update",
-        {"guild": guild_payload(guild)},
+        {"guild": rendered_guild},
     )
     await session.commit()
     await session.refresh(guild)

@@ -1,17 +1,20 @@
 import io
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
+from fastapi import Response
 from PIL import Image
 
+from app.api import media as media_api
 from app.api.media import select_variant
 from app.api.webhooks import new_webhook_token, token_digest
 from app.chat.payloads import guild_payload
 from app.chat.schemas import MessageCreate
 from app.core.settings import Settings
-from app.db.models import Attachment, Guild
+from app.db.models import Attachment, Guild, User
 from app.media.jobs import image_derivatives_are_current
 from app.media.processing import (
     IMAGE_PIPELINE_VERSION,
@@ -224,6 +227,181 @@ def test_guild_payload_includes_both_public_image_hashes() -> None:
 
     assert payload["icon_hash"] == "icon-digest"
     assert payload["banner_hash"] == "banner-digest"
+
+
+@pytest.mark.parametrize(
+    ("kind", "purpose", "field"),
+    (("icon", "guild_icon", "icon_hash"), ("banner", "guild_banner", "banner_hash")),
+)
+async def test_guild_asset_commit_refreshes_server_version_before_render(
+    monkeypatch: pytest.MonkeyPatch, kind: str, purpose: str, field: str
+) -> None:
+    digest = "a" * 64
+    user = User(
+        id=20,
+        origin_domain="alpha.localhost",
+        is_local=True,
+        username="owner",
+        password_hash="unused",
+        profile_version=1,
+        profile_resolved=True,
+    )
+    guild = Guild(
+        id=10,
+        origin_domain="alpha.localhost",
+        name="Paper Lantern",
+        owner_id=user.id,
+        owner_domain=user.origin_domain,
+        permission_generation=1,
+        history_policy_generation=1,
+        federated_history_policy="disabled",
+        next_event_seq=1,
+        last_event_seq=0,
+        sync_status="ready",
+        unavailable=False,
+    )
+    attachment = Attachment(
+        id=30,
+        origin_domain="alpha.localhost",
+        uploader_id=user.id,
+        uploader_domain=user.origin_domain,
+        filename="icon.png",
+        content_type="image/png",
+        detected_content_type="image/png",
+        size=128,
+        object_key="alpha.localhost/30/clean/original",
+        content_sha256=digest,
+        variants={},
+        scan_status="clean",
+        purpose=purpose,
+    )
+    calls: list[str] = []
+
+    class Session:
+        async def flush(self) -> None:
+            calls.append("flush")
+
+        async def refresh(self, value: object) -> None:
+            assert value is guild
+            calls.append("refresh")
+            guild.updated_at = datetime(2026, 8, 11, tzinfo=UTC)
+
+        async def commit(self) -> None:
+            calls.append("commit")
+
+    async def no_op(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def local_guild(*args: object, **kwargs: object) -> Guild:
+        return guild
+
+    async def finalize_attachment(*args: object, **kwargs: object) -> Attachment:
+        return attachment
+
+    async def bind_asset(*args: object, **kwargs: object) -> None:
+        return None
+
+    original_guild_payload = media_api.guild_payload
+
+    def render_guild(value: Guild) -> dict[str, object]:
+        # A synchronous serializer must never be the operation that triggers
+        # an async lazy load for PostgreSQL's expired ``updated_at`` value.
+        assert "refresh" in calls
+        calls.append("render")
+        return original_guild_payload(value)
+
+    monkeypatch.setattr(media_api, "local_guild", local_guild)
+    monkeypatch.setattr(media_api, "require_permissions", no_op)
+    monkeypatch.setattr(media_api, "finalize_attachment", finalize_attachment)
+    monkeypatch.setattr(media_api, "bind_asset", bind_asset)
+    monkeypatch.setattr(media_api, "queue_guild_mutation", no_op)
+    monkeypatch.setattr(media_api, "wake_queued_guild_federation", no_op)
+    monkeypatch.setattr(media_api, "publish_dispatch", no_op)
+    monkeypatch.setattr(media_api, "guild_payload", render_guild)
+
+    rendered = await media_api.commit_guild_asset(
+        guild_id=media_api.EntityRef(f"{guild.id}@{guild.origin_domain}"),
+        kind=kind,  # type: ignore[arg-type]
+        payload=media_api.AssetCommitRequest(attachment_id=str(attachment.id)),
+        response=Response(),
+        auth=SimpleNamespace(user=user),  # type: ignore[arg-type]
+        session=Session(),  # type: ignore[arg-type]
+        redis=object(),  # type: ignore[arg-type]
+        settings=settings(),
+    )
+
+    assert getattr(guild, field) == digest
+    assert rendered["id"] == str(attachment.id)
+    assert calls[:3] == ["flush", "refresh", "render"]
+
+
+@pytest.mark.parametrize(("kind", "field"), (("avatar", "avatar_hash"), ("banner", "banner_hash")))
+async def test_user_asset_commit_updates_each_profile_image_kind(
+    monkeypatch: pytest.MonkeyPatch, kind: str, field: str
+) -> None:
+    digest = "b" * 64
+    user = User(
+        id=20,
+        origin_domain="alpha.localhost",
+        is_local=True,
+        username="owner",
+        password_hash="unused",
+        profile_version=1,
+        profile_resolved=True,
+    )
+    attachment = Attachment(
+        id=31,
+        origin_domain=user.origin_domain,
+        uploader_id=user.id,
+        uploader_domain=user.origin_domain,
+        filename=f"{kind}.png",
+        content_type="image/png",
+        detected_content_type="image/png",
+        size=128,
+        object_key=f"{user.origin_domain}/31/clean/original",
+        content_sha256=digest,
+        variants={},
+        scan_status="clean",
+        purpose=kind,
+    )
+
+    class Session:
+        async def scalar(self, statement: object) -> User:
+            return user
+
+        async def commit(self) -> None:
+            return None
+
+    async def finalize_attachment(*args: object, **kwargs: object) -> Attachment:
+        return attachment
+
+    async def bind_asset(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def friend_updates(*args: object, **kwargs: object) -> set[str]:
+        return set()
+
+    async def no_op(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(media_api, "finalize_attachment", finalize_attachment)
+    monkeypatch.setattr(media_api, "bind_asset", bind_asset)
+    monkeypatch.setattr(media_api, "queue_friend_profile_updates", friend_updates)
+    monkeypatch.setattr(media_api, "publish_dispatch", no_op)
+
+    rendered = await media_api.commit_user_asset(
+        kind=kind,  # type: ignore[arg-type]
+        payload=media_api.AssetCommitRequest(attachment_id=str(attachment.id)),
+        response=Response(),
+        auth=SimpleNamespace(user=user),  # type: ignore[arg-type]
+        session=Session(),  # type: ignore[arg-type]
+        redis=object(),  # type: ignore[arg-type]
+        settings=settings(),
+    )
+
+    assert getattr(user, field) == digest
+    assert user.profile_version == 2
+    assert rendered["id"] == str(attachment.id)
 
 
 def test_missing_image_derivative_falls_back_to_scanned_original() -> None:
