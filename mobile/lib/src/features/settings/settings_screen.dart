@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -435,6 +436,12 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final image = await ImagePicker().pickImage(
         source: ImageSource.gallery, maxWidth: 4096, maxHeight: 4096);
     if (image == null) return;
+    final contentType =
+        imageUploadContentType(image.name, reportedType: image.mimeType);
+    if (contentType == null) {
+      _showError('Choose a PNG, JPEG, GIF, or WebP image.');
+      return;
+    }
     setState(() => _saving = true);
     try {
       await ref
@@ -443,7 +450,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           .uploadUserAsset(
             kind: kind,
             filename: image.name,
-            contentType: _imageType(image.name),
+            contentType: contentType,
             file: File(image.path),
           );
       await ref.read(mobileControllerProvider.notifier).refreshNavigation();
@@ -888,12 +895,4 @@ final class _DialogField {
   final String label;
   final TextInputType? keyboardType;
   final bool obscure;
-}
-
-String _imageType(String filename) {
-  final lower = filename.toLowerCase();
-  if (lower.endsWith('.png')) return 'image/png';
-  if (lower.endsWith('.gif')) return 'image/gif';
-  if (lower.endsWith('.webp')) return 'image/webp';
-  return 'image/jpeg';
 }

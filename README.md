@@ -47,10 +47,32 @@ make setup
 
 The wizard creates a private `.env`, selects Garage or an external S3-compatible
 provider, configures optional email, voice, KLIPY GIF, and Turnstile services,
-can configure optional Firebase Cloud Messaging, and can render a host nginx
-configuration. It writes configuration only; it does not start services,
-install nginx files, reload nginx, or obtain certificates. See
+can configure optional Firebase Cloud Messaging and source-based automatic
+updates, and can render a host nginx configuration. It does not start
+containers, install nginx files, reload nginx, or obtain certificates. It only
+installs or removes a per-user systemd timer when that option is explicitly
+selected. See
 [docs/deployment-wizard.md](docs/deployment-wizard.md) for all available options.
+
+### Optional automatic updates
+
+Kaede's production Compose topology builds the web and backend from this Git
+checkout. The recommended updater therefore runs on the host: it fetches the
+configured remote/branch, permits only a clean fast-forward, builds and
+preflights before downtime, optionally invokes an operator backup hook, stops
+writers, migrates once, restarts, and waits for health checks. Enable it during
+`make setup`, or change it later:
+
+```sh
+make auto-update-enable
+make auto-update-status
+make auto-update-run       # immediate, operator-requested check
+make auto-update-disable
+```
+
+Automatic migrations make verified backups especially important. Read the
+[automatic-update safety and recovery notes](docs/operator.md#optional-automatic-updates)
+before enabling it. No updater is enabled by default.
 
 ### Optional Firebase mobile notifications
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 
 # Interactive deployment configuration for Kaede Chat.
-# This script only writes configuration. It never starts containers, installs
-# host proxy files, requests certificates, changes firewall rules, or reloads
-# nginx/Caddy.
+# This script writes deployment configuration and, only when explicitly chosen,
+# installs a per-user automatic-update timer. It never starts containers,
+# installs host proxy files, requests certificates, changes firewall rules, or
+# reloads nginx/Caddy.
 
 set -Eeuo pipefail
 umask 077
@@ -32,14 +33,15 @@ usage() {
   cat <<'EOF'
 Usage: ./setup.sh [--dry-run] [--plain]
 
-Interactively generate Kaede's production .env, Compose override, and optional
-host nginx configuration.
+Interactively generate Kaede's production .env, Compose override, optional host
+nginx configuration, and optional per-user automatic-update timer.
 
   --dry-run  collect and validate answers without writing files
   --plain    use the built-in ANSI interface even when gum is installed
   --help     show this help
 
-The script never starts Docker Compose or changes host services.
+The script never starts Docker Compose. It changes a user systemd timer only
+when automatic updates are explicitly enabled or disabled.
 EOF
 }
 
@@ -478,7 +480,7 @@ fi
   'an earlier setup was interrupted; inspect .kaede-setup.in-progress and .kaede-backups first'
 
 section 'Kaede Chat setup' \
-  'Configuration only: no containers, packages, certificates, firewall rules, or host services will be changed.'
+  'No containers, packages, certificates, firewall rules, proxies, or production services are started. An optional user update timer is changed only when selected.'
 
 DOMAIN=$(ask_domain)
 if [[ -n ${OLD[KAEDE_DOMAIN]-} && ${OLD[KAEDE_DOMAIN]%.} != "$DOMAIN" && ${OLD[KAEDE_DOMAIN]} != *.example.com ]]; then
@@ -505,6 +507,56 @@ if confirm 'Enable the observability profile?' "$([[ ,$OLD_PROFILES, == *,observ
   OBSERVABILITY=true
 else
   OBSERVABILITY=false
+fi
+
+section 'Automatic updates' \
+  'Optional host-side updates safely fast-forward a selected Git branch, preflight and build before downtime, then stop writers, migrate once, restart, and health-check. Database rollback remains manual.'
+if confirm 'Enable the per-user automatic-update timer?' "$([[ $(old AUTO_UPDATE_ENABLED false) == true ]] && printf true || printf false)"; then
+  AUTO_UPDATE=true
+else
+  AUTO_UPDATE=false
+fi
+AUTO_UPDATE_REMOTE=$(old AUTO_UPDATE_REMOTE origin)
+AUTO_UPDATE_BRANCH=$(old AUTO_UPDATE_BRANCH '')
+if [[ -z $AUTO_UPDATE_BRANCH ]]; then
+  AUTO_UPDATE_BRANCH=$(git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || printf main)
+fi
+AUTO_UPDATE_INTERVAL=$(old AUTO_UPDATE_INTERVAL 6h)
+[[ $AUTO_UPDATE_INTERVAL =~ ^(6h|12h|1d|1w)$ ]] || AUTO_UPDATE_INTERVAL=6h
+AUTO_UPDATE_JITTER=$(old AUTO_UPDATE_JITTER 30m)
+[[ $AUTO_UPDATE_JITTER =~ ^[1-9][0-9]*(s|m|min|h|d|w)$ ]] || AUTO_UPDATE_JITTER=30m
+AUTO_UPDATE_BACKUP_HOOK=$(old AUTO_UPDATE_BACKUP_HOOK '')
+AUTO_UPDATE_WAIT_TIMEOUT=$(old_uint AUTO_UPDATE_WAIT_TIMEOUT_SECONDS 300)
+((AUTO_UPDATE_WAIT_TIMEOUT >= 60 && AUTO_UPDATE_WAIT_TIMEOUT <= 3600)) || \
+  die 'existing AUTO_UPDATE_WAIT_TIMEOUT_SECONDS must be from 60 through 3600'
+if [[ $AUTO_UPDATE == true ]]; then
+  while :; do
+    AUTO_UPDATE_REMOTE=$(prompt_text 'Git remote to update from' "$AUTO_UPDATE_REMOTE")
+    [[ $AUTO_UPDATE_REMOTE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && break
+    warn 'Use a Git remote name containing only letters, digits, dot, underscore, and dash.'
+  done
+  while :; do
+    AUTO_UPDATE_BRANCH=$(prompt_text 'Git branch to deploy' "$AUTO_UPDATE_BRANCH")
+    [[ $AUTO_UPDATE_BRANCH =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && $AUTO_UPDATE_BRANCH != */ && $AUTO_UPDATE_BRANCH != *..* ]] && break
+    warn 'Use a normal Git branch name without whitespace, a trailing slash, or dot-dot.'
+  done
+  AUTO_UPDATE_INTERVAL=$(choose 'How often should Kaede check for updates?' "$AUTO_UPDATE_INTERVAL" 6h 12h 1d 1w)
+  if confirm 'Run an executable backup hook before services are stopped?' "$([[ -n $AUTO_UPDATE_BACKUP_HOOK ]] && printf true || printf false)"; then
+    while :; do
+      AUTO_UPDATE_BACKUP_HOOK=$(ask_path 'Absolute backup-hook path' "${AUTO_UPDATE_BACKUP_HOOK:-/usr/local/sbin/kaede-backup}")
+      if [[ -f $AUTO_UPDATE_BACKUP_HOOK && ! -L $AUTO_UPDATE_BACKUP_HOOK && -x $AUTO_UPDATE_BACKUP_HOOK ]]; then
+        break
+      fi
+      warn 'The backup hook must already be a regular, non-symlink executable file.'
+    done
+  else
+    AUTO_UPDATE_BACKUP_HOOK=
+    warn 'Automatic schema migrations without a fresh verified backup can make rollback impossible.'
+    if ! confirm 'Enable automatic updates without a backup hook anyway?' false; then
+      AUTO_UPDATE=false
+      note 'Automatic updates will remain disabled.'
+    fi
+  fi
 fi
 
 section 'Reverse proxy' \
@@ -949,6 +1001,13 @@ emit() {
   emit SETUP_STORAGE_PROVIDER "$STORAGE"
   emit SETUP_EMAIL_PROVIDER "$EMAIL"
   emit SETUP_HOST_NGINX "$HOST_NGINX"
+  emit AUTO_UPDATE_ENABLED "$AUTO_UPDATE"
+  emit AUTO_UPDATE_REMOTE "$AUTO_UPDATE_REMOTE"
+  emit AUTO_UPDATE_BRANCH "$AUTO_UPDATE_BRANCH"
+  emit AUTO_UPDATE_INTERVAL "$AUTO_UPDATE_INTERVAL"
+  emit AUTO_UPDATE_JITTER "$AUTO_UPDATE_JITTER"
+  [[ -z $AUTO_UPDATE_BACKUP_HOOK ]] || emit AUTO_UPDATE_BACKUP_HOOK "$AUTO_UPDATE_BACKUP_HOOK"
+  emit AUTO_UPDATE_WAIT_TIMEOUT_SECONDS "$AUTO_UPDATE_WAIT_TIMEOUT"
   emit OPERATOR_ENV_UID "$(id -u)"
   emit OPERATOR_ENV_GID "$(id -g)"
   emit KAEDE_DOMAIN "$DOMAIN"
@@ -1097,11 +1156,16 @@ fi
 
 {
   printf 'Kaede deployment configuration generated by ./setup.sh.\n\n'
-  printf 'Nothing was started, installed, or reloaded.\n\n'
+  printf 'No containers, proxies, certificates, or production services were started or reloaded.\n\n'
   printf 'Validate:\n  make env-check\n  make generated-compose-check\n\n'
   printf 'Internal Caddy edge: 127.0.0.1:%s\n' "$EDGE_PORT"
-  printf 'Selected storage: %s\nSelected email: %s\nKLIPY GIF picker: %s\nTurnstile: %s\nMobile push: %s\n' \
-    "$STORAGE" "$EMAIL" "$KLIPY_ENABLED" "$TURNSTILE_ENABLED" "$PUSH_ENABLED"
+  printf 'Selected storage: %s\nSelected email: %s\nKLIPY GIF picker: %s\nTurnstile: %s\nMobile push: %s\nAutomatic updates: %s\n' \
+    "$STORAGE" "$EMAIL" "$KLIPY_ENABLED" "$TURNSTILE_ENABLED" "$PUSH_ENABLED" "$AUTO_UPDATE"
+  if [[ $AUTO_UPDATE == true ]]; then
+    printf 'Updater source: %s/%s every %s (up to %s jitter)\n' \
+      "$AUTO_UPDATE_REMOTE" "$AUTO_UPDATE_BRANCH" "$AUTO_UPDATE_INTERVAL" "$AUTO_UPDATE_JITTER"
+    printf 'Inspect later with `make auto-update-status`; change with `make auto-update-enable` or `make auto-update-disable`.\n'
+  fi
   if [[ $STORAGE == garage ]]; then
     printf '\nRequired media origin: create public DNS for media.%s, include it in the TLS certificate, and enable the generated nginx media virtual host. Browser uploads and every Garage-backed image depend on this origin.\n' "$DOMAIN"
   fi
@@ -1132,6 +1196,7 @@ if [[ $USE_GUM == true ]]; then
     "KLIPY GIF picker: $KLIPY_ENABLED" \
     "Turnstile: $TURNSTILE_ENABLED" \
     "Mobile push: $PUSH_ENABLED" \
+    "Automatic updates: $AUTO_UPDATE" \
     "Host nginx file: $HOST_NGINX" \
     "Voice: $VOICE" \
     "Observability: $OBSERVABILITY" \
@@ -1142,6 +1207,7 @@ else
   printf '  Storage:         %s\n  Email:           %s\n' "$STORAGE" "$EMAIL"
   printf '  KLIPY GIFs:      %s\n  Turnstile:       %s\n  Mobile push:     %s\n' \
     "$KLIPY_ENABLED" "$TURNSTILE_ENABLED" "$PUSH_ENABLED"
+  printf '  Auto updates:     %s\n' "$AUTO_UPDATE"
   printf '  Host nginx file: %s\n  Voice:           %s\n  Observability:   %s\n' "$HOST_NGINX" "$VOICE" "$OBSERVABILITY"
   printf '  Secrets:         generated or preserved; never displayed\n'
 fi
@@ -1220,6 +1286,14 @@ rm -rf -- "$STAGE_DIR"
 STAGE_DIR=
 
 printf '\n%sConfiguration ready.%s\n' "$C_GREEN" "$C_RESET"
+if [[ $AUTO_UPDATE == true ]]; then
+  if ! "$ROOT/deploy/install-auto-update.sh" enable; then
+    warn 'The automatic-update timer could not be enabled. The installer left AUTO_UPDATE_ENABLED=false; see docs/operator.md.'
+  fi
+else
+  "$ROOT/deploy/install-auto-update.sh" disable >/dev/null || \
+    warn 'Could not remove an existing user update timer; run make auto-update-disable.'
+fi
 printf 'Review deploy/generated/README.txt, then run: make env-check\n'
 if [[ $STORAGE == garage ]]; then
   printf 'Before uploading media, verify DNS and TLS for media.%s.\n' "$DOMAIN"

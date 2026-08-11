@@ -1,14 +1,61 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:uuid/uuid.dart';
 
 List<String> messageAttachmentIds(Iterable<EntityRef> attachments) =>
     attachments.map((reference) => reference.id.value).toList(growable: false);
+
+/// Completes the two-phase binding required for scanned profile media.
+///
+/// The first commit queues processing and commonly returns a pending attachment.
+/// Once the attachment is clean, the commit must be repeated to bind its digest
+/// to the user, guild, or emoji record.
+Future<Map<String, Object?>> commitScannedMedia({
+  required Future<Map<String, Object?>> Function() commit,
+  required Future<Map<String, Object?>> Function() status,
+  Duration pollInterval = const Duration(seconds: 1),
+  int maxPollAttempts = 30,
+}) async {
+  if (maxPollAttempts < 1) {
+    throw ArgumentError.value(maxPollAttempts, 'maxPollAttempts');
+  }
+  final initial = await commit();
+  final initialStatus = '${initial['scan_status'] ?? 'pending'}';
+  if (initialStatus == 'clean') return initial;
+  _throwForTerminalMediaStatus(initialStatus);
+
+  for (var attempt = 0; attempt < maxPollAttempts; attempt += 1) {
+    final attachment = await status();
+    final scanStatus = '${attachment['scan_status'] ?? 'pending'}';
+    if (scanStatus == 'clean') return commit();
+    _throwForTerminalMediaStatus(scanStatus);
+    if (attempt + 1 < maxPollAttempts && pollInterval > Duration.zero) {
+      await Future<void>.delayed(pollInterval);
+    }
+  }
+  throw const KaedeException(
+    code: 'MEDIA_PROCESSING_TIMEOUT',
+    message:
+        'Media processing is taking longer than expected. Try again shortly.',
+    status: 504,
+  );
+}
+
+void _throwForTerminalMediaStatus(String status) {
+  if (status != 'infected' && status != 'failed') return;
+  throw const KaedeException(
+    code: 'MEDIA_PROCESSING_REJECTED',
+    message: 'The image did not pass media processing.',
+    status: 422,
+  );
+}
 
 final class KaedeRepository {
   const KaedeRepository(this.api);
@@ -518,8 +565,12 @@ final class KaedeRepository {
     });
     await api.putPresignedFile(ticket['upload_url']! as String, file,
         contentType: contentType);
-    return api.sendJson('PUT', path,
-        data: <String, Object?>{'attachment_id': '${ticket['id']}'});
+    final attachmentId = '${ticket['id']}';
+    return commitScannedMedia(
+      commit: () => api.sendJson('PUT', path,
+          data: <String, Object?>{'attachment_id': attachmentId}),
+      status: () => api.getJson('/api/v1/attachments/$attachmentId'),
+    );
   }
 
   Future<Map<String, Object?>> uploadGuildAsset({
@@ -538,8 +589,12 @@ final class KaedeRepository {
     });
     await api.putPresignedFile(ticket['upload_url']! as String, file,
         contentType: contentType);
-    return api.sendJson('PUT', path,
-        data: <String, Object?>{'attachment_id': '${ticket['id']}'});
+    final attachmentId = '${ticket['id']}';
+    return commitScannedMedia(
+      commit: () => api.sendJson('PUT', path,
+          data: <String, Object?>{'attachment_id': attachmentId}),
+      status: () => api.getJson('/api/v1/attachments/$attachmentId'),
+    );
   }
 
   Future<Map<String, Object?>> uploadEmoji({
@@ -561,11 +616,15 @@ final class KaedeRepository {
     );
     await api.putPresignedFile(ticket['upload_url']! as String, file,
         contentType: contentType);
-    return api.sendJson('POST', '/api/v1/guilds/${guild.wire}/emojis',
-        data: <String, Object?>{
-          'attachment_id': '${ticket['id']}',
-          'name': name,
-        });
+    final attachmentId = '${ticket['id']}';
+    return commitScannedMedia(
+      commit: () => api.sendJson('POST', '/api/v1/guilds/${guild.wire}/emojis',
+          data: <String, Object?>{
+            'attachment_id': attachmentId,
+            'name': name,
+          }),
+      status: () => api.getJson('/api/v1/attachments/$attachmentId'),
+    );
   }
 
   Future<List<Map<String, Object?>>> webhooks(EntityRef guild) =>

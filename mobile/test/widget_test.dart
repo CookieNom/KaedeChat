@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
@@ -11,6 +12,92 @@ import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 
 void main() {
+  group('scanned profile media', () {
+    test('accepts supported picker types without mislabeling unknown images',
+        () {
+      expect(imageUploadContentType('avatar.PNG'), 'image/png');
+      expect(imageUploadContentType('avatar.jpeg'), 'image/jpeg');
+      expect(imageUploadContentType('avatar', reportedType: 'image/webp'),
+          'image/webp');
+      expect(imageUploadContentType('avatar.heic'), isNull);
+      expect(
+        imageUploadContentType('avatar.heic', reportedType: 'image/heic'),
+        isNull,
+      );
+    });
+
+    test('waits for a clean scan and repeats the binding commit', () async {
+      var commits = 0;
+      var polls = 0;
+      final result = await commitScannedMedia(
+        commit: () async {
+          commits += 1;
+          return <String, Object?>{
+            'scan_status': commits == 1 ? 'pending' : 'clean',
+          };
+        },
+        status: () async {
+          polls += 1;
+          return <String, Object?>{
+            'scan_status': polls < 2 ? 'pending' : 'clean',
+          };
+        },
+        pollInterval: Duration.zero,
+      );
+
+      expect(commits, 2);
+      expect(polls, 2);
+      expect(result['scan_status'], 'clean');
+    });
+
+    test('does not repeat a commit that already bound clean media', () async {
+      var commits = 0;
+      var polls = 0;
+      await commitScannedMedia(
+        commit: () async {
+          commits += 1;
+          return <String, Object?>{'scan_status': 'clean'};
+        },
+        status: () async {
+          polls += 1;
+          return <String, Object?>{'scan_status': 'clean'};
+        },
+        pollInterval: Duration.zero,
+      );
+
+      expect(commits, 1);
+      expect(polls, 0);
+    });
+
+    test('surfaces rejected and timed-out processing', () async {
+      await expectLater(
+        commitScannedMedia(
+          commit: () async => <String, Object?>{'scan_status': 'pending'},
+          status: () async => <String, Object?>{'scan_status': 'infected'},
+          pollInterval: Duration.zero,
+        ),
+        throwsA(isA<KaedeException>().having(
+          (error) => error.code,
+          'code',
+          'MEDIA_PROCESSING_REJECTED',
+        )),
+      );
+      await expectLater(
+        commitScannedMedia(
+          commit: () async => <String, Object?>{'scan_status': 'pending'},
+          status: () async => <String, Object?>{'scan_status': 'pending'},
+          pollInterval: Duration.zero,
+          maxPollAttempts: 2,
+        ),
+        throwsA(isA<KaedeException>().having(
+          (error) => error.code,
+          'code',
+          'MEDIA_PROCESSING_TIMEOUT',
+        )),
+      );
+    });
+  });
+
   group('notification preview preference', () {
     test('defaults on but preserves an explicit opt-out', () {
       expect(notificationPreviewsEnabled(const <String, bool>{}), isTrue);

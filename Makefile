@@ -18,9 +18,14 @@ MEDIA_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-media-validation-$(V
 VOICE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-voice-validation-$(VALIDATION_RUN_ID)
 RELEASE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-release-validation-$(VALIDATION_RUN_ID)
 
-.PHONY: help setup lock generate check test audit desktop-check desktop-lint desktop-test desktop-build desktop-dev env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
+.PHONY: help setup auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check lock generate check test audit desktop-check desktop-lint desktop-test desktop-build desktop-dev env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
 help:
-	@echo "setup            Run the interactive, configuration-only deployment wizard"
+	@echo "setup            Run the interactive deployment configuration wizard"
+	@echo "auto-update-enable  Install and enable the optional user systemd update timer"
+	@echo "auto-update-disable Disable and remove the optional user systemd update timer"
+	@echo "auto-update-status  Show updater configuration and user timer status"
+	@echo "auto-update-run     Check for and deploy an update immediately"
+	@echo "auto-update-check   Test updater validation, timer generation, and dirty-tree refusal"
 	@echo "lock             Generate uv and pnpm lockfiles in one-off containers"
 	@echo "generate         Regenerate shared TypeScript and Rust protocol constants"
 	@echo "check            Run lint, type, codegen, and unit checks in containers"
@@ -48,6 +53,21 @@ help:
 
 setup:
 	./setup.sh $(SETUP_ARGS)
+
+auto-update-enable:
+	./deploy/install-auto-update.sh enable
+
+auto-update-disable:
+	./deploy/install-auto-update.sh disable
+
+auto-update-status:
+	./deploy/install-auto-update.sh status
+
+auto-update-run:
+	./deploy/auto-update.sh run-now
+
+auto-update-check:
+	./deploy/tests/test_auto_update.sh
 
 lock:
 	docker build --target tooling -t kaede-backend-tooling backend

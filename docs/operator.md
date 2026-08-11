@@ -42,8 +42,9 @@ make setup
 It securely generates compatible keys, preserves existing durable secrets,
 configures Garage or an external S3 provider plus the email mode and
 optional service choices, and can render a configuration for host-level nginx.
-It writes configuration only and never starts the topology or reloads host
-nginx. See [the deployment-wizard guide](deployment-wizard.md) for every option
+It never starts the topology or reloads host nginx. If automatic updates are
+explicitly selected, it installs or removes only the current user's systemd
+timer. See [the deployment-wizard guide](deployment-wizard.md) for every option
 and generated file. Wizard users must use the two-file Compose command in
 `deploy/generated/README.txt`.
 
@@ -389,6 +390,100 @@ addresses, message bodies, provider errors, or one-time links. The console backe
 is the explicit development exception and must never be selected in production.
 
 ## Upgrade and rollback
+
+### Optional automatic updates
+
+The supplied automatic updater is host-side because this deployment builds the
+Kaede web and backend images from the local source tree. It is disabled by
+default. Enable it in `make setup`, or manage it later:
+
+```sh
+make auto-update-enable
+make auto-update-status
+make auto-update-run
+make auto-update-disable
+journalctl --user -u kaede-auto-update.service
+```
+
+The user running the timer must own this checkout and `.env`, have Docker
+Compose access, and have a working user systemd manager. On servers where the
+user manager stops at logout, an administrator must deliberately enable it for
+the Kaede service account, then verify the timer:
+
+```sh
+sudo loginctl enable-linger kaede
+systemctl --user list-timers kaede-auto-update.timer
+```
+
+Replace `kaede` with the actual unprivileged service account. Lingering is a
+host policy decision and setup never enables it. Do not run the timer as root
+merely to avoid configuring Docker access.
+
+The settings are ordinary non-secret entries in `.env`:
+
+```dotenv
+AUTO_UPDATE_ENABLED=false
+AUTO_UPDATE_REMOTE=origin
+AUTO_UPDATE_BRANCH=main
+AUTO_UPDATE_INTERVAL=6h
+AUTO_UPDATE_JITTER=30m
+# AUTO_UPDATE_BACKUP_HOOK=/usr/local/sbin/kaede-backup
+AUTO_UPDATE_WAIT_TIMEOUT_SECONDS=300
+```
+
+Intervals are `6h`, `12h`, `1d`, or `1w`; the timer adds the configured random
+delay to avoid synchronized fetches. The backup hook must be an absolute,
+regular, non-symlink executable. It runs only after new images and preflight
+succeed but before services stop, with `KAEDE_UPDATE_FROM`, `KAEDE_UPDATE_TO`,
+and `KAEDE_ROOT` in its environment. It must exit nonzero unless it has created
+and verified a database/object-store backup at one consistent boundary.
+
+Each run takes a local lock, refuses a dirty tracked checkout or detached/wrong
+branch, fetches only the configured branch, and verifies that the new commit is
+a descendant of the current one. It will not follow a force-push, downgrade, or
+divergent local history. It then validates and builds before downtime, runs the
+backup hook, stops `caddy`, `api`, `gateway`, `worker`, and `scheduler`, runs the
+new migration image once, starts the topology without rebuilding, and waits for
+Compose health checks. A recorded deployed commit makes a failed deployment
+retryable even when Git already reached the target commit.
+
+The updater first runs itself from a private temporary copy, so a fast-forward
+cannot replace the shell program while that same program is still executing.
+Configure Git authentication to work non-interactively for the timer account;
+never place a personal access token directly in the remote URL or systemd unit.
+
+If fetching, preflight, building, or the backup hook fails, the old services
+remain running. If migration or startup fails, writers remain stopped; inspect
+the journal and Compose logs, keep the public edge in maintenance mode, and use
+the reviewed manual recovery procedure below. The updater intentionally does
+not guess at schema downgrade or restore a database automatically.
+
+Treat write access to the configured Git branch and remote as production code
+execution. Protect the GitHub organization and maintainers with MFA and branch
+protection, require reviewed/green changes before merging, and prefer a stable
+release branch over a development branch. Git transport authenticity does not
+replace review of the code being deployed.
+
+On a host without systemd, set `AUTO_UPDATE_ENABLED=true` only after reviewing
+the same risks and invoke `deploy/auto-update.sh run` from the service account's
+cron. Redirect output to a protected log and configure equivalent alerting;
+cron has weaker missed-run handling and status visibility than the supplied
+timer.
+
+Other viable architectures have different tradeoffs:
+
+- Published application images plus a registry watcher provide immutable
+  digests and faster pull/restart cycles, but Kaede does not currently publish
+  the web/backend images. A watcher also needs highly privileged Docker-socket
+  access and cannot safely coordinate Kaede's backup/migration boundary alone.
+- A GitHub Actions deployment over SSH or a self-hosted runner can require CI,
+  approvals, and signed releases before rollout, but adds runner/credential
+  trust, GitHub availability, and the same backup/migration orchestration. It is
+  a good later choice for a larger operation, not a simpler local default.
+- A plain cron entry is widely available, but has poorer logging, randomized
+  scheduling, missed-run behavior, and enable/disable ergonomics than systemd.
+
+### Manual upgrade and rollback
 
 Before upgrading, take and verify backups, record `alembic current`, review every
 new migration downgrade, and render the new Compose configuration. Never let an

@@ -61,6 +61,10 @@ VOICE_PORT_DEFAULTS = {
     "LIVEKIT_TURN_TLS_PORT": 5349,
     "KAEDE_TURN_UDP_PORT": 13478,
 }
+AUTO_UPDATE_DURATION_RE = re.compile(r"^[1-9][0-9]*(?:s|m|min|h|d|w)$")
+AUTO_UPDATE_REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+AUTO_UPDATE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+AUTO_UPDATE_PATH_RE = re.compile(r"^/[A-Za-z0-9_./-]+$")
 
 
 class DeploymentConfigurationError(ValueError):
@@ -203,7 +207,48 @@ def _validate_fcm_service_account(encoded: str) -> None:
         )
 
 
+def _validate_auto_update(values: dict[str, str]) -> None:
+    enabled = values.get("AUTO_UPDATE_ENABLED", "false").strip().lower()
+    if enabled not in {"true", "false"}:
+        raise DeploymentConfigurationError(
+            "AUTO_UPDATE_ENABLED must be true or false"
+        )
+    remote = values.get("AUTO_UPDATE_REMOTE", "origin").strip()
+    if not AUTO_UPDATE_REMOTE_RE.fullmatch(remote):
+        raise DeploymentConfigurationError("AUTO_UPDATE_REMOTE is invalid")
+    branch = values.get("AUTO_UPDATE_BRANCH", "main").strip()
+    if (
+        not AUTO_UPDATE_BRANCH_RE.fullmatch(branch)
+        or branch.endswith("/")
+        or ".." in branch
+    ):
+        raise DeploymentConfigurationError("AUTO_UPDATE_BRANCH is invalid")
+    interval = values.get("AUTO_UPDATE_INTERVAL", "6h").strip()
+    if interval not in {"6h", "12h", "1d", "1w"}:
+        raise DeploymentConfigurationError(
+            "AUTO_UPDATE_INTERVAL must be 6h, 12h, 1d, or 1w"
+        )
+    jitter = values.get("AUTO_UPDATE_JITTER", "30m").strip()
+    if not AUTO_UPDATE_DURATION_RE.fullmatch(jitter):
+        raise DeploymentConfigurationError(
+            "AUTO_UPDATE_JITTER must be a positive systemd duration such as 30m"
+        )
+    timeout = values.get("AUTO_UPDATE_WAIT_TIMEOUT_SECONDS", "300").strip()
+    if not timeout.isdecimal() or not 60 <= int(timeout) <= 3600:
+        raise DeploymentConfigurationError(
+            "AUTO_UPDATE_WAIT_TIMEOUT_SECONDS must be from 60 through 3600"
+        )
+    backup_hook = values.get("AUTO_UPDATE_BACKUP_HOOK", "").strip()
+    if backup_hook and (
+        not AUTO_UPDATE_PATH_RE.fullmatch(backup_hook) or ".." in backup_hook
+    ):
+        raise DeploymentConfigurationError(
+            "AUTO_UPDATE_BACKUP_HOOK must be a safe absolute path"
+        )
+
+
 def validate_values(values: dict[str, str], *, observability: bool) -> None:
+    _validate_auto_update(values)
     environment = values.get("KAEDE_ENVIRONMENT", "production").strip().lower()
     allow_nonproduction = (
         values.get("ALLOW_NONPRODUCTION_DEPLOYMENT", "").lower() == "true"

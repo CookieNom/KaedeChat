@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
+import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
@@ -243,13 +244,14 @@ final class _GuildManagementScreenState
     });
   }
 
-  Future<void> _changed([String? message]) async {
+  Future<KaedeGuild> _changed([String? message]) async {
     await _reload();
     await ref.read(mobileControllerProvider.notifier).refreshNavigation();
     if (message != null && mounted) {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(message)));
     }
+    return _guild;
   }
 
   void _error(Object error) {
@@ -270,7 +272,7 @@ final class _OverviewTab extends StatefulWidget {
   });
   final KaedeGuild guild;
   final KaedeRepository repository;
-  final Future<void> Function([String?]) changed;
+  final Future<KaedeGuild> Function([String?]) changed;
   final bool canManage;
   final bool isOwner;
 
@@ -279,6 +281,7 @@ final class _OverviewTab extends StatefulWidget {
 }
 
 final class _OverviewTabState extends State<_OverviewTab> {
+  late KaedeGuild _guild = widget.guild;
   late final _name = TextEditingController(text: widget.guild.name);
   late final _description =
       TextEditingController(text: widget.guild.description ?? '');
@@ -301,6 +304,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.guild.ref != widget.guild.ref ||
         oldWidget.guild.version != widget.guild.version) {
+      _guild = widget.guild;
       _name.text = widget.guild.name;
       _description.text = widget.guild.description ?? '';
     }
@@ -321,7 +325,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
               'Identity and presentation are federated to every joined instance.',
           child: Column(children: [
             Row(children: [
-              GuildIcon(guild: widget.guild, size: 68),
+              GuildIcon(guild: _guild, size: 68),
               const SizedBox(width: 12),
               Expanded(
                   child: OutlinedButton.icon(
@@ -423,14 +427,14 @@ final class _OverviewTabState extends State<_OverviewTab> {
   Future<void> _save() async {
     setState(() => _busy = true);
     try {
-      await widget.repository
-          .updateGuild(widget.guild.ref, widget.guild.version ?? '*', {
+      await widget.repository.updateGuild(_guild.ref, _guild.version ?? '*', {
         'name': _name.text.trim(),
         'description':
             _description.text.trim().isEmpty ? null : _description.text.trim(),
         'federated_history_policy': _history,
       });
-      await widget.changed('Guild saved');
+      final updated = await widget.changed('Guild saved');
+      if (mounted) setState(() => _guild = updated);
     } on Object catch (error) {
       if (mounted) _tabError(context, 'Could not save guild', error);
     } finally {
@@ -442,16 +446,25 @@ final class _OverviewTabState extends State<_OverviewTab> {
     final file = await ImagePicker().pickImage(
         source: ImageSource.gallery, maxWidth: 4096, maxHeight: 4096);
     if (file == null) return;
+    if (!mounted) return;
+    final contentType =
+        imageUploadContentType(file.name, reportedType: file.mimeType);
+    if (contentType == null) {
+      _tabError(context, 'Could not update guild $kind',
+          'Choose a PNG, JPEG, GIF, or WebP image.');
+      return;
+    }
     setState(() => _busy = true);
     try {
       await widget.repository.uploadGuildAsset(
-        guild: widget.guild.ref,
+        guild: _guild.ref,
         kind: kind,
         filename: file.name,
-        contentType: _contentType(file.name),
+        contentType: contentType,
         file: File(file.path),
       );
-      await widget.changed('Guild $kind updated');
+      final updated = await widget.changed('Guild $kind updated');
+      if (mounted) setState(() => _guild = updated);
     } on Object catch (error) {
       if (mounted) _tabError(context, 'Could not update guild $kind', error);
     } finally {
@@ -467,23 +480,24 @@ final class _OverviewTabState extends State<_OverviewTab> {
     if (value == null) return;
     try {
       await widget.repository.transferGuild(
-        widget.guild.ref,
-        EntityRef.parse(value, localDomain: widget.guild.ref.domain),
-        widget.guild.version ?? '*',
+        _guild.ref,
+        EntityRef.parse(value, localDomain: _guild.ref.domain),
+        _guild.version ?? '*',
       );
-      await widget.changed('Ownership transferred');
+      final updated = await widget.changed('Ownership transferred');
+      if (mounted) setState(() => _guild = updated);
     } on Object catch (error) {
       if (mounted) _tabError(context, 'Could not transfer ownership', error);
     }
   }
 
   Future<void> _leave() async {
-    if (!await _confirm(context, 'Leave ${widget.guild.name}?',
+    if (!await _confirm(context, 'Leave ${_guild.name}?',
         'You will lose access unless invited again.')) {
       return;
     }
     try {
-      await widget.repository.leaveGuild(widget.guild.ref);
+      await widget.repository.leaveGuild(_guild.ref);
       if (mounted) Navigator.pop(context);
     } on Object catch (error) {
       if (mounted) _tabError(context, 'Could not leave guild', error);
@@ -497,8 +511,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
       return;
     }
     try {
-      await widget.repository
-          .deleteGuild(widget.guild.ref, widget.guild.version ?? '*');
+      await widget.repository.deleteGuild(_guild.ref, _guild.version ?? '*');
       if (mounted) Navigator.pop(context);
     } on Object catch (error) {
       if (mounted) _tabError(context, 'Could not delete guild', error);
@@ -516,7 +529,7 @@ final class _ChannelsTab extends StatefulWidget {
   });
   final KaedeGuild guild;
   final KaedeRepository repository;
-  final Future<void> Function([String?]) changed;
+  final Future<KaedeGuild> Function([String?]) changed;
   final bool canManageChannels;
   final bool canManagePermissions;
   @override
@@ -705,7 +718,7 @@ final class _RolesTab extends StatefulWidget {
   final KaedeGuild guild;
   final EntityRef? actorRef;
   final KaedeRepository repository;
-  final Future<void> Function([String?]) changed;
+  final Future<KaedeGuild> Function([String?]) changed;
   @override
   State<_RolesTab> createState() => _RolesTabState();
 }
@@ -853,7 +866,7 @@ final class _MembersTab extends StatefulWidget {
   final KaedeGuild guild;
   final EntityRef? actorRef;
   final KaedeRepository repository;
-  final Future<void> Function([String?]) changed;
+  final Future<KaedeGuild> Function([String?]) changed;
   @override
   State<_MembersTab> createState() => _MembersTabState();
 }
@@ -1494,12 +1507,20 @@ final class _EmojiTabState extends State<_EmojiTab> {
     if (name == null) return;
     final file = await ImagePicker().pickImage(source: ImageSource.gallery);
     if (file == null) return;
+    if (!mounted) return;
+    final contentType =
+        imageUploadContentType(file.name, reportedType: file.mimeType);
+    if (contentType == null) {
+      _tabError(context, 'Could not upload emoji',
+          'Choose a PNG, JPEG, GIF, or WebP image.');
+      return;
+    }
     try {
       await widget.repository.uploadEmoji(
           guild: widget.guild.ref,
           name: name,
           filename: file.name,
-          contentType: _contentType(file.name),
+          contentType: contentType,
           file: File(file.path));
       await _load();
     } on Object catch (error) {
@@ -2533,10 +2554,3 @@ int _channelNumber(ChannelType type) => switch (type) {
       ChannelType.announcement => 5,
       ChannelType.unknown => 0
     };
-String _contentType(String filename) {
-  final lower = filename.toLowerCase();
-  if (lower.endsWith('.png')) return 'image/png';
-  if (lower.endsWith('.gif')) return 'image/gif';
-  if (lower.endsWith('.webp')) return 'image/webp';
-  return 'image/jpeg';
-}

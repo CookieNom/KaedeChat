@@ -29,6 +29,39 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
     def test_safe_minimal_production_boundary(self) -> None:
         validate_values(self.production, observability=False)
 
+    def test_valid_auto_update_configuration(self) -> None:
+        validate_values(
+            self.production
+            | {
+                "AUTO_UPDATE_ENABLED": "true",
+                "AUTO_UPDATE_REMOTE": "origin",
+                "AUTO_UPDATE_BRANCH": "release/stable",
+                "AUTO_UPDATE_INTERVAL": "12h",
+                "AUTO_UPDATE_JITTER": "45m",
+                "AUTO_UPDATE_BACKUP_HOOK": "/usr/local/sbin/kaede-backup",
+                "AUTO_UPDATE_WAIT_TIMEOUT_SECONDS": "600",
+            },
+            observability=False,
+        )
+
+    def test_invalid_auto_update_configuration_is_rejected(self) -> None:
+        invalid = (
+            ("AUTO_UPDATE_ENABLED", "yes"),
+            ("AUTO_UPDATE_REMOTE", "origin;touch-x"),
+            ("AUTO_UPDATE_BRANCH", "../main"),
+            ("AUTO_UPDATE_INTERVAL", "every day"),
+            ("AUTO_UPDATE_JITTER", "0m"),
+            ("AUTO_UPDATE_BACKUP_HOOK", "relative/backup"),
+            ("AUTO_UPDATE_WAIT_TIMEOUT_SECONDS", "30"),
+        )
+        for name, value in invalid:
+            with self.subTest(name=name), self.assertRaises(
+                DeploymentConfigurationError
+            ):
+                validate_values(
+                    self.production | {name: value}, observability=False
+                )
+
     def test_production_requires_media_scanning(self) -> None:
         values = self.production | {"KAEDE_MEDIA_SCAN_ENABLED": "false"}
         with self.assertRaisesRegex(DeploymentConfigurationError, "must be true"):

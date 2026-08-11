@@ -28,6 +28,9 @@ deploy/generated/
 .kaede-setup.in-progress
 .kaede-setup.lock
 .kaede-setup-stage.*
+.kaede-auto-update.in-progress
+.kaede-auto-update.lock
+.kaede-auto-update-state
 *.local.pem
 *.local.key
 kaede-dev-root.crt

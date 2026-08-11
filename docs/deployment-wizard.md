@@ -8,9 +8,11 @@ Run the Bash setup wizard from the repository root:
 make setup
 ```
 
-The script only generates repository-local configuration. It does not start
-containers, install packages or proxy files, request certificates, change the
-firewall, or reload nginx/Caddy.
+The script generates repository-local configuration and can optionally install
+or remove Kaede's per-user systemd update timer. It does not start containers,
+install packages or proxy files, request certificates, change the firewall, or
+reload nginx/Caddy. The user timer is the only host service it changes, and only
+after an explicit automatic-update choice.
 
 The wizard asks about:
 
@@ -21,7 +23,9 @@ The wizard asks about:
 - bundled Garage, AWS S3, Backblaze B2, Cloudflare R2, or generic S3 storage;
 - Mailtrap API, Mailtrap SMTP, AWS SES SMTP, generic SMTP, or no email;
 - optional KLIPY GIF search and Cloudflare Turnstile registration/adaptive sign-in protection;
-- optional LiveKit voice/video and observability services; and
+- optional LiveKit voice/video and observability services;
+- optional source-based automatic updates, including Git remote, branch,
+  interval, and an executable pre-update backup hook; and
 - worker counts, upload limits, and non-conflicting host ports.
 
 If [`gum`](https://github.com/charmbracelet/gum) is already installed, the
@@ -88,6 +92,16 @@ private key's base64 representation in the operator environment. The Android and
 Firebase application files are installed separately at build/signing time and
 remain ignored by Git. FCM itself does not require billing or Google Analytics.
 
+Automatic updates are disabled by default. When enabled, setup installs a
+`kaede-auto-update.timer` in the current user's systemd configuration. Its first
+run reconciles and records the current commit. The updater never accepts a dirty
+tracked checkout, detached head, force-pushed history, downgrade, or
+non-fast-forward merge. It builds and runs preflight before stopping services;
+then it runs the configured backup hook, quiesces application writers, applies
+migrations, restarts, and waits for health. Declining a backup hook requires a
+separate warning confirmation. The timer needs the same user's Docker access as
+manual deployment commands.
+
 ## After setup
 
 Review the generated files, then validate without starting the application:
@@ -96,6 +110,12 @@ Review the generated files, then validate without starting the application:
 make env-check
 make generated-compose-check
 ```
+
+Inspect or change the update timer later with `make auto-update-status`,
+`make auto-update-enable`, and `make auto-update-disable`. If setup cannot reach
+the user's systemd manager, it leaves `AUTO_UPDATE_ENABLED=false` and prints a
+warning rather than claiming the timer is active. See the operator guide for
+lingering, logs, failure handling, and a cron fallback.
 
 On the first explicit `docker compose up`, the one-shot `migrate` service creates
 an empty database schema by applying all Alembic revisions in order. On later

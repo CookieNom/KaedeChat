@@ -1,5 +1,28 @@
 import 'package:kaede_mobile/src/core/refs.dart';
 
+const _supportedImageUploadTypes = <String>{
+  'image/gif',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+};
+
+/// Uses the picker-reported MIME type when it is supported, then falls back to
+/// a known extension. Unknown formats must not be mislabeled as JPEG because
+/// media processing validates the uploaded bytes.
+String? imageUploadContentType(String filename, {String? reportedType}) {
+  final normalized = reportedType?.trim().toLowerCase();
+  if (normalized != null && _supportedImageUploadTypes.contains(normalized)) {
+    return normalized;
+  }
+  final lower = filename.toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  return null;
+}
+
 /// Authenticated attachment bytes are served by the attachment's home
 /// instance through this path. The API client deliberately builds the origin
 /// from the signed-in instance and handles any object-storage redirect.
