@@ -11,6 +11,24 @@ import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 
 void main() {
+  group('notification preview preference', () {
+    test('defaults on but preserves an explicit opt-out', () {
+      expect(notificationPreviewsEnabled(const <String, bool>{}), isTrue);
+      expect(
+        notificationPreviewsEnabled(
+          const <String, bool>{'show_notification_previews': true},
+        ),
+        isTrue,
+      );
+      expect(
+        notificationPreviewsEnabled(
+          const <String, bool>{'show_notification_previews': false},
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('wire identifiers', () {
     test('federated references retain their home instance', () {
       final reference = EntityRef.parse('76423789306458112@Chat.Example.');

@@ -30,6 +30,16 @@ from app.chat.payloads import (
     user_payload,
 )
 from app.chat.permissions import get_permissions
+from app.chat.presence import (
+    PRESENCE_TTL_SECONDS,
+    broadcast_presence_preference,
+)
+from app.chat.presence import (
+    SET_PRESENCE_SCRIPT as SET_PRESENCE_SCRIPT,
+)
+from app.chat.presence import (
+    set_presence_state as set_presence_state,
+)
 from app.core.cache_warmup import cache_is_ready, maintain_cache_readiness, warm_identify_cache
 from app.core.close_codes import GatewayCloseCode
 from app.core.gateway_ops import PROTOCOL_VERSION, GatewayOp
@@ -61,7 +71,6 @@ log = structlog.get_logger()
 HEARTBEAT_INTERVAL_MS = 41_250
 SESSION_TTL_SECONDS = 3600
 SESSION_PROGRESS_HISTORY = 64
-PRESENCE_TTL_SECONDS = 90
 PREAUTH_CONNECTION_LIMIT = 128
 PREAUTH_REDIS_TIMEOUT_SECONDS = 3.0
 CLIENT_OP_LIMIT = 120
@@ -169,18 +178,6 @@ redis.call('EXPIRE', KEYS[2], 15)
 redis.call('ZADD', KEYS[1], tonumber(ARGV[2]) + 15000, ARGV[3])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
 return 1
-"""
-
-SET_PRESENCE_SCRIPT = """
-local generation = redis.call('INCR', KEYS[1])
-local state = cjson.encode({
-    status = ARGV[1],
-    generation = generation,
-    expires_at = tonumber(ARGV[2])
-})
-redis.call('SET', KEYS[2], state)
-redis.call('ZADD', KEYS[3], ARGV[2], ARGV[3])
-return generation
 """
 
 RENEW_PRESENCE_SCRIPT = """
@@ -436,25 +433,6 @@ async def reject_preauth_connection(websocket: WebSocket) -> None:
         # before accept as an HTTP 403. Either path avoids allocating a live
         # WebSocket or waiting for capacity.
         await websocket.close(code=GatewayCloseCode.RATE_LIMITED)
-
-
-async def set_presence_state(redis: Redis, user: User, status: str) -> int:
-    expires_at = int(time.time()) + PRESENCE_TTL_SECONDS
-    handle = f"{user.origin_domain}:{user.id}"
-    result = await cast(
-        Awaitable[object],
-        redis.eval(
-            SET_PRESENCE_SCRIPT,
-            3,
-            f"presence:generation:{handle}",
-            f"presence:{handle}",
-            "presence:expirations",
-            status,
-            str(expires_at),
-            handle,
-        ),
-    )
-    return int(cast(int | str, result))
 
 
 async def renew_presence_state(redis: Redis, user: User) -> int:
@@ -1774,34 +1752,9 @@ async def fanout_loop(
                 status_value = str(data.get("status", "online"))
                 if status_value not in {"online", "idle", "dnd", "invisible"}:
                     status_value = "online"
-                visible_status = "offline" if status_value == "invisible" else status_value
-                generation = await set_presence_state(redis, user, status_value)
-                presence = {
-                    "user_id": str(user.id),
-                    "user_domain": user.origin_domain,
-                    "status": visible_status,
-                }
-                for topic in topics:
-                    if topic.startswith("guild:"):
-                        await publish_presence(
-                            redis,
-                            topic,
-                            presence,
-                            user_domain=user.origin_domain,
-                            user_id=user.id,
-                            generation=generation,
-                        )
-                    elif topic == user_topic(user.origin_domain, user.id):
-                        # Only the account's private topic receives the actual
-                        # preference. Guild subscribers see Invisible as Offline.
-                        await publish_presence(
-                            redis,
-                            topic,
-                            {**presence, "preference": status_value},
-                            user_domain=user.origin_domain,
-                            user_id=user.id,
-                            generation=generation,
-                        )
+                visible_status, generation = await broadcast_presence_preference(
+                    redis, user, status_value, topics
+                )
                 schedule_presence_fanout(user, visible_status, generation)
             elif op == GatewayOp.VOICE_STATE_UPDATE:
                 raw_data = payload.get("d")

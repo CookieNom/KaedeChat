@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.api.push import rotated_token_fields
-from app.push.presentation import push_presentation
+from app.push.presentation import notification_previews_enabled, push_presentation
 from app.push.schemas import (
     PushDeviceCreate,
     PushNotificationRedeem,
@@ -129,6 +129,12 @@ def test_push_presentation_allows_opted_in_previews() -> None:
         title="Alice in Lounge",
         body="Hello",
     ) == ("Alice in Lounge", "Hello")
+
+
+def test_notification_previews_default_on_and_preserve_explicit_opt_out() -> None:
+    assert notification_previews_enabled({}) is True
+    assert notification_previews_enabled({"show_notification_previews": True}) is True
+    assert notification_previews_enabled({"show_notification_previews": False}) is False
 
 
 @pytest.mark.parametrize("platform", ["android", "ios"])

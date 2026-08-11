@@ -1,6 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from app.db.models import Message
+
+
+def notification_previews_enabled(preferences: Mapping[str, object]) -> bool:
+    """Default previews on while honoring an explicit account opt-out."""
+
+    return bool(preferences.get("show_notification_previews", True))
 
 
 def push_body(message: Message, has_attachment: bool) -> str:

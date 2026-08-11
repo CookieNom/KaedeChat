@@ -7,9 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import AuthenticatedUser, get_redis, get_session, require_user
 from app.auth.schemas import SettingsPatch
-from app.chat.events import publish_dispatch, user_topic
+from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.payloads import user_payload
 from app.chat.permissions import get_permissions
+from app.chat.presence import broadcast_presence_preference
 from app.chat.privacy import lock_dm_privacy
 from app.chat.schemas import ProfilePatch
 from app.core.permissions import Permission
@@ -28,7 +29,7 @@ from app.db.models import (
 )
 from app.federation.relationships import queue_friend_profile_updates
 from app.federation.users import resolve_handle
-from app.tasks import federation_deliver
+from app.tasks import federation_deliver, federation_presence_fanout
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
@@ -144,6 +145,7 @@ async def patch_user_settings(
     payload: SettingsPatch,
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
 ) -> dict[str, object]:
     settings = await session.scalar(
         select(UserSettings)
@@ -171,12 +173,39 @@ async def patch_user_settings(
         if existing_presence is not None:
             merged_notification_settings["presence_preference"] = existing_presence
         settings.notification_settings = merged_notification_settings
+    presence_topics: list[str] = []
     if presence_preference is not None:
         settings.notification_settings = {
             **settings.notification_settings,
             "presence_preference": presence_preference,
         }
+        guild_refs = (
+            await session.execute(
+                select(GuildMember.guild_id, GuildMember.guild_domain).where(
+                    GuildMember.user_id == auth.user.id,
+                    GuildMember.user_domain == auth.user.origin_domain,
+                )
+            )
+        ).all()
+        presence_topics = [
+            user_topic(auth.user.origin_domain, auth.user.id),
+            *(guild_topic(domain, guild_id) for guild_id, domain in guild_refs),
+        ]
     await session.commit()
+    if presence_preference is not None:
+        visible_status, generation = await broadcast_presence_preference(
+            redis,
+            auth.user,
+            presence_preference,
+            presence_topics,
+        )
+        await enqueue_best_effort(
+            federation_presence_fanout,
+            auth.user.id,
+            auth.user.origin_domain,
+            visible_status,
+            generation,
+        )
     return settings_payload(settings)
 
 

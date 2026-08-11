@@ -28,7 +28,11 @@ from app.db.models import (
     User,
     UserSettings,
 )
-from app.push.presentation import push_body, push_presentation
+from app.push.presentation import (
+    notification_previews_enabled,
+    push_body,
+    push_presentation,
+)
 from app.push.schemas import (
     PushDeviceCreate,
     PushDeviceResponse,
@@ -314,7 +318,7 @@ async def redeem_push_notification(
         if guild is None:  # Defensive: guild channels were validated above.
             return await _suppress_push(redis, body.event_token, encoded)
         title = f"{author_name} in {guild.name}"
-    show_preview = bool(preferences.get("show_notification_previews", False))
+    show_preview = notification_previews_enabled(preferences)
     title, notification_body = push_presentation(
         show_preview=show_preview,
         is_dm=is_dm,

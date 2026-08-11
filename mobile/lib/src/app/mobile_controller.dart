@@ -25,6 +25,9 @@ enum SessionPhase { restoring, locked, signedOut, authenticating, ready }
 String _lastConversationKey(String accountKey) =>
     'last_conversation:${Uri.encodeComponent(accountKey)}';
 
+bool notificationPreviewsEnabled(Map<String, bool> settings) =>
+    settings['show_notification_previews'] ?? true;
+
 /// Resolves a persisted composite reference against the conversations the
 /// account can currently access. DMs are the deterministic first fallback,
 /// followed by guild text/announcement channels in server and channel order.
@@ -721,7 +724,6 @@ final class MobileController extends StateNotifier<MobileState> {
       notificationSettings: notifications,
       presencePreference: presence,
     );
-    gateway.updatePresence(presence.name);
   }
 
   Future<void> setPresence(PresenceStatus presence) async {
@@ -1597,15 +1599,18 @@ final class MobileController extends StateNotifier<MobileState> {
       case 'PRESENCE_UPDATE':
         final user = _userRef(event.data);
         if (user != null) {
-          final presence =
-              _presence(event.data['status'] ?? event.data['preference']);
+          final visiblePresence = _presence(event.data['status']);
+          final accountPreference = _presence(
+            event.data['preference'] ?? event.data['status'],
+          );
           final presenceByUser = Map<EntityRef, PresenceStatus>.of(
             state.presenceByUser,
-          )..[user] = presence;
+          )..[user] = visiblePresence;
           state = state.copyWith(
             presenceByUser: Map.unmodifiable(presenceByUser),
-            presencePreference:
-                user == state.user?.ref ? presence : state.presencePreference,
+            presencePreference: user == state.user?.ref
+                ? accountPreference
+                : state.presencePreference,
           );
           if (user == state.user?.ref) _scheduleMetadataCache();
         }
@@ -1955,8 +1960,7 @@ final class MobileController extends StateNotifier<MobileState> {
         NotificationKind.guildMessage,
     };
     if (kind == null) return;
-    final showPreview =
-        state.notificationSettings['show_notification_previews'] ?? false;
+    final showPreview = notificationPreviewsEnabled(state.notificationSettings);
     final privateBody = switch (kind) {
       NotificationKind.directMessage => 'New direct message',
       NotificationKind.mention => 'You were mentioned',

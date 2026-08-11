@@ -309,8 +309,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               _PreferenceSwitch(
                 title: 'Show message previews',
                 subtitle:
-                    'Show the sender, message text, and profile picture. Kaede fetches these directly after the private push wake-up; FCM never receives them. Your lock-screen privacy settings still apply.',
-                value: _notification('show_notification_previews', false),
+                    'Enabled by default. Show the sender, message text, and profile picture. Kaede fetches these directly after the private push wake-up; FCM never receives them. Your lock-screen privacy settings still apply.',
+                value: _notification('show_notification_previews', true),
                 onChanged: (value) =>
                     _saveNotification('show_notification_previews', value),
               ),
