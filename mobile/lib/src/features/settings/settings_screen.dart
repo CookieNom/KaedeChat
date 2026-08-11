@@ -309,7 +309,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               _PreferenceSwitch(
                 title: 'Show message previews',
                 subtitle:
-                    'Allow message text to appear in system notifications and on your lock screen.',
+                    'Show the sender, message text, and profile picture. Kaede fetches these directly after the private push wake-up; FCM never receives them. Your lock-screen privacy settings still apply.',
                 value: _notification('show_notification_previews', false),
                 onChanged: (value) =>
                     _saveNotification('show_notification_previews', value),

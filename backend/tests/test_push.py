@@ -8,7 +8,11 @@ from pydantic import ValidationError
 
 from app.api.push import rotated_token_fields
 from app.push.presentation import push_presentation
-from app.push.schemas import PushDeviceCreate, PushNotificationRedeem
+from app.push.schemas import (
+    PushDeviceCreate,
+    PushNotificationRedeem,
+    PushNotificationResponse,
+)
 from app.push.service import fcm_sync_payload
 from app.push.sync import (
     PushSyncEvent,
@@ -167,6 +171,35 @@ def test_push_redemption_requires_a_fixed_urlsafe_token() -> None:
     for token in ("short", "a" * 42, "a" * 44, "a" * 42 + "/"):
         with pytest.raises(ValidationError):
             PushNotificationRedeem(installation_id=uuid4(), event_token=token)
+
+
+def test_redeemed_notification_supports_private_sender_presentation() -> None:
+    response = PushNotificationResponse(
+        kind="direct_message",
+        title="Turtle",
+        body="Hello",
+        channel_ref="42@chat.example",
+        message_ref="73@remote.example",
+        sender_name="Turtle",
+        sender_ref="9@remote.example",
+        sender_avatar_hash="a" * 64,
+        sent_at="2026-08-11T11:42:00+00:00",
+    )
+
+    assert response.sender_name == "Turtle"
+    assert response.sender_avatar_hash == "a" * 64
+    with pytest.raises(ValidationError):
+        PushNotificationResponse(
+            kind="direct_message",
+            title="Turtle",
+            body="Hello",
+            channel_ref="42@chat.example",
+            message_ref="73@remote.example",
+            sender_name="Turtle",
+            sender_ref="9@remote.example",
+            sender_avatar_hash="../avatar.png",
+            sent_at="2026-08-11T11:42:00+00:00",
+        )
 
 
 @pytest.mark.asyncio

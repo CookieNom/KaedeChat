@@ -39,3 +39,10 @@ class PushNotificationResponse(BaseModel):
     body: str
     channel_ref: str
     message_ref: str
+    sender_name: str | None = None
+    sender_ref: str | None = None
+    sender_avatar_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    sent_at: str

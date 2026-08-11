@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
+import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/message_store.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
@@ -99,6 +100,14 @@ ReadBadgeSnapshot decodeReadBadgeSnapshot(
     mentions: Map.unmodifiable(mentions),
   );
 }
+
+bool shouldAcknowledgeVisibleChannel({
+  required bool appActive,
+  required bool conversationPaneVisible,
+  required EntityRef? selectedChannel,
+  required EntityRef channel,
+}) =>
+    appActive && conversationPaneVisible && selectedChannel == channel;
 
 final class TypingParticipant {
   const TypingParticipant({
@@ -280,6 +289,7 @@ final class MobileController extends StateNotifier<MobileState> {
   Timer? _metadataCacheTimer;
   String? _pushDeviceId;
   var _appActive = true;
+  var _conversationPaneVisible = false;
   DateTime? _backgroundedAt;
   final Map<EntityRef, int> _messageRequestGenerations = <EntityRef, int>{};
   var _flushingOutbox = false;
@@ -294,7 +304,8 @@ final class MobileController extends StateNotifier<MobileState> {
     _appActive = active;
     push.setAppVisibility(
       active: active,
-      visibleChannel: state.selectedChannel,
+      visibleChannel:
+          active && _conversationPaneVisible ? state.selectedChannel : null,
     );
     if (active) {
       _appLockTimer?.cancel();
@@ -303,10 +314,41 @@ final class MobileController extends StateNotifier<MobileState> {
       unawaited(_flushOutbox());
       unawaited(_refreshReadBadges());
       unawaited(_activateNotifications());
+      _acknowledgeVisibleConversation();
     } else {
       _backgroundedAt ??= DateTime.now();
       unawaited(_scheduleAppLock());
     }
+  }
+
+  void setConversationPaneVisible(bool visible) {
+    _conversationPaneVisible = visible;
+    push.setAppVisibility(
+      active: _appActive,
+      visibleChannel: _appActive && visible ? state.selectedChannel : null,
+    );
+    if (visible) _acknowledgeVisibleConversation();
+  }
+
+  bool _isChannelVisible(EntityRef channel) => shouldAcknowledgeVisibleChannel(
+        appActive: _appActive,
+        conversationPaneVisible: _conversationPaneVisible,
+        selectedChannel: state.selectedChannel,
+        channel: channel,
+      );
+
+  void _acknowledgeVisibleConversation() {
+    final channel = state.selectedChannel;
+    if (channel == null || !_isChannelVisible(channel)) return;
+    // Opening the pane is the local read intent. Clear its marker immediately;
+    // the API acknowledgement below makes that intent durable across clients.
+    _clearUnread(channel);
+    final messages = state.messageStore[channel];
+    if (messages == null || messages.isEmpty) {
+      unawaited(loadMessages());
+      return;
+    }
+    unawaited(_acknowledge(channel, messages.last.ref));
   }
 
   Future<void> _scheduleAppLock() async {
@@ -391,7 +433,7 @@ final class MobileController extends StateNotifier<MobileState> {
       _appActive = true;
       push.setAppVisibility(
         active: true,
-        visibleChannel: state.selectedChannel,
+        visibleChannel: _conversationPaneVisible ? state.selectedChannel : null,
       );
       if (state.user != null) {
         state = state.copyWith(phase: SessionPhase.ready, clearError: true);
@@ -538,7 +580,8 @@ final class MobileController extends StateNotifier<MobileState> {
     );
     push.setAppVisibility(
       active: _appActive,
-      visibleChannel: initial?.ref,
+      visibleChannel:
+          _appActive && _conversationPaneVisible ? initial?.ref : null,
     );
     if (initial != null) unawaited(loadMessages());
     await _cacheLists();
@@ -715,9 +758,11 @@ final class MobileController extends StateNotifier<MobileState> {
     state = state.copyWith(clearGuild: true, selectedChannel: channel.ref);
     push.setAppVisibility(
       active: _appActive,
-      visibleChannel: channel.ref,
+      visibleChannel:
+          _appActive && _conversationPaneVisible ? channel.ref : null,
     );
     unawaited(_rememberConversation(channel.ref));
+    _acknowledgeVisibleConversation();
     await loadMessages();
   }
 
@@ -728,9 +773,11 @@ final class MobileController extends StateNotifier<MobileState> {
     );
     push.setAppVisibility(
       active: _appActive,
-      visibleChannel: channel.ref,
+      visibleChannel:
+          _appActive && _conversationPaneVisible ? channel.ref : null,
     );
     unawaited(_rememberConversation(channel.ref));
+    _acknowledgeVisibleConversation();
     if (channel.type == ChannelType.text ||
         channel.type == ChannelType.announcement ||
         channel.type == ChannelType.dm) {
@@ -836,7 +883,7 @@ final class MobileController extends StateNotifier<MobileState> {
         channelsWithOlderMessages: Set.unmodifiable(withOlder),
       );
       await _cacheMessages(channelRef);
-      if (!older && ordered.isNotEmpty && state.selectedChannel == channelRef) {
+      if (!older && ordered.isNotEmpty && _isChannelVisible(channelRef)) {
         unawaited(_acknowledge(channelRef, ordered.last.ref));
       }
     } on Object catch (error) {
@@ -1029,7 +1076,7 @@ final class MobileController extends StateNotifier<MobileState> {
       )) {
         _setChannelMessages(channelRef, page.reversed.toList());
         await _cacheMessages(channelRef);
-        if (page.isNotEmpty && state.selectedChannel == channelRef) {
+        if (page.isNotEmpty && _isChannelVisible(channelRef)) {
           unawaited(_acknowledge(channelRef, page.first.ref));
         }
       }
@@ -1378,6 +1425,11 @@ final class MobileController extends StateNotifier<MobileState> {
               }
             }
           }
+          if (state.selectedChannel case final selected?
+              when _isChannelVisible(selected)) {
+            counts.remove(selected);
+            unread.remove(selected);
+          }
           state = state.copyWith(
             mentionCounts: Map.unmodifiable(counts),
             unreadCounts: Map.unmodifiable(unread),
@@ -1404,7 +1456,7 @@ final class MobileController extends StateNotifier<MobileState> {
             database.completeOutbox(nonce).then((_) => _syncOutbox()),
           );
         }
-        if (_appActive && message.channelRef == state.selectedChannel) {
+        if (_isChannelVisible(message.channelRef)) {
           _clearUnread(message.channelRef);
           unawaited(_acknowledge(message.channelRef, message.ref));
         } else if (message.authorRef != state.user?.ref) {
@@ -1485,6 +1537,10 @@ final class MobileController extends StateNotifier<MobileState> {
             // An acknowledgement event from another client carries the new
             // read cursor. With no explicit unread field it is safe to clear
             // the local indicator; newer servers send the exact boolean.
+            unread.remove(channel);
+          }
+          if (_isChannelVisible(channel)) {
+            mentions.remove(channel);
             unread.remove(channel);
           }
           state = state.copyWith(
@@ -1880,8 +1936,7 @@ final class MobileController extends StateNotifier<MobileState> {
     final decision = decideLocalMessageNotification(
       authoredByCurrentUser: message.authorRef == self.ref,
       doNotDisturb: state.presencePreference == PresenceStatus.dnd,
-      conversationIsVisible:
-          _appActive && message.channelRef == state.selectedChannel,
+      conversationIsVisible: _isChannelVisible(message.channelRef),
       isDirectMessage: isDm,
       mentionsCurrentUser: mentioned,
       directMessagesEnabled:
@@ -1923,6 +1978,17 @@ final class MobileController extends StateNotifier<MobileState> {
         channel: message.channelRef,
         message: message.ref,
       ).encode(),
+      senderName:
+          showPreview ? message.author?.name ?? message.authorRef.wire : null,
+      senderRef: showPreview ? message.authorRef : null,
+      senderAvatarUri: showPreview
+          ? publicAssetUri(
+              message.authorRef.domain,
+              message.author?.avatarHash,
+              variant: 'thumbnail_128',
+            )
+          : null,
+      sentAt: message.createdAt,
     );
   }
 
@@ -1990,9 +2056,16 @@ final class MobileController extends StateNotifier<MobileState> {
     try {
       final badges = decodeReadBadgeSnapshot(await repository.readStates());
       if (!_sessionIsCurrent(accountKey, generation)) return;
+      final unread = Map<EntityRef, int>.of(badges.unread);
+      final mentions = Map<EntityRef, int>.of(badges.mentions);
+      if (state.selectedChannel case final selected?
+          when _isChannelVisible(selected)) {
+        unread.remove(selected);
+        mentions.remove(selected);
+      }
       state = state.copyWith(
-        unreadCounts: badges.unread,
-        mentionCounts: badges.mentions,
+        unreadCounts: Map.unmodifiable(unread),
+        mentionCounts: Map.unmodifiable(mentions),
       );
       _scheduleMetadataCache();
     } on Object {

@@ -118,14 +118,17 @@ final class _MobileShellState extends ConsumerState<MobileShell>
           child: switch (_section) {
             _ShellSection.messages => PageView(
                 controller: _pages,
-                onPageChanged: (page) => setState(() => _messagePage = page),
+                onPageChanged: (page) {
+                  setState(() => _messagePage = page);
+                  ref
+                      .read(mobileControllerProvider.notifier)
+                      .setConversationPaneVisible(page == 1);
+                },
                 children: [
                   _ChatBrowser(
                     onOpenChannel: _openConversation,
-                    onOpenFriends: () =>
-                        setState(() => _section = _ShellSection.friends),
-                    onOpenSettings: () =>
-                        setState(() => _section = _ShellSection.settings),
+                    onOpenFriends: () => _showSection(_ShellSection.friends),
+                    onOpenSettings: () => _showSection(_ShellSection.settings),
                   ),
                   activeChannel == null
                       ? const Center(child: Text('Choose a conversation.'))
@@ -146,17 +149,15 @@ final class _MobileShellState extends ConsumerState<MobileShell>
               ),
             _ShellSection.friends => _SectionScreen(
                 title: 'Friends',
-                onBack: () => setState(() => _section = _ShellSection.messages),
+                onBack: () => _showSection(_ShellSection.messages),
                 child: _FriendsPage(onOpenChat: () {
-                  setState(() {
-                    _section = _ShellSection.messages;
-                    _openConversation();
-                  });
+                  _showSection(_ShellSection.messages);
+                  _openConversation();
                 }),
               ),
             _ShellSection.settings => _SectionScreen(
                 title: 'You',
-                onBack: () => setState(() => _section = _ShellSection.messages),
+                onBack: () => _showSection(_ShellSection.messages),
                 child: const SettingsScreen(),
               ),
           },
@@ -167,17 +168,15 @@ final class _MobileShellState extends ConsumerState<MobileShell>
       canPop: _section == _ShellSection.messages && _messagePage == 0,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        setState(() {
-          if (_messagePage > 0) {
-            if (_messagePage == 2) {
-              _openConversation();
-            } else {
-              _openNavigation();
-            }
+        if (_messagePage > 0) {
+          if (_messagePage == 2) {
+            _openConversation();
           } else {
-            _section = _ShellSection.messages;
+            _openNavigation();
           }
-        });
+        } else {
+          _showSection(_ShellSection.messages);
+        }
       },
       child: Scaffold(body: body),
     );
@@ -202,6 +201,13 @@ final class _MobileShellState extends ConsumerState<MobileShell>
     _pages.animateToPage(2,
         duration: const Duration(milliseconds: 220),
         curve: Curves.easeOutCubic);
+  }
+
+  void _showSection(_ShellSection section) {
+    setState(() => _section = section);
+    ref.read(mobileControllerProvider.notifier).setConversationPaneVisible(
+          section == _ShellSection.messages && _messagePage == 1,
+        );
   }
 }
 

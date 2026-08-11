@@ -107,6 +107,11 @@ redeems the single-use token over the authenticated Kaede API, where device
 ownership, current channel access, read state, do-not-disturb, and notification
 preferences are rechecked before the app creates a local notification. If that
 direct fetch fails, a content-free local fallback asks the user to open Kaede.
+When the user enables message previews, the authenticated response can include
+the sender name, bounded message preview, and validated avatar hash. Android
+renders these locally with private lock-screen visibility; avatar thumbnails
+are fetched separately over HTTPS with no Kaede authorization header, capped at
+512 KiB, and kept in a bounded temporary cache.
 
 FCM still receives the app's provider token and delivery metadata such as the
 Firebase project, target device, timing, platform, and network address. Message

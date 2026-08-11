@@ -301,15 +301,22 @@ async def redeem_push_notification(
             )
         )
     )
-    author_name = author.display_name or author.username
+    author_name = message.webhook_name or author.display_name or author.username
+    avatar_hash = message.webhook_avatar_hash or author.avatar_hash
+    if avatar_hash is not None and (
+        len(avatar_hash) != 64
+        or any(character not in "0123456789abcdef" for character in avatar_hash)
+    ):
+        avatar_hash = None
     if is_dm:
         title = author_name
     else:
         if guild is None:  # Defensive: guild channels were validated above.
             return await _suppress_push(redis, body.event_token, encoded)
         title = f"{author_name} in {guild.name}"
+    show_preview = bool(preferences.get("show_notification_previews", False))
     title, notification_body = push_presentation(
-        show_preview=bool(preferences.get("show_notification_previews", False)),
+        show_preview=show_preview,
         is_dm=is_dm,
         is_mention=is_mention,
         title=title,
@@ -322,6 +329,10 @@ async def redeem_push_notification(
         body=notification_body,
         channel_ref=f"{channel.id}@{channel.origin_domain}",
         message_ref=f"{message.id}@{message.origin_domain}",
+        sender_name=author_name if show_preview else None,
+        sender_ref=(f"{author.id}@{author.origin_domain}" if show_preview else None),
+        sender_avatar_hash=avatar_hash if show_preview else None,
+        sent_at=message.created_at.isoformat(),
     )
 
 

@@ -8,8 +8,10 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
+import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:path_provider/path_provider.dart';
 
 enum NotificationKind {
   directMessage,
@@ -45,12 +47,28 @@ final class PushNotificationEnvelope {
     required this.title,
     required this.body,
     required this.destination,
+    this.senderName,
+    this.senderRef,
+    this.senderAvatarHash,
+    this.sentAt,
   });
 
   final NotificationKind kind;
   final String title;
   final String body;
   final PushDestination destination;
+  final String? senderName;
+  final EntityRef? senderRef;
+  final String? senderAvatarHash;
+  final DateTime? sentAt;
+
+  Uri? get senderAvatarUri => senderRef == null
+      ? null
+      : publicAssetUri(
+          senderRef!.domain,
+          senderAvatarHash,
+          variant: 'thumbnail_128',
+        );
 
   static PushNotificationEnvelope? parse(Map<String, Object?> json) {
     try {
@@ -63,13 +81,29 @@ final class PushNotificationEnvelope {
       final title = json['title'];
       final body = json['body'];
       final destination = PushDestination.parse(json);
+      final rawSenderName = json['sender_name'];
+      final rawSenderRef = json['sender_ref'];
+      final senderName =
+          rawSenderName is String && rawSenderName.trim().isNotEmpty
+              ? rawSenderName.trim()
+              : null;
+      final senderRef = senderName == null || rawSenderRef is! String
+          ? null
+          : EntityRef.parse(rawSenderRef);
+      final avatarHash = json['sender_avatar_hash'];
+      final senderAvatarHash =
+          avatarHash is String && RegExp(r'^[0-9a-f]{64}$').hasMatch(avatarHash)
+              ? avatarHash
+              : null;
+      final sentAt = DateTime.tryParse('${json['sent_at'] ?? ''}')?.toUtc();
       if (kind == null ||
           title is! String ||
           title.isEmpty ||
           body is! String ||
           body.isEmpty ||
           destination == null ||
-          destination.message == null) {
+          destination.message == null ||
+          (senderName != null && senderRef == null)) {
         return null;
       }
       return PushNotificationEnvelope(
@@ -77,6 +111,10 @@ final class PushNotificationEnvelope {
         title: title,
         body: body,
         destination: destination,
+        senderName: senderName,
+        senderRef: senderRef,
+        senderAvatarHash: senderAvatarHash,
+        sentAt: sentAt,
       );
     } on Object {
       return null;
@@ -177,14 +215,7 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   final redemption = await _redeemOpaqueWake(wake);
   final notification = redemption.notification;
   if (notification != null) {
-    await _showLocalNotification(
-      local,
-      id: stableNotificationId(notification.destination.message!.wire),
-      kind: notification.kind,
-      title: notification.title,
-      body: notification.body,
-      payload: notification.destination.encode(),
-    );
+    await _displayRedeemedNotification(local, notification);
   } else if (redemption.showFallback) {
     await _showLocalNotification(
       local,
@@ -359,16 +390,7 @@ final class PushService {
       if (_appActive && notification.destination.channel == _visibleChannel) {
         return;
       }
-      await show(
-        // Gateway and FCM can race while the process is foregrounded. Keying
-        // both deliveries by the Kaede message reference makes the second one
-        // replace the first instead of showing a duplicate notification.
-        id: stableNotificationId(notification.destination.message!.wire),
-        kind: notification.kind,
-        title: notification.title,
-        body: notification.body,
-        payload: notification.destination.encode(),
-      );
+      await _displayRedeemedNotification(_local, notification);
     } else if (redemption.showFallback) {
       await show(
         id: stableNotificationId(wake.eventToken),
@@ -442,6 +464,10 @@ final class PushService {
     required String title,
     required String body,
     String? payload,
+    String? senderName,
+    EntityRef? senderRef,
+    Uri? senderAvatarUri,
+    DateTime? sentAt,
   }) async {
     await _showLocalNotification(
       _local,
@@ -450,6 +476,23 @@ final class PushService {
       title: title,
       body: body,
       payload: payload,
+      senderName: senderName,
+      senderKey: senderRef?.wire,
+      sentAt: sentAt,
+    );
+    final avatarPath = await _notificationAvatar(senderAvatarUri);
+    if (avatarPath == null) return;
+    await _showLocalNotification(
+      _local,
+      id: id,
+      kind: kind,
+      title: title,
+      body: body,
+      payload: payload,
+      senderName: senderName,
+      senderKey: senderRef?.wire,
+      senderAvatarPath: avatarPath,
+      sentAt: sentAt,
     );
   }
 
@@ -461,6 +504,159 @@ final class PushService {
   }
 }
 
+Future<void> _displayRedeemedNotification(
+  FlutterLocalNotificationsPlugin local,
+  PushNotificationEnvelope notification,
+) async {
+  final id = stableNotificationId(notification.destination.message!.wire);
+  final payload = notification.destination.encode();
+  await _showLocalNotification(
+    local,
+    id: id,
+    kind: notification.kind,
+    title: notification.title,
+    body: notification.body,
+    payload: payload,
+    senderName: notification.senderName,
+    senderKey: notification.senderRef?.wire,
+    sentAt: notification.sentAt,
+  );
+  final avatarPath = await _notificationAvatar(notification.senderAvatarUri);
+  if (avatarPath == null) return;
+  await _showLocalNotification(
+    local,
+    id: id,
+    kind: notification.kind,
+    title: notification.title,
+    body: notification.body,
+    payload: payload,
+    senderName: notification.senderName,
+    senderKey: notification.senderRef?.wire,
+    senderAvatarPath: avatarPath,
+    sentAt: notification.sentAt,
+  );
+}
+
+const _maximumNotificationAvatarBytes = 512 * 1024;
+const _maximumNotificationAvatarFiles = 64;
+
+Future<String?> _notificationAvatar(Uri? initialUri) async {
+  if (initialUri == null || !_safePublicAvatarUri(initialUri)) return null;
+  File? partial;
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
+  try {
+    final directory = Directory(
+      '${(await getTemporaryDirectory()).path}/kaede-notification-avatars',
+    );
+    await directory.create(recursive: true);
+    final hash = initialUri.pathSegments[2];
+    final host = initialUri.host.replaceAll(RegExp(r'[^a-z0-9.-]'), '_');
+    final cached = File('${directory.path}/$host-$hash.img');
+    if (await cached.exists()) {
+      final length = await cached.length();
+      if (length > 0 && length <= _maximumNotificationAvatarBytes) {
+        await cached.setLastModified(DateTime.now());
+        return cached.path;
+      }
+      await cached.delete();
+    }
+
+    var uri = initialUri;
+    for (var redirects = 0; redirects <= 3; redirects += 1) {
+      final request = await client.getUrl(uri);
+      request.followRedirects = false;
+      request.headers.set(HttpHeaders.acceptHeader, 'image/*');
+      final response =
+          await request.close().timeout(const Duration(seconds: 3));
+      if (const <int>{301, 302, 303, 307, 308}.contains(response.statusCode)) {
+        final location = response.headers.value(HttpHeaders.locationHeader);
+        await response.drain<void>();
+        if (location == null || redirects == 3) return null;
+        final redirected = uri.resolve(location);
+        if (!_safeHttpsUri(redirected)) return null;
+        uri = redirected;
+        continue;
+      }
+      if (response.statusCode != HttpStatus.ok ||
+          response.headers.contentType?.primaryType != 'image' ||
+          response.contentLength > _maximumNotificationAvatarBytes) {
+        await response.drain<void>();
+        return null;
+      }
+
+      partial = File(
+        '${cached.path}.${DateTime.now().microsecondsSinceEpoch}.part',
+      );
+      final sink = partial.openWrite();
+      var received = 0;
+      try {
+        await response.timeout(const Duration(seconds: 3)).forEach((chunk) {
+          received += chunk.length;
+          if (received > _maximumNotificationAvatarBytes) {
+            throw const FormatException('notification avatar is too large');
+          }
+          sink.add(chunk);
+        });
+        await sink.flush();
+      } finally {
+        await sink.close();
+      }
+      if (received == 0) return null;
+      try {
+        await partial.rename(cached.path);
+      } on FileSystemException {
+        if (!await cached.exists()) rethrow;
+      }
+      partial = null;
+      unawaited(_pruneNotificationAvatars(directory));
+      return cached.path;
+    }
+  } on Object {
+    return null;
+  } finally {
+    client.close(force: true);
+    if (partial != null && await partial.exists()) {
+      await partial.delete();
+    }
+  }
+  return null;
+}
+
+bool _safePublicAvatarUri(Uri uri) =>
+    _safeHttpsUri(uri) &&
+    uri.pathSegments.length == 4 &&
+    uri.pathSegments[0] == 'media' &&
+    uri.pathSegments[1] == 'assets' &&
+    RegExp(r'^[0-9a-f]{64}$').hasMatch(uri.pathSegments[2]) &&
+    uri.pathSegments[3] == 'thumbnail_128';
+
+bool _safeHttpsUri(Uri uri) =>
+    uri.scheme == 'https' &&
+    uri.host.isNotEmpty &&
+    uri.userInfo.isEmpty &&
+    !uri.hasFragment;
+
+Future<void> _pruneNotificationAvatars(Directory directory) async {
+  try {
+    final files = await directory
+        .list()
+        .where((entry) => entry is File && !entry.path.endsWith('.part'))
+        .cast<File>()
+        .toList();
+    if (files.length <= _maximumNotificationAvatarFiles) return;
+    final dated = <(File, DateTime)>[];
+    for (final file in files) {
+      dated.add((file, (await file.stat()).modified));
+    }
+    dated.sort((left, right) => right.$2.compareTo(left.$2));
+    for (final item in dated.skip(_maximumNotificationAvatarFiles)) {
+      await item.$1.delete();
+    }
+  } on Object {
+    // Avatar cache cleanup is best effort.
+  }
+}
+
 Future<void> _showLocalNotification(
   FlutterLocalNotificationsPlugin local, {
   required int id,
@@ -468,6 +664,10 @@ Future<void> _showLocalNotification(
   required String title,
   required String body,
   String? payload,
+  String? senderName,
+  String? senderKey,
+  String? senderAvatarPath,
+  DateTime? sentAt,
 }) async {
   final channel = switch (kind) {
     NotificationKind.directMessage => PushService._androidChannels[0],
@@ -486,6 +686,26 @@ Future<void> _showLocalNotification(
       InterruptionLevel.active,
     NotificationKind.guildMessage => InterruptionLevel.passive,
   };
+  final sender = senderName == null
+      ? null
+      : Person(
+          name: senderName,
+          key: senderKey,
+          icon: senderAvatarPath == null
+              ? null
+              : BitmapFilePathAndroidIcon(senderAvatarPath),
+        );
+  final style = sender == null
+      ? null
+      : MessagingStyleInformation(
+          const Person(name: 'You', key: 'kaede-current-user'),
+          conversationTitle:
+              kind == NotificationKind.directMessage ? null : title,
+          groupConversation: kind != NotificationKind.directMessage,
+          messages: <Message>[
+            Message(body, sentAt ?? DateTime.now().toUtc(), sender),
+          ],
+        );
   await local.show(
     id,
     title,
@@ -496,6 +716,13 @@ Future<void> _showLocalNotification(
         channel.name,
         channelDescription: channel.description,
         icon: '@drawable/ic_stat_kaede',
+        largeIcon: senderAvatarPath == null
+            ? null
+            : FilePathAndroidBitmap(senderAvatarPath),
+        styleInformation: style,
+        visibility: NotificationVisibility.private,
+        category: sender == null ? null : AndroidNotificationCategory.message,
+        onlyAlertOnce: true,
       ),
       iOS: DarwinNotificationDetails(
         presentAlert: true,

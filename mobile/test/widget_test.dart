@@ -232,17 +232,41 @@ void main() {
         'body': 'Hello',
         'channel_ref': '42@chat.example',
         'message_ref': '73@remote.example',
+        'sender_name': 'Turtle',
+        'sender_ref': '9@remote.example',
+        'sender_avatar_hash': 'a' * 64,
+        'sent_at': '2026-08-11T11:42:00Z',
       });
 
       expect(envelope?.kind, NotificationKind.mention);
       expect(envelope?.destination.channel.wire, '42@chat.example');
       expect(envelope?.destination.message?.wire, '73@remote.example');
+      expect(envelope?.senderName, 'Turtle');
+      expect(envelope?.senderRef?.wire, '9@remote.example');
+      expect(
+        envelope?.senderAvatarUri.toString(),
+        'https://remote.example/media/assets/${'a' * 64}/thumbnail_128?v=2',
+      );
+      expect(envelope?.sentAt, DateTime.utc(2026, 8, 11, 11, 42));
       expect(
         PushNotificationEnvelope.parse(<String, Object?>{
           'kind': 'mention',
           'title': 'Turtle in General',
           'body': 'Hello',
           'channel_ref': '42@chat.example',
+        }),
+        isNull,
+      );
+      expect(
+        PushNotificationEnvelope.parse(<String, Object?>{
+          'kind': 'mention',
+          'title': 'Turtle in General',
+          'body': 'Hello',
+          'channel_ref': '42@chat.example',
+          'message_ref': '73@remote.example',
+          'sender_name': 'Turtle',
+          'sender_ref': 'invalid',
+          'sender_avatar_hash': '../avatar.png',
         }),
         isNull,
       );
@@ -307,6 +331,39 @@ void main() {
   });
 
   group('read badges', () {
+    test('acknowledges only when the selected conversation pane is visible',
+        () {
+      final selected = EntityRef.parse('42@chat.example');
+
+      expect(
+        shouldAcknowledgeVisibleChannel(
+          appActive: true,
+          conversationPaneVisible: false,
+          selectedChannel: selected,
+          channel: selected,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldAcknowledgeVisibleChannel(
+          appActive: true,
+          conversationPaneVisible: true,
+          selectedChannel: selected,
+          channel: selected,
+        ),
+        isTrue,
+      );
+      expect(
+        shouldAcknowledgeVisibleChannel(
+          appActive: true,
+          conversationPaneVisible: true,
+          selectedChannel: selected,
+          channel: EntityRef.parse('43@chat.example'),
+        ),
+        isFalse,
+      );
+    });
+
     test('decodes unread booleans and mention counters', () {
       final channel = EntityRef.parse('42@chat.example');
       final badges = decodeReadBadgeSnapshot(<Map<String, Object?>>[
