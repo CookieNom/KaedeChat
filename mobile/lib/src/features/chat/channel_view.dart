@@ -1,0 +1,2115 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
+import 'package:kaede_mobile/src/api/media_urls.dart';
+import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
+import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/remote_media.dart';
+import 'package:kaede_mobile/src/features/voice/voice_room.dart';
+import 'package:kaede_mobile/src/protocol/generated.dart';
+import 'package:kaede_mobile/src/storage/local_database.dart';
+import 'package:kaede_mobile/src/theme/kaede_theme.dart';
+import 'package:markdown/markdown.dart' as md;
+import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
+
+final _mentionPattern = RegExp(r'<@([1-9][0-9]{0,18}@[A-Za-z0-9.-]+)>');
+final _urlPattern = RegExp(r'https?://[^\s<>"\u0027]+', caseSensitive: false);
+
+List<EntityRef> mentionReferences(String content) {
+  final references = <EntityRef>{};
+  for (final match in _mentionPattern.allMatches(content)) {
+    try {
+      references.add(EntityRef.parse(match.group(1)!));
+    } on FormatException {
+      // Leave malformed user-authored markup as ordinary text.
+    }
+  }
+  return List.unmodifiable(references);
+}
+
+String renderMentionLabels(String content, MobileState state) =>
+    content.replaceAllMapped(_mentionPattern, (match) {
+      final reference = EntityRef.parse(match.group(1)!);
+      KaedeUser? user;
+      if (state.user?.ref == reference) user = state.user;
+      for (final dm in state.dms) {
+        for (final candidate in dm.recipients) {
+          if (candidate.ref == reference) user = candidate;
+        }
+      }
+      for (final messages in state.messageStore.values) {
+        for (final message in messages) {
+          if (message.author?.ref == reference) user = message.author;
+        }
+      }
+      final label = (user?.name ?? reference.wire)
+          .replaceAll(r'\', r'\\')
+          .replaceAll(']', r'\]');
+      return '[@$label](kaede-mention://${reference.wire})';
+    });
+
+Uri? previewMediaUrl(String content) {
+  for (final match in _urlPattern.allMatches(content)) {
+    final raw = match.group(0)!.replaceFirst(RegExp(r'[),.!?:;\]}]+$'), '');
+    final uri = Uri.tryParse(raw);
+    if (uri == null || !const <String>{'http', 'https'}.contains(uri.scheme)) {
+      continue;
+    }
+    final path = uri.path.toLowerCase();
+    if (path.endsWith('.gif') ||
+        path.endsWith('.webp') ||
+        path.endsWith('.png') ||
+        path.endsWith('.jpg') ||
+        path.endsWith('.jpeg') ||
+        path.endsWith('.mp4')) {
+      return uri;
+    }
+  }
+  return null;
+}
+
+final class ChannelView extends ConsumerStatefulWidget {
+  const ChannelView({super.key});
+
+  @override
+  ConsumerState<ChannelView> createState() => _ChannelViewState();
+}
+
+final class _ChannelViewState extends ConsumerState<ChannelView> {
+  final _composer = TextEditingController();
+  final _scroll = ScrollController();
+  final _messageKeys = <String, GlobalKey>{};
+  final _uploads = <_PendingUpload>[];
+  EntityRef? _renderedChannel;
+  EntityRef? _renderedLastMessage;
+  final _savedOffsets = <EntityRef, double>{};
+  var _initialScrollPending = false;
+  KaedeMessage? _reply;
+  DateTime? _lastTypingSent;
+  EntityRef? _composerChannel;
+  EntityRef? _pendingComposerChannel;
+  Timer? _draftTimer;
+  Timer? _slowModeTimer;
+  final _slowModeUntil = <EntityRef, DateTime>{};
+  var _updatingComposer = false;
+  var _notifyReply = true;
+  var _sending = false;
+  String? _mentionQuery;
+
+  @override
+  void initState() {
+    super.initState();
+    _composer.addListener(_composerChanged);
+    _scroll.addListener(_rememberOffset);
+  }
+
+  @override
+  void dispose() {
+    _draftTimer?.cancel();
+    _slowModeTimer?.cancel();
+    if (_composerChannel case final channel?) {
+      ref.read(mobileControllerProvider.notifier).setDraft(
+            channel,
+            _composer.text,
+          );
+    }
+    for (final upload in _uploads) {
+      unawaited(upload.deleteIfTemporary());
+    }
+    _composer
+      ..removeListener(_composerChanged)
+      ..dispose();
+    _scroll.removeListener(_rememberOffset);
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = ref.watch(mobileControllerProvider);
+    final channel = state.activeChannel;
+    if (channel == null) {
+      return const Center(child: Text('Choose a conversation.'));
+    }
+    if (channel.type == ChannelType.voice) return VoiceRoom(channel: channel);
+    final composerReady = _composerChannel == channel.ref;
+    if (!composerReady && _pendingComposerChannel != channel.ref) {
+      _pendingComposerChannel = channel.ref;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _switchComposer(channel.ref);
+      });
+    }
+    final canSend = channel.type == ChannelType.dm ||
+        channel.allows(Permission.sendMessages);
+    final messages = state.messages;
+    final pending = state.pendingMessages;
+    final channelChanged = _renderedChannel != channel.ref;
+    final lastMessage = messages.isEmpty ? null : messages.last.ref;
+    _renderedChannel = channel.ref;
+    if (channelChanged) {
+      _initialScrollPending = !_savedOffsets.containsKey(channel.ref);
+      _scheduleRestore(channel.ref);
+    } else if (_initialScrollPending &&
+        lastMessage != null &&
+        !state.loadingMessages) {
+      _initialScrollPending = false;
+      _scheduleScrollToBottom();
+    } else if (_renderedLastMessage != null &&
+        _renderedLastMessage != lastMessage &&
+        _isNearBottom) {
+      _scheduleScrollToBottom(animated: true);
+    }
+    _renderedLastMessage = lastMessage;
+    return Column(
+      children: [
+        if (state.error case final error?)
+          _ChatErrorStrip(
+            message: error,
+            onRetry: ref.read(mobileControllerProvider.notifier).loadMessages,
+          ),
+        Expanded(
+          child: messages.isEmpty && pending.isEmpty && !state.loadingMessages
+              ? _ConversationStart(channel: channel)
+              : ListView.builder(
+                  controller: _scroll,
+                  reverse: true,
+                  padding: const EdgeInsets.fromLTRB(4, 4, 4, 14),
+                  itemCount: messages.length +
+                      pending.length +
+                      (state.channelsWithOlderMessages.contains(channel.ref)
+                          ? 1
+                          : 0),
+                  itemBuilder: (context, index) {
+                    if (index < pending.length) {
+                      final item = pending[pending.length - index - 1];
+                      return _PendingMessageTile(
+                        item: item,
+                        onRetry: () => ref
+                            .read(mobileControllerProvider.notifier)
+                            .retrySend(item.nonce),
+                        onDiscard: () => ref
+                            .read(mobileControllerProvider.notifier)
+                            .discardSend(item.nonce),
+                      );
+                    }
+                    final messageIndex =
+                        messages.length - (index - pending.length) - 1;
+                    if (messageIndex < 0) {
+                      return Padding(
+                        padding: const EdgeInsets.fromLTRB(44, 4, 44, 10),
+                        child: OutlinedButton.icon(
+                          onPressed:
+                              state.loadingMessages ? null : _loadEarlier,
+                          icon: state.loadingMessages
+                              ? const SizedBox.square(
+                                  dimension: 16,
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2))
+                              : const Icon(Icons.history_rounded),
+                          label: const Text('Load earlier messages'),
+                        ),
+                      );
+                    }
+                    final message = messages[messageIndex];
+                    final previous =
+                        messageIndex > 0 ? messages[messageIndex - 1] : null;
+                    final compact = previous != null &&
+                        previous.authorRef == message.authorRef &&
+                        message.createdAt
+                                .difference(previous.createdAt)
+                                .inMinutes <
+                            7;
+                    final key = _messageKeys.putIfAbsent(
+                        message.ref.wire, GlobalKey.new);
+                    return KeyedSubtree(
+                      key: key,
+                      child: _MessageTile(
+                        state: state,
+                        message: message,
+                        compact: compact,
+                        referenced: message.reference == null
+                            ? null
+                            : messages
+                                .where((candidate) =>
+                                    candidate.ref == message.reference)
+                                .firstOrNull,
+                        onReply: () => setState(() {
+                          _reply = message;
+                          _notifyReply = message.authorRef != state.user?.ref &&
+                              channel.type != ChannelType.dm;
+                        }),
+                        onJump: message.reference == null
+                            ? null
+                            : () => _jumpTo(message.reference!),
+                        onMenu: () => _showMessageActions(message),
+                        onAuthorTap: message.author == null
+                            ? null
+                            : () => showUserProfile(
+                                  context,
+                                  message.author!,
+                                  state.presenceByUser[message.author!.ref] ??
+                                      message.author!.presence,
+                                ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+        if (state.typingByChannel[channel.ref] case final typing?
+            when typing.isNotEmpty)
+          _TypingIndicator(participants: typing),
+        if (_mentionQuery != null)
+          _MentionSuggestions(
+            users: _mentionCandidates(state, _mentionQuery!),
+            onSelected: _insertMention,
+          ),
+        if (!canSend)
+          const _PermissionNotice()
+        else
+          IgnorePointer(
+            ignoring: !composerReady,
+            child: _Composer(
+              controller: _composer,
+              reply: _reply,
+              notifyReply: _notifyReply,
+              uploads: _uploads,
+              sending: _sending,
+              canAttach: channel.type == ChannelType.dm ||
+                  channel.allows(Permission.attachFiles),
+              slowModeRemaining: _slowModeRemaining(channel.ref),
+              onNotifyChanged: (value) => setState(() => _notifyReply = value),
+              onCancelReply: () => setState(() => _reply = null),
+              onRemoveUpload: (item) {
+                setState(() => _uploads.remove(item));
+                unawaited(item.deleteIfTemporary());
+              },
+              onAttach: _pickFiles,
+              onSend: _send,
+            ),
+          ),
+      ],
+    );
+  }
+
+  bool get _isNearBottom =>
+      !_scroll.hasClients ||
+      _scroll.offset - _scroll.position.minScrollExtent < 160;
+
+  void _composerChanged() {
+    if (_updatingComposer) return;
+    final selection = _composer.selection;
+    final beforeCursor = selection.isValid
+        ? _composer.text.substring(0, selection.extentOffset)
+        : _composer.text;
+    final match = RegExp(r'(?:^|\s)@([^\s@<>]*)$').firstMatch(beforeCursor);
+    final nextMention = match?.group(1);
+    if (_mentionQuery != nextMention && mounted) {
+      setState(() => _mentionQuery = nextMention);
+    }
+    final channel = _composerChannel;
+    if (channel == null) return;
+    _draftTimer?.cancel();
+    _draftTimer = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted || _composerChannel != channel) return;
+      ref.read(mobileControllerProvider.notifier).setDraft(
+            channel,
+            _composer.text,
+          );
+    });
+    _publishTyping(channel);
+  }
+
+  List<KaedeUser> _mentionCandidates(MobileState state, String query) {
+    final users = <EntityRef, KaedeUser>{};
+    if (state.user case final user?) users[user.ref] = user;
+    for (final dm in state.dms) {
+      for (final user in dm.recipients) {
+        users[user.ref] = user;
+      }
+    }
+    for (final messages in state.messageStore.values) {
+      for (final message in messages) {
+        if (message.author case final user?) users[user.ref] = user;
+      }
+    }
+    final needle = query.toLowerCase();
+    return users.values
+        .where((user) =>
+            user.name.toLowerCase().contains(needle) ||
+            user.username.toLowerCase().contains(needle) ||
+            user.handle.toLowerCase().contains(needle))
+        .take(6)
+        .toList(growable: false);
+  }
+
+  void _insertMention(KaedeUser user) {
+    final selection = _composer.selection;
+    if (!selection.isValid) return;
+    final before = _composer.text.substring(0, selection.extentOffset);
+    final match = RegExp(r'(?:^|\s)@([^\s@<>]*)$').firstMatch(before);
+    if (match == null) return;
+    final at = before.lastIndexOf('@', selection.extentOffset - 1);
+    final replacement = '<@${user.ref.wire}> ';
+    _composer.value = TextEditingValue(
+      text:
+          _composer.text.replaceRange(at, selection.extentOffset, replacement),
+      selection: TextSelection.collapsed(offset: at + replacement.length),
+    );
+    setState(() => _mentionQuery = null);
+  }
+
+  void _publishTyping(EntityRef channel) {
+    final text = _composer.text.trim();
+    if (text.isEmpty) return;
+    final now = DateTime.now();
+    if (_lastTypingSent case final last?
+        when now.difference(last) < const Duration(seconds: 8)) {
+      return;
+    }
+    _lastTypingSent = now;
+    unawaited(
+      ref.read(mobileControllerProvider.notifier).publishTyping(channel),
+    );
+  }
+
+  void _switchComposer(EntityRef channel) {
+    final previous = _composerChannel;
+    if (previous != null) {
+      ref.read(mobileControllerProvider.notifier).setDraft(
+            previous,
+            _composer.text,
+          );
+    }
+    _draftTimer?.cancel();
+    final draft = ref.read(mobileControllerProvider).drafts[channel] ?? '';
+    _updatingComposer = true;
+    _composer.value = TextEditingValue(
+      text: draft,
+      selection: TextSelection.collapsed(offset: draft.length),
+    );
+    _updatingComposer = false;
+    setState(() {
+      _composerChannel = channel;
+      _pendingComposerChannel = null;
+      _reply = null;
+      _lastTypingSent = null;
+    });
+  }
+
+  void _rememberOffset() {
+    final channel = _renderedChannel;
+    if (channel != null && _scroll.hasClients) {
+      _savedOffsets[channel] = _scroll.offset;
+    }
+  }
+
+  void _scheduleRestore(EntityRef channel) {
+    final offset = _savedOffsets[channel];
+    if (offset == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _renderedChannel != channel || !_scroll.hasClients) {
+        return;
+      }
+      _scroll.jumpTo(offset.clamp(0.0, _scroll.position.maxScrollExtent));
+    });
+  }
+
+  void _scheduleScrollToBottom({bool animated = false}) {
+    final channel = _renderedChannel;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || channel != _renderedChannel || !_scroll.hasClients) {
+        return;
+      }
+      final target = _scroll.position.minScrollExtent;
+      if (animated) {
+        unawaited(_scroll.animateTo(target,
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic));
+      } else {
+        _scroll.jumpTo(target);
+      }
+    });
+  }
+
+  Future<void> _loadEarlier() async {
+    await ref.read(mobileControllerProvider.notifier).loadMessages(older: true);
+    // A reversed list appends older rows at its far edge, so Flutter retains
+    // the visible content and offset without a compensating jump.
+  }
+
+  Future<void> _jumpTo(EntityRef reference) async {
+    var key = _messageKeys[reference.wire];
+    if (key?.currentContext == null) {
+      await ref.read(mobileControllerProvider.notifier).loadAround(reference);
+      if (!mounted) return;
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      key = _messageKeys[reference.wire];
+    }
+    final targetContext = key?.currentContext;
+    if (targetContext != null && targetContext.mounted) {
+      await Scrollable.ensureVisible(targetContext,
+          duration: const Duration(milliseconds: 320), alignment: .35);
+    }
+  }
+
+  Future<void> _pickFiles() async {
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      withData: false,
+      withReadStream: true,
+    );
+    if (result == null || !mounted) return;
+    final additions = <_PendingUpload>[];
+    for (final file in result.files.take(10 - _uploads.length)) {
+      File source;
+      var temporary = false;
+      if (file.path case final path?) {
+        source = File(path);
+      } else if (file.readStream case final stream?) {
+        final directory = await getTemporaryDirectory();
+        source = File(
+          '${directory.path}/kaede-upload-${DateTime.now().microsecondsSinceEpoch}-${_safeName(file.name)}',
+        );
+        final sink = source.openWrite();
+        await sink.addStream(stream);
+        await sink.close();
+        temporary = true;
+      } else {
+        continue;
+      }
+      additions.add(_PendingUpload(
+        name: file.name,
+        file: source,
+        size: await source.length(),
+        contentType: _contentType(file.name),
+        temporary: temporary,
+      ));
+    }
+    setState(() => _uploads.addAll(additions));
+  }
+
+  Future<void> _send() async {
+    if (_sending) return;
+    final state = ref.read(mobileControllerProvider);
+    final channel = state.activeChannel;
+    if (channel == null || _composerChannel != channel.ref) return;
+    if (_slowModeRemaining(channel.ref) > Duration.zero) return;
+    final content = _composer.text;
+    final reply = _reply;
+    final notifyReply = _notifyReply;
+    final pendingUploads = List<_PendingUpload>.of(_uploads);
+    setState(() => _sending = true);
+    try {
+      final controller = ref.read(mobileControllerProvider.notifier);
+      final uploaded = <EntityRef>[];
+      for (final item in pendingUploads) {
+        uploaded.add(await controller.repository.uploadAttachmentFile(
+          channel: channel.ref,
+          filename: item.name,
+          contentType: item.contentType,
+          file: item.file,
+        ));
+      }
+      await controller.send(
+        channel.ref,
+        content,
+        attachments: uploaded,
+        mentionUsers: mentionReferences(content),
+        replyTo: reply?.ref,
+        replyAuthor: reply?.authorRef,
+        notify: notifyReply,
+      );
+      controller.setDraft(channel.ref, '');
+      if (_composerChannel == channel.ref) {
+        _updatingComposer = true;
+        _composer.clear();
+        _updatingComposer = false;
+      }
+      setState(() {
+        _uploads.removeWhere(pendingUploads.contains);
+        if (_composerChannel == channel.ref && _reply == reply) _reply = null;
+      });
+      for (final upload in pendingUploads) {
+        unawaited(upload.deleteIfTemporary());
+      }
+      if (channel.slowModeSeconds > 0) {
+        _startSlowMode(
+          channel.ref,
+          Duration(seconds: channel.slowModeSeconds),
+        );
+      }
+      await WidgetsBinding.instance.endOfFrame;
+      if (_composerChannel == channel.ref && _scroll.hasClients) {
+        await _scroll.animateTo(_scroll.position.minScrollExtent,
+            duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+      }
+    } on Object catch (error) {
+      if (error is KaedeException && error.retryAfter != null) {
+        _startSlowMode(channel.ref, error.retryAfter!);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Duration _slowModeRemaining(EntityRef channel) {
+    final deadline = _slowModeUntil[channel];
+    if (deadline == null) return Duration.zero;
+    final remaining = deadline.difference(DateTime.now());
+    return remaining.isNegative ? Duration.zero : remaining;
+  }
+
+  void _startSlowMode(EntityRef channel, Duration duration) {
+    if (duration <= Duration.zero || !mounted) return;
+    _slowModeUntil[channel] = DateTime.now().add(duration);
+    _slowModeTimer?.cancel();
+    _slowModeTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      final now = DateTime.now();
+      _slowModeUntil.removeWhere((_, deadline) => !deadline.isAfter(now));
+      setState(() {});
+      if (_slowModeUntil.isEmpty) {
+        timer.cancel();
+        _slowModeTimer = null;
+      }
+    });
+    setState(() {});
+  }
+
+  Future<void> _showMessageActions(KaedeMessage message) async {
+    if (message.deletedAt != null) return;
+    final me = ref.read(mobileControllerProvider).user?.ref;
+    final channel = ref.read(mobileControllerProvider).activeChannel!;
+    final canManage = channel.type == ChannelType.dm ||
+        channel.allows(Permission.manageMessages);
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+                leading: const Icon(Icons.reply_rounded),
+                title: const Text('Reply'),
+                onTap: () => Navigator.pop(context, 'reply')),
+            ListTile(
+                leading: const Icon(Icons.copy_rounded),
+                title: const Text('Copy text'),
+                onTap: () => Navigator.pop(context, 'copy')),
+            ListTile(
+                leading: const Icon(Icons.link_rounded),
+                title: const Text('Copy message link'),
+                onTap: () => Navigator.pop(context, 'copy-link')),
+            ListTile(
+                leading: const Icon(Icons.add_reaction_outlined),
+                title: const Text('Add reaction'),
+                onTap: () => Navigator.pop(context, 'react')),
+            if (canManage)
+              ListTile(
+                  leading: Icon(message.pinned
+                      ? Icons.push_pin_rounded
+                      : Icons.push_pin_outlined),
+                  title: Text(message.pinned ? 'Unpin message' : 'Pin message'),
+                  onTap: () => Navigator.pop(context, 'pin')),
+            if (message.authorRef == me)
+              ListTile(
+                  leading: const Icon(Icons.edit_outlined),
+                  title: const Text('Edit message'),
+                  onTap: () => Navigator.pop(context, 'edit')),
+            if (message.authorRef == me || canManage)
+              ListTile(
+                leading: const Icon(Icons.delete_outline_rounded,
+                    color: KaedeColors.danger),
+                title: const Text('Delete message',
+                    style: TextStyle(color: KaedeColors.danger)),
+                onTap: () => Navigator.pop(context, 'delete'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    final controller = ref.read(mobileControllerProvider.notifier);
+    try {
+      switch (action) {
+        case 'reply':
+          setState(() {
+            _reply = message;
+            _notifyReply =
+                message.authorRef != me && channel.type != ChannelType.dm;
+          });
+          break;
+        case 'copy':
+          await Clipboard.setData(ClipboardData(text: message.content ?? ''));
+          break;
+        case 'copy-link':
+          final instance = controller.api.tokens?.instance.value;
+          if (instance != null) {
+            final guild = ref.read(mobileControllerProvider).activeGuild;
+            final route = guild == null
+                ? '/home/${Uri.encodeComponent(channel.ref.wire)}'
+                : '/channels/${Uri.encodeComponent(guild.ref.wire)}/'
+                    '${Uri.encodeComponent(channel.ref.wire)}';
+            await Clipboard.setData(ClipboardData(
+              text: 'https://$instance$route#message-${message.ref.wire}',
+            ));
+          }
+          break;
+        case 'react':
+          await controller.repository
+              .react(message.channelRef, message.ref, '👍');
+          break;
+        case 'pin':
+          if (message.pinned) {
+            await controller.repository.unpin(message.channelRef, message.ref);
+          } else {
+            await controller.repository.pin(message.channelRef, message.ref);
+          }
+          break;
+        case 'edit':
+          final edited = await _editDialog(message.content ?? '');
+          if (edited != null) await controller.replaceMessage(message, edited);
+          break;
+        case 'delete':
+          await controller.removeMessage(message);
+          break;
+      }
+    } on Object catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('That action could not be completed: $error')),
+      );
+    }
+  }
+
+  Future<String?> _editDialog(String original) {
+    final input = TextEditingController(text: original);
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Edit message'),
+        content: TextField(
+            controller: input, autofocus: true, minLines: 2, maxLines: 8),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, input.text.trim()),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+  }
+}
+
+final class _PendingMessageTile extends StatelessWidget {
+  const _PendingMessageTile({
+    required this.item,
+    required this.onRetry,
+    required this.onDiscard,
+  });
+
+  final OutboxItem item;
+  final VoidCallback onRetry;
+  final VoidCallback onDiscard;
+
+  @override
+  Widget build(BuildContext context) {
+    final failed = item.state == 'failed';
+    final content = '${item.payload['content'] ?? ''}'.trim();
+    return Opacity(
+      opacity: failed ? 1 : .58,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(62, 8, 8, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (content.isNotEmpty) Text(content),
+            Row(
+              children: [
+                Icon(
+                  failed ? Icons.error_outline_rounded : Icons.schedule_rounded,
+                  size: 16,
+                  color: failed ? KaedeColors.danger : KaedeColors.muted,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    failed
+                        ? (item.lastError ?? 'Message could not be sent.')
+                        : 'Sending…',
+                    style: TextStyle(
+                      color: failed ? KaedeColors.danger : KaedeColors.muted,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+                if (failed) ...[
+                  TextButton(onPressed: onRetry, child: const Text('Retry')),
+                  IconButton(
+                    onPressed: onDiscard,
+                    tooltip: 'Discard message',
+                    icon: const Icon(Icons.close_rounded, size: 18),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _ChatErrorStrip extends StatelessWidget {
+  const _ChatErrorStrip({required this.message, required this.onRetry});
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) => ColoredBox(
+        color: KaedeColors.danger.withValues(alpha: .16),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
+          child: Row(
+            children: [
+              const Icon(Icons.error_outline_rounded,
+                  size: 18, color: KaedeColors.danger),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  message,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: KaedeColors.danger,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              TextButton(onPressed: onRetry, child: const Text('Retry')),
+            ],
+          ),
+        ),
+      );
+}
+
+final class _ReactionChip extends StatelessWidget {
+  const _ReactionChip({
+    required this.emoji,
+    required this.count,
+    required this.onTap,
+  });
+
+  final String emoji;
+  final int count;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(9),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: KaedeColors.selected,
+            borderRadius: BorderRadius.circular(9),
+            border: Border.all(color: KaedeColors.border),
+          ),
+          child: Text(
+            '$emoji  $count',
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+          ),
+        ),
+      );
+}
+
+final class _TypingDots extends StatelessWidget {
+  const _TypingDots();
+
+  @override
+  Widget build(BuildContext context) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (var index = 0; index < 3; index++) ...[
+            if (index > 0) const SizedBox(width: 3),
+            Container(
+              width: 4,
+              height: 4,
+              decoration: const BoxDecoration(
+                color: KaedeColors.muted,
+                shape: BoxShape.circle,
+              ),
+            ),
+          ],
+        ],
+      );
+}
+
+final class _ReplyingBar extends StatelessWidget {
+  const _ReplyingBar({
+    required this.author,
+    required this.notify,
+    required this.onNotifyChanged,
+    required this.onClose,
+  });
+
+  final String author;
+  final bool notify;
+  final ValueChanged<bool> onNotifyChanged;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.fromLTRB(13, 7, 5, 7),
+        decoration: const BoxDecoration(
+          border: Border(bottom: BorderSide(color: KaedeColors.border)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text.rich(
+                TextSpan(
+                  text: 'Replying to ',
+                  style: const TextStyle(color: KaedeColors.muted),
+                  children: [
+                    TextSpan(
+                      text: author,
+                      style: const TextStyle(
+                        color: KaedeColors.text,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            TextButton.icon(
+              onPressed: () => onNotifyChanged(!notify),
+              icon: Icon(
+                  notify ? Icons.alternate_email : Icons.notifications_off,
+                  size: 15),
+              label: Text(notify ? 'ON' : 'OFF'),
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+              ),
+            ),
+            IconButton(
+              onPressed: onClose,
+              tooltip: 'Cancel reply',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.close_rounded, size: 18),
+            ),
+          ],
+        ),
+      );
+}
+
+final class _UploadChip extends StatelessWidget {
+  const _UploadChip({required this.item, required this.onRemove});
+
+  final _PendingUpload item;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: 176,
+        padding: const EdgeInsets.fromLTRB(10, 5, 3, 5),
+        decoration: BoxDecoration(
+          color: KaedeColors.selected,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: KaedeColors.border),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.attach_file_rounded,
+                size: 18, color: KaedeColors.muted),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                item.name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+            ),
+            IconButton(
+              onPressed: onRemove,
+              tooltip: 'Remove attachment',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.close_rounded, size: 17),
+            ),
+          ],
+        ),
+      );
+}
+
+final class _MessageTile extends StatelessWidget {
+  const _MessageTile(
+      {required this.message,
+      required this.state,
+      required this.compact,
+      required this.onReply,
+      required this.onMenu,
+      this.onAuthorTap,
+      this.referenced,
+      this.onJump});
+  final KaedeMessage message;
+  final MobileState state;
+  final KaedeMessage? referenced;
+  final bool compact;
+  final VoidCallback onReply;
+  final VoidCallback onMenu;
+  final VoidCallback? onAuthorTap;
+  final VoidCallback? onJump;
+
+  @override
+  Widget build(BuildContext context) {
+    final author = message.author;
+    final deleted = message.deletedAt != null;
+    final mediaPreview = previewMediaUrl(message.content ?? '');
+    return InkWell(
+      onLongPress: onMenu,
+      onDoubleTap: deleted ? null : onReply,
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(8, compact ? 1 : 9, 8, 2),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 40,
+              child: compact
+                  ? null
+                  : author == null
+                      ? const CircleAvatar(
+                          backgroundColor: KaedeColors.raised,
+                          child: Text('?'),
+                        )
+                      : GestureDetector(
+                          onTap: onAuthorTap,
+                          child: UserAvatar(user: author),
+                        ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (!compact)
+                    Row(
+                      children: [
+                        Flexible(
+                            child: GestureDetector(
+                          onTap: onAuthorTap,
+                          child: Text(author?.name ?? 'Unknown author',
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w800, fontSize: 15)),
+                        )),
+                        const SizedBox(width: 7),
+                        Text(
+                            DateFormat.jm().format(message.createdAt.toLocal()),
+                            style: const TextStyle(
+                                color: KaedeColors.muted, fontSize: 12)),
+                        if (message.editedAt != null)
+                          const Text('  (edited)',
+                              style: TextStyle(
+                                  color: KaedeColors.muted, fontSize: 11)),
+                      ],
+                    ),
+                  if (message.reference != null)
+                    InkWell(
+                      onTap: onJump,
+                      borderRadius: BorderRadius.circular(6),
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 3, bottom: 2),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.reply_rounded,
+                                size: 14, color: KaedeColors.muted),
+                            const SizedBox(width: 5),
+                            Text(referenced?.author?.name ?? 'Original message',
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w700, fontSize: 13)),
+                            const SizedBox(width: 6),
+                            Expanded(
+                                child: Text(
+                                    referenced == null
+                                        ? 'Tap to load message'
+                                        : referenced!.content ?? 'Attachment',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        color: KaedeColors.muted,
+                                        fontSize: 13))),
+                          ],
+                        ),
+                      ),
+                    ),
+                  if (deleted)
+                    const Text(
+                      'Message deleted',
+                      style: TextStyle(
+                        color: KaedeColors.muted,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    )
+                  else if (message.content case final content?
+                      when content.isNotEmpty)
+                    MarkdownBody(
+                      data: renderMentionLabels(
+                        mediaPreview == null
+                            ? content
+                            : content.replaceFirst(mediaPreview.toString(), ''),
+                        state,
+                      ).trim(),
+                      builders: <String, MarkdownElementBuilder>{
+                        'a': _MentionBuilder(),
+                      },
+                      selectable: true,
+                      styleSheet: MarkdownStyleSheet(
+                        p: const TextStyle(
+                          color: KaedeColors.text,
+                          fontSize: 16,
+                          height: 1.24,
+                        ),
+                        pPadding: EdgeInsets.zero,
+                        code: const TextStyle(
+                          color: KaedeColors.text,
+                          backgroundColor: KaedeColors.rail,
+                          fontSize: 14,
+                        ),
+                        codeblockDecoration: BoxDecoration(
+                          color: KaedeColors.rail,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: KaedeColors.border),
+                        ),
+                        blockquoteDecoration: const BoxDecoration(
+                          border: Border(
+                            left: BorderSide(
+                              color: KaedeColors.muted,
+                              width: 3,
+                            ),
+                          ),
+                        ),
+                      ),
+                      onTapLink: (_, href, __) async {
+                        final uri = Uri.tryParse(href ?? '');
+                        if (uri?.scheme == 'kaede-mention') return;
+                        if (uri != null &&
+                            (uri.scheme == 'https' || uri.scheme == 'http')) {
+                          await launchUrl(uri,
+                              mode: LaunchMode.externalApplication);
+                        }
+                      },
+                    ),
+                  if (!deleted && mediaPreview != null)
+                    _RemoteMediaPreview(uri: mediaPreview),
+                  for (final attachment in deleted
+                      ? const <KaedeAttachment>[]
+                      : message.attachments)
+                    _AttachmentCard(attachment: attachment),
+                  if (!deleted && message.reactionCounts.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: [
+                          for (final reaction in message.reactionCounts.entries)
+                            _ReactionChip(
+                              emoji: reaction.key,
+                              count: reaction.value,
+                              onTap: onMenu,
+                            ),
+                        ],
+                      ),
+                    ),
+                  if (message.deliveryStatus == 'failed')
+                    const Text('Message not delivered',
+                        style: TextStyle(
+                            color: KaedeColors.danger,
+                            fontWeight: FontWeight.w700)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _AttachmentCard extends ConsumerStatefulWidget {
+  const _AttachmentCard({required this.attachment});
+  final KaedeAttachment attachment;
+
+  @override
+  ConsumerState<_AttachmentCard> createState() => _AttachmentCardState();
+}
+
+final class _AttachmentStatusCard extends StatelessWidget {
+  const _AttachmentStatusCard({
+    required this.attachment,
+    required this.icon,
+    required this.message,
+    this.error = false,
+  });
+
+  final KaedeAttachment attachment;
+  final IconData icon;
+  final String message;
+  final bool error;
+
+  @override
+  Widget build(BuildContext context) {
+    final card = Container(
+      margin: const EdgeInsets.only(top: 7),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: KaedeColors.raised,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: error ? KaedeColors.danger : KaedeColors.border,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: error ? KaedeColors.danger : KaedeColors.muted),
+          const SizedBox(width: 10),
+          Expanded(child: Text(message, overflow: TextOverflow.ellipsis)),
+        ],
+      ),
+    );
+    if (error || !attachment.contentType.startsWith('image/')) return card;
+    final width = attachment.width;
+    final height = attachment.height;
+    final ratio = width != null && height != null && width > 0 && height > 0
+        ? (width / height).clamp(.65, 2.4)
+        : 16 / 9;
+    return AspectRatio(aspectRatio: ratio, child: card);
+  }
+}
+
+final class _RemoteMediaPreview extends StatefulWidget {
+  const _RemoteMediaPreview({required this.uri});
+  final Uri uri;
+
+  @override
+  State<_RemoteMediaPreview> createState() => _RemoteMediaPreviewState();
+}
+
+final class _RemoteMediaPreviewState extends State<_RemoteMediaPreview> {
+  Future<File>? _videoFile;
+  HttpClient? _downloadClient;
+
+  bool get _isVideo => widget.uri.path.toLowerCase().endsWith('.mp4');
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeVideo();
+  }
+
+  @override
+  void didUpdateWidget(covariant _RemoteMediaPreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.uri != widget.uri) {
+      _downloadClient?.close(force: true);
+      _videoFile = null;
+      _initializeVideo();
+    }
+  }
+
+  void _initializeVideo() {
+    if (!_isVideo) return;
+    _videoFile = _cacheVideo(widget.uri);
+  }
+
+  @override
+  void dispose() {
+    _downloadClient?.close(force: true);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(top: 7),
+        child: GestureDetector(
+          onLongPress: () => _copyLink(context),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: _isVideo
+                ? FutureBuilder<File>(
+                    future: _videoFile,
+                    builder: (context, snapshot) {
+                      if (snapshot.hasError) {
+                        return const AspectRatio(
+                          aspectRatio: 16 / 9,
+                          child: ColoredBox(
+                            color: KaedeColors.raised,
+                            child: Center(
+                                child: Icon(Icons.broken_image_outlined)),
+                          ),
+                        );
+                      }
+                      if (!snapshot.hasData) {
+                        return const AspectRatio(
+                          aspectRatio: 16 / 9,
+                          child: ColoredBox(
+                            color: KaedeColors.raised,
+                            child: Center(child: CircularProgressIndicator()),
+                          ),
+                        );
+                      }
+                      return _FileVideo(file: snapshot.data!);
+                    },
+                  )
+                : CachedNetworkImage(
+                    imageUrl: widget.uri.toString(),
+                    fit: BoxFit.contain,
+                    fadeInDuration: Duration.zero,
+                    placeholder: (_, __) => const AspectRatio(
+                      aspectRatio: 16 / 9,
+                      child: ColoredBox(
+                        color: KaedeColors.raised,
+                        child: Center(child: CircularProgressIndicator()),
+                      ),
+                    ),
+                    errorWidget: (_, __, ___) => const AspectRatio(
+                      aspectRatio: 16 / 9,
+                      child: ColoredBox(
+                        color: KaedeColors.raised,
+                        child: Center(child: Icon(Icons.broken_image_outlined)),
+                      ),
+                    ),
+                  ),
+          ),
+        ),
+      );
+
+  Future<File> _cacheVideo(Uri original) async {
+    final directory = await getTemporaryDirectory();
+    final destination = File(
+      '${directory.path}/kaede-link-video-${stableMediaCacheKey(original)}.mp4',
+    );
+    if (await destination.exists() && await destination.length() > 0) {
+      return destination;
+    }
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 12);
+    _downloadClient = client;
+    var uri = original;
+    try {
+      for (var redirects = 0; redirects <= 5; redirects += 1) {
+        final request = await client.getUrl(uri);
+        request.followRedirects = false;
+        final response = await request.close();
+        if (<int>{301, 302, 303, 307, 308}.contains(response.statusCode)) {
+          final location = response.headers.value(HttpHeaders.locationHeader);
+          await response.drain<void>();
+          if (location == null || redirects == 5) {
+            throw const HttpException('Invalid media redirect');
+          }
+          final next = uri.resolve(location);
+          if (next.scheme != 'https') {
+            throw const HttpException('Unsafe media redirect');
+          }
+          uri = next;
+          continue;
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          await response.drain<void>();
+          throw HttpException('Media request failed', uri: uri);
+        }
+        const maximum = 100 * 1024 * 1024;
+        if (response.contentLength > maximum) {
+          await response.drain<void>();
+          throw const HttpException('Media is too large');
+        }
+        final temporary = File('${destination.path}.part');
+        final sink = temporary.openWrite();
+        var received = 0;
+        try {
+          await for (final chunk in response) {
+            received += chunk.length;
+            if (received > maximum) {
+              throw const HttpException('Media is too large');
+            }
+            sink.add(chunk);
+          }
+          await sink.close();
+        } on Object {
+          await sink.close();
+          if (await temporary.exists()) await temporary.delete();
+          rethrow;
+        }
+        return temporary.rename(destination.path);
+      }
+      throw const HttpException('Too many media redirects');
+    } finally {
+      if (identical(_downloadClient, client)) _downloadClient = null;
+      client.close();
+    }
+  }
+
+  Future<void> _copyLink(BuildContext context) async {
+    final copy = await showModalBottomSheet<bool>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListTile(
+          leading: const Icon(Icons.link_rounded),
+          title: const Text('Copy media link'),
+          onTap: () => Navigator.pop(context, true),
+        ),
+      ),
+    );
+    if (copy == true) {
+      await Clipboard.setData(ClipboardData(text: widget.uri.toString()));
+    }
+  }
+}
+
+String stableMediaCacheKey(Uri uri) {
+  var hash = 0xcbf29ce484222325;
+  for (final unit in uri.toString().codeUnits) {
+    hash ^= unit;
+    hash = (hash * 0x100000001b3) & 0x7fffffffffffffff;
+  }
+  return hash.toRadixString(16);
+}
+
+final class _MentionBuilder extends MarkdownElementBuilder {
+  @override
+  Widget? visitElementAfterWithContext(
+    BuildContext context,
+    md.Element element,
+    TextStyle? preferredStyle,
+    TextStyle? parentStyle,
+  ) {
+    final href = element.attributes['href'];
+    if (href == null || !href.startsWith('kaede-mention://')) return null;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+      decoration: BoxDecoration(
+        color: KaedeColors.coral.withValues(alpha: .14),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        element.textContent,
+        style: (parentStyle ?? preferredStyle ?? const TextStyle()).copyWith(
+          color: KaedeColors.coral,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
+  late Future<File> _future;
+  late KaedeAttachment _displayAttachment = widget.attachment;
+  File? _file;
+  Timer? _statusTimer;
+  var _loadGeneration = 0;
+  var _disposed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _initialFuture();
+    _scheduleStatusPoll();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AttachmentCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.attachment.ref != widget.attachment.ref ||
+        oldWidget.attachment.scanStatus != widget.attachment.scanStatus) {
+      _loadGeneration += 1;
+      _takeFile();
+      _displayAttachment = widget.attachment;
+      _future = _initialFuture();
+      _scheduleStatusPoll();
+    }
+  }
+
+  Future<File> _initialFuture() => widget.attachment.scanStatus == 'clean'
+      ? _load()
+      : Completer<File>().future;
+
+  void _scheduleStatusPoll() {
+    _statusTimer?.cancel();
+    if (_displayAttachment.scanStatus == 'clean' ||
+        _displayAttachment.scanStatus == 'rejected' ||
+        _displayAttachment.scanStatus == 'failed') {
+      return;
+    }
+    _statusTimer = Timer(const Duration(seconds: 1), _pollStatus);
+  }
+
+  Future<void> _pollStatus() async {
+    try {
+      final attachment = await ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .attachmentStatus(_displayAttachment);
+      if (!mounted || attachment.ref != widget.attachment.ref) return;
+      setState(() {
+        _displayAttachment = attachment;
+        if (attachment.scanStatus == 'clean') _future = _load(attachment);
+      });
+    } on Object {
+      // Gateway updates are the primary path. Polling is a recovery path for
+      // uploads whose scan completion event was missed while backgrounded.
+    }
+    if (mounted) _scheduleStatusPoll();
+  }
+
+  Future<File> _load([KaedeAttachment? resolved]) async {
+    final generation = ++_loadGeneration;
+    final directory = await getTemporaryDirectory();
+    final attachment = resolved ?? _displayAttachment;
+    final safeDomain = attachment.ref.domain.value.replaceAll(
+      RegExp('[^a-z0-9.-]'),
+      '_',
+    );
+    final destination = File(
+      '${directory.path}/kaede-media-${attachment.ref.id.value}-$safeDomain-${_safeName(attachment.filename)}',
+    );
+    if (await destination.exists() && await destination.length() > 0) {
+      _file = destination;
+      return destination;
+    }
+    final downloaded = await ref
+        .read(mobileControllerProvider.notifier)
+        .repository
+        .downloadAttachment(attachment, destination);
+    if (_disposed || generation != _loadGeneration) {
+      throw const FileSystemException('Attachment load was cancelled.');
+    }
+    _file = downloaded;
+    return downloaded;
+  }
+
+  File? _takeFile() {
+    final file = _file;
+    _file = null;
+    return file;
+  }
+
+  Future<void> _deleteFile(File? file) async {
+    if (file != null && await file.exists()) {
+      try {
+        await file.delete();
+      } on FileSystemException {
+        // A native decoder may briefly retain the file on Windows.
+        await Future<void>.delayed(const Duration(seconds: 1));
+        if (await file.exists()) {
+          try {
+            await file.delete();
+          } on FileSystemException {
+            // The operating system will remove the temporary directory later.
+          }
+        }
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _statusTimer?.cancel();
+    _loadGeneration += 1;
+    _takeFile();
+    super.dispose();
+  }
+
+  void _retry() {
+    _loadGeneration += 1;
+    final oldFile = _takeFile();
+    unawaited(_deleteFile(oldFile));
+    setState(() => _future = _load());
+  }
+
+  Future<void> _showMediaActions() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.link_rounded),
+              title: const Text('Copy media link'),
+              onTap: () => Navigator.pop(context, 'copy'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.info_outline_rounded),
+              title: Text(widget.attachment.filename),
+              subtitle: Text(
+                '${widget.attachment.contentType} · '
+                '${(widget.attachment.size / 1024).ceil()} KB',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action != 'copy' || !mounted) return;
+    final controller = ref.read(mobileControllerProvider.notifier);
+    final instance = controller.api.tokens?.instance.value;
+    if (instance == null) return;
+    await Clipboard.setData(ClipboardData(
+      text: 'https://$instance${attachmentMediaPath(widget.attachment.ref)}',
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final attachment = _displayAttachment;
+    if (attachment.scanStatus == 'pending' ||
+        attachment.scanStatus == 'processing') {
+      return _AttachmentStatusCard(
+        attachment: attachment,
+        icon: Icons.hourglass_top_rounded,
+        message: 'Preparing ${attachment.filename}…',
+      );
+    }
+    if (attachment.scanStatus != 'clean') {
+      return _AttachmentStatusCard(
+        attachment: attachment,
+        icon: Icons.warning_amber_rounded,
+        message: '${attachment.filename} could not be processed safely.',
+        error: true,
+      );
+    }
+    final imageWidth = attachment.width;
+    final imageHeight = attachment.height;
+    final imageRatio = imageWidth != null &&
+            imageHeight != null &&
+            imageWidth > 0 &&
+            imageHeight > 0
+        ? (imageWidth / imageHeight).clamp(.65, 2.4)
+        : 16 / 9;
+    return FutureBuilder<File>(
+      future: _future,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return Container(
+            margin: const EdgeInsets.only(top: 7),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: KaedeColors.raised,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: KaedeColors.danger),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.broken_image_outlined,
+                    color: KaedeColors.danger),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Could not load ${attachment.filename}.',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                TextButton(
+                  onPressed: _retry,
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          );
+        }
+        if (!snapshot.hasData) {
+          final loading = Container(
+            height: attachment.contentType.startsWith('image/') ? null : 62,
+            margin: const EdgeInsets.only(top: 7),
+            decoration: BoxDecoration(
+                color: KaedeColors.raised,
+                borderRadius: BorderRadius.circular(14)),
+            child: const Center(child: CircularProgressIndicator()),
+          );
+          return attachment.contentType.startsWith('image/')
+              ? AspectRatio(aspectRatio: imageRatio, child: loading)
+              : loading;
+        }
+        final file = snapshot.data!;
+        if (attachment.contentType.startsWith('image/')) {
+          return AspectRatio(
+            aspectRatio: imageRatio,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 7),
+              child: Semantics(
+                button: true,
+                label: 'Open image ${attachment.filename}',
+                child: GestureDetector(
+                  onLongPress: _showMediaActions,
+                  onTap: () => showDialog<void>(
+                    context: context,
+                    builder: (dialogContext) => Dialog.fullscreen(
+                      backgroundColor: Colors.black.withValues(alpha: .92),
+                      child: Stack(
+                        children: [
+                          InteractiveViewer(
+                              minScale: .5,
+                              maxScale: 6,
+                              child: Center(
+                                  child:
+                                      Image.file(file, fit: BoxFit.contain))),
+                          Positioned(
+                              top: 12,
+                              right: 12,
+                              child: IconButton.filled(
+                                  tooltip: 'Close image viewer',
+                                  onPressed: () => Navigator.pop(dialogContext),
+                                  icon: const Icon(Icons.close_rounded))),
+                        ],
+                      ),
+                    ),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.file(
+                      file,
+                      fit: BoxFit.contain,
+                      width: double.infinity,
+                      alignment: Alignment.centerLeft,
+                      errorBuilder: (_, __, ___) => const Center(
+                        child: Icon(Icons.broken_image_outlined),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
+        if (attachment.contentType.startsWith('video/')) {
+          return GestureDetector(
+            onLongPress: _showMediaActions,
+            child: _FileVideo(file: file),
+          );
+        }
+        return ListTile(
+          onLongPress: _showMediaActions,
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.insert_drive_file_outlined),
+          title: Text(attachment.filename),
+          subtitle: Text('${(attachment.size / 1024).ceil()} KB'),
+        );
+      },
+    );
+  }
+}
+
+final class _TypingIndicator extends StatelessWidget {
+  const _TypingIndicator({required this.participants});
+
+  final List<TypingParticipant> participants;
+
+  @override
+  Widget build(BuildContext context) {
+    final names = participants.map((item) => item.name).toList();
+    final label = switch (names.length) {
+      1 => '${names.first} is typing…',
+      2 => '${names[0]} and ${names[1]} are typing…',
+      _ =>
+        '${names[0]}, ${names[1]}, and ${names.length - 2} others are typing…',
+    };
+    return Semantics(
+      liveRegion: true,
+      label: label,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(18, 2, 18, 0),
+        child: Row(
+          children: [
+            const _TypingDots(),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: KaedeColors.muted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _FileVideo extends StatefulWidget {
+  const _FileVideo({required this.file});
+  final File file;
+  @override
+  State<_FileVideo> createState() => _FileVideoState();
+}
+
+final class _FileVideoState extends State<_FileVideo> {
+  VideoPlayerController? controller;
+  @override
+  void initState() {
+    super.initState();
+    _prepare();
+  }
+
+  Future<void> _prepare() async {
+    final next = VideoPlayerController.file(widget.file);
+    await next.initialize();
+    if (!mounted) {
+      await next.dispose();
+      return;
+    }
+    setState(() => controller = next);
+  }
+
+  @override
+  void dispose() {
+    controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final player = controller;
+    if (player == null) {
+      return const Padding(
+          padding: EdgeInsets.all(18), child: LinearProgressIndicator());
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 7),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: AspectRatio(
+          aspectRatio: player.value.aspectRatio,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              VideoPlayer(player),
+              IconButton.filled(
+                onPressed: () => setState(() =>
+                    player.value.isPlaying ? player.pause() : player.play()),
+                icon: Icon(player.value.isPlaying
+                    ? Icons.pause_rounded
+                    : Icons.play_arrow_rounded),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _MentionSuggestions extends StatelessWidget {
+  const _MentionSuggestions({required this.users, required this.onSelected});
+
+  final List<KaedeUser> users;
+  final ValueChanged<KaedeUser> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    if (users.isEmpty) return const SizedBox.shrink();
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 210),
+      margin: const EdgeInsets.fromLTRB(8, 2, 8, 4),
+      decoration: BoxDecoration(
+        color: KaedeColors.panel,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: KaedeColors.border),
+      ),
+      child: ListView.builder(
+        shrinkWrap: true,
+        itemCount: users.length,
+        itemBuilder: (context, index) {
+          final user = users[index];
+          return ListTile(
+            dense: true,
+            leading: UserAvatar(user: user, radius: 17),
+            title: Text(user.name),
+            subtitle: Text(user.handle),
+            onTap: () => onSelected(user),
+          );
+        },
+      ),
+    );
+  }
+}
+
+final class _Composer extends StatelessWidget {
+  const _Composer(
+      {required this.controller,
+      required this.reply,
+      required this.notifyReply,
+      required this.uploads,
+      required this.sending,
+      required this.canAttach,
+      required this.slowModeRemaining,
+      required this.onNotifyChanged,
+      required this.onCancelReply,
+      required this.onRemoveUpload,
+      required this.onAttach,
+      required this.onSend});
+  final TextEditingController controller;
+  final KaedeMessage? reply;
+  final bool notifyReply;
+  final List<_PendingUpload> uploads;
+  final bool sending;
+  final bool canAttach;
+  final Duration slowModeRemaining;
+  final ValueChanged<bool> onNotifyChanged;
+  final VoidCallback onCancelReply;
+  final ValueChanged<_PendingUpload> onRemoveUpload;
+  final VoidCallback onAttach;
+  final VoidCallback onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    final coolingDown = slowModeRemaining > Duration.zero;
+    final seconds = (slowModeRemaining.inMilliseconds / 1000).ceil();
+    return SafeArea(
+      top: false,
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(8, 3, 8, 7),
+        decoration: BoxDecoration(
+            color: KaedeColors.raised,
+            borderRadius: BorderRadius.circular(23),
+            border: Border.all(color: KaedeColors.border)),
+        child: Column(
+          children: [
+            if (reply case final message?)
+              _ReplyingBar(
+                author: message.author?.name ?? 'Unknown author',
+                notify: notifyReply,
+                onNotifyChanged: onNotifyChanged,
+                onClose: onCancelReply,
+              ),
+            if (uploads.isNotEmpty)
+              SizedBox(
+                height: 68,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.all(8),
+                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                  itemCount: uploads.length,
+                  itemBuilder: (_, index) {
+                    final item = uploads[index];
+                    return _UploadChip(
+                      item: item,
+                      onRemove: () => onRemoveUpload(item),
+                    );
+                  },
+                ),
+              ),
+            if (coolingDown)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 7, 14, 0),
+                child: Row(
+                  children: [
+                    const Icon(Icons.timer_outlined,
+                        size: 16, color: KaedeColors.muted),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Slow mode · ${seconds}s remaining',
+                      style: const TextStyle(
+                        color: KaedeColors.muted,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(left: 5, bottom: 3),
+                  child: IconButton.filledTonal(
+                      constraints:
+                          const BoxConstraints.tightFor(width: 38, height: 38),
+                      padding: EdgeInsets.zero,
+                      onPressed: sending || coolingDown || !canAttach
+                          ? null
+                          : onAttach,
+                      icon: const Icon(Icons.add_rounded, size: 23)),
+                ),
+                Expanded(
+                  child: TextField(
+                    controller: controller,
+                    minLines: 1,
+                    maxLines: 5,
+                    maxLength: 4000,
+                    textCapitalization: TextCapitalization.sentences,
+                    decoration: const InputDecoration(
+                        hintText: 'Message',
+                        contentPadding:
+                            EdgeInsets.symmetric(horizontal: 10, vertical: 13),
+                        border: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        counterText: ''),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(right: 5, bottom: 3),
+                  child: IconButton.filled(
+                    constraints:
+                        const BoxConstraints.tightFor(width: 40, height: 40),
+                    padding: EdgeInsets.zero,
+                    onPressed: sending || coolingDown ? null : onSend,
+                    icon: sending
+                        ? const SizedBox.square(
+                            dimension: 17,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.arrow_upward_rounded, size: 21),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _PermissionNotice extends StatelessWidget {
+  const _PermissionNotice();
+  @override
+  Widget build(BuildContext context) => const SafeArea(
+        top: false,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(8, 3, 8, 7),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: KaedeColors.raised,
+              borderRadius: BorderRadius.all(Radius.circular(18)),
+              border: Border.fromBorderSide(
+                BorderSide(color: KaedeColors.border),
+              ),
+            ),
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 15, vertical: 14),
+              child: Row(
+                children: [
+                  Icon(Icons.lock_outline_rounded,
+                      size: 18, color: KaedeColors.muted),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'You do not have permission to send messages here.',
+                      style: TextStyle(color: KaedeColors.muted),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
+final class _ConversationStart extends StatelessWidget {
+  const _ConversationStart({required this.channel});
+  final KaedeChannel channel;
+  @override
+  Widget build(BuildContext context) => Align(
+        alignment: Alignment.bottomLeft,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 28, 18, 22),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const CircleAvatar(radius: 30, child: Icon(Icons.tag_rounded)),
+              const SizedBox(height: 14),
+              Text('Welcome to ${channel.name ?? 'this conversation'}',
+                  style: Theme.of(context).textTheme.headlineMedium,
+                  textAlign: TextAlign.left),
+              const SizedBox(height: 8),
+              const Text('This is the beginning of the conversation.',
+                  style: TextStyle(color: KaedeColors.muted)),
+            ],
+          ),
+        ),
+      );
+}
+
+final class _PendingUpload {
+  const _PendingUpload(
+      {required this.name,
+      required this.file,
+      required this.size,
+      required this.contentType,
+      required this.temporary});
+  final String name;
+  final File file;
+  final int size;
+  final String contentType;
+  final bool temporary;
+
+  Future<void> deleteIfTemporary() async {
+    if (temporary && await file.exists()) await file.delete();
+  }
+}
+
+String _safeName(String filename) =>
+    filename.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+
+String _contentType(String filename) {
+  final extension = filename.split('.').last.toLowerCase();
+  return switch (extension) {
+    'png' => 'image/png',
+    'jpg' || 'jpeg' => 'image/jpeg',
+    'gif' => 'image/gif',
+    'webp' => 'image/webp',
+    'mp4' => 'video/mp4',
+    'webm' => 'video/webm',
+    'mp3' => 'audio/mpeg',
+    'ogg' => 'audio/ogg',
+    'pdf' => 'application/pdf',
+    _ => 'application/octet-stream',
+  };
+}
+
+extension _FirstOrNull<T> on Iterable<T> {
+  T? get firstOrNull => isEmpty ? null : first;
+}

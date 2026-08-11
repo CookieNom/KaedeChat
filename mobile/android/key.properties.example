@@ -1,0 +1,5 @@
+# Copy this file to android/key.properties. Never commit the real file or keystore.
+storePassword=replace-me
+keyPassword=replace-me
+keyAlias=kaede-upload
+storeFile=../private/kaede-upload.jks

@@ -1512,6 +1512,11 @@ async def acknowledge_channel(
         )
     ).one()
     await session.commit()
+    unread = channel.last_message_id is not None and (
+        state.last_message_id is None
+        or (state.last_message_id, state.last_message_domain or "")
+        < (channel.last_message_id, channel.last_message_domain or "")
+    )
     await publish_dispatch(
         redis,
         user_topic(auth.user.origin_domain, auth.user.id),
@@ -1522,6 +1527,7 @@ async def acknowledge_channel(
             "last_message_id": str(state.last_message_id),
             "last_message_domain": state.last_message_domain,
             "mention_count": state.mention_count,
+            "unread": unread,
         },
     )
     return Response(status_code=204)

@@ -10,6 +10,9 @@ the application preflight.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import json
 import os
 import re
 import stat
@@ -18,6 +21,7 @@ from urllib.parse import urlsplit
 
 
 KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+FCM_AUTH_ENDPOINT = "https://oauth2.googleapis.com/token"
 PLACEHOLDER_MARKERS = (
     "change-me",
     "changeme",
@@ -42,6 +46,7 @@ SENSITIVE_NAMES = {
     "KAEDE_MEDIA_S3_SECRET_KEY",
     "KAEDE_MEDIA_S3_SESSION_TOKEN",
     "KAEDE_PROXY_SECRET",
+    "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64",
     "KAEDE_SECRET_KEY",
     "KAEDE_SMTP_URL",
     "LIVEKIT_API_KEY",
@@ -70,9 +75,13 @@ def _unquote(value: str) -> str:
 
 def read_env_file(path: Path) -> dict[str, str]:
     if not path.is_file():
-        raise DeploymentConfigurationError(f"operator environment is not a file: {path}")
+        raise DeploymentConfigurationError(
+            f"operator environment is not a file: {path}"
+        )
     values: dict[str, str] = {}
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), 1
+    ):
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -83,7 +92,9 @@ def read_env_file(path: Path) -> dict[str, str]:
                 f"{path}:{line_number}: expected one KEY=value assignment"
             )
         if key in values:
-            raise DeploymentConfigurationError(f"{path}:{line_number}: duplicate setting {key}")
+            raise DeploymentConfigurationError(
+                f"{path}:{line_number}: duplicate setting {key}"
+            )
         values[key] = _unquote(value.strip())
     return values
 
@@ -96,10 +107,14 @@ def _is_placeholder(value: str) -> bool:
 def _deployment_port(values: dict[str, str], name: str, default: int) -> int:
     raw_value = values.get(name, str(default)).strip()
     if not raw_value.isdecimal():
-        raise DeploymentConfigurationError(f"{name} must be an integer from 1024 to 65535")
+        raise DeploymentConfigurationError(
+            f"{name} must be an integer from 1024 to 65535"
+        )
     port = int(raw_value)
     if not 1024 <= port <= 65535:
-        raise DeploymentConfigurationError(f"{name} must be an integer from 1024 to 65535")
+        raise DeploymentConfigurationError(
+            f"{name} must be an integer from 1024 to 65535"
+        )
     return port
 
 
@@ -114,7 +129,8 @@ def _validate_voice_ports(values: dict[str, str]) -> None:
     collision = next((names for names in duplicates.values() if len(names) > 1), None)
     if collision:
         raise DeploymentConfigurationError(
-            "LiveKit host ports must be distinct; conflicting settings: " + ", ".join(collision)
+            "LiveKit host ports must be distinct; conflicting settings: "
+            + ", ".join(collision)
         )
 
     for name, default in (
@@ -135,7 +151,9 @@ def _validate_voice_ports(values: dict[str, str]) -> None:
     try:
         url_port = parsed.port
     except ValueError as error:
-        raise DeploymentConfigurationError("KAEDE_VOICE_LIVEKIT_URL has an invalid port") from error
+        raise DeploymentConfigurationError(
+            "KAEDE_VOICE_LIVEKIT_URL has an invalid port"
+        ) from error
     if (
         parsed.scheme != "http"
         or parsed.hostname not in {"host.docker.internal", "127.0.0.1", "localhost"}
@@ -154,9 +172,42 @@ def _validate_voice_ports(values: dict[str, str]) -> None:
         )
 
 
+def _validate_fcm_service_account(encoded: str) -> None:
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+        if not decoded or len(decoded) > 64 * 1024:
+            raise ValueError
+        document = json.loads(decoded)
+    except (
+        binascii.Error,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        ValueError,
+    ) as error:
+        raise DeploymentConfigurationError(
+            "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64 must be base64-encoded Firebase "
+            "service-account JSON no larger than 64 KiB"
+        ) from error
+    required = ("project_id", "client_email", "private_key", "token_uri")
+    if (
+        not isinstance(document, dict)
+        or document.get("type") != "service_account"
+        or any(
+            not isinstance(document.get(name), str) or not document[name].strip()
+            for name in required
+        )
+        or document["token_uri"] != FCM_AUTH_ENDPOINT
+    ):
+        raise DeploymentConfigurationError(
+            "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64 is not a valid Firebase service account"
+        )
+
+
 def validate_values(values: dict[str, str], *, observability: bool) -> None:
     environment = values.get("KAEDE_ENVIRONMENT", "production").strip().lower()
-    allow_nonproduction = values.get("ALLOW_NONPRODUCTION_DEPLOYMENT", "").lower() == "true"
+    allow_nonproduction = (
+        values.get("ALLOW_NONPRODUCTION_DEPLOYMENT", "").lower() == "true"
+    )
     if environment != "production":
         if not allow_nonproduction:
             raise DeploymentConfigurationError(
@@ -168,31 +219,46 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
     for name in sorted(SENSITIVE_NAMES):
         value = values.get(name, "").strip()
         if value and _is_placeholder(value):
-            raise DeploymentConfigurationError(f"{name} still contains a documented placeholder")
+            raise DeploymentConfigurationError(
+                f"{name} still contains a documented placeholder"
+            )
 
-    if values.get("KAEDE_KLIPY_ENABLED", "false").strip().lower() == "true" and not values.get(
-        "KAEDE_KLIPY_API_KEY", ""
-    ).strip():
+    if (
+        values.get("KAEDE_KLIPY_ENABLED", "false").strip().lower() == "true"
+        and not values.get("KAEDE_KLIPY_API_KEY", "").strip()
+    ):
         raise DeploymentConfigurationError(
             "KAEDE_KLIPY_API_KEY is required when KLIPY is enabled"
         )
     if values.get("KAEDE_TURNSTILE_ENABLED", "false").strip().lower() == "true":
-        if not values.get("KAEDE_TURNSTILE_SITE_KEY", "").strip() or not values.get(
-            "TURNSTILE_SECRET", ""
-        ).strip():
+        if (
+            not values.get("KAEDE_TURNSTILE_SITE_KEY", "").strip()
+            or not values.get("TURNSTILE_SECRET", "").strip()
+        ):
             raise DeploymentConfigurationError(
                 "KAEDE_TURNSTILE_SITE_KEY and TURNSTILE_SECRET are required when Turnstile is enabled"
             )
+    if values.get("KAEDE_PUSH_ENABLED", "false").strip().lower() == "true":
+        push_credential = values.get("KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64", "").strip()
+        if not push_credential:
+            raise DeploymentConfigurationError(
+                "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64 is required when mobile push is enabled"
+            )
+        _validate_fcm_service_account(push_credential)
 
     if values.get("KAEDE_MEDIA_SCAN_ENABLED", "true").strip().lower() != "true":
-        raise DeploymentConfigurationError("KAEDE_MEDIA_SCAN_ENABLED must be true in production")
+        raise DeploymentConfigurationError(
+            "KAEDE_MEDIA_SCAN_ENABLED must be true in production"
+        )
 
     if values.get("KAEDE_VOICE_ENABLED", "false").strip().lower() == "true":
         _validate_voice_ports(values)
 
     domain = values.get("KAEDE_DOMAIN", "").strip().lower().removesuffix(".")
     if domain.endswith(".example.com"):
-        raise DeploymentConfigurationError("KAEDE_DOMAIN must not use the example.com template")
+        raise DeploymentConfigurationError(
+            "KAEDE_DOMAIN must not use the example.com template"
+        )
 
     smtp_url = values.get("KAEDE_SMTP_URL", "").strip()
     if values.get("KAEDE_EMAIL_BACKEND", "console") == "smtp" and smtp_url:

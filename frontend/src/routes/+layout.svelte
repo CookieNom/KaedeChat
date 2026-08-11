@@ -3,13 +3,43 @@
   import '@fontsource-variable/bricolage-grotesque';
   import '@fontsource-variable/inter';
   import '@fontsource-variable/jetbrains-mono';
+  import { afterNavigate, goto } from '$app/navigation';
   import { resolve } from '$app/paths';
+  import {
+    initializeNativeInstance,
+    isNativeDesktop,
+    rememberNativeRoute,
+    storedNativeRoute
+  } from '$lib/platform/native';
   import { applyTheme, storedTheme } from '$lib/ui/theme';
   import { onMount } from 'svelte';
 
   let { children } = $props();
 
+  afterNavigate(({ to }) => {
+    if (to) rememberNativeRoute(`${to.url.pathname}${to.url.search}${to.url.hash}`);
+  });
+
   onMount(() => {
+    // Begin restoring a native session before any protected child route can
+    // issue work. API calls also await the same single-flight promise.
+    void initializeNativeInstance()
+      .then((restored) => {
+        if (!restored.authenticated || !isNativeDesktop()) return;
+        const current = window.location.pathname;
+        if (
+          current === resolve('/') ||
+          current === resolve('/login') ||
+          current === resolve('/register') ||
+          current === resolve('/forgot-password')
+        ) {
+          void goto(storedNativeRoute() ?? resolve('/home'), { replaceState: true });
+        }
+      })
+      .catch(() => {
+        // The request layer retries transient native-vault failures and exposes
+        // a useful error if the store remains unavailable.
+      });
     applyTheme(storedTheme(), false);
     const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
     const colorSchemeChanged = () => {

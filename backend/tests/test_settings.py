@@ -1,4 +1,5 @@
 import base64
+import json
 import re
 from pathlib import Path
 
@@ -8,6 +9,17 @@ from pydantic import ValidationError
 from app.core.settings import AUXILIARY_KAEDE_ENV, Settings
 
 VALID_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
+VALID_FCM_ACCOUNT = base64.b64encode(
+    json.dumps(
+        {
+            "type": "service_account",
+            "project_id": "kaede-mobile",
+            "client_email": "firebase@example.iam.gserviceaccount.com",
+            "private_key": "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    ).encode()
+).decode()
 
 
 def settings(**overrides: object) -> Settings:
@@ -89,6 +101,7 @@ def test_blank_optional_secrets_are_treated_as_unset() -> None:
         klipy_api_key="",
         turnstile_site_key="",
         turnstile_secret="",
+        push_fcm_service_account_b64="",
     )
     assert configured.proxy_secret is None
     assert configured.admin_token is None
@@ -97,6 +110,7 @@ def test_blank_optional_secrets_are_treated_as_unset() -> None:
     assert configured.federation_ca_file is None
     assert configured.klipy_api_key is None
     assert configured.turnstile_secret is None
+    assert configured.push_fcm_service_account_b64 is None
 
 
 def test_optional_interaction_services_require_credentials_and_hide_them() -> None:
@@ -118,6 +132,37 @@ def test_optional_interaction_services_require_credentials_and_hide_them() -> No
     )
     assert "klipy_example_key" not in repr(configured)
     assert "0x4AAAAAAExampleSecret" not in repr(configured)
+
+
+def test_mobile_push_service_account_is_validated_and_secret_safe() -> None:
+    with pytest.raises(ValidationError, match="push_fcm_service_account_b64"):
+        settings(service_role="worker", push_enabled=True)
+    with pytest.raises(ValidationError, match="base64-encoded"):
+        settings(push_fcm_service_account_b64="not-base64")
+    malformed = base64.b64encode(json.dumps({"type": "authorized_user"}).encode()).decode()
+    with pytest.raises(ValidationError, match="missing required fields"):
+        settings(push_fcm_service_account_b64=malformed)
+    alternate_endpoint = base64.b64encode(
+        json.dumps(
+            {
+                "type": "service_account",
+                "project_id": "kaede-mobile",
+                "client_email": "firebase@example.iam.gserviceaccount.com",
+                "private_key": "test",
+                "token_uri": "https://oauth.example.test/token",
+            }
+        ).encode()
+    ).decode()
+    with pytest.raises(ValidationError, match="Google's OAuth token endpoint"):
+        settings(push_fcm_service_account_b64=alternate_endpoint)
+    configured = settings(
+        service_role="worker",
+        push_enabled=True,
+        push_fcm_service_account_b64=VALID_FCM_ACCOUNT,
+    )
+    assert VALID_FCM_ACCOUNT not in repr(configured)
+    gateway = settings(service_role="gateway", push_enabled=True)
+    assert gateway.push_enabled is True
 
 
 def test_media_configuration_is_bounded_and_secret_safe() -> None:

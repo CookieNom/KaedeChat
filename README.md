@@ -24,6 +24,9 @@ allowed to access and send writes back to the authority for validation.
 - A Tauri desktop client for Windows, macOS, and Linux that shares the web UI
   while Rust provides native audio devices, push-to-talk, voice activity,
   speech processing, camera, and desktop capture
+- A mobile-first Flutter client for Android and iOS with full chat and guild
+  administration, offline-tolerant message state, native LiveKit calls,
+  biometric app locking, and category-aware push notifications
 
 The federation wire format is documented in
 [docs/kaede-fed-v1.md](docs/kaede-fed-v1.md). Architectural and operational
@@ -44,9 +47,48 @@ make setup
 
 The wizard creates a private `.env`, selects Garage or an external S3-compatible
 provider, configures optional email, voice, KLIPY GIF, and Turnstile services,
-and can render a host nginx configuration. It writes configuration only; it does not start services,
+can configure optional Firebase Cloud Messaging, and can render a host nginx
+configuration. It writes configuration only; it does not start services,
 install nginx files, reload nginx, or obtain certificates. See
 [docs/deployment-wizard.md](docs/deployment-wizard.md) for all available options.
+
+### Optional Firebase mobile notifications
+
+Firebase Cloud Messaging is required only for reliable notifications after the
+mobile process has been suspended or terminated. FCM is a no-cost Firebase
+product and does not require billing or Google Analytics, but creating the
+Firebase project requires a Google account.
+
+Before choosing Firebase in `make setup`:
+
+1. Create a project in the [Firebase console](https://console.firebase.google.com/).
+2. Add an Android application with package name `chat.kaede.mobile`.
+3. Download its `google-services.json` client configuration and save it as
+   `mobile/android/app/google-services.json`.
+4. Create a dedicated Google Cloud service account with only **Firebase Cloud
+   Messaging API Admin** (`roles/firebasecloudmessaging.admin`), generate a JSON
+   key for it, and save the file outside version control. Revoke and replace the
+   key immediately if it is ever pasted into chat, logs, or an issue tracker.
+5. Run `make setup` and enable Firebase Cloud Messaging. Choose either to read
+   the private service-account JSON from a local file or paste its complete
+   contents into the hidden multiline prompt. For pasted input, finish with
+   `KAEDE_FIREBASE_JSON_END` on a line by itself. The wizard stores only the
+   base64 representation in the private `.env` file.
+6. Rebuild the mobile application, restart the Kaede API and worker processes,
+   and enable system notifications from Kaede's notification settings.
+
+These are two different files: `google-services.json` identifies the Android
+client and is bundled into the APK; the service-account JSON authorizes the
+backend to send notifications and must never be bundled, logged, or committed.
+Both must belong to the same Firebase project. Kaede works in the foreground
+without either file, but terminated-process delivery does not.
+
+FCM transport is TLS-protected but not end-to-end encrypted, so Kaede sends FCM
+only a short-lived random wake token. The authenticated app redeems that token
+directly from the Kaede API and creates the visible notification locally;
+sender names, message text, and channel/message references never enter the FCM
+payload. See [mobile/README.md](mobile/README.md#firebase-cloud-messaging-setup)
+for build details and the exact privacy boundary.
 
 For a manual setup:
 
@@ -116,6 +158,17 @@ The [desktop architecture](desktop/docs/architecture.md),
 [release guide](desktop/docs/releasing.md) document native permissions,
 packaging, signing, and known operating-system constraints.
 
+### Mobile clients
+
+Android and iOS share a Flutter presentation and domain layer while retaining
+native platform integrations for secure credentials, biometrics, notifications,
+media capture, and LiveKit audio processing. The mobile interface uses compact
+navigation, sheets, gesture actions, paginated lists, and adaptive media rather
+than embedding the desktop or web layout.
+
+Build and release prerequisites, Firebase configuration, signing, and platform
+permissions are documented in [mobile/README.md](mobile/README.md).
+
 ## Production routing
 
 The default production layout expects host nginx to own ports 80 and 443. The
@@ -145,6 +198,7 @@ with other services.
 - [Release hardening](docs/m6-hardening-release.md)
 - [Reference deployment](docs/reference-deployment.md)
 - [Desktop client](desktop/README.md)
+- [Android and iOS clients](mobile/README.md)
 
 ### Docker inside LXC
 

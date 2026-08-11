@@ -205,6 +205,27 @@ class UserSettings(Base, LocalUserMixin, TimestampMixin):
     )
 
 
+class PushDevice(Base, LocalUserMixin, TimestampMixin):
+    __tablename__ = "push_devices"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False)
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False, unique=True)
+    token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    device_name: Mapped[str | None] = mapped_column(String(100))
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        *LocalUserMixin.locality_constraints("push_devices"),
+        CheckConstraint("platform IN ('android','ios')", name="platform_value"),
+        CheckConstraint("octet_length(token_hash) = 32", name="token_hash_length"),
+        Index("ix_push_devices_user", "user_id", "user_domain"),
+    )
+
+
 class Relationship(Base, LocalUserMixin, TimestampMixin):
     __tablename__ = "relationships"
     target_id: Mapped[int] = mapped_column(BigInteger)

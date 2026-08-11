@@ -239,6 +239,8 @@ the present architecture does not force future encrypted rooms to reveal content
 ## Version 1 scope
 
 Version 1 includes identity and authentication, single-instance chat,
-federation, media and webhooks, voice/video/screen sharing, and the associated
-operational controls. Group DMs, search, threads, MLS, mobile clients, and
-compressed gateway encoding are outside the version 1 scope.
+federation, media and webhooks, voice/video/screen sharing, Android and iOS
+clients, and the associated operational controls. Group DMs, search, threads,
+MLS, and compressed gateway encoding are outside the version 1 scope. The
+mobile clients use the same home-instance API and gateway boundary as the web
+and desktop clients; they never call peer federation endpoints directly.

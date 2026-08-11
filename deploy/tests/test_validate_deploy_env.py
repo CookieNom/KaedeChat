@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
 import sys
 import tempfile
@@ -41,6 +43,64 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(DeploymentConfigurationError, "KLIPY_API_KEY"):
             validate_values(
                 self.production | {"KAEDE_KLIPY_ENABLED": "true"}, observability=False
+            )
+
+    def test_mobile_push_requires_a_valid_service_account(self) -> None:
+        with self.assertRaisesRegex(
+            DeploymentConfigurationError, "FCM_SERVICE_ACCOUNT"
+        ):
+            validate_values(
+                self.production | {"KAEDE_PUSH_ENABLED": "true"}, observability=False
+            )
+        with self.assertRaisesRegex(DeploymentConfigurationError, "base64-encoded"):
+            validate_values(
+                self.production
+                | {
+                    "KAEDE_PUSH_ENABLED": "true",
+                    "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64": "not-base64",
+                },
+                observability=False,
+            )
+        credential = base64.b64encode(
+            json.dumps(
+                {
+                    "type": "service_account",
+                    "project_id": "kaede-mobile",
+                    "client_email": "firebase@example.iam.gserviceaccount.com",
+                    "private_key": "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                }
+            ).encode()
+        ).decode()
+        validate_values(
+            self.production
+            | {
+                "KAEDE_PUSH_ENABLED": "true",
+                "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64": credential,
+            },
+            observability=False,
+        )
+        alternate_endpoint = base64.b64encode(
+            json.dumps(
+                {
+                    "type": "service_account",
+                    "project_id": "kaede-mobile",
+                    "client_email": "firebase@example.iam.gserviceaccount.com",
+                    "private_key": "test",
+                    "token_uri": "https://oauth.example.test/token",
+                }
+            ).encode()
+        ).decode()
+        with self.assertRaisesRegex(
+            DeploymentConfigurationError, "valid Firebase service account"
+        ):
+            validate_values(
+                self.production
+                | {
+                    "KAEDE_PUSH_ENABLED": "true",
+                    "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64": alternate_endpoint,
+                },
+                observability=False,
             )
         with self.assertRaisesRegex(DeploymentConfigurationError, "TURNSTILE_SECRET"):
             validate_values(
@@ -104,7 +164,9 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
     def test_duplicate_file_assignment_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "operator.env")
-            path.write_text("KAEDE_DOMAIN=one.test\nKAEDE_DOMAIN=two.test\n", encoding="utf-8")
+            path.write_text(
+                "KAEDE_DOMAIN=one.test\nKAEDE_DOMAIN=two.test\n", encoding="utf-8"
+            )
             with self.assertRaisesRegex(DeploymentConfigurationError, "duplicate"):
                 read_env_file(path)
 

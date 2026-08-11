@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from redis.asyncio import Redis
-from sqlalchemy import exists, or_, select, tuple_
+from sqlalchemy import and_, exists, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import AuthenticatedUser, get_redis, get_session, require_user
@@ -16,7 +16,16 @@ from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityReference, validate_entity_reference
-from app.db.models import Channel, DMParticipant, Guild, GuildMember, ReadState, User, UserSettings
+from app.db.models import (
+    Channel,
+    DMParticipant,
+    Guild,
+    GuildMember,
+    Message,
+    ReadState,
+    User,
+    UserSettings,
+)
 from app.federation.relationships import queue_friend_profile_updates
 from app.federation.users import resolve_handle
 from app.tasks import federation_deliver
@@ -232,11 +241,47 @@ async def list_read_states(
         )
     )
     by_channel = {(state.channel_id, state.channel_domain): state for state in states}
+    channel_refs = [(channel.id, channel.origin_domain) for channel in channels]
+    unread_counts = (
+        {
+            (channel_id, channel_domain): int(count)
+            for channel_id, channel_domain, count in (
+                await session.execute(
+                    select(
+                        Message.channel_id,
+                        Message.channel_domain,
+                        func.count(Message.id),
+                    )
+                    .outerjoin(
+                        ReadState,
+                        and_(
+                            ReadState.user_id == auth.user.id,
+                            ReadState.user_domain == auth.user.origin_domain,
+                            ReadState.channel_id == Message.channel_id,
+                            ReadState.channel_domain == Message.channel_domain,
+                        ),
+                    )
+                    .where(
+                        tuple_(Message.channel_id, Message.channel_domain).in_(channel_refs),
+                        or_(
+                            ReadState.last_message_id.is_(None),
+                            tuple_(Message.id, Message.origin_domain)
+                            > tuple_(ReadState.last_message_id, ReadState.last_message_domain),
+                        ),
+                    )
+                    .group_by(Message.channel_id, Message.channel_domain)
+                )
+            ).tuples()
+        }
+        if channel_refs
+        else {}
+    )
     keys = [f"channel:last_message:{channel.origin_domain}:{channel.id}" for channel in channels]
     cached = await redis.mget(keys) if keys else []
     result: list[dict[str, object]] = []
     for channel, cached_last in zip(channels, cached, strict=True):
         state = by_channel.get((channel.id, channel.origin_domain))
+        unread_count = unread_counts.get((channel.id, channel.origin_domain), 0)
         latest: EntityReference | None = None
         if cached_last is not None:
             try:
@@ -262,10 +307,8 @@ async def list_read_states(
                 "read_message_id": str(read.id) if read is not None else None,
                 "read_message_domain": read.domain if read is not None else None,
                 "mention_count": state.mention_count if state is not None else 0,
-                "unread": latest is not None
-                and (
-                    read is None or (latest.id, latest.domain or "") > (read.id, read.domain or "")
-                ),
+                "unread_count": unread_count,
+                "unread": unread_count > 0,
             }
         )
     return result

@@ -41,6 +41,7 @@ from app.chat.schemas import (
     ChannelPositionBatch,
     ChannelUpdate,
     GuildUpdate,
+    MemberRoleSet,
     RolePositionBatch,
     RoleUpdate,
 )
@@ -778,6 +779,140 @@ async def assign_role(
             rendered_member,
         )
     return Response(status_code=204)
+
+
+@router.put("/{guild_id}/members/{user_id}/roles")
+async def replace_member_roles(
+    guild_id: EntityRef,
+    user_id: EntityRef,
+    payload: MemberRoleSet,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    """Atomically replace the explicitly assigned roles for one member."""
+
+    guild = await local_guild(session, settings, guild_id, for_update=True)
+    await require_permissions(
+        session, redis, guild, auth.user, required_permissions("member.role.update")
+    )
+    user_number, user_domain = user_id.resolve(settings.domain)
+    member = await require_can_assign_member_role(
+        session, guild, auth.user, user_number, user_domain
+    )
+
+    requested: dict[tuple[int, str], Role] = {}
+    for role_ref in payload.role_ids:
+        role_number, role_domain = role_ref.resolve(settings.domain)
+        if role_domain != guild.origin_domain:
+            raise HTTPException(status_code=404, detail={"code": "ROLE_NOT_FOUND"})
+        role = await guild_role(session, guild, role_number)
+        if role.id == guild.id:
+            raise HTTPException(status_code=400, detail={"code": "EVERYONE_ROLE_IMPLICIT"})
+        requested[(role.id, role.origin_domain)] = role
+
+    current = {
+        (role_id, role_domain)
+        for role_id, role_domain in (
+            await session.execute(
+                select(MemberRole.role_id, MemberRole.role_domain).where(
+                    MemberRole.guild_id == guild.id,
+                    MemberRole.guild_domain == guild.origin_domain,
+                    MemberRole.user_id == user_number,
+                    MemberRole.user_domain == user_domain,
+                )
+            )
+        ).all()
+    }
+    desired = set(requested)
+    added = desired - current
+    removed = current - desired
+    if not added and not removed:
+        return await render_member_update(session, member)
+
+    changed_roles = dict(requested)
+    for role_id, role_domain in removed:
+        role = await session.get(Role, (role_id, role_domain))
+        if role is None or (role.guild_id, role.guild_domain) != (
+            guild.id,
+            guild.origin_domain,
+        ):
+            raise HTTPException(status_code=409, detail={"code": "ROLE_STATE_CHANGED"})
+        changed_roles[(role.id, role.origin_domain)] = role
+    for role_ref in sorted(added | removed):
+        await require_can_manage_role(session, guild, auth.user, changed_roles[role_ref])
+
+    if removed:
+        await session.execute(
+            delete(MemberRole).where(
+                MemberRole.guild_id == guild.id,
+                MemberRole.guild_domain == guild.origin_domain,
+                MemberRole.user_id == user_number,
+                MemberRole.user_domain == user_domain,
+                MemberRole.role_id.in_([role_id for role_id, _ in removed]),
+                MemberRole.role_domain == guild.origin_domain,
+            )
+        )
+    for role_id, role_domain in sorted(added):
+        session.add(
+            MemberRole(
+                guild_id=guild.id,
+                guild_domain=guild.origin_domain,
+                user_id=user_number,
+                user_domain=user_domain,
+                role_id=role_id,
+                role_domain=role_domain,
+            )
+        )
+
+    member.member_version += 1
+    for event_type, refs in (
+        ("guild.member.role.remove", sorted(removed)),
+        ("guild.member.role.add", sorted(added)),
+    ):
+        for role_id, role_domain in refs:
+            await queue_guild_mutation(
+                session,
+                settings,
+                guild,
+                auth.user,
+                event_type,
+                {
+                    "user": {"id": str(user_number), "origin_domain": user_domain},
+                    "role": {"id": str(role_id), "origin_domain": role_domain},
+                    "member_version": str(member.member_version),
+                },
+                snapshot_required=True,
+            )
+    await add_audit_entry(
+        session,
+        snowflake,
+        guild,
+        auth.user,
+        25,
+        target_type="member",
+        target_ref={"id": str(user_number), "origin_domain": user_domain},
+        changes=[
+            {
+                "key": "roles",
+                "added": [str(role_id) for role_id, _ in sorted(added)],
+                "removed": [str(role_id) for role_id, _ in sorted(removed)],
+            }
+        ],
+    )
+    rendered_member = await render_member_update(session, member)
+    await session.commit()
+    await session.refresh(guild)
+    await wake_queued_guild_federation(guild)
+    await publish_dispatch(
+        redis,
+        guild_topic(guild.origin_domain, guild.id),
+        "GUILD_MEMBER_UPDATE",
+        rendered_member,
+    )
+    return rendered_member
 
 
 @router.delete("/{guild_id}/members/{user_id}/roles/{role_id}", status_code=204)

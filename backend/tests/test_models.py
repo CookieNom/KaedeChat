@@ -10,6 +10,7 @@ def test_complete_v1_schema_is_registered() -> None:
         "peer_keys",
         "users",
         "user_settings",
+        "push_devices",
         "relationships",
         "sessions",
         "one_time_tokens",
@@ -53,6 +54,25 @@ def test_complete_v1_schema_is_registered() -> None:
         "instance_blocks",
     }
     assert required == set(Base.metadata.tables)
+
+
+def test_push_devices_are_local_encrypted_registrations() -> None:
+    devices = Base.metadata.tables["push_devices"]
+    assert tuple(devices.primary_key.columns.keys()) == ("id",)
+    assert devices.c.token_hash.unique is True
+    assert devices.c.token_encrypted.nullable is False
+    assert "ck_push_devices_push_devices_user_is_local" in constraint_names("push_devices")
+    assert "ck_push_devices_platform_value" in constraint_names("push_devices")
+    assert "ck_push_devices_token_hash_length" in constraint_names("push_devices")
+    local_user = foreign_key_for_columns(
+        "push_devices", ("user_id", "user_domain", "user_is_local")
+    )
+    assert tuple(element.target_fullname for element in local_user.elements) == (
+        "users.id",
+        "users.origin_domain",
+        "users.is_local",
+    )
+    assert local_user.ondelete == "CASCADE"
 
 
 def test_guild_notification_settings_are_membership_scoped() -> None:

@@ -33,7 +33,24 @@ jobs:
       - run: uv run pytest --cov=app
       - run: uv run pip-audit --skip-editable
       - name: Verify generated protocol constants
-        run: uv run python -m scripts.generate_protocol && git diff --exit-code -- ../frontend/src/lib/generated ../desktop/crates/kaede-protocol/src/generated.rs
+        run: uv run python -m scripts.generate_protocol && git diff --exit-code -- ../frontend/src/lib/generated ../desktop/crates/kaede-protocol/src/generated.rs ../mobile/lib/src/protocol/generated.dart
+
+  mobile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults: { run: { working-directory: mobile } }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install pinned Flutter SDK
+        working-directory: ${{ runner.temp }}
+        run: |
+          git clone --depth 1 --branch 3.41.4 https://github.com/flutter/flutter.git flutter
+          echo "${{ runner.temp }}/flutter/bin" >> "$GITHUB_PATH"
+      - run: flutter pub get
+      - run: dart format --output=none --set-exit-if-changed lib test
+      - run: flutter analyze
+      - run: flutter test
+      - run: flutter build apk --debug
 
   frontend:
     runs-on: ubuntu-24.04

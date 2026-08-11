@@ -292,11 +292,17 @@ async fn restore_known_account(
                 .await?;
             }
             Ok(false) => {}
-            Err(error) => tracing::warn!(
-                %error,
-                account = %known.account_key,
-                "stored desktop session could not be restored"
-            ),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    account = %known.account_key,
+                    "stored desktop session could not be restored"
+                );
+                return Err(NativeError::local(
+                    "SESSION_RESTORE_FAILED",
+                    "Kaede could not read the saved session from the operating-system credential vault. Try reopening the app.",
+                ));
+            }
         }
     }
     Ok(Some(domain))
@@ -306,11 +312,14 @@ async fn configured_api(state: &NativeState) -> Result<ApiClient, NativeError> {
     if let Some(account) = state.account.read().await.as_ref() {
         return Ok(account.api.clone());
     }
-    if state.instance.read().await.is_none() {
-        restore_known_account(state, None).await?;
-        if let Some(account) = state.account.read().await.as_ref() {
-            return Ok(account.api.clone());
-        }
+
+    // A hard process restart can reach an API command before the WebView's
+    // startup hook. Retry restoration whenever there is no active account,
+    // including when the WebView already remembered the preferred instance.
+    let preferred = state.instance.read().await.clone();
+    restore_known_account(state, preferred.as_ref()).await?;
+    if let Some(account) = state.account.read().await.as_ref() {
+        return Ok(account.api.clone());
     }
     let domain = state
         .instance
@@ -1382,6 +1391,16 @@ fn main() {
         ))
         .manage(state)
         .setup(|app| {
+            // Warm the persisted account and OS credential vault immediately.
+            // The frontend and configured_api also await/retry this same
+            // serialized operation, which closes the hard-restart race.
+            let restore_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let state = restore_handle.state::<NativeState>();
+                if let Err(error) = restore_known_account(&state, None).await {
+                    tracing::warn!(?error, "desktop session could not be restored at startup");
+                }
+            });
             let window =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title(format!("Kaede Chat · {}", env!("CARGO_PKG_VERSION")))

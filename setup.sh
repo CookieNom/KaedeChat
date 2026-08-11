@@ -170,6 +170,26 @@ prompt_secret() {
   printf '%s' "$answer"
 }
 
+prompt_multiline_secret() {
+  local prompt=$1 line answer= terminated=false
+  printf '%s\n' "$prompt" >&2
+  printf 'Paste the complete JSON, then enter KAEDE_FIREBASE_JSON_END on a line by itself. Input is hidden.\n' >&2
+  while IFS= read -r -s line; do
+    if [[ $line == KAEDE_FIREBASE_JSON_END ]]; then
+      terminated=true
+      break
+    fi
+    if [[ -n $answer ]]; then
+      answer+=$'\n'
+    fi
+    answer+=$line
+  done
+  printf '\n' >&2
+  [[ $terminated == true ]] || die 'Firebase JSON paste ended before KAEDE_FIREBASE_JSON_END'
+  [[ -n $answer ]] || die 'Firebase service-account JSON is empty'
+  printf '%s' "$answer"
+}
+
 choose() {
   local prompt=$1 default=$2
   shift 2
@@ -790,7 +810,7 @@ else
 fi
 
 section 'Interaction services' \
-  'KLIPY adds a GIF picker. Cloudflare Turnstile protects registration and suspicious sign-ins.'
+  'KLIPY adds a GIF picker. Turnstile protects authentication. Firebase optionally delivers mobile notifications while the app is closed.'
 if confirm 'Enable the KLIPY GIF picker?' "$([[ $(old KAEDE_KLIPY_ENABLED false) == true ]] && printf true || printf false)"; then
   KLIPY_ENABLED=true
   if [[ -n ${OLD[KAEDE_KLIPY_API_KEY]-} ]] && confirm 'Reuse existing KLIPY API key?' true; then
@@ -816,6 +836,50 @@ else
   TURNSTILE_ENABLED=false
   TURNSTILE_SITE_KEY=
   TURNSTILE_SECRET_VALUE=
+fi
+
+if confirm 'Enable closed-app Android and iOS notifications through Firebase Cloud Messaging?' "$([[ $(old KAEDE_PUSH_ENABLED false) == true ]] && printf true || printf false)"; then
+  PUSH_ENABLED=true
+  note 'FCM setup requires a Firebase project. Google Analytics and billing are not required for Cloud Messaging.'
+  note 'Register Android package chat.kaede.mobile, then download its client file to mobile/android/app/google-services.json.'
+  note 'For production, create a dedicated Google Cloud service account with only Firebase Cloud Messaging API Admin (roles/firebasecloudmessaging.admin), then generate its JSON key.'
+  note 'Revoke and replace the key immediately if it is ever pasted into chat, logs, or an issue tracker.'
+  note 'The service-account JSON is the private backend credential; it is NOT google-services.json and must never be committed.'
+  note 'See README.md and mobile/README.md for the complete setup and privacy notes.'
+  if [[ -f $ROOT/mobile/android/app/google-services.json && ! -L $ROOT/mobile/android/app/google-services.json ]]; then
+    note 'Found the Android Firebase client file at mobile/android/app/google-services.json.'
+  else
+    warn 'Android Firebase client file not found at mobile/android/app/google-services.json; closed-app Android notifications will not work until it is added and the app is rebuilt.'
+  fi
+  if [[ -n ${OLD[KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64]-} ]] && confirm 'Reuse the existing Firebase service-account credential?' true; then
+    PUSH_FCM_SERVICE_ACCOUNT_B64=${OLD[KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64]}
+  else
+    FIREBASE_CREDENTIAL_SOURCE=$(choose 'How should setup read the private Firebase service-account JSON?' \
+      'Read from a file' 'Paste JSON now')
+    if [[ $FIREBASE_CREDENTIAL_SOURCE == 'Read from a file' ]]; then
+      FIREBASE_SERVICE_ACCOUNT_PATH=$(prompt_text 'Private Firebase service-account JSON path (not google-services.json)')
+      [[ -f $FIREBASE_SERVICE_ACCOUNT_PATH && ! -L $FIREBASE_SERVICE_ACCOUNT_PATH ]] || \
+        die 'Firebase service-account path must be a regular, non-symlink file'
+      [[ $(basename -- "$FIREBASE_SERVICE_ACCOUNT_PATH") != google-services.json ]] || \
+        die 'google-services.json is the public Android client configuration, not a backend service-account credential'
+      (( $(wc -c < "$FIREBASE_SERVICE_ACCOUNT_PATH") <= 65536 )) || \
+        die 'Firebase service-account file must not exceed 64 KiB'
+      PUSH_FCM_SERVICE_ACCOUNT_B64=$(openssl base64 -A -in "$FIREBASE_SERVICE_ACCOUNT_PATH")
+    else
+      FIREBASE_SERVICE_ACCOUNT_JSON=$(prompt_multiline_secret 'Firebase service-account JSON')
+      ((${#FIREBASE_SERVICE_ACCOUNT_JSON} <= 65536)) || \
+        die 'Firebase service-account JSON must not exceed 64 KiB'
+      [[ $FIREBASE_SERVICE_ACCOUNT_JSON == *'"type"'* && $FIREBASE_SERVICE_ACCOUNT_JSON == *'"service_account"'* ]] || \
+        die 'pasted JSON does not identify itself as a Firebase service account'
+      PUSH_FCM_SERVICE_ACCOUNT_B64=$(printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" | openssl base64 -A)
+      unset FIREBASE_SERVICE_ACCOUNT_JSON
+    fi
+    [[ -n $PUSH_FCM_SERVICE_ACCOUNT_B64 ]] || die 'Firebase service-account file is empty'
+  fi
+  note 'The mobile builds also need their platform Firebase configuration files; see mobile/README.md.'
+else
+  PUSH_ENABLED=false
+  PUSH_FCM_SERVICE_ACCOUNT_B64=
 fi
 
 section 'Runtime sizing' 'Defaults are appropriate for a small instance and can be changed now.'
@@ -946,6 +1010,8 @@ emit() {
     emit KAEDE_TURNSTILE_SITE_KEY "$TURNSTILE_SITE_KEY"
     emit TURNSTILE_SECRET "$TURNSTILE_SECRET_VALUE"
   fi
+  emit KAEDE_PUSH_ENABLED "$PUSH_ENABLED"
+  [[ $PUSH_ENABLED == false ]] || emit KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64 "$PUSH_FCM_SERVICE_ACCOUNT_B64"
   emit KAEDE_APP_URL "https://$DOMAIN"
   emit KAEDE_API_WORKERS "$API_WORKERS"
   emit KAEDE_GATEWAY_WORKERS "$GATEWAY_WORKERS"
@@ -1034,8 +1100,8 @@ fi
   printf 'Nothing was started, installed, or reloaded.\n\n'
   printf 'Validate:\n  make env-check\n  make generated-compose-check\n\n'
   printf 'Internal Caddy edge: 127.0.0.1:%s\n' "$EDGE_PORT"
-  printf 'Selected storage: %s\nSelected email: %s\nKLIPY GIF picker: %s\nTurnstile: %s\n' \
-    "$STORAGE" "$EMAIL" "$KLIPY_ENABLED" "$TURNSTILE_ENABLED"
+  printf 'Selected storage: %s\nSelected email: %s\nKLIPY GIF picker: %s\nTurnstile: %s\nMobile push: %s\n' \
+    "$STORAGE" "$EMAIL" "$KLIPY_ENABLED" "$TURNSTILE_ENABLED" "$PUSH_ENABLED"
   if [[ $STORAGE == garage ]]; then
     printf '\nRequired media origin: create public DNS for media.%s, include it in the TLS certificate, and enable the generated nginx media virtual host. Browser uploads and every Garage-backed image depend on this origin.\n' "$DOMAIN"
   fi
@@ -1065,6 +1131,7 @@ if [[ $USE_GUM == true ]]; then
     "Email: $EMAIL" \
     "KLIPY GIF picker: $KLIPY_ENABLED" \
     "Turnstile: $TURNSTILE_ENABLED" \
+    "Mobile push: $PUSH_ENABLED" \
     "Host nginx file: $HOST_NGINX" \
     "Voice: $VOICE" \
     "Observability: $OBSERVABILITY" \
@@ -1073,7 +1140,8 @@ else
   printf '\n%s%sReady to write%s\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
   printf '  Domain:          %s\n  Internal Caddy:  127.0.0.1:%s\n' "$DOMAIN" "$EDGE_PORT"
   printf '  Storage:         %s\n  Email:           %s\n' "$STORAGE" "$EMAIL"
-  printf '  KLIPY GIFs:      %s\n  Turnstile:       %s\n' "$KLIPY_ENABLED" "$TURNSTILE_ENABLED"
+  printf '  KLIPY GIFs:      %s\n  Turnstile:       %s\n  Mobile push:     %s\n' \
+    "$KLIPY_ENABLED" "$TURNSTILE_ENABLED" "$PUSH_ENABLED"
   printf '  Host nginx file: %s\n  Voice:           %s\n  Observability:   %s\n' "$HOST_NGINX" "$VOICE" "$OBSERVABILITY"
   printf '  Secrets:         generated or preserved; never displayed\n'
 fi

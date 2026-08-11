@@ -215,6 +215,16 @@ class RolePositionBatch(RequestModel):
         return self
 
 
+class MemberRoleSet(RequestModel):
+    role_ids: list[EntityRef] = Field(default_factory=list, max_length=250)
+
+    @model_validator(mode="after")
+    def unique_roles(self) -> MemberRoleSet:
+        if len(self.role_ids) != len(set(self.role_ids)):
+            raise ValueError("role IDs must be unique")
+        return self
+
+
 class OverwritePut(RequestModel):
     target_id: EntityRef
     target_type: str

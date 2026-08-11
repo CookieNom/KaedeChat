@@ -1,4 +1,5 @@
 import {
+  initializeNativeInstance,
   isNativeDesktop,
   nativeError,
   nativeInvoke,
@@ -89,6 +90,7 @@ function requestSignal(init: RequestInit): AbortSignal {
 async function performRefresh(): Promise<RefreshResult> {
   try {
     if (isNativeDesktop()) {
+      await initializeNativeInstance();
       await nativeInvoke('native_api_request', {
         request: { method: 'POST', path: '/auth/refresh', body: {} }
       });
@@ -111,6 +113,7 @@ async function performRefresh(): Promise<RefreshResult> {
 async function accessSessionIsLive(): Promise<boolean | null> {
   try {
     if (isNativeDesktop()) {
+      await initializeNativeInstance();
       await nativeInvoke('native_api_request', {
         request: { method: 'GET', path: '/users/@me', body: null }
       });
@@ -164,6 +167,7 @@ export function refreshSession(): Promise<RefreshResult> {
 
 async function send(path: string, init: RequestInit): Promise<Response> {
   if (isNativeDesktop()) {
+    await initializeNativeInstance();
     let body: unknown = null;
     if (typeof init.body === 'string' && init.body.length > 0) {
       try {

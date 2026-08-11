@@ -71,6 +71,9 @@ export interface NativeSessionBootstrap {
   authenticated: boolean;
 }
 
+let nativeInitialization: Promise<NativeSessionBootstrap> | null = null;
+const LAST_NATIVE_ROUTE = 'kaede.native.last-route';
+
 interface TauriGlobal {
   core: {
     invoke<T>(command: string, args?: unknown): Promise<T>;
@@ -104,21 +107,61 @@ export function storedNativeInstance(): string {
   return localStorage.getItem('kaede.native.instance') ?? '';
 }
 
+export function rememberNativeRoute(value: string): void {
+  if (!isNativeDesktop() || typeof localStorage === 'undefined') return;
+  const route = safeNativeRoute(value);
+  if (route) localStorage.setItem(LAST_NATIVE_ROUTE, route);
+}
+
+export function storedNativeRoute(): string | null {
+  if (typeof localStorage === 'undefined' || typeof window === 'undefined') return null;
+  return safeNativeRoute(localStorage.getItem(LAST_NATIVE_ROUTE) ?? '');
+}
+
+function safeNativeRoute(value: string): string | null {
+  if (!value.startsWith('/') || value.startsWith('//') || value.length > 2048) return null;
+  try {
+    const url = new URL(value, 'https://desktop.kaede.invalid');
+    if (url.origin !== 'https://desktop.kaede.invalid') return null;
+    if (!/^\/(?:home(?:\/|$)|g\/|settings(?:\/|$)|invite\/)/.test(url.pathname)) return null;
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return null;
+  }
+}
+
 export async function setNativeInstance(instance: string): Promise<string> {
   const normalized = await nativeInvoke<string>('native_set_instance', { instance });
   localStorage.setItem('kaede.native.instance', normalized);
   return normalized;
 }
 
-export async function initializeNativeInstance(): Promise<void> {
-  if (!isNativeDesktop()) return;
-  const instance = storedNativeInstance();
-  if (instance) {
-    await setNativeInstance(instance);
-    return;
-  }
+async function restoreNativeSession(): Promise<NativeSessionBootstrap> {
+  const preferredInstance = storedNativeInstance();
+  if (preferredInstance) await setNativeInstance(preferredInstance);
+
+  // The account registry and credentials live outside the WebView. Always ask
+  // Rust for the authenticated state, even when the WebView remembered an
+  // instance, so a process restart cannot race protected API requests.
   const restored = await nativeInvoke<NativeSessionBootstrap>('native_restore_session');
   if (restored.instance) localStorage.setItem('kaede.native.instance', restored.instance);
+  return restored;
+}
+
+export function initializeNativeInstance(): Promise<NativeSessionBootstrap> {
+  if (!isNativeDesktop()) {
+    return Promise.resolve({ instance: null, authenticated: false });
+  }
+  if (!nativeInitialization) {
+    nativeInitialization = restoreNativeSession().catch((error) => {
+      // Native storage can be temporarily unavailable while the OS unlocks a
+      // credential vault. Permit the next request to retry instead of caching
+      // a failed startup for the lifetime of the application.
+      nativeInitialization = null;
+      throw error;
+    });
+  }
+  return nativeInitialization;
 }
 
 export function nativeError(value: unknown): NativeError {

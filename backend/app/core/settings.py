@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import ipaddress
+import json
 import os
 import re
 from functools import lru_cache
@@ -17,6 +18,7 @@ DOMAIN_RE = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 )
 URLSAFE_BASE64_RE = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
+FCM_AUTH_ENDPOINT = "https://oauth2.googleapis.com/token"
 HOST_RE = re.compile(
     r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
     r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$",
@@ -172,6 +174,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TURNSTILE_SECRET", "turnstile_secret"),
     )
 
+    # Mobile push. The credential is the base64-encoded Firebase service-account
+    # JSON document; keeping it encoded makes multiline private keys safe in
+    # env files and Compose interpolation.
+    push_enabled: bool = False
+    push_fcm_service_account_b64: SecretStr | None = None
+
     # Observability and retention
     audit_retention_days: int = Field(default=90, ge=90)
     metrics_enabled: bool = True
@@ -194,6 +202,7 @@ class Settings(BaseSettings):
         "klipy_api_key",
         "turnstile_site_key",
         "turnstile_secret",
+        "push_fcm_service_account_b64",
         mode="before",
     )
     @classmethod
@@ -258,6 +267,33 @@ class Settings(BaseSettings):
             r"[A-Za-z0-9_-]{8,256}", value.get_secret_value()
         ):
             raise ValueError("must be a valid Cloudflare Turnstile secret")
+        return value
+
+    @field_validator("push_fcm_service_account_b64")
+    @classmethod
+    def validate_push_service_account(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw = value.get_secret_value().strip()
+        try:
+            decoded = base64.b64decode(raw, validate=True)
+            if len(decoded) > 64 * 1024:
+                raise ValueError("Firebase service account is too large")
+            document = json.loads(decoded)
+        except (ValueError, binascii.Error, json.JSONDecodeError) as exc:
+            raise ValueError("must be base64-encoded Firebase service-account JSON") from exc
+        required = {"project_id", "client_email", "private_key", "token_uri"}
+        if (
+            not isinstance(document, dict)
+            or document.get("type") != "service_account"
+            or any(
+                not isinstance(document.get(name), str) or not document[name].strip()
+                for name in required
+            )
+        ):
+            raise ValueError("Firebase service account is missing required fields")
+        if document["token_uri"] != FCM_AUTH_ENDPOINT:
+            raise ValueError("Firebase token_uri must be Google's OAuth token endpoint")
         return value
 
     @field_validator("database_url")
@@ -561,6 +597,9 @@ class Settings(BaseSettings):
             raise ValueError(
                 "turnstile_site_key and TURNSTILE_SECRET are required when Turnstile is enabled"
             )
+        push_runtime = self.service_role in {"full", "worker", "preflight"}
+        if push_runtime and self.push_enabled and self.push_fcm_service_account_b64 is None:
+            raise ValueError("push_fcm_service_account_b64 is required when mobile push is enabled")
         if self.environment == "production":
             if self.domain.endswith(".localhost"):
                 raise ValueError("a .localhost domain cannot be used in production")

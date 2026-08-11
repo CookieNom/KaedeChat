@@ -122,6 +122,32 @@ failed sign-in attempt. The API key
 and Turnstile secret belong only in backend environments; neither is included
 in public configuration responses.
 
+Closed-app mobile notifications are optional. Set `KAEDE_PUSH_ENABLED=true`
+and provide a base64-encoded Firebase service-account JSON document in
+`KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64`. The worker uses the FCM HTTP v1 API for
+both Android and iOS; APNs remains connected to the Firebase project. Device
+tokens are encrypted with `KAEDE_SECRET_KEY`, registration is authenticated,
+and invalidated provider tokens are disabled automatically. Keep the Firebase
+service account, Android `google-services.json`, iOS
+`GoogleService-Info.plist`, and APNs signing key out of version control.
+The Android client must be registered in the same Firebase project with package
+name `chat.kaede.mobile`; its downloaded file belongs at
+`mobile/android/app/google-services.json`. This client file is not the private
+service-account JSON requested by `make setup`. Generate the latter from
+Firebase Console under **Project settings > Service accounts**. FCM does not
+require billing or Google Analytics. FCM is not end-to-end encrypted, so Kaede
+sends it only a data-only wake with a short-lived random token. Sender names,
+message text, notification kind, and entity references are fetched directly
+from the authenticated Kaede API and displayed as a local notification. FCM
+still receives the provider token and ordinary delivery metadata. Preview
+settings do not change the content-free FCM payload.
+The wizard can read this credential from a non-symlink file or accept the full
+JSON through a hidden multiline paste. Complete pasted input by entering
+`KAEDE_FIREBASE_JSON_END` on a line by itself.
+For production, use a dedicated service account with only the Firebase Cloud
+Messaging API Admin role (`roles/firebasecloudmessaging.admin`), rotate its key
+on a regular schedule, and revoke it immediately after any accidental exposure.
+
 Set the same `KAEDE_EDGE_SECRET` in `.env` and the nginx
 `X-Kaede-Edge-Secret` header. It must differ from `KAEDE_PROXY_SECRET`. The
 selected internal edge receives only the domain and these two edge credentials; application processes

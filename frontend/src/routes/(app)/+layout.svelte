@@ -7,7 +7,7 @@
     shouldOfferBrowserNotificationPrompt,
     type GuildNotificationPreference
   } from '$lib/notifications/browser.svelte';
-  import { isNativeDesktop } from '$lib/platform/native';
+  import { initializeNativeInstance, isNativeDesktop } from '$lib/platform/native';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import { applyLocale } from '$lib/ui/locale';
   import { applyTheme, type ThemePreference } from '$lib/ui/theme';
@@ -36,6 +36,7 @@
 
   onMount(() => {
     const controller = new AbortController();
+    let disposed = false;
     let guildPreferenceRequest: Promise<void> | null = null;
 
     function refreshGuildNotificationPreferences(): Promise<void> {
@@ -59,7 +60,14 @@
     }
 
     developerMode.reset();
-    authenticatedGateway.start();
+    void initializeNativeInstance()
+      .then(() => {
+        if (!disposed) authenticatedGateway.start();
+      })
+      .catch(() => {
+        // Protected API requests surface a durable-vault error if restoration
+        // remains unavailable. Do not start an unauthenticated gateway first.
+      });
     browserNotifications.refreshPromptPreference();
     void api<UserSettingsPayload>('/users/@me/settings', {
       signal: controller.signal
@@ -88,6 +96,7 @@
       60_000
     );
     return () => {
+      disposed = true;
       controller.abort();
       window.clearInterval(guildPreferenceRefreshTimer);
       window.removeEventListener('blur', refreshPreferencesWhenBackgrounded);

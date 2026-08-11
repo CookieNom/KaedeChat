@@ -122,6 +122,7 @@ database invariants, guarded downgrade behavior, and metadata drift.
 
 ## Scope limits
 
-Group DMs, message search, threads, forums, stages, vanity invites, MLS,
-MessagePack, and native mobile clients are outside the current scope. Federation
+Group DMs, message search, threads, forums, stages, vanity invites, MLS, and
+MessagePack are outside the current scope. Native Android and iOS clients are
+implemented in `mobile/` and consume the same core-chat contracts. Federation
 behavior is documented in [m3-federation.md](m3-federation.md).

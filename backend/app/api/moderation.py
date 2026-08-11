@@ -44,6 +44,7 @@ from app.db.models import (
     AuditLogEntry,
     Ban,
     Channel,
+    Guild,
     GuildInstanceBan,
     GuildMember,
     Instance,
@@ -89,7 +90,15 @@ async def list_members(
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
 ) -> list[dict[str, object]]:
-    guild = await local_guild(session, settings, guild_id)
+    resolved_guild_id, resolved_guild_domain = guild_id.resolve(settings.domain)
+    guild = await session.scalar(
+        select(Guild).where(
+            Guild.id == resolved_guild_id,
+            Guild.origin_domain == resolved_guild_domain,
+        )
+    )
+    if guild is None:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
     await require_permissions(session, redis, guild, auth.user, required_permissions("member.list"))
     conditions: list[ColumnElement[bool]] = [
         GuildMember.guild_id == guild.id,

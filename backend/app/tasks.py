@@ -7,6 +7,7 @@ from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+import httpx
 from redis.asyncio import Redis
 from sqlalchemy import and_, case, delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -18,9 +19,11 @@ from taskiq_redis import RedisStreamBroker
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
 from app.chat.payloads import guild_payload, render_message_payload
+from app.chat.permissions import get_permissions
 from app.core.cache_warmup import warm_identify_cache
 from app.core.logging import configure_logging
 from app.core.metrics import observed_job
+from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.task_wake import enqueue_best_effort
 from app.db.models import (
@@ -36,12 +39,15 @@ from app.db.models import (
     GuildHistoryImport,
     GuildInstanceBan,
     GuildMember,
+    GuildNotificationSetting,
     Message,
     MessageProjection,
     OneTimeToken,
+    PushDevice,
     ReadState,
     Session,
     User,
+    UserSettings,
 )
 from app.db.partitions import ensure_message_partitions
 from app.db.session import create_engine_and_sessionmaker
@@ -72,6 +78,8 @@ from app.media.jobs import (
 )
 from app.media.processing import IMAGE_PIPELINE_VERSION
 from app.media.service import attachment_payload
+from app.push.service import decrypt_device_token, fcm_client
+from app.push.sync import PushSyncEvent, discard_push_sync, issue_push_sync
 from app.voice.background import replicate_room
 from app.voice.cleanup import cleanup_orphaned_dm_rooms
 from app.voice.rooms import parse_room_name
@@ -331,9 +339,269 @@ async def project_message_record(
                 "last_message_id": (str(last_message_id) if last_message_id is not None else None),
                 "last_message_domain": last_message_domain,
                 "mention_count": mention_count,
+                "unread": last_message_id is None
+                or (last_message_id, last_message_domain or "") < (latest.id, latest.origin_domain),
             },
         )
+    if settings.push_enabled:
+        for _, message in messages:
+            await enqueue_best_effort(
+                mobile_push_message,
+                message.id,
+                message.origin_domain,
+                0,
+            )
     return len(mention_states)
+
+
+@broker.task(task_name="mobile.push_message", retry_on_error=True, max_retries=4)
+@observed_job("mobile.push_message")
+async def mobile_push_message(
+    message_id: int,
+    message_domain: str,
+    after_user_id: int = 0,
+) -> int:
+    """Deliver one bounded page of native push notifications.
+
+    The task is deliberately paged so enabling all-message notifications in a
+    large guild never turns one message projection into an unbounded worker
+    transaction. Each continuation advances a local-user snowflake cursor.
+    """
+
+    settings = get_settings()
+    if not settings.push_enabled:
+        return 0
+    message_domain = normalize_domain(message_domain)
+    if not 0 <= message_id <= (1 << 63) - 1 or not 0 <= after_user_id <= (1 << 63) - 1:
+        raise ValueError("invalid push message identity")
+
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    delivered = 0
+    next_cursor: int | None = None
+    invalid_device_ids: list[str] = []
+    try:
+        async with sessionmaker() as session:
+            message = await session.get(Message, (message_id, message_domain))
+            if message is None or message.deleted_at is not None:
+                return 0
+            channel = await session.get(Channel, (message.channel_id, message.channel_domain))
+            author = await session.get(User, (message.author_id, message.author_domain))
+            if channel is None or author is None:
+                return 0
+
+            if channel.type == 1:
+                candidate_statement = (
+                    select(User.id)
+                    .join(
+                        DMParticipant,
+                        (DMParticipant.user_id == User.id)
+                        & (DMParticipant.user_domain == User.origin_domain),
+                    )
+                    .join(
+                        PushDevice,
+                        (PushDevice.user_id == User.id)
+                        & (PushDevice.user_domain == User.origin_domain),
+                    )
+                    .where(
+                        DMParticipant.conversation_id == channel.id,
+                        DMParticipant.conversation_domain == channel.origin_domain,
+                        User.origin_domain == settings.domain,
+                        User.id > after_user_id,
+                        PushDevice.enabled.is_(True),
+                    )
+                )
+                if message.author_domain == settings.domain:
+                    candidate_statement = candidate_statement.where(User.id != message.author_id)
+                guild = None
+            elif channel.guild_id is not None and channel.guild_domain is not None:
+                guild = await session.get(Guild, (channel.guild_id, channel.guild_domain))
+                if guild is None or guild.unavailable:
+                    return 0
+                candidate_statement = (
+                    select(User.id)
+                    .join(
+                        GuildMember,
+                        (GuildMember.user_id == User.id)
+                        & (GuildMember.user_domain == User.origin_domain),
+                    )
+                    .join(
+                        PushDevice,
+                        (PushDevice.user_id == User.id)
+                        & (PushDevice.user_domain == User.origin_domain),
+                    )
+                    .where(
+                        GuildMember.guild_id == guild.id,
+                        GuildMember.guild_domain == guild.origin_domain,
+                        User.origin_domain == settings.domain,
+                        User.id > after_user_id,
+                        PushDevice.enabled.is_(True),
+                    )
+                )
+                if message.author_domain == settings.domain:
+                    candidate_statement = candidate_statement.where(User.id != message.author_id)
+            else:
+                return 0
+
+            candidate_ids = list(
+                await session.scalars(candidate_statement.distinct().order_by(User.id).limit(251))
+            )
+            if len(candidate_ids) > 250:
+                next_cursor = candidate_ids[249]
+                candidate_ids = candidate_ids[:250]
+            if not candidate_ids:
+                return 0
+
+            mentioned = {
+                int(item["id"])
+                for item in message.mention_user_refs
+                if item.get("origin_domain") == settings.domain
+                and str(item.get("id", "")).isdigit()
+            }
+            devices_to_notify: list[tuple[str, str, str, str, int]] = []
+
+            users = {
+                user.id: user
+                for user in await session.scalars(
+                    select(User).where(
+                        User.id.in_(candidate_ids),
+                        User.origin_domain == settings.domain,
+                    )
+                )
+            }
+            user_preferences = {
+                item.user_id: item
+                for item in await session.scalars(
+                    select(UserSettings).where(
+                        UserSettings.user_id.in_(candidate_ids),
+                        UserSettings.user_domain == settings.domain,
+                    )
+                )
+            }
+            devices_by_user: dict[int, list[PushDevice]] = {}
+            for device in await session.scalars(
+                select(PushDevice).where(
+                    PushDevice.user_id.in_(candidate_ids),
+                    PushDevice.user_domain == settings.domain,
+                    PushDevice.enabled.is_(True),
+                )
+            ):
+                devices_by_user.setdefault(device.user_id, []).append(device)
+            guild_preferences: dict[int, GuildNotificationSetting] = {}
+            if guild is not None:
+                guild_preferences = {
+                    item.user_id: item
+                    for item in await session.scalars(
+                        select(GuildNotificationSetting).where(
+                            GuildNotificationSetting.user_id.in_(candidate_ids),
+                            GuildNotificationSetting.user_domain == settings.domain,
+                            GuildNotificationSetting.guild_id == guild.id,
+                            GuildNotificationSetting.guild_domain == guild.origin_domain,
+                        )
+                    )
+                }
+
+            for user_id in candidate_ids:
+                user = users.get(user_id)
+                if user is None:
+                    continue
+                user_settings = user_preferences.get(user_id)
+                notification_settings = (
+                    user_settings.notification_settings if user_settings is not None else {}
+                )
+                if notification_settings.get("presence_preference") == "dnd":
+                    continue
+
+                is_mention = user_id in mentioned
+                if guild is None:
+                    if not bool(notification_settings.get("direct_messages", True)):
+                        continue
+                    android_channel = "kaede_dms"
+                else:
+                    permissions = await get_permissions(
+                        session,
+                        redis,
+                        guild,
+                        user,
+                        channel=channel,
+                    )
+                    if not permissions & Permission.VIEW_CHANNEL:
+                        continue
+                    preference = guild_preferences.get(user_id)
+                    level = preference.level if preference is not None else "mentions"
+                    if level == "none" or (level == "mentions" and not is_mention):
+                        continue
+                    if is_mention and not bool(notification_settings.get("mentions", True)):
+                        continue
+                    android_channel = "kaede_mentions" if is_mention else "kaede_guilds"
+
+                for device in devices_by_user.get(user_id, []):
+                    devices_to_notify.append(
+                        (
+                            device.id,
+                            decrypt_device_token(device, settings),
+                            device.platform,
+                            {
+                                "kaede_dms": "direct_message",
+                                "kaede_mentions": "mention",
+                                "kaede_guilds": "guild_message",
+                            }[android_channel],
+                            user_id,
+                        )
+                    )
+
+            # Release the read transaction before making any external request.
+            event_message_id = message.id
+            event_message_domain = message.origin_domain
+            await session.rollback()
+            client = fcm_client(settings)
+            for device_id, token, platform, notification_kind, user_id in devices_to_notify:
+                event_token = await issue_push_sync(
+                    redis,
+                    PushSyncEvent(
+                        device_id=device_id,
+                        user_id=user_id,
+                        user_domain=settings.domain,
+                        message_id=event_message_id,
+                        message_domain=event_message_domain,
+                        kind=notification_kind,
+                    ),
+                )
+                try:
+                    result = await client.send_sync(
+                        token,
+                        event_token=event_token,
+                        platform=platform,
+                    )
+                except httpx.HTTPError:
+                    await discard_push_sync(redis, event_token)
+                    continue
+                if result.delivered:
+                    delivered += 1
+                else:
+                    await discard_push_sync(redis, event_token)
+                    if result.token_invalid:
+                        invalid_device_ids.append(device_id)
+
+            if invalid_device_ids:
+                await session.execute(
+                    update(PushDevice)
+                    .where(PushDevice.id.in_(invalid_device_ids))
+                    .values(enabled=False, updated_at=func.now())
+                )
+                await session.commit()
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+    if next_cursor is not None:
+        await enqueue_best_effort(
+            mobile_push_message,
+            message_id,
+            message_domain,
+            next_cursor,
+        )
+    return delivered
 
 
 @broker.task(task_name="mentions.fanout", retry_on_error=True, max_retries=5)
