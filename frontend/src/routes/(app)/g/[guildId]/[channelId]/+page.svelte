@@ -3329,25 +3329,8 @@
             onclick={togglePins}>📌</button
           >
         {/if}
-        <button
-          class="icon-button"
-          type="button"
-          aria-label="Search messages"
-          title="Search messages"
-          onclick={() => (messageSearchOpen = true)}
-        >
-          <Icon name="search" size={18} />
-        </button>
       </div>
     </header>
-    <MessageSearch
-      bind:open={messageSearchOpen}
-      scope="guild"
-      scopeRef={guild ? entityRef(guild) : guildId}
-      accountRef={currentUser ? entityRef(currentUser) : null}
-      {channel}
-      users={members.map((member) => member.user)}
-    />
     <div class="sidebar-section-heading">
       <p class="sidebar-section-label">Channels</p>
       {#if canManageChannels}
@@ -3619,6 +3602,15 @@
         </div>
       </div>
       <div class="channel-header-actions">
+        <MessageSearch
+          bind:open={messageSearchOpen}
+          scope="guild"
+          scopeRef={guild ? entityRef(guild) : guildId}
+          accountRef={currentUser ? entityRef(currentUser) : null}
+          {channel}
+          users={members.map((member) => member.user)}
+          placement="header"
+        />
         <button
           class:active={memberRosterOpen}
           class="icon-button member-roster-toggle"
