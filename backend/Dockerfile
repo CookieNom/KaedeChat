@@ -32,6 +32,7 @@ COPY --from=production-dependencies /opt/venv /opt/venv
 COPY app app
 COPY alembic.ini ./
 COPY migrations migrations
+COPY scripts scripts
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin kaede
 ENV PATH="/opt/venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 USER kaede

@@ -7,7 +7,7 @@ from app.core.federation import FEDERATION_CAPABILITIES
 from app.core.settings import Settings
 from app.db.base import Base
 from app.db.models import Channel
-from app.search.meili import TYPO_TOLERANCE, document_id
+from app.search.meili import TYPO_TOLERANCE, MeiliClient, document_id
 from app.search.schemas import FederatedMessageSearchResponse, MessageSearchRequest
 
 VALID_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
@@ -123,3 +123,36 @@ def test_federated_search_response_is_minimal_and_bounded() -> None:
                 ]
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_reset_missing_search_index_is_a_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    deleted = False
+
+    class Response:
+        status_code = 404
+
+        def raise_for_status(self) -> None:
+            raise AssertionError("a missing index must not be treated as an error")
+
+    class Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "Client":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, _path: str) -> Response:
+            return Response()
+
+        async def delete(self, _path: str) -> Response:
+            nonlocal deleted
+            deleted = True
+            return Response()
+
+    monkeypatch.setattr("app.search.meili.httpx.AsyncClient", Client)
+    await MeiliClient(settings(search_enabled=True, search_master_key="s" * 32)).reset_index()
+    assert deleted is False

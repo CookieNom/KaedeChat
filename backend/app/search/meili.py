@@ -151,6 +151,11 @@ class MeiliClient:
                 timeout=self.settings.search_request_timeout_seconds,
                 follow_redirects=False,
             ) as client:
+                current = await client.get(f"/indexes/{self.uid}")
+                if current.status_code == 404:
+                    _configured_indices.discard((self.settings.search_url.rstrip("/"), self.uid))
+                    return
+                current.raise_for_status()
                 response = await client.delete(f"/indexes/{self.uid}")
                 if response.status_code != 404:
                     response.raise_for_status()
