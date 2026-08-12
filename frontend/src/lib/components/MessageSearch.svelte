@@ -261,34 +261,38 @@
           if (event.key === 'Escape') closeSearch();
         }}
       >
-        <header>
-          <div>
-            <h2>{advancedOpen ? 'Advanced search' : 'Search messages'}</h2>
-            {#if placement === 'dialog'}
-              <p>
-                Typo-tolerant search across {scope === 'guild'
-                  ? 'this guild'
-                  : scope === 'dms'
-                    ? 'your direct messages'
-                    : 'this conversation'}.
-              </p>
-            {/if}
-          </div>
-          <div class="panel-tools">
-            <button
-              class:active={advancedOpen || activeFilterCount > 0}
-              class="advanced-toggle"
-              type="button"
-              aria-expanded={advancedOpen}
-              onclick={() => (advancedOpen = !advancedOpen)}
-            >
-              Filters{activeFilterCount ? ` · ${activeFilterCount}` : ''}
-            </button>
-            <button class="close" type="button" aria-label="Close search" onclick={closeSearch}
-              >×</button
-            >
-          </div>
-        </header>
+        {#if placement === 'dialog' || advancedOpen || response || error || encrypted || disabledByInstance}
+          <header>
+            <div>
+              <h2>{advancedOpen ? 'Advanced search' : 'Search messages'}</h2>
+              {#if placement === 'dialog'}
+                <p>
+                  Typo-tolerant search across {scope === 'guild'
+                    ? 'this guild'
+                    : scope === 'dms'
+                      ? 'your direct messages'
+                      : 'this conversation'}.
+                </p>
+              {/if}
+            </div>
+            <div class="panel-tools">
+              {#if placement === 'dialog' || response || advancedOpen}
+                <button
+                  class:active={advancedOpen || activeFilterCount > 0}
+                  class="advanced-toggle"
+                  type="button"
+                  aria-expanded={advancedOpen}
+                  onclick={() => (advancedOpen = !advancedOpen)}
+                >
+                  Filters{activeFilterCount ? ` · ${activeFilterCount}` : ''}
+                </button>
+              {/if}
+              <button class="close" type="button" aria-label="Close search" onclick={closeSearch}
+                >×</button
+              >
+            </div>
+          </header>
+        {/if}
 
         {#if placement === 'dialog'}
           <form
@@ -516,8 +520,8 @@
     z-index: 1001;
   }
   .header-search-box {
-    width: clamp(10rem, 18vw, 15rem);
-    height: 2.25rem;
+    width: clamp(10rem, 16vw, 13.5rem);
+    height: 2rem;
     display: flex;
     align-items: center;
     border: 1px solid var(--border, #34363d);
@@ -535,16 +539,27 @@
   }
   .header-search-box input {
     min-width: 0;
+    min-height: 0;
     flex: 1;
     height: 100%;
     padding: 0 0.2rem 0 0.75rem;
     border: 0;
+    border-radius: inherit;
     outline: 0;
+    box-shadow: none;
     background: transparent;
     color: inherit;
     font: inherit;
     font-size: 0.86rem;
     font-weight: 650;
+  }
+  .header-search-box input:hover,
+  .header-search-box input:focus,
+  .header-search-box input:focus-visible {
+    min-height: 0;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
   }
   .header-search-box input::placeholder {
     color: var(--muted, #aaa);
@@ -552,7 +567,7 @@
   }
   .header-search-box button,
   .dialog-query button {
-    width: 2.25rem;
+    width: 2rem;
     height: 100%;
     display: grid;
     place-items: center;
@@ -574,7 +589,7 @@
   }
   .search-layer.header-layer {
     position: absolute;
-    top: calc(100% + 0.55rem);
+    top: calc(100% + 0.35rem);
     right: 0;
     z-index: 1000;
   }
@@ -609,13 +624,15 @@
     width: min(820px, calc(100vw - 2rem));
   }
   .search-panel.header-popover {
-    width: min(580px, calc(100vw - 2rem));
-    max-height: min(720px, calc(100dvh - 5rem));
-    padding: 0.85rem;
-    box-shadow: 0 18px 48px #000b;
+    width: min(410px, calc(100vw - 1rem));
+    max-height: min(640px, calc(100dvh - 4.5rem));
+    padding: 0.5rem;
+    border-radius: 9px;
+    box-shadow: 0 12px 32px #000a;
   }
   .search-panel.header-popover.advanced {
-    width: min(760px, calc(100vw - 2rem));
+    width: min(660px, calc(100vw - 1rem));
+    padding: 0.75rem;
   }
   .search-panel header {
     display: flex;
@@ -734,23 +751,23 @@
   }
   .search-start {
     display: grid;
-    gap: 0.2rem;
-    padding: 0.2rem 0;
+    gap: 0.05rem;
+    padding: 0;
   }
   .search-start h3 {
-    margin: 0.25rem 0.65rem 0.45rem;
+    margin: 0.2rem 0.5rem 0.35rem;
     color: var(--muted, #aaa);
-    font-size: 0.8rem;
+    font-size: 0.72rem;
     text-transform: uppercase;
     letter-spacing: 0.07em;
   }
   .search-start > button {
     display: grid;
-    grid-template-columns: 2.35rem minmax(0, 1fr);
-    gap: 0.7rem;
+    grid-template-columns: 1.8rem minmax(0, 1fr);
+    gap: 0.5rem;
     align-items: center;
     width: 100%;
-    padding: 0.65rem;
+    padding: 0.45rem 0.5rem;
     border: 0;
     border-radius: 9px;
     background: transparent;
@@ -763,17 +780,22 @@
   }
   .search-start > button > span:last-child {
     display: grid;
-    gap: 0.1rem;
+    gap: 0;
+  }
+  .search-start strong {
+    font-size: 0.86rem;
+    line-height: 1.25;
   }
   .search-start small {
     color: var(--muted, #aaa);
-    font-size: 0.8rem;
+    font-size: 0.74rem;
+    line-height: 1.25;
   }
   .quick-icon {
     display: grid;
     place-items: center;
     color: var(--muted, #aaa);
-    font-size: 1.45rem;
+    font-size: 1.15rem;
     font-weight: 800;
   }
   .submit,
