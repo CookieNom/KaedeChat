@@ -318,6 +318,42 @@ final class KaedeRepository {
     return payload.map(KaedeMessage.fromJson).toList();
   }
 
+  Future<MessageSearchPage> searchMessages({
+    required String query,
+    required String scope,
+    EntityRef? scopeRef,
+    String sort = 'relevance',
+    List<EntityRef> authors = const <EntityRef>[],
+    List<EntityRef> mentions = const <EntityRef>[],
+    List<String> has = const <String>[],
+    bool? pinned,
+    String? authorType,
+    DateTime? before,
+    DateTime? after,
+    String? cursor,
+  }) async =>
+      MessageSearchPage.fromJson(await api.sendJson(
+        'POST',
+        '/api/v1/search/messages',
+        data: <String, Object?>{
+          'query': query,
+          'scope': scope,
+          if (scopeRef != null) 'scope_ref': scopeRef.wire,
+          'sort': sort,
+          if (cursor != null) 'cursor': cursor,
+          'limit': 25,
+          'filters': <String, Object?>{
+            'authors': authors.map((item) => item.wire).toList(),
+            'mentions': mentions.map((item) => item.wire).toList(),
+            'has': has,
+            if (pinned != null) 'pinned': pinned,
+            if (authorType != null) 'author_type': authorType,
+            if (before != null) 'before': before.toUtc().toIso8601String(),
+            if (after != null) 'after': after.toUtc().toIso8601String(),
+          },
+        },
+      ));
+
   Future<Map<String, Object?>> sendMessage(
     EntityRef channel, {
     String? content,

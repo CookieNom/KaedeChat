@@ -294,6 +294,16 @@ final class KaedeException implements Exception {
           'This instance keeps recent messages here and loads older messages from their home instance as you scroll.',
       'FEDERATED_DM_HISTORY_UNAVAILABLE':
           'Older messages could not be loaded from their home instance right now. Your recent messages are still available; try again in a moment.',
+      'SEARCH_DISABLED_FOR_E2EE':
+          'Search is unavailable in end-to-end encrypted conversations because the server cannot read or index their contents.',
+      'SEARCH_DISABLED_BY_INSTANCE':
+          'Message search is disabled by this instance’s administrator.',
+      'SEARCH_UNAVAILABLE':
+          'Message search is temporarily unavailable. Try again shortly.',
+      'INVALID_SEARCH_CURSOR':
+          'That search page expired. Run the search again.',
+      'FEDERATED_SEARCH_RESPONSE_INVALID':
+          'The other server returned an invalid search response. Locally cached messages may still be available.',
       'VOICE_DISABLED': 'Voice is disabled on this instance.',
       'VOICE_DENIED': 'You do not have permission to join that voice channel.',
       'VOICE_NOT_CONNECTED': 'You are no longer connected to voice.',

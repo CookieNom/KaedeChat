@@ -17,6 +17,36 @@ import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
 
 void main() {
+  group('message search models', () {
+    test('parses encryption policy and bounded search coverage', () {
+      final channel = KaedeChannel.fromJson(<String, Object?>{
+        'id': '10',
+        'origin_domain': 'remote.example',
+        'guild_id': '20',
+        'guild_domain': 'remote.example',
+        'type': 0,
+        'position': 0,
+        'encryption_mode': 'e2ee',
+        'search_available': false,
+      });
+      final page = MessageSearchPage.fromJson(<String, Object?>{
+        'results': <Object?>[],
+        'coverage': <String, Object?>{
+          'local': 'cached',
+          'authority': 'unavailable',
+        },
+        'encrypted_channel_refs': <Object?>['10@remote.example'],
+        'indexing': true,
+      });
+
+      expect(channel.encryptionMode, 'e2ee');
+      expect(channel.searchAvailable, isFalse);
+      expect(page.localCoverage, 'cached');
+      expect(page.encryptedChannelRefs, <EntityRef>[channel.ref]);
+      expect(page.indexing, isTrue);
+    });
+  });
+
   group('federated profile refresh', () {
     test(
         'resolved profile cache immediately labels an otherwise unknown mention',

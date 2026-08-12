@@ -12,6 +12,7 @@
     Channel,
     Guild,
     Message,
+    MessageSearchResult,
     ReadStateStatus,
     Relationship,
     UserSummary
@@ -32,6 +33,7 @@
   import UserProfileCard from '$lib/components/UserProfileCard.svelte';
   import GuildRail from '$lib/components/GuildRail.svelte';
   import Icon from '$lib/components/Icon.svelte';
+  import MessageSearch from '$lib/components/MessageSearch.svelte';
   import { onMount, tick } from 'svelte';
 
   let guilds = $state<Guild[]>([]);
@@ -53,6 +55,7 @@
   let navigationToggle: HTMLButtonElement | null = null;
   let navigationClose: HTMLButtonElement | null = null;
   let messageDialog = $state<HTMLDialogElement | null>(null);
+  let messageSearchOpen = $state(false);
   let messageDialogError = $state('');
   let profilePopover = $state<{ user: UserSummary; x: number; y: number } | null>(null);
   let loadGeneration = 0;
@@ -111,6 +114,12 @@
 
   function openCommandSwitcher() {
     window.dispatchEvent(new Event('kaede:open-command-switcher'));
+  }
+
+  function jumpToSearchResult(result: MessageSearchResult) {
+    window.location.assign(
+      `${directMessagePath(result.channel)}?${new URLSearchParams({ around: entityRef(result.message) })}`
+    );
   }
 
   function guildLandingPath(guild: Guild): string {
@@ -675,6 +684,15 @@
         <button
           class="icon-button"
           type="button"
+          aria-label="Search direct messages"
+          title="Search direct messages"
+          onclick={() => (messageSearchOpen = true)}
+        >
+          <Icon name="message" size={19} />
+        </button>
+        <button
+          class="icon-button"
+          type="button"
           aria-label="Jump to a channel"
           title="Jump to a channel (Ctrl+K)"
           onclick={openCommandSwitcher}
@@ -686,6 +704,14 @@
         </a>
       </div>
     </header>
+    <MessageSearch
+      bind:open={messageSearchOpen}
+      scope="dms"
+      scopeRef={null}
+      accountRef={currentUser ? entityRef(currentUser) : null}
+      users={directMessages.flatMap((channel) => channel.recipients ?? [])}
+      onJump={jumpToSearchResult}
+    />
 
     <div class="home-scroll" aria-busy={loading}>
       {#if friendsView}

@@ -102,6 +102,13 @@ from app.media.processing import IMAGE_PIPELINE_VERSION
 from app.media.service import attachment_payload
 from app.push.service import decrypt_device_token, fcm_client
 from app.push.sync import PushSyncEvent, discard_push_sync, issue_push_sync
+from app.search.meili import (
+    SearchUnavailable,
+    process_search_outbox,
+    purge_index_for_encryption_transition,
+    reconcile_search_index_state,
+    seed_search_backfill,
+)
 from app.voice.background import replicate_room
 from app.voice.cleanup import cleanup_orphaned_dm_rooms
 from app.voice.rooms import parse_room_name
@@ -682,6 +689,29 @@ async def message_projection_sweep() -> int:
         return projected
     finally:
         await redis.aclose()
+        await engine.dispose()
+
+
+@broker.task(task_name="search.index_sweep", schedule=[{"cron": "* * * * *"}])
+@observed_job("search.index_sweep")
+async def search_index_sweep() -> int:
+    """Drain the durable SQL desired-state queue into private Meilisearch."""
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    try:
+        async with sessionmaker() as session:
+            if not await reconcile_search_index_state(session, settings):
+                return 0
+            try:
+                await purge_index_for_encryption_transition(session, settings)
+                await seed_search_backfill(session, settings)
+                return await process_search_outbox(session, settings)
+            except SearchUnavailable:
+                # The durable queue owns retry state. A routine search outage
+                # must not make Taskiq create a parallel retry storm.
+                return 0
+    finally:
         await engine.dispose()
 
 

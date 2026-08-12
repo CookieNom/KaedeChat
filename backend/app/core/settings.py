@@ -90,6 +90,16 @@ class Settings(BaseSettings):
     database_url: SecretStr
     dragonfly_url: SecretStr
 
+    # Message search. Meilisearch is an internal, rebuildable projection; SQL
+    # and the federation protocol remain authoritative.
+    search_enabled: bool = False
+    search_url: str = "http://meilisearch:7700"
+    search_master_key: SecretStr | None = None
+    search_index_prefix: str = "kaede"
+    search_request_timeout_seconds: int = Field(default=5, ge=1, le=30)
+    search_batch_size: int = Field(default=250, ge=10, le=2_000)
+    search_federation_timeout_seconds: int = Field(default=8, ge=2, le=30)
+
     # Federation
     federation_mode: Literal["open", "allowlist"] = "open"
     federation_clock_skew_seconds: int = Field(default=300, ge=30, le=900)
@@ -321,6 +331,7 @@ class Settings(BaseSettings):
         "turnstile_site_key",
         "turnstile_secret",
         "push_fcm_service_account_b64",
+        "search_master_key",
         mode="before",
     )
     @classmethod
@@ -799,6 +810,27 @@ class Settings(BaseSettings):
             )
         if self.media_inflight_quota_bytes < self.media_max_attachment_bytes:
             raise ValueError("media_inflight_quota_bytes cannot be below one maximum attachment")
+        if self.search_enabled:
+            if (
+                self.search_master_key is None
+                or len(self.search_master_key.get_secret_value()) < 32
+            ):
+                raise ValueError(
+                    "search_master_key must contain at least 32 characters when search is enabled"
+                )
+            search_endpoint = urlsplit(self.search_url)
+            if (
+                search_endpoint.scheme not in {"http", "https"}
+                or not search_endpoint.hostname
+                or search_endpoint.username is not None
+                or search_endpoint.password is not None
+                or search_endpoint.path not in {"", "/"}
+                or search_endpoint.query
+                or search_endpoint.fragment
+            ):
+                raise ValueError(
+                    "search_url must be an HTTP(S) origin without a path, credentials, or query"
+                )
         if self.media_s3_create_buckets is None:
             self.media_s3_create_buckets = self.media_storage_backend == "garage"
         if self.media_s3_addressing_style == "virtual" and any(

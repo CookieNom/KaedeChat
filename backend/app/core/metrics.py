@@ -12,7 +12,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.settings import get_settings
-from app.db.models import FederationOutbox, FederationReplicaUsage, Guild, Instance
+from app.db.models import (
+    FederationOutbox,
+    FederationReplicaUsage,
+    Guild,
+    Instance,
+    SearchIndexOutbox,
+)
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -112,6 +118,14 @@ async def render_metrics(redis: Redis, sessionmaker: async_sessionmaker[AsyncSes
                 )
             )
         ).one()
+        search_pending, search_failed = (
+            await session.execute(
+                select(
+                    func.count(SearchIndexOutbox.message_id),
+                    func.count(SearchIndexOutbox.message_id).filter(SearchIndexOutbox.attempts > 0),
+                )
+            )
+        ).one()
     failure_total = int(await redis.get("metrics:counter:federation_delivery_failures") or 0)
     quota_rejections = int(
         await redis.get("metrics:counter:federation_inbox_quota_rejections") or 0
@@ -193,6 +207,12 @@ async def render_metrics(redis: Redis, sessionmaker: async_sessionmaker[AsyncSes
             "kaede_federation_remote_media_cache_quota_rejections_total",
             media_cache_quota_rejections,
         ),
+        "# HELP kaede_search_index_pending_messages Messages awaiting search projection.",
+        "# TYPE kaede_search_index_pending_messages gauge",
+        _sample("kaede_search_index_pending_messages", int(search_pending or 0)),
+        "# HELP kaede_search_index_retrying_messages Search projections delayed by errors.",
+        "# TYPE kaede_search_index_retrying_messages gauge",
+        _sample("kaede_search_index_retrying_messages", int(search_failed or 0)),
         "# HELP kaede_job_duration_seconds_total Cumulative observed task duration.",
         "# TYPE kaede_job_duration_seconds_total counter",
         "# HELP kaede_job_runs_total Observed task executions.",

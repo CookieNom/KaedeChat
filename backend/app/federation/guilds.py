@@ -1182,6 +1182,7 @@ async def apply_guild_mutation_event(
         position = raw.get("position")
         slowmode = raw.get("rate_limit_per_user")
         history_policy = raw.get("federated_history_policy", "inherit")
+        encryption_mode = raw.get("encryption_mode", "plaintext")
         if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5}:
             raise ValueError("channel mutation type is invalid")
         if not isinstance(name, str) or not 1 <= len(name) <= 100:
@@ -1198,6 +1199,8 @@ async def apply_guild_mutation_event(
             raise ValueError("channel mutation slowmode is invalid")
         if history_policy not in {"inherit", "disabled", "full_retained"}:
             raise ValueError("channel history policy is invalid")
+        if encryption_mode not in {"plaintext", "e2ee"}:
+            raise ValueError("channel encryption mode is invalid")
         parent_id = (
             database_snowflake(raw.get("parent_id"), "parent channel id")
             if raw.get("parent_id") is not None
@@ -1238,6 +1241,7 @@ async def apply_guild_mutation_event(
                 permissions_synced=permissions_synced,
                 rate_limit_per_user=slowmode,
                 federated_history_policy=str(history_policy),
+                encryption_mode=str(encryption_mode),
                 created_floor_id=created_floor_id,
             )
             session.add(channel)
@@ -1253,6 +1257,7 @@ async def apply_guild_mutation_event(
             channel.permissions_synced = permissions_synced
             channel.rate_limit_per_user = slowmode
             channel.federated_history_policy = str(history_policy)
+            channel.encryption_mode = str(encryption_mode)
             channel.unavailable = False
         dispatch_type = "CHANNEL_CREATE" if event_type.endswith("create") else "CHANNEL_UPDATE"
         dispatch = dict(raw)
@@ -2332,6 +2337,7 @@ def validate_guild_snapshot(
         position = raw.get("position")
         slowmode = raw.get("rate_limit_per_user")
         history_policy = raw.get("federated_history_policy", "inherit")
+        encryption_mode = raw.get("encryption_mode", "plaintext")
         parent_id = raw.get("parent_id")
         permissions_synced = raw.get("permissions_synced", parent_id is not None)
         if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5}:
@@ -2350,6 +2356,8 @@ def validate_guild_snapshot(
             raise ValueError("guild snapshot channel slowmode is invalid")
         if history_policy not in {"inherit", "disabled", "full_retained"}:
             raise ValueError("guild snapshot channel history policy is invalid")
+        if encryption_mode not in {"plaintext", "e2ee"}:
+            raise ValueError("guild snapshot channel encryption mode is invalid")
         if (
             not isinstance(permissions_synced, bool)
             or permissions_synced
@@ -2832,6 +2840,7 @@ def guild_snapshot_payload(
                 ),
                 "rate_limit_per_user": channel.rate_limit_per_user,
                 "federated_history_policy": channel.federated_history_policy,
+                "encryption_mode": getattr(channel, "encryption_mode", "plaintext"),
                 "created_floor_id": str(channel.created_floor_id),
             }
             for channel in channels
@@ -3103,6 +3112,7 @@ async def apply_guild_snapshot(
         loaded_channel.federated_history_policy = str(
             raw.get("federated_history_policy", "inherit")
         )
+        loaded_channel.encryption_mode = str(raw.get("encryption_mode", "plaintext"))
     for raw in snapshot.get("emojis", []):
         loaded_emoji = await session.get(Emoji, (int(raw["id"]), str(raw["origin_domain"])))
         if loaded_emoji is None:

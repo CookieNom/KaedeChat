@@ -18,9 +18,10 @@ MEDIA_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-media-validation-$(V
 VOICE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-voice-validation-$(VALIDATION_RUN_ID)
 RELEASE_COMPOSE := $(VALIDATION_COMPOSE) --project-name kaede-release-validation-$(VALIDATION_RUN_ID)
 
-.PHONY: help setup auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check lock generate check test audit desktop-check desktop-lint desktop-test desktop-build desktop-dev env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
+.PHONY: help setup search-rebuild auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check lock generate check test audit desktop-check desktop-lint desktop-test desktop-build desktop-dev env-check migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check compose-check generated-compose-check nginx-check dev dev-down
 help:
 	@echo "setup            Run the interactive deployment configuration wizard"
+	@echo "search-rebuild   Rebuild private message search online (RESET=1 recreates the index)"
 	@echo "auto-update-enable  Install and enable the optional user systemd update timer"
 	@echo "auto-update-disable Disable and remove the optional user systemd update timer"
 	@echo "auto-update-status  Show updater configuration and user timer status"
@@ -53,6 +54,9 @@ help:
 
 setup:
 	./setup.sh $(SETUP_ARGS)
+
+search-rebuild:
+	$(COMPOSE) exec -T worker python -m scripts.rebuild_search $(if $(filter 1 true yes,$(RESET)),--reset-index,)
 
 auto-update-enable:
 	./deploy/install-auto-update.sh enable

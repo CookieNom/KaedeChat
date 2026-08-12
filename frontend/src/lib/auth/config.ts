@@ -4,6 +4,7 @@ export interface AuthConfiguration {
   email_required: boolean;
   password_recovery_enabled: boolean;
   gif_picker_enabled: boolean;
+  message_search_enabled: boolean;
   turnstile: {
     enabled: boolean;
     site_key: string | null;

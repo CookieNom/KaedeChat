@@ -762,6 +762,48 @@ object-store growth. This rolling remote cache is separate from the unchanged
 admission still reaches the ceiling, which can indicate a stalled eviction
 worker, undeletable orphan objects, or a genuinely undersized target.
 
+## Private message search
+
+New setup runs offer typo-tolerant message search backed by the bundled
+Meilisearch service. It binds only to the private Compose `data` network and its
+master key is generated into the mode-0600 operator `.env`; it is never sent to
+browsers, mobile clients, desktop clients, or federation peers. Disable it with
+`KAEDE_SEARCH_ENABLED=false`. Existing deployments can rerun `make setup`, choose
+search, then apply the generated configuration and migrations normally.
+The generated `COMPOSE_PROFILES=search` activates the bundled service only when
+search is enabled, so opting out does not leave an idle search container running.
+
+The relevant settings are `KAEDE_SEARCH_ENABLED`, `KAEDE_SEARCH_URL`,
+`KAEDE_SEARCH_MASTER_KEY`, `KAEDE_SEARCH_INDEX_PREFIX`,
+`KAEDE_SEARCH_REQUEST_TIMEOUT_SECONDS`, `KAEDE_SEARCH_BATCH_SIZE`, and
+`KAEDE_SEARCH_FEDERATION_TIMEOUT_SECONDS`. The setup defaults are intended for a
+normal deployment. A larger batch catches up faster after installation or a
+rebuild but increases database, worker, and indexing load. Never publish the
+Meilisearch port or reuse its master key outside this deployment.
+
+The SQL queue is durable and contains references plus retry state, never a second
+copy of message content. Meilisearch is disposable. To repair or replace it while
+chat remains online, run:
+
+```sh
+make search-rebuild            # refresh every authoritative SQL message
+make search-rebuild RESET=1    # first discard and recreate the private index
+```
+
+The UI reports while indexing is catching up. A Meilisearch outage makes search
+temporarily unavailable but does not block sending, receiving, federation, or
+history. Monitor the worker task `search.index_sweep`,
+`kaede_search_index_pending_messages`, and
+`kaede_search_index_retrying_messages`. Repeated `SEARCH_BACKEND_UNAVAILABLE`
+means the URL, key, service health, disk, or index task failed. Restore the service
+and rebuild; do not edit message rows to repair a derived index.
+
+Only plaintext channels are indexed. Setting a channel encryption policy to
+`e2ee` queues removal of all of its indexed documents, and API/SQL/federation
+authorization independently prevents stale candidates from being returned while
+that removal drains. Future encrypted-room support must not reuse this plaintext
+index or upload search tokens/terms without a separate reviewed protocol.
+
 ## Federated retained history
 
 The `guild-history-sync/1` extension is advertised automatically. Export remains

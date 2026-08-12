@@ -30,6 +30,13 @@ x-backend-base: &backend-base
     KAEDE_PROXY_SECRET: ${KAEDE_PROXY_SECRET:?set KAEDE_PROXY_SECRET}
     KAEDE_DATABASE_URL: ${KAEDE_DATABASE_URL:?set KAEDE_DATABASE_URL}
     KAEDE_DRAGONFLY_URL: ${KAEDE_DRAGONFLY_URL:?set KAEDE_DRAGONFLY_URL}
+    KAEDE_SEARCH_ENABLED: ${KAEDE_SEARCH_ENABLED:-false}
+    KAEDE_SEARCH_URL: ${KAEDE_SEARCH_URL:-http://meilisearch:7700}
+    KAEDE_SEARCH_MASTER_KEY: ${KAEDE_SEARCH_MASTER_KEY:-}
+    KAEDE_SEARCH_INDEX_PREFIX: ${KAEDE_SEARCH_INDEX_PREFIX:-kaede}
+    KAEDE_SEARCH_REQUEST_TIMEOUT_SECONDS: ${KAEDE_SEARCH_REQUEST_TIMEOUT_SECONDS:-5}
+    KAEDE_SEARCH_BATCH_SIZE: ${KAEDE_SEARCH_BATCH_SIZE:-250}
+    KAEDE_SEARCH_FEDERATION_TIMEOUT_SECONDS: ${KAEDE_SEARCH_FEDERATION_TIMEOUT_SECONDS:-8}
     KAEDE_FEDERATION_MODE: ${KAEDE_FEDERATION_MODE:-open}
     KAEDE_FEDERATION_CLOCK_SKEW_SECONDS: ${KAEDE_FEDERATION_CLOCK_SKEW_SECONDS:-300}
     KAEDE_FEDERATION_EVENT_RETENTION_DAYS: ${KAEDE_FEDERATION_EVENT_RETENTION_DAYS:-30}
@@ -154,6 +161,13 @@ x-backend-core-environment: &backend-core-environment
   KAEDE_PROXY_SECRET: ${KAEDE_PROXY_SECRET:?set KAEDE_PROXY_SECRET}
   KAEDE_DATABASE_URL: ${KAEDE_DATABASE_URL:?set KAEDE_DATABASE_URL}
   KAEDE_DRAGONFLY_URL: ${KAEDE_DRAGONFLY_URL:?set KAEDE_DRAGONFLY_URL}
+  KAEDE_SEARCH_ENABLED: ${KAEDE_SEARCH_ENABLED:-false}
+  KAEDE_SEARCH_URL: ${KAEDE_SEARCH_URL:-http://meilisearch:7700}
+  KAEDE_SEARCH_MASTER_KEY: ${KAEDE_SEARCH_MASTER_KEY:-}
+  KAEDE_SEARCH_INDEX_PREFIX: ${KAEDE_SEARCH_INDEX_PREFIX:-kaede}
+  KAEDE_SEARCH_REQUEST_TIMEOUT_SECONDS: ${KAEDE_SEARCH_REQUEST_TIMEOUT_SECONDS:-5}
+  KAEDE_SEARCH_BATCH_SIZE: ${KAEDE_SEARCH_BATCH_SIZE:-250}
+  KAEDE_SEARCH_FEDERATION_TIMEOUT_SECONDS: ${KAEDE_SEARCH_FEDERATION_TIMEOUT_SECONDS:-8}
   KAEDE_FEDERATION_MODE: ${KAEDE_FEDERATION_MODE:-open}
   KAEDE_FEDERATION_CLOCK_SKEW_SECONDS: ${KAEDE_FEDERATION_CLOCK_SKEW_SECONDS:-300}
   KAEDE_FEDERATION_EVENT_RETENTION_DAYS: ${KAEDE_FEDERATION_EVENT_RETENTION_DAYS:-30}
@@ -552,6 +566,26 @@ services:
       timeout: 3s
       retries: 20
 
+  meilisearch:
+    image: getmeili/meilisearch:v1.51.0
+    profiles: [search]
+    restart: unless-stopped
+    environment:
+      MEILI_ENV: production
+      MEILI_MASTER_KEY: ${KAEDE_SEARCH_MASTER_KEY:-search-disabled-change-me}
+      MEILI_NO_ANALYTICS: "true"
+      MEILI_LOG_LEVEL: WARN
+    volumes: [meilisearch-data:/meili_data]
+    networks: [data]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:7700/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
   garage:
     image: dxflrs/garage:v2.3.0
     restart: unless-stopped
@@ -930,6 +964,7 @@ networks:
 volumes:
   postgres-data:
   dragonfly-data:
+  meilisearch-data:
   garage-meta:
   garage-data:
   clamav-data:

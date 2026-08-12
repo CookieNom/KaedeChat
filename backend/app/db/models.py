@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     PrimaryKeyConstraint,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -822,6 +823,13 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
     federated_history_policy: Mapped[str] = mapped_column(
         String(16), server_default="inherit", nullable=False
     )
+    # Search is a channel-level policy, not something inferred from whichever
+    # messages a replica currently has.  Future E2EE setup flips this to
+    # ``e2ee`` before encrypted messages are accepted, which guarantees that
+    # plaintext never enters an external search index for that channel.
+    encryption_mode: Mapped[str] = mapped_column(
+        String(16), server_default="plaintext", nullable=False
+    )
     last_message_id: Mapped[int | None] = mapped_column(BigInteger)
     last_message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
     created_floor_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -884,6 +892,10 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
             use_alter=True,
         ),
         CheckConstraint("type IN (0,1,2,4,5)", name="channel_type"),
+        CheckConstraint(
+            "encryption_mode IN ('plaintext','e2ee')",
+            name="channel_encryption_mode_value",
+        ),
         CheckConstraint("(guild_id IS NULL) = (guild_domain IS NULL)", name="guild_ref_complete"),
         CheckConstraint(
             "(parent_id IS NULL) = (parent_domain IS NULL)", name="parent_ref_complete"
@@ -1101,6 +1113,56 @@ class MessageProjection(Base):
             "ix_message_projections_pending",
             "created_at",
             postgresql_where=text("processed_at IS NULL"),
+        ),
+    )
+
+
+class SearchIndexOutbox(Base):
+    """Durable desired-state queue for the rebuildable message search index."""
+
+    __tablename__ = "search_index_outbox"
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    attempts: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("message_id", "message_domain"),
+        CheckConstraint("attempts >= 0", name="search_index_outbox_attempts_nonnegative"),
+        Index("ix_search_index_outbox_due", "next_attempt_at", "updated_at"),
+    )
+
+
+class SearchIndexState(Base):
+    """Singleton cursor for resumable online search backfills."""
+
+    __tablename__ = "search_index_state"
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    reset_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    backfill_after_id: Mapped[int | None] = mapped_column(BigInteger)
+    backfill_after_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    backfill_completed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (
+        CheckConstraint("id = 1", name="search_index_state_singleton"),
+        CheckConstraint(
+            "(backfill_after_id IS NULL) = (backfill_after_domain IS NULL)",
+            name="search_index_state_cursor_complete",
         ),
     )
 

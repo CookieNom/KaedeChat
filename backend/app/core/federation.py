@@ -31,6 +31,7 @@ FEDERATION_CAPABILITIES = (
     "guild-history-sync/1",
     "guild-history-sync/2",
     "member-self-moderation/1",
+    "message-search/1",
     "presence/1",
     "profile-by-ref/1",
     "request-nonce/1",

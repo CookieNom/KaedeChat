@@ -36,6 +36,7 @@ async def test_auth_configuration_reports_disabled_email_capabilities() -> None:
         "email_required": False,
         "password_recovery_enabled": False,
         "gif_picker_enabled": False,
+        "message_search_enabled": False,
         "turnstile": {"enabled": False, "site_key": None},
     }
 

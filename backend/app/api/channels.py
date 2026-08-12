@@ -509,11 +509,26 @@ async def list_messages(
         and conversation.history_truncated
         and authority_history_available
         and cache_start is not None
-        and around is None
         and after is None
     ):
         requested_before = before.resolve(settings.domain) if before is not None else None
-        if payloads:
+        requested_around = around.resolve(settings.domain) if around is not None else None
+        around_is_local = requested_around is not None and any(
+            (int(str(item["id"])), str(item["origin_domain"])) == requested_around
+            for item in payloads
+        )
+        if requested_around is not None and not around_is_local:
+            # The search authority may return an older result outside this
+            # replica's rolling cache. Ask for the descending page immediately
+            # after that snowflake so the exact target is included without
+            # persisting another copy.
+            if requested_around[0] < (1 << 63) - 1:
+                should_fetch_remote = True
+                remote_before = (
+                    requested_around[0] + 1,
+                    conversation.authority_domain,
+                )
+        elif payloads:
             local_oldest = (
                 int(str(payloads[-1]["id"])),
                 str(payloads[-1]["origin_domain"]),

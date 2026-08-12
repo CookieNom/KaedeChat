@@ -37,6 +37,7 @@ CLIENT_RATE_LIMITS = {
     "link_preview": ClientRateLimit("link-preview", 30, 60),
     "link_preview_media": ClientRateLimit("link-preview-media", 120, 60),
     "self_moderation_status": ClientRateLimit("self-moderation-status", 120, 60),
+    "message_search": ClientRateLimit("message-search", 60, 60),
 }
 
 # Integer milli-tokens and Dragonfly's own clock make this bucket atomic and

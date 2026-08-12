@@ -31,6 +31,7 @@ from app.api.media import router as media_router
 from app.api.moderation import router as moderation_router
 from app.api.push import router as push_router
 from app.api.relationships import router as relationships_router
+from app.api.search import router as search_router
 from app.api.users import router as users_router
 from app.api.voice import router as voice_router
 from app.api.webhooks import router as webhooks_router
@@ -121,6 +122,7 @@ app.include_router(media_router)
 app.include_router(moderation_router)
 app.include_router(push_router)
 app.include_router(relationships_router)
+app.include_router(search_router)
 app.include_router(webhooks_router)
 
 

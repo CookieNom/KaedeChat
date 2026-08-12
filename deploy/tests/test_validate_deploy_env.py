@@ -32,6 +32,28 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
     def test_safe_minimal_production_boundary(self) -> None:
         validate_values(self.production, observability=False)
 
+    def test_message_search_requires_private_valid_configuration(self) -> None:
+        configured = self.production | {
+            "KAEDE_SEARCH_ENABLED": "true",
+            "KAEDE_SEARCH_MASTER_KEY": "s" * 32,
+            "KAEDE_SEARCH_URL": "http://meilisearch:7700",
+            "COMPOSE_PROFILES": "search",
+        }
+        validate_values(configured, observability=False)
+        for overrides in (
+            {"KAEDE_SEARCH_MASTER_KEY": "short"},
+            {"KAEDE_SEARCH_URL": "http://user:secret@meilisearch:7700"},
+            {"KAEDE_SEARCH_URL": "http://meilisearch:7700/not-an-origin"},
+            {"KAEDE_SEARCH_BATCH_SIZE": "0"},
+            {"KAEDE_SEARCH_FEDERATION_TIMEOUT_SECONDS": "31"},
+            {"COMPOSE_PROFILES": ""},
+        ):
+            with (
+                self.subTest(overrides=overrides),
+                self.assertRaises(DeploymentConfigurationError),
+            ):
+                validate_values(configured | overrides, observability=False)
+
     def test_federation_budget_defaults_are_valid(self) -> None:
         values = self.production | {
             name: str(value) for name, value in FEDERATION_INTEGER_DEFAULTS.items()

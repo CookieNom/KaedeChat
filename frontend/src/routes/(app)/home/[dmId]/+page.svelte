@@ -61,6 +61,7 @@
   import EmojiPicker from '$lib/components/EmojiPicker.svelte';
   import GifPicker from '$lib/components/GifPicker.svelte';
   import MessageRow from '$lib/components/MessageRow.svelte';
+  import MessageSearch from '$lib/components/MessageSearch.svelte';
   import PinnedMessagesPanel from '$lib/components/PinnedMessagesPanel.svelte';
   import PresencePicker from '$lib/components/PresencePicker.svelte';
   import UploadPreviewTray from '$lib/components/UploadPreviewTray.svelte';
@@ -98,6 +99,7 @@
   let content = $state('');
   let gifPickerEnabled = $state(false);
   let gifPickerOpen = $state(false);
+  let messageSearchOpen = $state(false);
   let gifConfigurationError = $state('');
   let gifConfigurationLoading = $state(false);
   let featureController: AbortController | null = null;
@@ -1790,9 +1792,9 @@
         <button
           class="icon-button"
           type="button"
-          aria-label="Jump to a channel"
-          title="Jump to a channel (Ctrl+K)"
-          onclick={() => window.dispatchEvent(new Event('kaede:open-command-switcher'))}
+          aria-label="Search messages"
+          title="Search messages"
+          onclick={() => (messageSearchOpen = true)}
         >
           <Icon name="search" size={18} />
         </button>
@@ -1803,6 +1805,14 @@
         {/if}
       </div>
     </header>
+    <MessageSearch
+      bind:open={messageSearchOpen}
+      scope="channel"
+      scopeRef={channel ? entityRef(channel) : dmId}
+      accountRef={currentUser ? entityRef(currentUser) : null}
+      {channel}
+      users={channel?.recipients ?? []}
+    />
     {#if readStateWarning}
       <div class="read-state-warning" role="status">
         <span>{readStateWarning}</span>

@@ -31,6 +31,8 @@ export interface Channel {
   permissions?: string;
   rate_limit_per_user: number;
   federated_history_policy?: 'inherit' | 'disabled' | 'full_retained';
+  encryption_mode?: 'plaintext' | 'e2ee';
+  search_available?: boolean;
   last_message_id: string | null;
   last_message_domain: string | null;
   recipients?: UserSummary[];
@@ -130,6 +132,24 @@ export interface Message {
   /** Nonterminal failure while extending this page from the DM authority. */
   history_page_error_code?: string;
   history_page_retry_after_ms?: number;
+}
+
+export interface MessageSearchResult {
+  message: Message;
+  channel: Channel;
+  guild: Guild | null;
+  snippet: string;
+}
+
+export interface MessageSearchResponse {
+  results: MessageSearchResult[];
+  next_cursor: string | null;
+  coverage: {
+    local: 'complete' | 'cached' | 'unavailable';
+    authority: 'not_needed' | 'not_queried' | 'complete' | 'unsupported' | 'unavailable';
+  };
+  encrypted_channel_refs: string[];
+  indexing: boolean;
 }
 
 export interface Attachment {

@@ -10,6 +10,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
+import 'package:kaede_mobile/src/features/chat/message_search_screen.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
@@ -377,7 +378,39 @@ final class _ConversationScreen extends StatelessWidget {
               ),
             IconButton(
               tooltip: 'Search',
-              onPressed: null,
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => MessageSearchScreen(
+                    repository: ProviderScope.containerOf(context)
+                        .read(mobileControllerProvider.notifier)
+                        .repository,
+                    scope: channel.guildRef == null ? 'channel' : 'guild',
+                    scopeRef: channel.guildRef ?? channel.ref,
+                    channel: channel,
+                    accountRef: ProviderScope.containerOf(context)
+                        .read(mobileControllerProvider.notifier)
+                        .api
+                        .tokens
+                        ?.userRef,
+                    users: ProviderScope.containerOf(context)
+                        .read(mobileControllerProvider)
+                        .userProfiles
+                        .values
+                        .toList(growable: false),
+                    onJump: (result) async {
+                      final controller = ProviderScope.containerOf(context)
+                          .read(mobileControllerProvider.notifier);
+                      if (result.channel.guildRef == null) {
+                        await controller.selectDm(result.channel);
+                      } else {
+                        await controller.selectChannel(result.channel);
+                      }
+                      await controller.loadAround(result.message.ref);
+                      if (context.mounted) Navigator.of(context).pop();
+                    },
+                  ),
+                ),
+              ),
               icon: const Icon(Icons.search_rounded),
             ),
             if (onMembers != null)
@@ -1031,7 +1064,33 @@ final class _DirectMessageBrowser extends ConsumerWidget {
                   _SquareAction(
                     tooltip: 'Search',
                     icon: Icons.search_rounded,
-                    onTap: () {},
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => MessageSearchScreen(
+                          repository: ref
+                              .read(mobileControllerProvider.notifier)
+                              .repository,
+                          scope: 'dms',
+                          scopeRef: null,
+                          channel: null,
+                          accountRef: ref
+                              .read(mobileControllerProvider.notifier)
+                              .api
+                              .tokens
+                              ?.userRef,
+                          users:
+                              state.userProfiles.values.toList(growable: false),
+                          onJump: (result) async {
+                            final controller =
+                                ref.read(mobileControllerProvider.notifier);
+                            await controller.selectDm(result.channel);
+                            await controller.loadAround(result.message.ref);
+                            if (context.mounted) Navigator.of(context).pop();
+                            onOpenChannel();
+                          },
+                        ),
+                      ),
+                    ),
                   ),
                   const SizedBox(width: 8),
                   _SquareAction(
@@ -1242,7 +1301,25 @@ final class _GuildBrowser extends ConsumerWidget {
                   child: _NavRow(
                     icon: Icons.search_rounded,
                     title: 'Search',
-                    onTap: () {},
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => MessageSearchScreen(
+                          repository: controller.repository,
+                          scope: 'guild',
+                          scopeRef: guild.ref,
+                          channel: null,
+                          accountRef: controller.api.tokens?.userRef,
+                          users:
+                              state.userProfiles.values.toList(growable: false),
+                          onJump: (result) async {
+                            await controller.selectChannel(result.channel);
+                            await controller.loadAround(result.message.ref);
+                            if (context.mounted) Navigator.of(context).pop();
+                            onOpenChannel();
+                          },
+                        ),
+                      ),
+                    ),
                   ),
                 ),
                 const SizedBox(width: 8),

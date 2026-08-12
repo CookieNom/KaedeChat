@@ -99,6 +99,8 @@ def channel_payload(channel: Channel) -> dict[str, object]:
         "permissions_synced": channel.permissions_synced,
         "rate_limit_per_user": channel.rate_limit_per_user,
         "federated_history_policy": channel.federated_history_policy,
+        "encryption_mode": channel.encryption_mode,
+        "search_available": channel.encryption_mode == "plaintext",
         "last_message_id": (
             str(channel.last_message_id) if channel.last_message_id is not None else None
         ),

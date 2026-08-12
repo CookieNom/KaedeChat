@@ -48,6 +48,7 @@ SENSITIVE_NAMES = {
     "KAEDE_PROXY_SECRET",
     "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64",
     "KAEDE_SECRET_KEY",
+    "KAEDE_SEARCH_MASTER_KEY",
     "KAEDE_SMTP_URL",
     "LIVEKIT_API_KEY",
     "LIVEKIT_API_SECRET",
@@ -512,6 +513,52 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
                 "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64 is required when mobile push is enabled"
             )
         _validate_fcm_service_account(push_credential)
+
+    search_enabled = values.get("KAEDE_SEARCH_ENABLED", "false").strip().lower()
+    if search_enabled not in {"true", "false"}:
+        raise DeploymentConfigurationError("KAEDE_SEARCH_ENABLED must be true or false")
+    if search_enabled == "true":
+        search_key = values.get("KAEDE_SEARCH_MASTER_KEY", "").strip()
+        if len(search_key) < 32 or _is_placeholder(search_key):
+            raise DeploymentConfigurationError(
+                "KAEDE_SEARCH_MASTER_KEY must contain at least 32 non-placeholder "
+                "characters when message search is enabled; rerun `make setup` to generate it"
+            )
+        search_url = urlsplit(
+            values.get("KAEDE_SEARCH_URL", "http://meilisearch:7700").strip()
+        )
+        if (
+            search_url.scheme not in {"http", "https"}
+            or not search_url.hostname
+            or search_url.username is not None
+            or search_url.password is not None
+            or search_url.path not in {"", "/"}
+            or search_url.query
+            or search_url.fragment
+        ):
+            raise DeploymentConfigurationError(
+                "KAEDE_SEARCH_URL must be an HTTP(S) origin without a path, credentials, "
+                "query, or fragment"
+            )
+        profiles = {
+            item.strip()
+            for item in values.get("COMPOSE_PROFILES", "").split(",")
+            if item.strip()
+        }
+        if search_url.hostname == "meilisearch" and "search" not in profiles:
+            raise DeploymentConfigurationError(
+                "COMPOSE_PROFILES must include search when the bundled Meilisearch URL is used"
+            )
+        for name, default, minimum, maximum in (
+            ("KAEDE_SEARCH_REQUEST_TIMEOUT_SECONDS", 5, 1, 30),
+            ("KAEDE_SEARCH_BATCH_SIZE", 250, 10, 2_000),
+            ("KAEDE_SEARCH_FEDERATION_TIMEOUT_SECONDS", 8, 2, 30),
+        ):
+            raw = values.get(name, str(default)).strip()
+            if not raw.isdecimal() or not minimum <= int(raw) <= maximum:
+                raise DeploymentConfigurationError(
+                    f"{name} must be an integer from {minimum} through {maximum}"
+                )
 
     if values.get("KAEDE_MEDIA_SCAN_ENABLED", "true").strip().lower() != "true":
         raise DeploymentConfigurationError(

@@ -123,6 +123,14 @@ services:
     <<: *dragonfly
     volumes: [alpha-dragonfly:/data]
     networks: [alpha]
+  alpha-meilisearch:
+    image: getmeili/meilisearch:v1.51.0
+    environment:
+      MEILI_ENV: development
+      MEILI_MASTER_KEY: alpha-development-search-key-0000000000000001
+      MEILI_NO_ANALYTICS: "true"
+    volumes: [alpha-meilisearch:/meili_data]
+    networks: [alpha]
   alpha-garage:
     image: dxflrs/garage:v2.3.0
     command: ["/garage", "server", "--single-node", "--default-bucket"]
@@ -240,6 +248,15 @@ services:
     depends_on:
       beta-garage: { condition: service_healthy }
 
+  beta-meilisearch:
+    image: getmeili/meilisearch:v1.51.0
+    environment:
+      MEILI_ENV: development
+      MEILI_MASTER_KEY: beta-development-search-key-00000000000000002
+      MEILI_NO_ANALYTICS: "true"
+    volumes: [beta-meilisearch:/meili_data]
+    networks: [beta]
+
   clamav:
     image: clamav/clamav:1.5.3
     volumes: [clamav-dev:/var/lib/clamav]
@@ -290,9 +307,11 @@ volumes:
   alpha-dragonfly:
   alpha-garage-meta:
   alpha-garage-data:
+  alpha-meilisearch:
   beta-postgres:
   beta-dragonfly:
   beta-garage-meta:
   beta-garage-data:
+  beta-meilisearch:
   clamav-dev:
   frontend-modules:

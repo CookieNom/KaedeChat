@@ -17,6 +17,7 @@ remote media, voice token brokering, occupancy, and call signaling.
     "e2ee-transport/1",
     "guild-history-sync/1",
     "member-self-moderation/1",
+    "message-search/1",
     "profile-by-ref/1",
     "request-nonce/1"
   ]
@@ -49,6 +50,10 @@ capability, an unavailable home, or an unknown user leaves a non-blocking generi
 identity and never invalidates the surrounding guild snapshot or history import.
 `member-self-moderation/1` advertises the affected-user-only timeout status
 lookup in section 5. Its response is never part of a guild replica or broadcast.
+`message-search/1` advertises the signed, permission-bound search endpoint in
+section 7. A user home never receives or shares the authority's search-engine
+credentials. Encrypted channels are excluded and a missing capability degrades
+to explicitly partial local-cache results.
 Rendered same-origin media paths carry a 15-minute HMAC. After expiry, the
 user's home MAY renew that exact signed tuple only after authenticating the
 user, confirming current conversation participation, and repeating the
@@ -566,6 +571,7 @@ Except for discovery at `/.well-known/kaede/server`, protocol routes are under
 | `POST /guilds/{id}/history-exports/{export}/complete`                  | Idempotently acknowledge a merged export                                  | `guild-history-sync/1` |
 | `POST /guilds/{id}/proxy`                                              | Idempotent remote guild message write                                     | v1                     |
 | `POST /guilds/{id}/proxy-pin`                                          | Permission-checked remote guild pin mutation                              | v1                     |
+| `POST /search/messages`                                                | Bounded permission-checked federated message search                       | `message-search/1`     |
 | `GET /link`                                                            | Signed `kaede-fed.1` hot-link WebSocket upgrade                           | v1                     |
 | `POST /voice/token`                                                    | Home-SFU guild token broker                                               | v1                     |
 | `POST /voice/dm-token`                                                 | Caller-SFU DM call token broker                                           | v1                     |
@@ -626,6 +632,37 @@ required. Until then clients render `Remote user · <home>` rather than exposing
 internal randomized `history_<opaque>` storage handle. The alias is local-only,
 is never derived from the composite reference, and must never be displayed or
 treated as an authoritative handle; `profile_resolved=false` is the sole marker.
+
+### Federated message search
+
+`POST /_kaede/v1/search/messages` accepts a structured query (maximum 512
+characters), exactly one `channel`, `guild`, or account-DM scope, bounded author,
+mention, content-type, date, pin, and author-type filters, sort order, opaque
+cursor, and an `actor_ref`. The actor origin must equal the authenticated signing
+origin. The authority rechecks current membership and `VIEW_CHANNEL` plus
+`READ_MESSAGE_HISTORY` for every candidate. Requests and responses have fixed
+size, result-count, cursor, string, and JSON limits and consume a per-origin
+search rate budget.
+
+The response contains at most 50 minimal result projections: composite message,
+channel, guild, and author references, a bounded one-line snippet, and a
+timestamp. It never contains attachment URLs or an arbitrary full
+client payload. The receiving home validates every reference and timestamp,
+rechecks local channel access, and reconstructs client payloads from local state.
+It refuses peer-supplied bodies for locally authored messages. A peer failure or
+missing capability does not fail chat; clients identify locally cached results as
+partial.
+
+Channel-scoped DM search contacts the deterministic conversation authority.
+Account-wide DM search remains local-cache scoped so one query is not broadcast
+to every participant authority; clients MUST disclose that coverage rather than
+present it as complete federated history.
+
+An authority MUST NOT index or return a channel whose authenticated encryption
+policy is `e2ee`, nor a message carrying an opaque `e2ee` envelope. Guild-wide
+responses list excluded encrypted channel references so clients can explain the
+coverage. Search queries are operationally sensitive and must not be placed in
+URLs, access logs, federation event retention, analytics, or notification text.
 
 ## 8. Voice and calls
 

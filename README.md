@@ -15,6 +15,9 @@ allowed to access and send writes back to the authority for validation.
   reactions, pins, attachments, webhooks, and audit logs
 - Direct messages, friend requests, blocking, presence, unread state, and
   two-party calls
+- Typo-tolerant message search with author, mention, content-type, date, pin,
+  and sort filters; remote guild/DM authorities are queried through signed
+  federation without exposing search credentials
 - Signed server-to-server delivery with retry queues, sequence recovery,
   permission-filtered replication, and optional retained-history transfer
 - Private S3-compatible media storage with malware scanning and image/video
@@ -46,7 +49,8 @@ make setup
 ```
 
 The wizard creates a private `.env`, selects Garage or an external S3-compatible
-provider, configures optional email, voice, KLIPY GIF, and Turnstile services,
+provider, configures optional email, voice, private message search, KLIPY GIF,
+and Turnstile services,
 can configure optional Firebase Cloud Messaging and source-based automatic
 updates, offers optional common or advanced federation/storage quota tuning,
 and can render a host nginx configuration. Quota prompts accept friendly

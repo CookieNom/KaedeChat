@@ -23,6 +23,8 @@ The wizard asks about:
 - bundled Garage, AWS S3, Backblaze B2, Cloudflare R2, or generic S3 storage;
 - Mailtrap API, Mailtrap SMTP, AWS SES SMTP, generic SMTP, or no email;
 - optional KLIPY GIF search and Cloudflare Turnstile registration/adaptive sign-in protection;
+- optional typo-tolerant message search backed by a private, bundled Meilisearch
+  service (enabled by default for new deployments);
 - optional LiveKit voice/video and observability services;
 - optional source-based automatic updates, including Git remote, branch,
   interval, and an executable pre-update backup hook; and

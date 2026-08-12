@@ -34,6 +34,8 @@ def test_complete_v1_schema_is_registered() -> None:
         "channel_overwrites",
         "messages",
         "message_projections",
+        "search_index_outbox",
+        "search_index_state",
         "guild_history_imports",
         "guild_history_import_channels",
         "guild_history_staged_messages",

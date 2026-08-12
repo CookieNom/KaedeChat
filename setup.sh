@@ -1051,6 +1051,16 @@ else
   PUSH_FCM_SERVICE_ACCOUNT_B64=
 fi
 
+if confirm 'Enable typo-tolerant message search with the bundled private Meilisearch service?' "$([[ $(old KAEDE_SEARCH_ENABLED true) == true ]] && printf true || printf false)"; then
+  SEARCH_ENABLED=true
+  SEARCH_MASTER_KEY=$(preserve_or_generate KAEDE_SEARCH_MASTER_KEY hex32)
+  note 'Search content stays inside this deployment. Federated searches are signed Kaede requests to the authoritative instance; Meilisearch credentials are never shared.'
+  note 'End-to-end encrypted channels are never indexed and their clients show search as unavailable.'
+else
+  SEARCH_ENABLED=false
+  SEARCH_MASTER_KEY=$(old KAEDE_SEARCH_MASTER_KEY '')
+fi
+
 section 'Runtime sizing' 'Defaults are appropriate for a small instance and can be changed now.'
 if confirm 'Customize worker counts and media limits?' false; then
   API_WORKERS=$(prompt_text 'API workers (1-64)' "$(old KAEDE_API_WORKERS 4)")
@@ -1239,6 +1249,7 @@ case "$LOG_LEVEL" in DEBUG|INFO|WARNING|ERROR) ;; *) die "existing KAEDE_LOG_LEV
 PROFILES=()
 [[ $VOICE == true ]] && PROFILES+=(voice)
 [[ $OBSERVABILITY == true ]] && PROFILES+=(observability)
+[[ $SEARCH_ENABLED == true ]] && PROFILES+=(search)
 COMPOSE_PROFILES=
 if ((${#PROFILES[@]})); then
   COMPOSE_PROFILES=$(IFS=,; printf '%s' "${PROFILES[*]}")
@@ -1329,6 +1340,13 @@ emit() {
   emit KAEDE_DATABASE_URL "postgresql+asyncpg://kaede:$POSTGRES_PASSWORD@postgres:5432/kaede"
   emit DRAGONFLY_PASSWORD "$DRAGONFLY_PASSWORD"
   emit KAEDE_DRAGONFLY_URL "redis://:$DRAGONFLY_PASSWORD@dragonfly:6379/0"
+  emit KAEDE_SEARCH_ENABLED "$SEARCH_ENABLED"
+  emit KAEDE_SEARCH_URL "$(old KAEDE_SEARCH_URL http://meilisearch:7700)"
+  [[ -z $SEARCH_MASTER_KEY ]] || emit KAEDE_SEARCH_MASTER_KEY "$SEARCH_MASTER_KEY"
+  emit KAEDE_SEARCH_INDEX_PREFIX "$(old KAEDE_SEARCH_INDEX_PREFIX kaede)"
+  emit KAEDE_SEARCH_REQUEST_TIMEOUT_SECONDS "$(old_uint KAEDE_SEARCH_REQUEST_TIMEOUT_SECONDS 5)"
+  emit KAEDE_SEARCH_BATCH_SIZE "$(old_uint KAEDE_SEARCH_BATCH_SIZE 250)"
+  emit KAEDE_SEARCH_FEDERATION_TIMEOUT_SECONDS "$(old_uint KAEDE_SEARCH_FEDERATION_TIMEOUT_SECONDS 8)"
   emit KAEDE_MEDIA_STORAGE_BACKEND "$STORAGE_BACKEND"
   emit KAEDE_MEDIA_S3_ENDPOINT "$S3_ENDPOINT"
   emit KAEDE_MEDIA_PUBLIC_BASE_URL "$MEDIA_PUBLIC"

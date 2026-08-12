@@ -137,6 +137,8 @@ final class KaedeChannel {
     this.historyRemoteAvailable = false,
     this.oldestAvailableMessageRef,
     this.historyDegradedCode,
+    this.encryptionMode = 'plaintext',
+    this.searchAvailable = true,
     this.version,
   });
 
@@ -174,6 +176,8 @@ final class KaedeChannel {
       oldestAvailableMessageRef:
           _entityRefOrNull(json['oldest_available_message_ref']),
       historyDegradedCode: _string(json['history_degraded_code']),
+      encryptionMode: _string(json['encryption_mode']) ?? 'plaintext',
+      searchAvailable: _boolean(json['search_available'], true),
       version: _string(json['version']),
     );
   }
@@ -195,6 +199,8 @@ final class KaedeChannel {
   final bool historyRemoteAvailable;
   final EntityRef? oldestAvailableMessageRef;
   final String? historyDegradedCode;
+  final String encryptionMode;
+  final bool searchAvailable;
   final String? version;
 
   bool allows(int bit) => permissions & BigInt.from(bit) != BigInt.zero;
@@ -233,8 +239,74 @@ final class KaedeChannel {
                 'origin_domain': oldestAvailableMessageRef!.domain.value,
               },
         'history_degraded_code': historyDegradedCode,
+        'encryption_mode': encryptionMode,
+        'search_available': searchAvailable,
         'version': version,
       };
+}
+
+final class MessageSearchResult {
+  const MessageSearchResult({
+    required this.message,
+    required this.channel,
+    required this.snippet,
+    this.guild,
+  });
+
+  factory MessageSearchResult.fromJson(Json json) => MessageSearchResult(
+        message: KaedeMessage.fromJson(
+            Map<String, Object?>.from(json['message']! as Map)),
+        channel: KaedeChannel.fromJson(
+            Map<String, Object?>.from(json['channel']! as Map)),
+        guild: json['guild'] is Map
+            ? KaedeGuild.fromJson(
+                Map<String, Object?>.from(json['guild']! as Map))
+            : null,
+        snippet: _string(json['snippet']) ?? '',
+      );
+
+  final KaedeMessage message;
+  final KaedeChannel channel;
+  final KaedeGuild? guild;
+  final String snippet;
+}
+
+final class MessageSearchPage {
+  const MessageSearchPage({
+    required this.results,
+    required this.localCoverage,
+    required this.authorityCoverage,
+    this.nextCursor,
+    this.encryptedChannelRefs = const <EntityRef>[],
+    this.indexing = false,
+  });
+
+  factory MessageSearchPage.fromJson(Json json) {
+    final coverage = json['coverage'] is Map
+        ? Map<String, Object?>.from(json['coverage']! as Map)
+        : const <String, Object?>{};
+    return MessageSearchPage(
+      results: _objects(json['results'])
+          .map(MessageSearchResult.fromJson)
+          .toList(growable: false),
+      localCoverage: _string(coverage['local']) ?? 'unavailable',
+      authorityCoverage: _string(coverage['authority']) ?? 'not_queried',
+      nextCursor: _string(json['next_cursor']),
+      encryptedChannelRefs:
+          (json['encrypted_channel_refs'] as List? ?? const [])
+              .whereType<String>()
+              .map(EntityRef.parse)
+              .toList(growable: false),
+      indexing: _boolean(json['indexing']),
+    );
+  }
+
+  final List<MessageSearchResult> results;
+  final String localCoverage;
+  final String authorityCoverage;
+  final String? nextCursor;
+  final List<EntityRef> encryptedChannelRefs;
+  final bool indexing;
 }
 
 final class KaedeRole {

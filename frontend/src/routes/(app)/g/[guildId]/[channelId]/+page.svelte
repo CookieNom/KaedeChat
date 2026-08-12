@@ -85,6 +85,7 @@
   import GifPicker from '$lib/components/GifPicker.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import MessageRow from '$lib/components/MessageRow.svelte';
+  import MessageSearch from '$lib/components/MessageSearch.svelte';
   import PinnedMessagesPanel from '$lib/components/PinnedMessagesPanel.svelte';
   import PresencePicker from '$lib/components/PresencePicker.svelte';
   import UploadPreviewTray from '$lib/components/UploadPreviewTray.svelte';
@@ -158,6 +159,7 @@
   let content = $state('');
   let gifPickerEnabled = $state(false);
   let gifPickerOpen = $state(false);
+  let messageSearchOpen = $state(false);
   let gifConfigurationError = $state('');
   let gifConfigurationLoading = $state(false);
   let featureController: AbortController | null = null;
@@ -3330,14 +3332,22 @@
         <button
           class="icon-button"
           type="button"
-          aria-label="Jump to a channel"
-          title="Jump to a channel (Ctrl+K)"
-          onclick={() => window.dispatchEvent(new Event('kaede:open-command-switcher'))}
+          aria-label="Search messages"
+          title="Search messages"
+          onclick={() => (messageSearchOpen = true)}
         >
           <Icon name="search" size={18} />
         </button>
       </div>
     </header>
+    <MessageSearch
+      bind:open={messageSearchOpen}
+      scope="guild"
+      scopeRef={guild ? entityRef(guild) : guildId}
+      accountRef={currentUser ? entityRef(currentUser) : null}
+      {channel}
+      users={members.map((member) => member.user)}
+    />
     <div class="sidebar-section-heading">
       <p class="sidebar-section-label">Channels</p>
       {#if canManageChannels}

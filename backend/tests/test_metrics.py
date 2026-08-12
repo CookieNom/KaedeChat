@@ -18,7 +18,7 @@ class _Result:
 
 class _Session:
     def __init__(self) -> None:
-        self.rows = iter(((7, 2), (80, 800), (120, 1200, 3)))
+        self.rows = iter(((7, 2), (80, 800), (120, 1200, 3), (11, 4)))
 
     async def execute(self, _statement: object) -> _Result:
         return _Result(next(self.rows))
@@ -66,3 +66,5 @@ async def test_metrics_expose_federation_capacity_and_replica_pauses(
     assert "kaede_federation_replica_retained_bytes 1200" in rendered
     assert "kaede_federation_replica_quota_paused_guilds 3" in rendered
     assert "kaede_federation_remote_media_cache_capacity_bytes 500000" in rendered
+    assert "kaede_search_index_pending_messages 11" in rendered
+    assert "kaede_search_index_retrying_messages 4" in rendered

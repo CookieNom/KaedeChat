@@ -206,6 +206,37 @@ History reads include a lower ID floor so PostgreSQL can prune partitions even
 without a cursor. Presence, typing, and live voice occupancy never enter SQL;
 only server mute/deafen flags persist.
 
+## Message search
+
+PostgreSQL remains authoritative for messages and permissions. A durable SQL
+desired-state queue projects only eligible plaintext messages into a private
+Meilisearch index on the same deployment network. Message, attachment, pin, and
+channel-encryption changes enqueue replacement or deletion work. Search treats
+the engine as an untrusted, rebuildable candidate generator: every hit is loaded
+from SQL and its current channel access is checked again before it reaches a
+client. Search outages never block message delivery, and `make search-rebuild`
+can repopulate a replaced index online.
+
+Federated search never joins Meilisearch clusters or shares a master key. A user
+home sends a signed, bounded query to the authoritative guild or DM instance only
+when it advertises `message-search/1`. The authority applies its own permissions
+and returns a minimal bounded result projection. The user home validates and
+re-authorizes each result against local channel state before showing it. Cached
+local matches remain available when a peer is offline and are explicitly labeled
+as incomplete.
+
+A channel-scoped DM search contacts that conversation's deterministic authority.
+Account-wide DM search deliberately searches the user's bounded recent replica
+cache instead of broadcasting sensitive terms to every instance the account has
+ever contacted; the clients label that coverage and offer complete authority
+search when the user opens a specific conversation.
+
+Channels marked `e2ee` are excluded at indexing, query, SQL hydration, and
+federation boundaries. The UI explains why search is disabled. The future E2EE
+protocol may define a separate opt-in client-side or privacy-preserving search
+design, but server plaintext indexing is not silently re-enabled for encrypted
+rooms.
+
 ## Future end-to-end encryption compatibility
 
 Message storage and every local, gateway, federation, retained-history, and DM
@@ -262,9 +293,9 @@ analysis resistance are outside the current transport capability.
 
 ## Version 1 scope
 
-Version 1 includes identity and authentication, single-instance chat,
+The production scope includes identity and authentication, single-instance chat,
 federation, media and webhooks, voice/video/screen sharing, Android and iOS
-clients, and the associated operational controls. Group DMs, search, threads,
-MLS, and compressed gateway encoding are outside the version 1 scope. The
+clients, message search, and the associated operational controls. Group DMs, threads,
+MLS, and compressed gateway encoding are not currently implemented. The
 mobile clients use the same home-instance API and gateway boundary as the web
 and desktop clients; they never call peer federation endpoints directly.

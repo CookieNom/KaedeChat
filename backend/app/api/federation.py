@@ -650,10 +650,13 @@ async def has_outbound_guild_proxy(
 
 @router.get("/.well-known/kaede/server")
 async def well_known(settings: Settings = Depends(get_settings)) -> dict[str, object]:
+    capabilities = list(FEDERATION_CAPABILITIES)
+    if not settings.search_enabled:
+        capabilities.remove("message-search/1")
     return {
         "server": settings.domain,
         "versions": ["1", "2"],
-        "capabilities": list(FEDERATION_CAPABILITIES),
+        "capabilities": capabilities,
     }
 
 

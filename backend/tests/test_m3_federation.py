@@ -23,6 +23,7 @@ from app.api.federation import (
     _guild_snapshot_cursor_changed,
     federation_user_profile_by_ref,
     visible_guild_channels_for_origin,
+    well_known,
 )
 from app.core.federation import (
     SECURITY_CRITICAL_GUILD_EVENTS,
@@ -117,6 +118,14 @@ from app.federation.security import (
 from app.federation.users import refresh_remote_user, resolve_handle
 
 VALID_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
+
+
+@pytest.mark.asyncio
+async def test_search_capability_is_advertised_only_when_enabled() -> None:
+    disabled = await well_known(settings())
+    enabled = await well_known(settings(search_enabled=True, search_master_key="s" * 32))
+    assert "message-search/1" not in disabled["capabilities"]
+    assert "message-search/1" in enabled["capabilities"]
 
 
 def settings(**overrides: object) -> Settings:

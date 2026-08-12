@@ -251,6 +251,7 @@ async def auth_configuration(settings: Settings = Depends(get_settings)) -> dict
             "site_key": settings.turnstile_site_key if settings.turnstile_enabled else None,
         },
         "gif_picker_enabled": settings.klipy_enabled,
+        "message_search_enabled": settings.search_enabled,
     }
 
 

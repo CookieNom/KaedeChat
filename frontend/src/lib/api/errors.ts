@@ -138,6 +138,13 @@ const ERROR_MESSAGES: Record<string, string> = {
     'The guild’s home instance returned invalid timeout details. Sending is still checked by the guild home.',
   FEDERATED_MODERATION_STATUS_UNAVAILABLE:
     'Your timeout details are temporarily unavailable from the guild’s home instance. Sending is still checked by the guild home.',
+  SEARCH_DISABLED_FOR_E2EE:
+    'Search is unavailable in end-to-end encrypted conversations because the server cannot read or index their contents.',
+  SEARCH_DISABLED_BY_INSTANCE: 'Message search is disabled by this instance’s administrator.',
+  SEARCH_UNAVAILABLE: 'Message search is temporarily unavailable. Try again shortly.',
+  INVALID_SEARCH_CURSOR: 'That search page expired. Run the search again.',
+  FEDERATED_SEARCH_RESPONSE_INVALID:
+    'The other server returned an invalid search response. Locally cached messages may still be available.',
   FEDERATION_UNAVAILABLE: 'The remote Kaede server is temporarily unavailable.',
   FEDERATED_WRITE_UNAVAILABLE: 'The remote Kaede server could not save that change.',
   FEDERATION_LOOKUP_RATE_LIMITED: 'The remote Kaede server is receiving too many requests.',
