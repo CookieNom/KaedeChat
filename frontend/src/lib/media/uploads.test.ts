@@ -74,7 +74,7 @@ describe('media upload contracts', () => {
     expect(FakeXMLHttpRequest.latest?.aborted).toBe(true);
   });
 
-  it('identifies the unreachable public media endpoint', async () => {
+  it('gives connection guidance when media storage is unreachable', async () => {
     vi.stubGlobal('XMLHttpRequest', FakeXMLHttpRequest as unknown as typeof XMLHttpRequest);
     const request = uploadObject(
       ticket(),
@@ -84,6 +84,24 @@ describe('media upload contracts', () => {
 
     FakeXMLHttpRequest.latest?.onerror?.();
 
-    await expect(request).rejects.toThrow('Could not reach media storage at media.alpha.localhost');
+    await expect(request).rejects.toThrow(
+      'Could not reach media storage. Check your connection and try again.'
+    );
+  });
+
+  it('explains an expired or rejected signed upload instead of showing only a status code', async () => {
+    vi.stubGlobal('XMLHttpRequest', FakeXMLHttpRequest as unknown as typeof XMLHttpRequest);
+    const request = uploadObject(
+      ticket(),
+      new File(['content'], 'paper.png', { type: 'image/png' }),
+      vi.fn()
+    );
+    if (FakeXMLHttpRequest.latest) FakeXMLHttpRequest.latest.status = 403;
+
+    FakeXMLHttpRequest.latest?.onload?.();
+
+    await expect(request).rejects.toThrow(
+      'Media storage rejected the upload authorization. Choose the file again and retry.'
+    );
   });
 });

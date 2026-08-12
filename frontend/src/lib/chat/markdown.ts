@@ -3,6 +3,7 @@ import { marked } from 'marked';
 import { entityRef } from './refs';
 import { customEmojiUrl } from './emojis';
 import type { Role, UserSummary } from './types';
+import { userDisplayName, userPublicHandle } from './users';
 
 const EXPLICIT_MENTION = /^<@(\d+)(?:@([a-z0-9.-]+))?>$/i;
 const ROLE_MENTION = /^<@&(\d+)@([a-z0-9.-]+)>$/i;
@@ -72,25 +73,46 @@ function mentionUser(
   return users.find((user) => user.handle.toLowerCase() === handle);
 }
 
-function mentionSpan(token: string, users: UserSummary[], localDomain: string): HTMLSpanElement {
+export function mentionPresentation(
+  token: string,
+  users: UserSummary[],
+  localDomain: string
+): {
+  text: string;
+  title: string;
+  ariaLabel: string;
+  userRef?: string;
+  userHandle?: string;
+} {
   const user = mentionUser(token, users, localDomain);
   const explicit = EXPLICIT_MENTION.exec(token);
   const reference = explicit ? `${explicit[1]}${explicit[2] ? `@${explicit[2]}` : ''}` : undefined;
-  const handle = user?.handle ?? (token.startsWith('@') ? token.slice(1) : undefined);
-  const visibleName = user?.display_name ?? user?.username;
+  const handle = user
+    ? (userPublicHandle(user) ?? undefined)
+    : token.startsWith('@')
+      ? token.slice(1)
+      : undefined;
+  const visibleName = user ? userDisplayName(user) : undefined;
+  return {
+    text: visibleName ? `@${visibleName}` : handle ? `@${handle}` : '@unknown-user',
+    title: user ? (handle ? `@${handle}` : visibleName!) : (reference ?? token),
+    ariaLabel: `View profile for ${visibleName ?? handle ?? reference ?? 'user'}`,
+    userRef: user ? entityRef(user) : reference,
+    userHandle: handle
+  };
+}
+
+function mentionSpan(token: string, users: UserSummary[], localDomain: string): HTMLSpanElement {
+  const presentation = mentionPresentation(token, users, localDomain);
   const span = document.createElement('span');
   span.className = 'chat-token chat-token-mention';
-  span.textContent = visibleName ? `@${visibleName}` : handle ? `@${handle}` : '@unknown-user';
+  span.textContent = presentation.text;
   span.tabIndex = 0;
   span.setAttribute('role', 'button');
-  if (user) span.dataset.userRef = entityRef(user);
-  else if (reference) span.dataset.userRef = reference;
-  if (handle) span.dataset.userHandle = handle;
-  span.title = user ? `@${user.handle}` : (reference ?? token);
-  span.setAttribute(
-    'aria-label',
-    `View profile for ${visibleName ?? handle ?? reference ?? 'user'}`
-  );
+  if (presentation.userRef) span.dataset.userRef = presentation.userRef;
+  if (presentation.userHandle) span.dataset.userHandle = presentation.userHandle;
+  span.title = presentation.title;
+  span.setAttribute('aria-label', presentation.ariaLabel);
   return span;
 }
 

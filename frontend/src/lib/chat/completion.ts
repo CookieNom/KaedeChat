@@ -1,6 +1,7 @@
 import type { Channel, GuildMemberSummary, Role } from './types';
 import { entityRef } from './refs';
 import { assetUrl } from '$lib/media/assets';
+import { userDisplayName, userPublicHandle } from './users';
 
 export interface CompletionOption {
   value: string;
@@ -42,14 +43,16 @@ export function memberCompletions(members: GuildMemberSummary[], query: string) 
   return members
     .filter((member) => {
       const user = member.user;
-      return [member.nickname, user.display_name, user.username, user.handle].some((value) =>
+      return [member.nickname, userDisplayName(user), userPublicHandle(user)].some((value) =>
         value?.toLocaleLowerCase().includes(needle)
       );
     })
     .map((member) => ({
       value: `<@${entityRef(member.user)}>`,
-      label: member.nickname ?? member.user.display_name ?? member.user.username,
-      detail: `@${member.user.handle}`,
+      label: member.nickname ?? userDisplayName(member.user),
+      detail: userPublicHandle(member.user)
+        ? `@${userPublicHandle(member.user)}`
+        : 'Profile unavailable',
       imageUrl: member.user.avatar_hash
         ? assetUrl(member.user.avatar_hash, 'thumbnail_128', member.user)
         : undefined,

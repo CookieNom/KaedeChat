@@ -1,14 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import hashlib
+import secrets
+import tempfile
+from collections.abc import AsyncIterator, Awaitable
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
+from pathlib import Path as FilePath
+from typing import cast
 
+import anyio
 from anyio import CapacityLimiter, WouldBlock
-from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from fastapi.responses import RedirectResponse
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +31,7 @@ from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
 from app.chat.payloads import emoji_payload, guild_payload, user_payload
 from app.chat.permissions import require_permissions
+from app.core.metrics import increment_metric
 from app.core.permission_contract import required_permissions
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
 from app.core.settings import Settings, get_settings
@@ -33,22 +40,25 @@ from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef, EntityReference, Snowflake
 from app.db.models import (
     Attachment,
+    DMConversation,
+    DMParticipant,
     Emoji,
     Guild,
     GuildMember,
     Message,
     RemoteMediaCache,
+    RemoteMediaOrphan,
     RemoteMediaTombstone,
     User,
 )
-from app.federation.client import signed_request
+from app.federation.client import signed_request, signed_stream_request
+from app.federation.dm_history import history_media_capability_status, history_media_path
 from app.federation.network import FederationNetworkError, normalize_domain
 from app.federation.relationships import queue_friend_profile_updates
 from app.media.processing import (
     IMAGE_TYPES,
     MediaValidationError,
-    clamav_scan,
-    content_digest,
+    clamav_scan_file,
     normalize_declared_type,
     sniff_content_type,
     validate_detected_type,
@@ -70,9 +80,69 @@ from app.media.storage import S3Storage, StorageError
 from app.tasks import federation_deliver, media_cache_gc, media_local_purge, media_process
 
 router = APIRouter(tags=["media"])
+REMOTE_MEDIA_UPLOAD_RESERVATION_SECONDS = 5 * 60
 REMOTE_MEDIA_FETCH_CONCURRENCY = 8
+REMOTE_MEDIA_FETCH_DEADLINE_SECONDS = 60
 PRIVATE_MEDIA_CAPABILITY_SECONDS = 60
 remote_media_fetch_limiter = CapacityLimiter(REMOTE_MEDIA_FETCH_CONCURRENCY)
+REMOTE_MEDIA_RESERVATION_TTL_MS = 300_000
+REMOTE_MEDIA_RESERVE_LUA = """
+local function cleanup(zset_key, hash_key, total_key, now)
+  local total = tonumber(redis.call('GET', total_key) or '0')
+  local expired = redis.call('ZRANGEBYSCORE', zset_key, '-inf', now)
+  for _, token in ipairs(expired) do
+    local weight = tonumber(redis.call('HGET', hash_key, token) or '0')
+    total = math.max(0, total - weight)
+    redis.call('HDEL', hash_key, token)
+    redis.call('ZREM', zset_key, token)
+  end
+  if total == 0 then redis.call('DEL', total_key) else redis.call('SET', total_key, total) end
+  return total
+end
+local now = tonumber(ARGV[3])
+local global_total = cleanup(KEYS[1], KEYS[2], KEYS[3], now)
+local origin_total = cleanup(KEYS[4], KEYS[5], KEYS[6], now)
+local weight = tonumber(ARGV[2])
+if global_total + weight > tonumber(ARGV[5]) or origin_total + weight > tonumber(ARGV[4]) then
+  return {0, global_total, origin_total}
+end
+local expires = tonumber(ARGV[3]) + tonumber(ARGV[6])
+redis.call('HSET', KEYS[2], ARGV[1], weight)
+redis.call('ZADD', KEYS[1], expires, ARGV[1])
+redis.call('SET', KEYS[3], global_total + weight, 'PX', tonumber(ARGV[6]) * 2)
+redis.call('HSET', KEYS[5], ARGV[1], weight)
+redis.call('ZADD', KEYS[4], expires, ARGV[1])
+redis.call('SET', KEYS[6], origin_total + weight, 'PX', tonumber(ARGV[6]) * 2)
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[6]) * 2)
+redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[6]) * 2)
+redis.call('PEXPIRE', KEYS[4], tonumber(ARGV[6]) * 2)
+redis.call('PEXPIRE', KEYS[5], tonumber(ARGV[6]) * 2)
+return {1, global_total + weight, origin_total + weight}
+"""
+REMOTE_MEDIA_RELEASE_LUA = """
+local function release(zset_key, hash_key, total_key, token)
+  local weight = tonumber(redis.call('HGET', hash_key, token) or '0')
+  if weight == 0 then return end
+  local total = math.max(0, tonumber(redis.call('GET', total_key) or '0') - weight)
+  redis.call('HDEL', hash_key, token)
+  redis.call('ZREM', zset_key, token)
+  if total == 0 then
+    redis.call('DEL', total_key)
+  else
+    redis.call('SET', total_key, total, 'PX', ARGV[2])
+  end
+end
+release(KEYS[1], KEYS[2], KEYS[3], ARGV[1])
+release(KEYS[4], KEYS[5], KEYS[6], ARGV[1])
+return 1
+"""
+REMOTE_MEDIA_CACHE_LOCK_SECONDS = 300
+REMOTE_MEDIA_CACHE_UNLOCK_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
 
 
 @asynccontextmanager
@@ -82,6 +152,8 @@ async def remote_media_fetch_admission(
     *,
     user_id: int,
     user_domain: str,
+    origin_domain: str,
+    settings: Settings,
 ) -> AsyncIterator[None]:
     """Bound distinct remote cache misses without penalizing cache hits."""
 
@@ -100,10 +172,89 @@ async def remote_media_fetch_admission(
             detail={"code": "REMOTE_MEDIA_BUSY", "retry_after_ms": 1_000},
             headers={"Retry-After": "1"},
         ) from None
+    token = secrets.token_urlsafe(18)
+    global_prefix = "federation:remote-media:inflight"
+    origin_prefix = f"{global_prefix}:{origin_domain}"
+    keys = (
+        f"{global_prefix}:leases",
+        f"{global_prefix}:weights",
+        f"{global_prefix}:bytes",
+        f"{origin_prefix}:leases",
+        f"{origin_prefix}:weights",
+        f"{origin_prefix}:bytes",
+    )
+    reserved = False
+    try:
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        result = await cast(
+            Awaitable[object],
+            redis.eval(
+                REMOTE_MEDIA_RESERVE_LUA,
+                len(keys),
+                *keys,
+                token,
+                str(settings.media_max_attachment_bytes),
+                str(now_ms),
+                str(settings.federation_remote_media_inflight_bytes_per_origin),
+                str(settings.federation_remote_media_inflight_bytes_total),
+                str(REMOTE_MEDIA_RESERVATION_TTL_MS),
+            ),
+        )
+        if not isinstance(result, (list, tuple)) or not result or int(result[0]) != 1:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "REMOTE_MEDIA_BUSY", "retry_after_ms": 1_000},
+                headers={"Retry-After": "1"},
+            )
+        reserved = True
+        yield
+    finally:
+        if reserved:
+            with suppress(Exception):
+                await cast(
+                    Awaitable[object],
+                    redis.eval(
+                        REMOTE_MEDIA_RELEASE_LUA,
+                        len(keys),
+                        *keys,
+                        token,
+                        str(REMOTE_MEDIA_RESERVATION_TTL_MS * 2),
+                    ),
+                )
+        remote_media_fetch_limiter.release()
+
+
+@asynccontextmanager
+async def remote_media_cache_key_lock(
+    redis: Redis,
+    origin_domain: str,
+    attachment_id: int,
+    variant: str,
+) -> AsyncIterator[None]:
+    """Serialize one cache identity across workers with a crash-safe lease."""
+
+    key = f"federation:remote-media:cache-lock:{origin_domain}:{attachment_id}:{variant}"
+    token = secrets.token_urlsafe(18)
+    accepted = await redis.set(
+        key,
+        token,
+        ex=REMOTE_MEDIA_CACHE_LOCK_SECONDS,
+        nx=True,
+    )
+    if not accepted:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "REMOTE_MEDIA_BUSY", "retry_after_ms": 1_000},
+            headers={"Retry-After": "1"},
+        )
     try:
         yield
     finally:
-        remote_media_fetch_limiter.release()
+        with suppress(Exception):
+            await cast(
+                Awaitable[object],
+                redis.eval(REMOTE_MEDIA_CACHE_UNLOCK_LUA, 1, key, token),
+            )
 
 
 def copy_rate_limit_headers(source: Response, destination: Response) -> None:
@@ -592,9 +743,9 @@ def select_variant(
         return settings.media_attachments_bucket, attachment.object_key, attachment.filename
     raw = attachment.variants.get(variant)
     if not isinstance(raw, dict) or not isinstance(raw.get("object_key"), str):
-        # Older replicated images may predate a requested derivative. Serving
-        # the already-scanned original keeps them usable while avoiding a
-        # permanent broken image on remote replicas.
+        # Older scanned images can predate generated derivatives. Falling back
+        # to the bounded, clean original preserves compatibility without
+        # trusting an unscanned or non-image payload as a preview.
         if (attachment.detected_content_type or attachment.content_type) in IMAGE_TYPES:
             return settings.media_attachments_bucket, attachment.object_key, attachment.filename
         raise HTTPException(status_code=404, detail={"code": "MEDIA_VARIANT_NOT_FOUND"})
@@ -675,92 +826,290 @@ async def cache_remote_media(
     session: AsyncSession,
     settings: Settings,
     *,
+    redis: Redis | None = None,
     origin_domain: str,
     attachment_id: int,
     variant: str,
+    dm_history_scope: tuple[tuple[int, str], tuple[int, str]] | None = None,
 ) -> RemoteMediaCache:
     if await session.get(RemoteMediaTombstone, (origin_domain, attachment_id)) is not None:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    with tempfile.NamedTemporaryFile(
+        prefix="kaede-remote-media-", suffix=".spool", delete=False
+    ) as temporary:
+        temporary_path = FilePath(temporary.name)
+    declared_type = "application/octet-stream"
+    declared_size: int | None = None
+    received = 0
+    digest_builder = hashlib.sha256()
+    prefix = bytearray()
     try:
-        remote = await signed_request(
-            session,
-            settings,
-            "GET",
-            origin_domain,
-            f"/_kaede/v1/media/{attachment_id}/{variant}",
-            max_response_bytes=settings.media_max_attachment_bytes,
-        )
-    except (FederationNetworkError, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail={"code": "REMOTE_MEDIA_UNAVAILABLE"}) from exc
-    if remote.status_code == 404:
-        raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
-    if remote.status_code != 200:
-        raise HTTPException(status_code=503, detail={"code": "REMOTE_MEDIA_UNAVAILABLE"})
+        try:
+            async with signed_stream_request(
+                session,
+                settings,
+                "GET",
+                origin_domain,
+                f"/_kaede/v1/media/{attachment_id}/{variant}",
+                query=(
+                    {
+                        "conversation_id": str(dm_history_scope[0][0]),
+                        "conversation_domain": dm_history_scope[0][1],
+                        "message_id": str(dm_history_scope[1][0]),
+                        "message_domain": dm_history_scope[1][1],
+                    }
+                    if dm_history_scope is not None
+                    else None
+                ),
+                request_timeout=REMOTE_MEDIA_FETCH_DEADLINE_SECONDS,
+                max_response_bytes=settings.media_max_attachment_bytes,
+            ) as remote:
+                if remote.status_code == 404:
+                    raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+                if remote.status_code != 200:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"code": "REMOTE_MEDIA_UNAVAILABLE"},
+                    )
+                raw_length = remote.headers.get("Content-Length")
+                if raw_length is not None:
+                    declared_size = int(raw_length)
+                declared_type = normalize_declared_type(
+                    remote.headers.get("Content-Type", "application/octet-stream")
+                )
+                with anyio.fail_after(REMOTE_MEDIA_FETCH_DEADLINE_SECONDS):
+                    async with await anyio.open_file(temporary_path, "wb") as destination:
+                        async for chunk in remote.aiter_raw():
+                            received += len(chunk)
+                            if received > settings.media_max_attachment_bytes:
+                                raise MediaValidationError(
+                                    "remote media exceeded the configured size limit"
+                                )
+                            digest_builder.update(chunk)
+                            if len(prefix) < 512:
+                                prefix.extend(chunk[: 512 - len(prefix)])
+                            await destination.write(chunk)
+        except HTTPException:
+            raise
+        except (FederationNetworkError, RuntimeError, TimeoutError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "REMOTE_MEDIA_UNAVAILABLE"},
+            ) from exc
+        except MediaValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "REMOTE_MEDIA_REJECTED"},
+            ) from exc
 
-    body = remote.content
-    try:
-        scan_status = await clamav_scan(body, settings)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail={"code": "REMOTE_MEDIA_UNAVAILABLE"}) from exc
-    if scan_status != "clean":
-        raise HTTPException(status_code=422, detail={"code": "REMOTE_MEDIA_REJECTED"})
+        if declared_size is not None and declared_size != received:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "REMOTE_MEDIA_UNAVAILABLE"},
+            )
+        try:
+            scan_status = await clamav_scan_file(temporary_path, settings)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "REMOTE_MEDIA_UNAVAILABLE"},
+            ) from exc
+        if scan_status != "clean":
+            raise HTTPException(status_code=422, detail={"code": "REMOTE_MEDIA_REJECTED"})
 
-    detected_type = sniff_content_type(body)
-    try:
-        declared_type = normalize_declared_type(
-            remote.headers.get("Content-Type", "application/octet-stream")
-        )
-        validate_detected_type(declared_type, detected_type)
-    except MediaValidationError as exc:
-        raise HTTPException(status_code=422, detail={"code": "REMOTE_MEDIA_REJECTED"}) from exc
+        detected_type = sniff_content_type(bytes(prefix))
+        try:
+            validate_detected_type(declared_type, detected_type)
+        except MediaValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "REMOTE_MEDIA_REJECTED"},
+            ) from exc
 
-    cache_key = f"{origin_domain}/{attachment_id}/{variant}"
-    try:
-        await S3Storage(settings).put(
-            settings.media_remote_cache_bucket,
-            cache_key,
-            body,
-            detected_type,
+        digest = digest_builder.hexdigest()
+        cache_key = f"{origin_domain}/{attachment_id}/{variant}/{digest}"
+        storage = S3Storage(settings)
+        # Serialize reservations and eviction. Orphans remain charged until
+        # their physical DELETE succeeds, so the ceiling reflects object-store
+        # bytes rather than only currently referenced cache rows.
+        await session.scalar(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended("kaede-remote-media-cache-budget", 0)
+                )
+            )
         )
-    except StorageError as exc:
-        raise HTTPException(status_code=503, detail={"code": "MEDIA_STORAGE_UNAVAILABLE"}) from exc
+        # Re-read the cache row only after taking the physical-budget lock.
+        # A GC worker may have deleted a row (and scheduled its object for
+        # deletion) while this fetch was downloading or waiting for the lock.
+        # Using an identity-map value observed before the lock could otherwise
+        # skip the PUT and recreate a row that points at the deleted object.
+        existing = await session.get(
+            RemoteMediaCache,
+            (origin_domain, attachment_id, variant),
+            populate_existing=True,
+            with_for_update=True,
+        )
+        existing_key = existing.object_key if existing is not None else None
+        existing_size = existing.size if existing is not None else None
+        referenced_bytes = int(
+            await session.scalar(select(func.coalesce(func.sum(RemoteMediaCache.size), 0))) or 0
+        )
+        orphan_bytes = int(
+            await session.scalar(
+                select(func.coalesce(func.sum(RemoteMediaOrphan.size), 0)).where(
+                    ~exists(
+                        select(RemoteMediaCache.object_key).where(
+                            RemoteMediaCache.object_key == RemoteMediaOrphan.object_key
+                        )
+                    )
+                )
+            )
+            or 0
+        )
+        reservation = await session.scalar(
+            select(RemoteMediaOrphan)
+            .where(RemoteMediaOrphan.object_key == cache_key)
+            .with_for_update()
+        )
+        needs_new_object = cache_key != existing_key
+        reservation_bytes = received if needs_new_object and reservation is None else 0
+        if referenced_bytes + orphan_bytes + reservation_bytes > settings.media_remote_cache_bytes:
+            await increment_metric(redis, "federation_remote_media_cache_quota_rejections")
+            await enqueue_best_effort(media_cache_gc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "REMOTE_MEDIA_CACHE_FULL", "retry_after_ms": 1_000},
+                headers={"Retry-After": "1"},
+            )
+        if needs_new_object:
+            reservation_deadline = datetime.now(UTC) + timedelta(
+                seconds=REMOTE_MEDIA_UPLOAD_RESERVATION_SECONDS
+            )
+            if reservation is None:
+                session.add(
+                    RemoteMediaOrphan(
+                        object_key=cache_key,
+                        size=received,
+                        # The orphan row is first a crash-recovery reservation.
+                        # Do not let the sweeper race the PUT/cache-row swap; a
+                        # dead worker becomes collectible after this bounded lease.
+                        next_retry_at=reservation_deadline,
+                    )
+                )
+            else:
+                if reservation.size != received:
+                    raise RuntimeError("remote media reservation size changed")
+                # A retry may have found an expired crash reservation. Refresh
+                # it while holding both the budget advisory lock and row lock,
+                # then commit before PUT so the sweeper cannot delete in flight.
+                reservation.next_retry_at = reservation_deadline
+                reservation.last_error = None
+            # Commit the reservation before bytes are written. If this worker
+            # dies during/after PUT, the deletion sweep still knows the exact
+            # key and keeps its bytes inside the hard physical budget.
+            await session.commit()
+        try:
+            if needs_new_object:
+                await storage.put_file(
+                    settings.media_remote_cache_bucket,
+                    cache_key,
+                    temporary_path,
+                    size=received,
+                    sha256=digest,
+                    content_type=detected_type,
+                )
+            await session.scalar(
+                select(
+                    func.pg_advisory_xact_lock(
+                        func.hashtextextended("kaede-remote-media-cache-budget", 0)
+                    )
+                )
+            )
+            if (
+                await session.get(
+                    RemoteMediaTombstone,
+                    (origin_domain, attachment_id),
+                    populate_existing=True,
+                )
+                is not None
+            ):
+                raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+            stored_at = datetime.now(UTC)
+            expires_at = stored_at + timedelta(days=settings.media_remote_cache_ttl_days)
+            if existing_key is not None and existing_key != cache_key:
+                if existing_size is None:
+                    raise RuntimeError("remote media cache entry changed during refresh")
+                await session.execute(
+                    pg_insert(RemoteMediaOrphan)
+                    .values(object_key=existing_key, size=existing_size)
+                    .on_conflict_do_nothing(index_elements=["object_key"])
+                )
+            await session.execute(
+                pg_insert(RemoteMediaCache)
+                .values(
+                    origin_domain=origin_domain,
+                    attachment_id=attachment_id,
+                    variant=variant,
+                    object_key=cache_key,
+                    size=received,
+                    content_type=detected_type,
+                    content_sha256=digest,
+                    scan_status="clean",
+                    last_accessed_at=stored_at,
+                    expires_at=expires_at,
+                )
+                .on_conflict_do_update(
+                    index_elements=["origin_domain", "attachment_id", "variant"],
+                    set_={
+                        "object_key": cache_key,
+                        "size": received,
+                        "content_type": detected_type,
+                        "content_sha256": digest,
+                        "scan_status": "clean",
+                        "last_accessed_at": stored_at,
+                        "expires_at": expires_at,
+                    },
+                )
+            )
+            await session.execute(
+                delete(RemoteMediaOrphan).where(RemoteMediaOrphan.object_key == cache_key)
+            )
+            await session.commit()
+        except StorageError as exc:
+            await session.rollback()
+            await enqueue_best_effort(media_cache_gc)
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "MEDIA_STORAGE_UNAVAILABLE"},
+            ) from exc
+        except BaseException:
+            await session.rollback()
+            await enqueue_best_effort(media_cache_gc)
+            raise
 
-    stored_at = datetime.now(UTC)
-    expires_at = stored_at + timedelta(days=settings.media_remote_cache_ttl_days)
-    digest = content_digest(body)
-    await session.execute(
-        pg_insert(RemoteMediaCache)
-        .values(
-            origin_domain=origin_domain,
-            attachment_id=attachment_id,
-            variant=variant,
-            object_key=cache_key,
-            size=len(body),
-            content_type=detected_type,
-            content_sha256=digest,
-            scan_status="clean",
-            last_accessed_at=stored_at,
-            expires_at=expires_at,
+        if existing_key is not None and existing_key != cache_key:
+            try:
+                await storage.delete(settings.media_remote_cache_bucket, existing_key)
+            except StorageError:
+                pass
+            else:
+                await session.execute(
+                    delete(RemoteMediaOrphan).where(RemoteMediaOrphan.object_key == existing_key)
+                )
+                await session.commit()
+        await enqueue_best_effort(media_cache_gc)
+        cached = await session.get(
+            RemoteMediaCache,
+            (origin_domain, attachment_id, variant),
+            populate_existing=True,
         )
-        .on_conflict_do_update(
-            index_elements=["origin_domain", "attachment_id", "variant"],
-            set_={
-                "object_key": cache_key,
-                "size": len(body),
-                "content_type": detected_type,
-                "content_sha256": digest,
-                "scan_status": "clean",
-                "last_accessed_at": stored_at,
-                "expires_at": expires_at,
-            },
-        )
-    )
-    await session.commit()
-    await enqueue_best_effort(media_cache_gc)
-    cached = await session.get(RemoteMediaCache, (origin_domain, attachment_id, variant))
-    if cached is None:
-        raise RuntimeError("remote media cache write did not converge")
-    return cached
+        if cached is None:
+            raise RuntimeError("remote media cache write did not converge")
+        return cached
+    finally:
+        with suppress(OSError):
+            await anyio.Path(temporary_path).unlink()
 
 
 @router.get("/media/{origin_domain}/{attachment_id}/{variant}")
@@ -811,15 +1160,6 @@ async def authorized_attachment(
     remote_attachment_id = int(attachment_id)
     if await session.get(RemoteMediaTombstone, (origin_domain, remote_attachment_id)) is not None:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
-    await session.scalar(
-        select(
-            func.pg_advisory_xact_lock(
-                func.hashtextextended(
-                    f"kaede-remote-media:{origin_domain}:{remote_attachment_id}", 0
-                )
-            )
-        )
-    )
     if (
         await session.get(
             RemoteMediaTombstone,
@@ -834,19 +1174,43 @@ async def authorized_attachment(
     if cached is not None and (cached.expires_at <= checked_at or cached.scan_status != "clean"):
         cached = None
     if cached is None:
-        async with remote_media_fetch_admission(
+        async with remote_media_cache_key_lock(
             redis,
-            response_status,
-            user_id=auth.user.id,
-            user_domain=auth.user.origin_domain,
+            origin_domain,
+            remote_attachment_id,
+            variant,
         ):
-            cached = await cache_remote_media(
-                session,
-                settings,
-                origin_domain=origin_domain,
-                attachment_id=remote_attachment_id,
-                variant=variant,
+            # The database transaction lock above is deliberately try-only;
+            # the Redis lease persists across the durable object reservation
+            # commit performed by cache_remote_media. Recheck after acquiring
+            # the lease in case a prior worker filled the same cache key.
+            cached = await session.get(
+                RemoteMediaCache,
+                (origin_domain, remote_attachment_id, variant),
+                populate_existing=True,
             )
+            checked_at = datetime.now(UTC)
+            if cached is not None and (
+                cached.expires_at <= checked_at or cached.scan_status != "clean"
+            ):
+                cached = None
+            if cached is None:
+                async with remote_media_fetch_admission(
+                    redis,
+                    response_status,
+                    user_id=auth.user.id,
+                    user_domain=auth.user.origin_domain,
+                    origin_domain=origin_domain,
+                    settings=settings,
+                ):
+                    cached = await cache_remote_media(
+                        session,
+                        settings,
+                        redis=redis,
+                        origin_domain=origin_domain,
+                        attachment_id=remote_attachment_id,
+                        variant=variant,
+                    )
     if cached is None:
         raise RuntimeError("remote media cache write did not converge")
     cached.last_accessed_at = datetime.now(UTC)
@@ -863,5 +1227,149 @@ async def authorized_attachment(
     response = RedirectResponse(url, status_code=302)
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = "Authorization, Cookie"
+    copy_rate_limit_headers(response_status, response)
+    return response
+
+
+@router.get("/api/v1/dms/{conversation_ref}/history-media/{message_ref}/{attachment_ref}/{variant}")
+async def authorized_dm_history_media(
+    conversation_ref: EntityRef,
+    message_ref: EntityRef,
+    attachment_ref: EntityRef,
+    response_status: Response,
+    expires: int = Query(ge=0),
+    token: str = Query(min_length=40, max_length=48),
+    variant: str = Path(pattern=r"^(original|thumbnail_128|thumbnail_512|thumbnail_1024|poster)$"),
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> RedirectResponse:
+    """Stream old authority-page media through the user's authenticated home."""
+
+    conversation_key = conversation_ref.resolve(settings.domain)
+    message_key = message_ref.resolve(settings.domain)
+    attachment_key = attachment_ref.resolve(settings.domain)
+    conversation = await session.get(DMConversation, conversation_key)
+    capability_status = history_media_capability_status(
+        settings,
+        conversation_ref=conversation_key,
+        message_ref=message_key,
+        attachment_ref=attachment_key,
+        variant=variant,
+        expires=expires,
+        token=token,
+    )
+    if (
+        conversation is None
+        or conversation.authority_domain == settings.domain
+        or message_key[1] != attachment_key[1]
+        or attachment_key[1] == settings.domain
+        or capability_status == "invalid"
+    ):
+        raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    participant = await session.get(
+        DMParticipant,
+        (
+            conversation.id,
+            conversation.origin_domain,
+            auth.user.id,
+            auth.user.origin_domain,
+        ),
+    )
+    if participant is None:
+        raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+
+    origin_domain = attachment_key[1]
+    attachment_id = attachment_key[0]
+    try:
+        authorization = await signed_request(
+            session,
+            settings,
+            "GET",
+            origin_domain,
+            f"/_kaede/v1/media/{attachment_id}/{variant}/authorize",
+            query={
+                "conversation_id": str(conversation_key[0]),
+                "conversation_domain": conversation_key[1],
+                "message_id": str(message_key[0]),
+                "message_domain": message_key[1],
+            },
+            request_timeout=10,
+            max_response_bytes=4_096,
+        )
+    except FederationNetworkError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "REMOTE_MEDIA_UNAVAILABLE"},
+        ) from exc
+    if authorization.status_code == 404:
+        raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    if authorization.status_code != 204:
+        raise HTTPException(status_code=503, detail={"code": "REMOTE_MEDIA_UNAVAILABLE"})
+    if await session.get(RemoteMediaTombstone, (origin_domain, attachment_id)) is not None:
+        raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    cached = await session.get(RemoteMediaCache, (origin_domain, attachment_id, variant))
+    checked_at = datetime.now(UTC)
+    if cached is not None and (cached.expires_at <= checked_at or cached.scan_status != "clean"):
+        cached = None
+    if cached is None:
+        async with remote_media_cache_key_lock(redis, origin_domain, attachment_id, variant):
+            cached = await session.get(
+                RemoteMediaCache,
+                (origin_domain, attachment_id, variant),
+                populate_existing=True,
+            )
+            checked_at = datetime.now(UTC)
+            if cached is not None and (
+                cached.expires_at <= checked_at or cached.scan_status != "clean"
+            ):
+                cached = None
+            if cached is None:
+                async with remote_media_fetch_admission(
+                    redis,
+                    response_status,
+                    user_id=auth.user.id,
+                    user_domain=auth.user.origin_domain,
+                    origin_domain=origin_domain,
+                    settings=settings,
+                ):
+                    cached = await cache_remote_media(
+                        session,
+                        settings,
+                        redis=redis,
+                        origin_domain=origin_domain,
+                        attachment_id=attachment_id,
+                        variant=variant,
+                        dm_history_scope=(conversation_key, message_key),
+                    )
+    if cached is None:
+        raise RuntimeError("remote history media cache write did not converge")
+    cached.last_accessed_at = datetime.now(UTC)
+    try:
+        url = S3Storage(settings).presign(
+            "GET",
+            settings.media_remote_cache_bucket,
+            cached.object_key,
+            expires=PRIVATE_MEDIA_CAPABILITY_SECONDS,
+        )
+    except StorageError as exc:
+        raise HTTPException(status_code=503, detail={"code": "MEDIA_STORAGE_UNAVAILABLE"}) from exc
+    await session.commit()
+    response = RedirectResponse(url, status_code=302)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Authorization, Cookie"
+    if capability_status == "renewable":
+        # The caller may keep using the stale rendered URL: it is authenticated
+        # and fully re-authorized above on every request. Content-Location also
+        # exposes a newly short-lived, identically scoped path to clients that
+        # choose to retain the renewal without adding another redirect hop.
+        response.headers["Content-Location"] = history_media_path(
+            settings,
+            conversation_ref=conversation_key,
+            message_ref=message_key,
+            attachment_ref=attachment_key,
+            variant=variant,
+        )
     copy_rate_limit_headers(response_status, response)
     return response

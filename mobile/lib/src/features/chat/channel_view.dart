@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
@@ -38,19 +39,36 @@ List<EntityRef> mentionReferences(String content) {
   return List.unmodifiable(references);
 }
 
+const _automaticHistoryLoadThreshold = 320.0;
+
+@visibleForTesting
+bool shouldAutomaticallyLoadEarlier({
+  required double pixels,
+  required double maxScrollExtent,
+  required bool hasEarlier,
+  required bool loading,
+  required bool hasError,
+}) =>
+    hasEarlier &&
+    !loading &&
+    !hasError &&
+    pixels >= maxScrollExtent - _automaticHistoryLoadThreshold;
+
 String renderMentionLabels(String content, MobileState state) =>
     content.replaceAllMapped(_mentionPattern, (match) {
       final reference = EntityRef.parse(match.group(1)!);
-      KaedeUser? user;
+      KaedeUser? user = state.userProfiles[reference];
       if (state.user?.ref == reference) user = state.user;
       for (final dm in state.dms) {
         for (final candidate in dm.recipients) {
-          if (candidate.ref == reference) user = candidate;
+          if (candidate.ref == reference && user == null) user = candidate;
         }
       }
       for (final messages in state.messageStore.values) {
         for (final message in messages) {
-          if (message.author?.ref == reference) user = message.author;
+          if (message.author?.ref == reference && user == null) {
+            user = message.author;
+          }
         }
       }
       final label = (user?.name ?? reference.wire)
@@ -105,13 +123,15 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   var _updatingComposer = false;
   var _notifyReply = true;
   var _sending = false;
+  var _automaticHistoryCheckScheduled = false;
+  var _automaticHistoryLoadInFlight = false;
   String? _mentionQuery;
 
   @override
   void initState() {
     super.initState();
     _composer.addListener(_composerChanged);
-    _scroll.addListener(_rememberOffset);
+    _scroll.addListener(_handleScroll);
   }
 
   @override
@@ -130,7 +150,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     _composer
       ..removeListener(_composerChanged)
       ..dispose();
-    _scroll.removeListener(_rememberOffset);
+    _scroll.removeListener(_handleScroll);
     _scroll.dispose();
     super.dispose();
   }
@@ -150,8 +170,10 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         if (mounted) _switchComposer(channel.ref);
       });
     }
-    final canSend = channel.type == ChannelType.dm ||
-        channel.allows(Permission.sendMessages);
+    final moderationStatus = state.activeModerationStatus;
+    final canSend = moderationStatus == null &&
+        (channel.type == ChannelType.dm ||
+            channel.allows(Permission.sendMessages));
     final messages = state.messages;
     final pending = state.pendingMessages;
     final channelChanged = _renderedChannel != channel.ref;
@@ -171,15 +193,58 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       _scheduleScrollToBottom(animated: true);
     }
     _renderedLastMessage = lastMessage;
+    if (state.channelsWithOlderMessages.contains(channel.ref) &&
+        !state.loadingMessages &&
+        state.error == null) {
+      _scheduleAutomaticHistoryCheck();
+    }
+    final historySyncWarning = _guildHistorySyncWarning(state.activeGuild);
     return Column(
       children: [
+        if (state.activeGuild?.syncStatus == 'quota_paused')
+          _FederationStatusStrip(
+            title: 'Guild updates are paused on this instance.',
+            message: switch (state.activeGuild?.syncErrorCode) {
+              'FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED' =>
+                'This instance cannot cache another remote account needed by the guild. Contact your instance administrator; you do not need to delete your own messages.',
+              'FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED' =>
+                'This instance cannot cache another remote server needed by the guild. Contact your instance administrator; you do not need to delete your own messages.',
+              _ =>
+                'Its remote-guild cache is full, so recent messages or changes may be missing. Contact your instance administrator; you do not need to delete your own messages.',
+            },
+          ),
+        if (historySyncWarning != null &&
+            state.activeGuild?.syncStatus != 'quota_paused')
+          _FederationStatusStrip(
+            title: historySyncWarning.$1,
+            message: historySyncWarning.$2,
+          ),
+        if (moderationStatus != null)
+          _FederationStatusStrip(
+            title: moderationStatus.timeoutIndefinite
+                ? 'You are timed out in this guild.'
+                : 'You are timed out until ${_formatTimeout(context, moderationStatus.timeoutUntil!)}.',
+            message: moderationStatus.reason?.isNotEmpty == true
+                ? 'Reason: ${moderationStatus.reason}'
+                : moderationStatus.detailsAvailable
+                    ? 'The guild’s home instance did not provide a reason.'
+                    : 'Kaede is retrieving the reason from the guild’s home instance.',
+          ),
         if (state.error case final error?)
           _ChatErrorStrip(
             message: error,
-            onRetry: ref.read(mobileControllerProvider.notifier).loadMessages,
+            onRetry:
+                error.startsWith('Older messages are temporarily unavailable')
+                    ? () => ref
+                        .read(mobileControllerProvider.notifier)
+                        .loadMessages(older: true)
+                    : ref.read(mobileControllerProvider.notifier).loadMessages,
           ),
         Expanded(
-          child: messages.isEmpty && pending.isEmpty && !state.loadingMessages
+          child: messages.isEmpty &&
+                  pending.isEmpty &&
+                  !state.loadingMessages &&
+                  !channel.historyTruncated
               ? _ConversationStart(channel: channel)
               : ListView.builder(
                   controller: _scroll,
@@ -187,7 +252,10 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                   padding: const EdgeInsets.fromLTRB(4, 4, 4, 14),
                   itemCount: messages.length +
                       pending.length +
-                      (state.channelsWithOlderMessages.contains(channel.ref)
+                      (state.channelsWithOlderMessages.contains(channel.ref) ||
+                              (channel.historyTruncated && messages.isEmpty) ||
+                              (channel.historyTruncated &&
+                                  !channel.historyRemoteAvailable)
                           ? 1
                           : 0),
                   itemBuilder: (context, index) {
@@ -206,6 +274,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                     final messageIndex =
                         messages.length - (index - pending.length) - 1;
                     if (messageIndex < 0) {
+                      if (!state.channelsWithOlderMessages
+                          .contains(channel.ref)) {
+                        return _HistoryBoundary(
+                          complete: messages.isEmpty
+                              ? channel.historyRemoteAvailable &&
+                                  !state.loadingMessages &&
+                                  state.error == null
+                              : messages.first.historyPageComplete,
+                        );
+                      }
                       return Padding(
                         padding: const EdgeInsets.fromLTRB(44, 4, 44, 10),
                         child: OutlinedButton.icon(
@@ -275,7 +353,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             onSelected: _insertMention,
           ),
         if (!canSend)
-          const _PermissionNotice()
+          _PermissionNotice(
+            message: moderationStatus == null
+                ? 'You do not have permission to send messages here.'
+                : 'You cannot send messages while timed out.',
+          )
         else
           IgnorePointer(
             ignoring: !composerReady,
@@ -300,6 +382,13 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           ),
       ],
     );
+  }
+
+  String _formatTimeout(BuildContext context, DateTime value) {
+    final local = value.toLocal();
+    final material = MaterialLocalizations.of(context);
+    return '${material.formatMediumDate(local)} at '
+        '${material.formatTimeOfDay(TimeOfDay.fromDateTime(local))}';
   }
 
   bool get _isNearBottom =>
@@ -331,7 +420,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   }
 
   List<KaedeUser> _mentionCandidates(MobileState state, String query) {
-    final users = <EntityRef, KaedeUser>{};
+    final users = <EntityRef, KaedeUser>{...state.userProfiles};
     if (state.user case final user?) users[user.ref] = user;
     for (final dm in state.dms) {
       for (final user in dm.recipients) {
@@ -345,6 +434,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     }
     final needle = query.toLowerCase();
     return users.values
+        .where((user) => user.profileResolved)
         .where((user) =>
             user.name.toLowerCase().contains(needle) ||
             user.username.toLowerCase().contains(needle) ||
@@ -412,6 +502,45 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     if (channel != null && _scroll.hasClients) {
       _savedOffsets[channel] = _scroll.offset;
     }
+  }
+
+  void _handleScroll() {
+    _rememberOffset();
+    _maybeAutomaticallyLoadEarlier();
+  }
+
+  void _scheduleAutomaticHistoryCheck() {
+    if (_automaticHistoryCheckScheduled) return;
+    _automaticHistoryCheckScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _automaticHistoryCheckScheduled = false;
+      if (mounted) _maybeAutomaticallyLoadEarlier();
+    });
+  }
+
+  void _maybeAutomaticallyLoadEarlier() {
+    if (!_scroll.hasClients || _automaticHistoryLoadInFlight) return;
+    final state = ref.read(mobileControllerProvider);
+    final channel = state.activeChannel;
+    if (channel == null ||
+        !shouldAutomaticallyLoadEarlier(
+          pixels: _scroll.position.pixels,
+          maxScrollExtent: _scroll.position.maxScrollExtent,
+          hasEarlier: state.channelsWithOlderMessages.contains(channel.ref),
+          loading: state.loadingMessages,
+          hasError: state.error != null,
+        )) {
+      return;
+    }
+    _automaticHistoryLoadInFlight = true;
+    unawaited(() async {
+      try {
+        await _loadEarlier();
+      } finally {
+        _automaticHistoryLoadInFlight = false;
+        if (mounted) _scheduleAutomaticHistoryCheck();
+      }
+    }());
   }
 
   void _scheduleRestore(EntityRef channel) {
@@ -560,8 +689,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         _startSlowMode(channel.ref, error.retryAfter!);
       }
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$error')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(userFacingError(
+            error,
+            summary: 'Could not send the message',
+          )),
+        ));
       }
     } finally {
       if (mounted) setState(() => _sending = false);
@@ -697,7 +830,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     } on Object catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('That action could not be completed: $error')),
+        SnackBar(
+          content: Text(userFacingError(
+            error,
+            summary: 'Could not complete that message action',
+          )),
+        ),
       );
     }
   }
@@ -721,6 +859,95 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       ),
     );
   }
+}
+
+(String, String)? _guildHistorySyncWarning(KaedeGuild? guild) {
+  if (guild?.historySyncStatus == 'retrying') {
+    final milliseconds = guild!.historySyncRetryAfterMs ?? 2000;
+    final seconds = max(1, (milliseconds + 999) ~/ 1000);
+    final title = guild.historySyncErrorCode == 'KAED_FED_HISTORY_CAPACITY'
+        ? 'Older guild history is waiting for capacity.'
+        : 'Older guild history is temporarily delayed.';
+    return (
+      title,
+      'Recent messages remain available. Kaede will retry automatically in about $seconds second${seconds == 1 ? '' : 's'}; no action is needed.',
+    );
+  }
+  if (guild?.historySyncStatus != 'failed') return null;
+  if (guild?.historySyncErrorCode == 'FEDERATED_GUILD_HISTORY_LIMIT_REACHED') {
+    return (
+      'Older guild history stopped at this instance’s safety limit.',
+      'Recent and new messages still work. Ask your instance administrator to raise the federation history limit if more retained history is needed.',
+    );
+  }
+  if (guild?.historySyncErrorCode == 'FEDERATED_GUILD_HISTORY_REJECTED') {
+    return (
+      'Older guild history could not be safely imported.',
+      'The remote instance returned history Kaede could not accept. Recent and new messages still work; contact your instance administrator if older history is required.',
+    );
+  }
+  return (
+    'Older guild history could not be imported.',
+    'Recent and new messages still work. Contact your instance administrator if older history remains unavailable.',
+  );
+}
+
+final class _FederationStatusStrip extends StatelessWidget {
+  const _FederationStatusStrip({
+    required this.title,
+    required this.message,
+  });
+
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(14, 9, 14, 10),
+        color: KaedeColors.coral.withValues(alpha: .12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title,
+                style: const TextStyle(
+                    color: KaedeColors.coral, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 2),
+            Text(message,
+                style: const TextStyle(
+                    color: KaedeColors.muted, fontSize: 12, height: 1.3)),
+          ],
+        ),
+      );
+}
+
+final class _HistoryBoundary extends StatelessWidget {
+  const _HistoryBoundary({required this.complete});
+
+  final bool complete;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.fromLTRB(28, 8, 28, 14),
+        child: Column(
+          children: [
+            Text(
+                complete
+                    ? 'Beginning of conversation'
+                    : 'Recent history starts here',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontWeight: FontWeight.w800)),
+            const SizedBox(height: 3),
+            Text(
+              complete
+                  ? 'You have reached the oldest message available from the conversation home.'
+                  : 'This instance keeps a rolling cache of this remote conversation. Older messages load on demand from its home instance; retry if that instance is temporarily unavailable.',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: KaedeColors.muted, fontSize: 12),
+            ),
+          ],
+        ),
+      );
 }
 
 final class _PendingMessageTile extends StatelessWidget {
@@ -757,7 +984,9 @@ final class _PendingMessageTile extends StatelessWidget {
                 Expanded(
                   child: Text(
                     failed
-                        ? (item.lastError ?? 'Message could not be sent.')
+                        ? userFacingError(
+                            item.lastError ?? 'Message could not be sent.',
+                          )
                         : 'Sending…',
                     style: TextStyle(
                       color: failed ? KaedeColors.danger : KaedeColors.muted,
@@ -1153,10 +1382,19 @@ final class _MessageTile extends StatelessWidget {
                       ),
                     ),
                   if (message.deliveryStatus == 'failed')
-                    const Text('Message not delivered',
-                        style: TextStyle(
+                    Text(message.failureReason ?? 'Message not delivered.',
+                        style: const TextStyle(
                             color: KaedeColors.danger,
                             fontWeight: FontWeight.w700)),
+                  if (message.deliveryStatus == 'retrying')
+                    Text(
+                      message.failureReason ??
+                          'The receiving instance is temporarily at capacity. Kaede is retrying automatically.',
+                      style: const TextStyle(
+                        color: KaedeColors.muted,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -1181,12 +1419,14 @@ final class _AttachmentStatusCard extends StatelessWidget {
     required this.icon,
     required this.message,
     this.error = false,
+    this.onRetry,
   });
 
   final KaedeAttachment attachment;
   final IconData icon;
   final String message;
   final bool error;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -1204,7 +1444,15 @@ final class _AttachmentStatusCard extends StatelessWidget {
         children: [
           Icon(icon, color: error ? KaedeColors.danger : KaedeColors.muted),
           const SizedBox(width: 10),
-          Expanded(child: Text(message, overflow: TextOverflow.ellipsis)),
+          Expanded(
+            child: Text(
+              message,
+              maxLines: error ? 3 : 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (onRetry != null)
+            TextButton(onPressed: onRetry, child: const Text('Retry')),
         ],
       ),
     );
@@ -1229,6 +1477,7 @@ final class _RemoteMediaPreview extends StatefulWidget {
 final class _RemoteMediaPreviewState extends State<_RemoteMediaPreview> {
   Future<File>? _videoFile;
   HttpClient? _downloadClient;
+  var _previewGeneration = 0;
 
   bool get _isVideo => widget.uri.path.toLowerCase().endsWith('.mp4');
 
@@ -1253,6 +1502,18 @@ final class _RemoteMediaPreviewState extends State<_RemoteMediaPreview> {
     _videoFile = _cacheVideo(widget.uri);
   }
 
+  Future<void> _retryPreview() async {
+    _downloadClient?.close(force: true);
+    if (!_isVideo) {
+      await CachedNetworkImage.evictFromCache(widget.uri.toString());
+    }
+    if (!mounted) return;
+    setState(() {
+      _previewGeneration += 1;
+      if (_isVideo) _videoFile = _cacheVideo(widget.uri);
+    });
+  }
+
   @override
   void dispose() {
     _downloadClient?.close(force: true);
@@ -1271,13 +1532,9 @@ final class _RemoteMediaPreviewState extends State<_RemoteMediaPreview> {
                     future: _videoFile,
                     builder: (context, snapshot) {
                       if (snapshot.hasError) {
-                        return const AspectRatio(
-                          aspectRatio: 16 / 9,
-                          child: ColoredBox(
-                            color: KaedeColors.raised,
-                            child: Center(
-                                child: Icon(Icons.broken_image_outlined)),
-                          ),
+                        return _MediaPreviewError(
+                          error: snapshot.error!,
+                          onRetry: _retryPreview,
                         );
                       }
                       if (!snapshot.hasData) {
@@ -1293,6 +1550,7 @@ final class _RemoteMediaPreviewState extends State<_RemoteMediaPreview> {
                     },
                   )
                 : CachedNetworkImage(
+                    key: ValueKey('${widget.uri}#$_previewGeneration'),
                     imageUrl: widget.uri.toString(),
                     fit: BoxFit.contain,
                     fadeInDuration: Duration.zero,
@@ -1303,12 +1561,9 @@ final class _RemoteMediaPreviewState extends State<_RemoteMediaPreview> {
                         child: Center(child: CircularProgressIndicator()),
                       ),
                     ),
-                    errorWidget: (_, __, ___) => const AspectRatio(
-                      aspectRatio: 16 / 9,
-                      child: ColoredBox(
-                        color: KaedeColors.raised,
-                        child: Center(child: Icon(Icons.broken_image_outlined)),
-                      ),
+                    errorWidget: (_, __, error) => _MediaPreviewError(
+                      error: error,
+                      onRetry: _retryPreview,
                     ),
                   ),
           ),
@@ -1398,6 +1653,45 @@ final class _RemoteMediaPreviewState extends State<_RemoteMediaPreview> {
   }
 }
 
+final class _MediaPreviewError extends StatelessWidget {
+  const _MediaPreviewError({required this.error, required this.onRetry});
+
+  final Object error;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) => AspectRatio(
+        aspectRatio: 16 / 9,
+        child: ColoredBox(
+          color: KaedeColors.raised,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(
+                  Icons.broken_image_outlined,
+                  color: KaedeColors.danger,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  userFacingError(
+                    error,
+                    summary: 'Could not load the media preview',
+                  ),
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 12),
+                ),
+                TextButton(onPressed: onRetry, child: const Text('Retry')),
+              ],
+            ),
+          ),
+        ),
+      );
+}
+
 String stableMediaCacheKey(Uri uri) {
   var hash = 0xcbf29ce484222325;
   for (final unit in uri.toString().codeUnits) {
@@ -1439,6 +1733,8 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
   late KaedeAttachment _displayAttachment = widget.attachment;
   File? _file;
   Timer? _statusTimer;
+  Object? _statusError;
+  var _statusFailures = 0;
   var _loadGeneration = 0;
   var _disposed = false;
 
@@ -1453,10 +1749,14 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
   void didUpdateWidget(covariant _AttachmentCard oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.attachment.ref != widget.attachment.ref ||
-        oldWidget.attachment.scanStatus != widget.attachment.scanStatus) {
+        oldWidget.attachment.scanStatus != widget.attachment.scanStatus ||
+        oldWidget.attachment.historyMediaUrl !=
+            widget.attachment.historyMediaUrl) {
       _loadGeneration += 1;
       _takeFile();
       _displayAttachment = widget.attachment;
+      _statusError = null;
+      _statusFailures = 0;
       _future = _initialFuture();
       _scheduleStatusPoll();
     }
@@ -1485,13 +1785,28 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
       if (!mounted || attachment.ref != widget.attachment.ref) return;
       setState(() {
         _displayAttachment = attachment;
+        _statusError = null;
+        _statusFailures = 0;
         if (attachment.scanStatus == 'clean') _future = _load(attachment);
       });
-    } on Object {
+    } on Object catch (error) {
       // Gateway updates are the primary path. Polling is a recovery path for
       // uploads whose scan completion event was missed while backgrounded.
+      _statusFailures += 1;
+      if (mounted && _statusFailures >= 3) {
+        setState(() => _statusError = error);
+      }
     }
     if (mounted) _scheduleStatusPoll();
+  }
+
+  void _retryStatus() {
+    _statusTimer?.cancel();
+    setState(() {
+      _statusError = null;
+      _statusFailures = 0;
+    });
+    unawaited(_pollStatus());
   }
 
   Future<File> _load([KaedeAttachment? resolved]) async {
@@ -1509,15 +1824,42 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
       _file = destination;
       return destination;
     }
-    final downloaded = await ref
-        .read(mobileControllerProvider.notifier)
-        .repository
-        .downloadAttachment(attachment, destination);
+    final downloaded = await _downloadWithCapacityRetry(
+      attachment,
+      destination,
+      generation,
+    );
     if (_disposed || generation != _loadGeneration) {
       throw const FileSystemException('Attachment load was cancelled.');
     }
     _file = downloaded;
     return downloaded;
+  }
+
+  Future<File> _downloadWithCapacityRetry(
+    KaedeAttachment attachment,
+    File destination,
+    int generation,
+  ) async {
+    final repository = ref.read(mobileControllerProvider.notifier).repository;
+    for (var attempt = 0;; attempt += 1) {
+      try {
+        return await repository.downloadAttachment(attachment, destination);
+      } on KaedeException catch (error) {
+        final transientCapacity = error.code == 'REMOTE_MEDIA_BUSY' ||
+            error.code == 'REMOTE_MEDIA_CACHE_FULL';
+        if (!transientCapacity || attempt >= 2) rethrow;
+        final serverDelay =
+            error.retryAfter ?? Duration(milliseconds: 1000 * (attempt + 1));
+        final boundedMilliseconds =
+            serverDelay.inMilliseconds.clamp(500, 5000) +
+                (attachment.ref.hashCode.abs() % 251);
+        await Future<void>.delayed(Duration(milliseconds: boundedMilliseconds));
+        if (_disposed || generation != _loadGeneration) {
+          throw const FileSystemException('Attachment load was cancelled.');
+        }
+      }
+    }
   }
 
   File? _takeFile() {
@@ -1590,7 +1932,10 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
     final instance = controller.api.tokens?.instance.value;
     if (instance == null) return;
     await Clipboard.setData(ClipboardData(
-      text: 'https://$instance${attachmentMediaPath(widget.attachment.ref)}',
+      text: 'https://$instance${attachmentMediaPath(
+        widget.attachment.ref,
+        historyMediaUrl: widget.attachment.historyMediaUrl,
+      )}',
     ));
   }
 
@@ -1599,6 +1944,18 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
     final attachment = _displayAttachment;
     if (attachment.scanStatus == 'pending' ||
         attachment.scanStatus == 'processing') {
+      if (_statusError case final error?) {
+        return _AttachmentStatusCard(
+          attachment: attachment,
+          icon: Icons.warning_amber_rounded,
+          message: userFacingError(
+            error,
+            summary: 'Could not check the attachment status',
+          ),
+          error: true,
+          onRetry: _retryStatus,
+        );
+      }
       return _AttachmentStatusCard(
         attachment: attachment,
         icon: Icons.hourglass_top_rounded,
@@ -1606,10 +1963,14 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
       );
     }
     if (attachment.scanStatus != 'clean') {
+      final rejected = attachment.scanStatus == 'rejected' ||
+          attachment.scanStatus == 'infected';
       return _AttachmentStatusCard(
         attachment: attachment,
         icon: Icons.warning_amber_rounded,
-        message: '${attachment.filename} could not be processed safely.',
+        message: rejected
+            ? '${attachment.filename} did not pass the server’s safety scan.'
+            : '${attachment.filename} could not be processed by the server. Upload the file again later.',
         error: true,
       );
     }
@@ -1639,9 +2000,25 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
                     color: KaedeColors.danger),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
-                    'Could not load ${attachment.filename}.',
-                    overflow: TextOverflow.ellipsis,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        attachment.filename,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        userFacingError(
+                          snapshot.error!,
+                          summary: 'Could not load the attachment',
+                        ),
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ],
                   ),
                 ),
                 TextButton(
@@ -1683,11 +2060,17 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
                       child: Stack(
                         children: [
                           InteractiveViewer(
-                              minScale: .5,
-                              maxScale: 6,
-                              child: Center(
-                                  child:
-                                      Image.file(file, fit: BoxFit.contain))),
+                            minScale: .5,
+                            maxScale: 6,
+                            child: Center(
+                              child: Image.file(
+                                file,
+                                fit: BoxFit.contain,
+                                errorBuilder: (_, __, ___) =>
+                                    const _MediaDecodeError(kind: 'image'),
+                              ),
+                            ),
+                          ),
                           Positioned(
                               top: 12,
                               right: 12,
@@ -1706,9 +2089,8 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
                       fit: BoxFit.contain,
                       width: double.infinity,
                       alignment: Alignment.centerLeft,
-                      errorBuilder: (_, __, ___) => const Center(
-                        child: Icon(Icons.broken_image_outlined),
-                      ),
+                      errorBuilder: (_, __, ___) =>
+                          const _MediaDecodeError(kind: 'image'),
                     ),
                   ),
                 ),
@@ -1785,24 +2167,46 @@ final class _FileVideo extends StatefulWidget {
 
 final class _FileVideoState extends State<_FileVideo> {
   VideoPlayerController? controller;
+  Object? _error;
+  var _prepareGeneration = 0;
+
   @override
   void initState() {
     super.initState();
-    _prepare();
+    unawaited(_prepare());
+  }
+
+  @override
+  void didUpdateWidget(covariant _FileVideo oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.file.path != widget.file.path) unawaited(_prepare());
   }
 
   Future<void> _prepare() async {
+    final generation = ++_prepareGeneration;
+    _error = null;
+    final previous = controller;
+    controller = null;
+    await previous?.dispose();
     final next = VideoPlayerController.file(widget.file);
-    await next.initialize();
-    if (!mounted) {
+    try {
+      await next.initialize();
+      if (!mounted || generation != _prepareGeneration) {
+        await next.dispose();
+        return;
+      }
+      setState(() => controller = next);
+    } on Object catch (error) {
       await next.dispose();
-      return;
+      if (mounted && generation == _prepareGeneration) {
+        setState(() => _error = error);
+      }
     }
-    setState(() => controller = next);
   }
 
   @override
   void dispose() {
+    _prepareGeneration += 1;
     controller?.dispose();
     super.dispose();
   }
@@ -1810,6 +2214,18 @@ final class _FileVideoState extends State<_FileVideo> {
   @override
   Widget build(BuildContext context) {
     final player = controller;
+    if (_error != null) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 7),
+        child: _MediaDecodeError(
+          kind: 'video',
+          onRetry: () {
+            setState(() => _error = null);
+            unawaited(_prepare());
+          },
+        ),
+      );
+    }
     if (player == null) {
       return const Padding(
           padding: EdgeInsets.all(18), child: LinearProgressIndicator());
@@ -1839,6 +2255,40 @@ final class _FileVideoState extends State<_FileVideo> {
   }
 }
 
+final class _MediaDecodeError extends StatelessWidget {
+  const _MediaDecodeError({required this.kind, this.onRetry});
+
+  final String kind;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) => ColoredBox(
+        color: KaedeColors.raised,
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.broken_image_outlined,
+                  color: KaedeColors.danger,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Could not display this $kind. The file may be damaged or use an unsupported format.',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 12),
+                ),
+                if (onRetry != null)
+                  TextButton(onPressed: onRetry, child: const Text('Retry')),
+              ],
+            ),
+          ),
+        ),
+      );
+}
+
 final class _MentionSuggestions extends StatelessWidget {
   const _MentionSuggestions({required this.users, required this.onSelected});
 
@@ -1865,7 +2315,9 @@ final class _MentionSuggestions extends StatelessWidget {
             dense: true,
             leading: UserAvatar(user: user, radius: 17),
             title: Text(user.name),
-            subtitle: Text(user.handle),
+            subtitle: Text(user.profileResolved
+                ? user.handle
+                : 'Profile unavailable · refreshes automatically'),
             onTap: () => onSelected(user),
           );
         },
@@ -2012,14 +2464,17 @@ final class _Composer extends StatelessWidget {
 }
 
 final class _PermissionNotice extends StatelessWidget {
-  const _PermissionNotice();
+  const _PermissionNotice({required this.message});
+
+  final String message;
+
   @override
-  Widget build(BuildContext context) => const SafeArea(
+  Widget build(BuildContext context) => SafeArea(
         top: false,
         child: Padding(
-          padding: EdgeInsets.fromLTRB(8, 3, 8, 7),
+          padding: const EdgeInsets.fromLTRB(8, 3, 8, 7),
           child: DecoratedBox(
-            decoration: BoxDecoration(
+            decoration: const BoxDecoration(
               color: KaedeColors.raised,
               borderRadius: BorderRadius.all(Radius.circular(18)),
               border: Border.fromBorderSide(
@@ -2027,16 +2482,16 @@ final class _PermissionNotice extends StatelessWidget {
               ),
             ),
             child: Padding(
-              padding: EdgeInsets.symmetric(horizontal: 15, vertical: 14),
+              padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 14),
               child: Row(
                 children: [
-                  Icon(Icons.lock_outline_rounded,
+                  const Icon(Icons.lock_outline_rounded,
                       size: 18, color: KaedeColors.muted),
-                  SizedBox(width: 10),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      'You do not have permission to send messages here.',
-                      style: TextStyle(color: KaedeColors.muted),
+                      message,
+                      style: const TextStyle(color: KaedeColors.muted),
                     ),
                   ),
                 ],

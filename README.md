@@ -48,11 +48,18 @@ make setup
 The wizard creates a private `.env`, selects Garage or an external S3-compatible
 provider, configures optional email, voice, KLIPY GIF, and Turnstile services,
 can configure optional Firebase Cloud Messaging and source-based automatic
-updates, and can render a host nginx configuration. It does not start
-containers, install nginx files, reload nginx, or obtain certificates. It only
+updates, offers optional common or advanced federation/storage quota tuning,
+and can render a host nginx configuration. Quota prompts accept friendly
+counts such as `250K` or `2.5M` and sizes such as `100GB` or `100GiB`; keeping
+the recommended/current limits adds no individual sizing questions. It does not
+start containers, install nginx files, reload nginx, or obtain certificates. It only
 installs or removes a per-user systemd timer when that option is explicitly
 selected. See
 [docs/deployment-wizard.md](docs/deployment-wizard.md) for all available options.
+Rerunning `make setup` preserves custom quota tuning and upgrades only the exact
+low cache/history defaults written by older setup versions; manual deployments
+can find the corresponding variables and sizing guidance in
+[docs/operator.md](docs/operator.md#federation-storage-budgets).
 
 ### Optional automatic updates
 

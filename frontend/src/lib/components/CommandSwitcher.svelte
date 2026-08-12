@@ -1,7 +1,8 @@
 <script lang="ts">
   import { afterNavigate, goto } from '$app/navigation';
-  import { api } from '$lib/api/client';
+  import { api, userErrorMessage } from '$lib/api/client';
   import type { Channel, Guild } from '$lib/chat/types';
+  import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import { recordNavigation } from '$lib/navigation/history';
   import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
   import { onMount, tick } from 'svelte';
@@ -73,19 +74,21 @@
         ),
         ...dms.map((channel) => ({
           path: directMessagePath(channel),
-          label:
-            channel.recipients?.[0]?.display_name ??
-            channel.recipients?.[0]?.username ??
-            'Direct message',
-          detail: channel.recipients?.[0]?.handle ?? 'Direct message'
+          label: userDisplayName(channel.recipients?.[0]) || 'Direct message',
+          detail: channel.recipients?.[0]
+            ? (userPublicHandle(channel.recipients[0]) ?? 'Profile unavailable')
+            : 'Direct message'
         }))
       ];
       loaded = true;
-    } catch {
+    } catch (caught) {
       if (!controller.signal.aborted && generation === requestGeneration) {
         destinations = [];
         loaded = true;
-        loadError = 'Could not load your channels and conversations.';
+        loadError = userErrorMessage(
+          caught,
+          'Could not load your channels and conversations. Try again.'
+        );
       }
     } finally {
       if (generation === requestGeneration) loading = false;

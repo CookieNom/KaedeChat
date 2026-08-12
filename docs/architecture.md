@@ -214,14 +214,38 @@ plaintext. Plaintext and encrypted bodies are mutually exclusive, deleted messag
 discard either representation, and the server deliberately does not interpret or
 select a cipher suite. This preserves room for a future MLS-style guild protocol and
 per-device ratcheted DMs without another message-table rewrite or a federation
-envelope fork. Device identity, key packages, recovery, trust UX, membership epoch
-changes, and attachment encryption are intentionally not specified yet.
+envelope fork. Instances advertise this storage-and-relay behavior as
+`e2ee-transport/1`. That capability is deliberately narrow: it does not mean that
+Kaede currently implements E2EE, MLS, device identity, key packages, recovery,
+trust UX, membership epoch changes, or attachment encryption.
+
+An eventual encrypted-room protocol must define authenticated device identities,
+key/epoch state, and a canonical associated-data encoding. At minimum, ciphertext
+must be bound to the protocol and cipher-suite versions, the composite guild/channel
+or DM reference, the sender user and device, the room-policy generation and
+cryptographic epoch, a stable message nonce/generation, the operation being
+performed, and any encrypted attachment manifest. Federation's instance-level
+Ed25519 signatures authenticate transport between servers; they do not authenticate
+a participant device and cannot substitute for ciphertext authentication.
+
+Downgrade resistance also belongs to that future protocol. Enabling encryption must
+create an authenticated, monotonic room-policy generation; membership and device
+changes must advance the cryptographic epoch. Clients must reject plaintext or stale
+epochs after the policy is enabled, and authorities/replicas must reject writes that
+do not match the current policy. Optional encryption must never be negotiated from
+an unauthenticated boolean or from the presence of an opaque envelope alone.
 
 Encrypted rooms will necessarily trade away server-side content search, link
 previews, content moderation, and plaintext mention extraction unless clients
 provide a separately designed privacy-preserving projection. None of those current
 server features is treated as a prerequisite for accepting an opaque envelope, so
 the present architecture does not force future encrypted rooms to reveal content.
+Notification text, mention recipients, link metadata, thumbnails, filenames, and
+attachment dimensions are projections too and must be omitted, encrypted, or
+explicitly accepted as metadata leakage by the future protocol. Servers still learn
+routing metadata such as the participating instances, composite room and sender
+references, timestamps, ciphertext sizes, and delivery activity; padding and traffic
+analysis resistance are outside the current transport capability.
 
 ## Security invariants
 

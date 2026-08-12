@@ -17,6 +17,7 @@ from app.email.outbox import drain_email_outbox
 from app.main import app
 from app.media.jobs import process_attachment_record, purge_local_attachment
 from scripts.email_tokens import token_from_email
+from scripts.verification import VerificationFailure, failure_message, require
 
 _png_buffer = io.BytesIO()
 Image.new("RGB", (16, 16), (181, 57, 34)).save(_png_buffer, format="PNG")
@@ -24,17 +25,14 @@ PNG = _png_buffer.getvalue()
 EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 
 
-def require(condition: bool, message: str) -> None:
-    if not condition:
-        raise RuntimeError(message)
-
-
 def register(
     client: TestClient, emails: list[str], deliver_mail: Callable[[], None]
 ) -> dict[str, str]:
     proxy_secret = get_settings().proxy_secret
     if proxy_secret is None:
-        raise RuntimeError("validation proxy secret is not configured")
+        raise VerificationFailure(
+            "KAEDE_PROXY_SECRET is not configured for the validation environment"
+        )
     response = client.post(
         "/api/v1/auth/register",
         headers={
@@ -114,7 +112,9 @@ def verify() -> None:
 
         def deliver_mail() -> None:
             if api.portal is None:
-                raise RuntimeError("API test portal is unavailable")
+                raise VerificationFailure(
+                    "FastAPI's test portal is unavailable; verify the application lifespan started"
+                )
             api.portal.call(drain_mail)
 
         login = register(api, emails, deliver_mail)
@@ -152,12 +152,11 @@ def verify() -> None:
         )
         require(ticket.status_code == 201, f"upload ticket failed: {ticket.text}")
         attachment_id = ticket.json()["id"]
+        uploaded = garage_request(ticket.json()["upload_url"], "PUT", PNG, content_type="image/png")
         require(
-            garage_request(
-                ticket.json()["upload_url"], "PUT", PNG, content_type="image/png"
-            ).status_code
-            == 200,
-            "upload failed",
+            uploaded.status_code == 200,
+            "object-storage upload expected HTTP 200; received "
+            f"HTTP {uploaded.status_code}: {uploaded.text}",
         )
         sent = api.post(
             f"/api/v1/channels/{channel_id}/messages",
@@ -180,7 +179,9 @@ def verify() -> None:
                 )
 
         if api.portal is None:
-            raise RuntimeError("API test portal is unavailable")
+            raise VerificationFailure(
+                "FastAPI's test portal is unavailable; verify the application lifespan started"
+            )
         process_result = api.portal.call(process)
         require(process_result == "clean", f"clean image processing failed: {process_result}")
         replacement = b"MZ" + b"\0" * (len(PNG) - 2)
@@ -208,7 +209,12 @@ def verify() -> None:
         )
         require(redirect.status_code == 302, f"authorized media failed: {redirect.text}")
         downloaded = garage_request(redirect.headers["location"], "GET")
-        require(downloaded.status_code == 200 and downloaded.content == PNG, "download differed")
+        require(
+            downloaded.status_code == 200 and downloaded.content == PNG,
+            "downloaded original expected HTTP 200 and "
+            f"{len(PNG)} bytes; received HTTP {downloaded.status_code} and "
+            f"{len(downloaded.content)} bytes",
+        )
 
         edited = api.patch(
             f"/api/v1/channels/{channel_id}/messages/{message_id}",
@@ -244,7 +250,11 @@ def verify() -> None:
             headers=headers,
             json={"filename": "eicar.txt", "content_type": "text/plain", "size": len(EICAR)},
         )
-        require(infected_ticket.status_code == 201, "infected ticket failed")
+        require(
+            infected_ticket.status_code == 201,
+            "infected-file test ticket expected HTTP 201; received "
+            f"HTTP {infected_ticket.status_code}: {infected_ticket.text}",
+        )
         infected_id = infected_ticket.json()["id"]
         require(
             garage_request(
@@ -261,7 +271,11 @@ def verify() -> None:
             headers=headers,
             json={"attachment_ids": [infected_id]},
         )
-        require(infected_message.status_code == 201, "infected test message failed")
+        require(
+            infected_message.status_code == 201,
+            "infected-file test message expected HTTP 201; received "
+            f"HTTP {infected_message.status_code}: {infected_message.text}",
+        )
 
         async def scan_infected() -> str:
             async with app.state.sessionmaker() as session:
@@ -289,7 +303,10 @@ def verify() -> None:
             f"webhook attribution failed: {executed.text}",
         )
         rotated = api.post(f"/api/v1/webhooks/{webhook_id}/rotate", headers=headers)
-        require(rotated.status_code == 200, "webhook rotation failed")
+        require(
+            rotated.status_code == 200,
+            f"webhook rotation expected HTTP 200; received HTTP {rotated.status_code}",
+        )
         require(
             api.post(
                 f"/api/v1/webhooks/{webhook_id}/{token}", json={"content": "stale"}
@@ -313,7 +330,11 @@ def verify() -> None:
         deleted = api.delete(
             f"/api/v1/channels/{channel_id}/messages/{message_id}", headers=headers
         )
-        require(deleted.status_code == 204, "message delete failed")
+        require(
+            deleted.status_code == 204,
+            "message deletion expected HTTP 204; received "
+            f"HTTP {deleted.status_code}: {deleted.text}",
+        )
 
         async def purge() -> str:
             async with app.state.sessionmaker() as session:
@@ -335,4 +356,7 @@ def verify() -> None:
 
 
 if __name__ == "__main__":
-    verify()
+    try:
+        verify()
+    except VerificationFailure as error:
+        raise SystemExit(failure_message("media", error, "make media-check")) from None

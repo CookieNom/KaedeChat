@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from pydantic import ValidationError
 from redis.asyncio import Redis
 from sqlalchemy import delete, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -32,13 +33,16 @@ from app.chat.hierarchy import (
     require_can_manage_member,
     role_rank,
 )
+from app.chat.moderation_status import guild_self_moderation_status, sanitize_timeout_reason
 from app.chat.payloads import audit_payload, ban_payload, instance_ban_payload, member_payload
 from app.chat.permissions import require_permissions
 from app.chat.schemas import BanCreate, InstanceBanCreate, MemberUpdate
 from app.core.permission_contract import required_permissions
 from app.core.permissions import Permission
+from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
+from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef, Snowflake
 from app.db.models import (
     AuditLogEntry,
@@ -53,7 +57,13 @@ from app.db.models import (
     Role,
     User,
 )
-from app.federation.network import normalize_domain
+from app.federation.client import signed_request
+from app.federation.network import (
+    FederationNetworkError,
+    decode_federation_response_json,
+    normalize_domain,
+)
+from app.federation.schemas import GuildSelfModerationStatus
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["moderation"])
 
@@ -77,6 +87,106 @@ def future_expiry(value: datetime | None, *, code: str) -> datetime | None:
 
 def active_expiry(column: InstrumentedAttribute[datetime | None]) -> ColumnElement[bool]:
     return or_(column.is_(None), column > datetime.now(UTC))
+
+
+@router.get("/{guild_id}/members/@me/moderation-status")
+async def self_moderation_status(
+    guild_id: EntityRef,
+    response: Response,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    """Return timeout details only to the member they describe.
+
+    Remote guild state is fetched on demand over a signed request. The reason
+    is never inserted into the local guild replica or a guild-topic event.
+    """
+
+    await enforce_client_rate_limit(
+        redis,
+        response,
+        CLIENT_RATE_LIMITS["self_moderation_status"],
+        user_id=auth.user.id,
+        user_domain=auth.user.origin_domain,
+    )
+    resolved_id, resolved_domain = guild_id.resolve(settings.domain)
+    guild = await session.get(Guild, (resolved_id, resolved_domain))
+    member = await session.get(
+        GuildMember,
+        (resolved_id, resolved_domain, auth.user.id, auth.user.origin_domain),
+    )
+    if guild is None or member is None:
+        raise HTTPException(status_code=404, detail={"code": "NOT_A_GUILD_MEMBER"})
+    if resolved_domain == settings.domain:
+        return guild_self_moderation_status(member).model_dump(mode="json")
+    fallback = guild_self_moderation_status(member)
+    # The broad replica projection intentionally has timing but not a reason.
+    # Avoid a federation round trip for the overwhelmingly common inactive
+    # state and preserve quiet rolling-upgrade behavior.
+    if not fallback.timed_out:
+        return fallback.model_dump(mode="json")
+    fallback = GuildSelfModerationStatus(
+        guild_id=fallback.guild_id,
+        guild_domain=fallback.guild_domain,
+        timed_out=True,
+        timeout_until=fallback.timeout_until,
+        timeout_indefinite=fallback.timeout_indefinite,
+        reason=None,
+        details_available=False,
+    )
+    peer = await session.get(Instance, resolved_domain)
+    if peer is None or "member-self-moderation/1" not in (peer.capabilities or []):
+        # Rolling upgrades must converge without a user action. Queue only a
+        # domain-level discovery refresh (never a user or timeout identifier),
+        # deduped for an hour, and return the replica timing immediately.
+        discovery_key = f"federation:self-moderation-capability-refresh:{resolved_domain}"
+        if await redis.set(discovery_key, "1", ex=60 * 60, nx=True):
+            # Lazy import keeps task registration out of the API import graph.
+            from app.tasks import federation_self_moderation_capability_refresh
+
+            if not await enqueue_best_effort(
+                federation_self_moderation_capability_refresh,
+                resolved_domain,
+            ):
+                await redis.delete(discovery_key)
+        return fallback.model_dump(mode="json")
+    try:
+        upstream = await signed_request(
+            session,
+            settings,
+            "GET",
+            resolved_domain,
+            f"/_kaede/v1/guilds/{resolved_id}/members/{auth.user.id}/moderation-status",
+            max_response_bytes=8 * 1024,
+        )
+    except (FederationNetworkError, RuntimeError):
+        return fallback.model_dump(mode="json")
+    if upstream.status_code != 200:
+        # Old/mixed-version homes and transient failures must not make the
+        # timing projection disappear. The private reason remains unknown.
+        return fallback.model_dump(mode="json")
+    try:
+        status_payload = GuildSelfModerationStatus.model_validate(
+            decode_federation_response_json(upstream, max_response_bytes=8 * 1024)
+        )
+    except (FederationNetworkError, ValidationError):
+        return fallback.model_dump(mode="json")
+    if (int(status_payload.guild_id), status_payload.guild_domain) != (
+        resolved_id,
+        resolved_domain,
+    ):
+        return fallback.model_dump(mode="json")
+    if status_payload.timeout_until is not None and status_payload.timeout_until <= datetime.now(
+        UTC
+    ):
+        status_payload = GuildSelfModerationStatus(
+            guild_id=status_payload.guild_id,
+            guild_domain=status_payload.guild_domain,
+            timed_out=False,
+        )
+    return status_payload.model_dump(mode="json")
 
 
 @router.get("/{guild_id}/members")
@@ -145,7 +255,12 @@ async def list_members(
         for assignment in assignments:
             roles[(assignment.user_id, assignment.user_domain)].append(assignment.role_id)
     return [
-        member_payload(member, user, roles[(member.user_id, member.user_domain)])
+        member_payload(
+            member,
+            user,
+            roles[(member.user_id, member.user_domain)],
+            include_private_authority_state=guild.origin_domain == settings.domain,
+        )
         for member, user in rows
     ]
 
@@ -208,7 +323,9 @@ async def update_member(
         timed_out = bool(values.get("timeout_indefinite", member.timeout_indefinite)) or bool(
             values.get("timeout_until", member.timeout_until)
         )
-        values["timeout_reason"] = audit_reason(reason) if timed_out else None
+        values["timeout_reason"] = (
+            sanitize_timeout_reason(audit_reason(reason)) if timed_out else None
+        )
     changes: list[dict[str, object]] = []
     for field, value in values.items():
         old = getattr(member, field)
@@ -231,7 +348,6 @@ async def update_member(
                         member.timeout_until.isoformat() if member.timeout_until else None
                     ),
                     "timeout_indefinite": member.timeout_indefinite,
-                    "timeout_reason": member.timeout_reason,
                     "member_version": str(member.member_version),
                 }
             },
@@ -276,7 +392,12 @@ async def update_member(
             )
         )
     )
-    return member_payload(member, target_user, roles)
+    return member_payload(
+        member,
+        target_user,
+        roles,
+        include_private_authority_state=True,
+    )
 
 
 @router.delete("/{guild_id}/members/{user_id}", status_code=204)

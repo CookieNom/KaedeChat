@@ -68,7 +68,12 @@ async def render_member_update(session: AsyncSession, member: GuildMember) -> di
             )
         )
     )
-    return member_payload(member, user, role_ids)
+    return member_payload(
+        member,
+        user,
+        role_ids,
+        include_private_authority_state=True,
+    )
 
 
 def require_current_version(updated_at: datetime, if_match: str | None) -> None:
@@ -804,8 +809,8 @@ async def replace_member_roles(
     )
 
     requested: dict[tuple[int, str], Role] = {}
-    for role_ref in payload.role_ids:
-        role_number, role_domain = role_ref.resolve(settings.domain)
+    for requested_role_ref in payload.role_ids:
+        role_number, role_domain = requested_role_ref.resolve(settings.domain)
         if role_domain != guild.origin_domain:
             raise HTTPException(status_code=404, detail={"code": "ROLE_NOT_FOUND"})
         role = await guild_role(session, guild, role_number)
@@ -834,15 +839,18 @@ async def replace_member_roles(
 
     changed_roles = dict(requested)
     for role_id, role_domain in removed:
-        role = await session.get(Role, (role_id, role_domain))
-        if role is None or (role.guild_id, role.guild_domain) != (
+        existing_role = await session.get(Role, (role_id, role_domain))
+        if existing_role is None or (
+            existing_role.guild_id,
+            existing_role.guild_domain,
+        ) != (
             guild.id,
             guild.origin_domain,
         ):
             raise HTTPException(status_code=409, detail={"code": "ROLE_STATE_CHANGED"})
-        changed_roles[(role.id, role.origin_domain)] = role
-    for role_ref in sorted(added | removed):
-        await require_can_manage_role(session, guild, auth.user, changed_roles[role_ref])
+        changed_roles[(existing_role.id, existing_role.origin_domain)] = existing_role
+    for changed_role_ref in sorted(added | removed):
+        await require_can_manage_role(session, guild, auth.user, changed_roles[changed_role_ref])
 
     if removed:
         await session.execute(

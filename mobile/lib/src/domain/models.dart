@@ -5,8 +5,22 @@ typedef Json = Map<String, Object?>;
 String? _string(Object? value) => value is String ? value : null;
 int _integer(Object? value, [int fallback = 0]) =>
     value is num ? value.toInt() : int.tryParse('$value') ?? fallback;
+int? _nullableInteger(Object? value) => value == null
+    ? null
+    : value is num
+        ? value.toInt()
+        : int.tryParse('$value');
 bool _boolean(Object? value, [bool fallback = false]) =>
     value is bool ? value : fallback;
+EntityRef? _entityRefOrNull(Object? value) {
+  if (value == null) return null;
+  try {
+    return EntityRef.fromJson(value);
+  } on FormatException {
+    return null;
+  }
+}
+
 List<Json> _objects(Object? value) => value is List
     ? value
         .whereType<Map<Object?, Object?>>()
@@ -42,6 +56,7 @@ final class KaedeUser {
     this.email,
     this.emailVerified = false,
     this.mfaEnabled = false,
+    this.profileResolved = true,
     this.presence = PresenceStatus.offline,
   });
 
@@ -59,6 +74,7 @@ final class KaedeUser {
       email: _string(json['email']),
       emailVerified: _boolean(json['email_verified']),
       mfaEnabled: _boolean(json['mfa_enabled']),
+      profileResolved: _boolean(json['profile_resolved'], true),
       presence: PresenceStatus.values.firstWhere(
         (value) => value.name == _string(json['presence']),
         orElse: () => PresenceStatus.offline,
@@ -77,10 +93,12 @@ final class KaedeUser {
   final String? email;
   final bool emailVerified;
   final bool mfaEnabled;
+  final bool profileResolved;
   final PresenceStatus presence;
 
-  String get name =>
-      displayName?.trim().isNotEmpty == true ? displayName! : username;
+  String get name => profileResolved
+      ? (displayName?.trim().isNotEmpty == true ? displayName! : username)
+      : 'Remote user · ${ref.domain.value}';
 
   Json toJson() => <String, Object?>{
         'id': ref.id.value,
@@ -95,6 +113,7 @@ final class KaedeUser {
         'email': email,
         'email_verified': emailVerified,
         'mfa_enabled': mfaEnabled,
+        'profile_resolved': profileResolved,
         'presence': presence.name,
       };
 }
@@ -113,6 +132,11 @@ final class KaedeChannel {
     this.recipients = const <KaedeUser>[],
     this.slowModeSeconds = 0,
     this.permissionsSynced = false,
+    this.historyTruncated = false,
+    this.historyRetention,
+    this.historyRemoteAvailable = false,
+    this.oldestAvailableMessageRef,
+    this.historyDegradedCode,
     this.version,
   });
 
@@ -144,6 +168,12 @@ final class KaedeChannel {
       recipients: _objects(json['recipients']).map(KaedeUser.fromJson).toList(),
       slowModeSeconds: _integer(json['rate_limit_per_user']),
       permissionsSynced: _boolean(json['permissions_synced']),
+      historyTruncated: _boolean(json['history_truncated']),
+      historyRetention: _string(json['history_retention']),
+      historyRemoteAvailable: _boolean(json['history_remote_available']),
+      oldestAvailableMessageRef:
+          _entityRefOrNull(json['oldest_available_message_ref']),
+      historyDegradedCode: _string(json['history_degraded_code']),
       version: _string(json['version']),
     );
   }
@@ -160,6 +190,11 @@ final class KaedeChannel {
   final List<KaedeUser> recipients;
   final int slowModeSeconds;
   final bool permissionsSynced;
+  final bool historyTruncated;
+  final String? historyRetention;
+  final bool historyRemoteAvailable;
+  final EntityRef? oldestAvailableMessageRef;
+  final String? historyDegradedCode;
   final String? version;
 
   bool allows(int bit) => permissions & BigInt.from(bit) != BigInt.zero;
@@ -188,6 +223,16 @@ final class KaedeChannel {
         'recipients': recipients.map((user) => user.toJson()).toList(),
         'rate_limit_per_user': slowModeSeconds,
         'permissions_synced': permissionsSynced,
+        'history_truncated': historyTruncated,
+        'history_retention': historyRetention,
+        'history_remote_available': historyRemoteAvailable,
+        'oldest_available_message_ref': oldestAvailableMessageRef == null
+            ? null
+            : <String, Object?>{
+                'id': oldestAvailableMessageRef!.id.value,
+                'origin_domain': oldestAvailableMessageRef!.domain.value,
+              },
+        'history_degraded_code': historyDegradedCode,
         'version': version,
       };
 }
@@ -257,6 +302,12 @@ final class KaedeGuild {
     this.channels = const <KaedeChannel>[],
     this.roles = const <KaedeRole>[],
     this.actorHighestRoleId,
+    this.syncStatus,
+    this.syncErrorCode,
+    this.historySyncStatus,
+    this.historySyncErrorCode,
+    this.historySyncRetryAfterMs,
+    this.historySyncResource,
     this.version,
   });
 
@@ -276,6 +327,13 @@ final class KaedeGuild {
       channels: _objects(json['channels']).map(KaedeChannel.fromJson).toList(),
       roles: _objects(json['roles']).map(KaedeRole.fromJson).toList(),
       actorHighestRoleId: _string(json['actor_highest_role_id']),
+      syncStatus: _string(json['sync_status']),
+      syncErrorCode: _string(json['sync_error_code']),
+      historySyncStatus: _string(json['history_sync_status']),
+      historySyncErrorCode: _string(json['history_sync_error_code']),
+      historySyncRetryAfterMs:
+          _nullableInteger(json['history_sync_retry_after_ms']),
+      historySyncResource: _string(json['history_sync_resource']),
       version: _string(json['version']),
     );
   }
@@ -291,6 +349,12 @@ final class KaedeGuild {
   final List<KaedeChannel> channels;
   final List<KaedeRole> roles;
   final String? actorHighestRoleId;
+  final String? syncStatus;
+  final String? syncErrorCode;
+  final String? historySyncStatus;
+  final String? historySyncErrorCode;
+  final int? historySyncRetryAfterMs;
+  final String? historySyncResource;
   final String? version;
 
   bool allows(int bit) => permissions & BigInt.from(bit) != BigInt.zero;
@@ -309,6 +373,12 @@ final class KaedeGuild {
         'channels': channels.map((channel) => channel.toJson()).toList(),
         'roles': roles.map((role) => role.toJson()).toList(),
         'actor_highest_role_id': actorHighestRoleId,
+        'sync_status': syncStatus,
+        'sync_error_code': syncErrorCode,
+        'history_sync_status': historySyncStatus,
+        'history_sync_error_code': historySyncErrorCode,
+        'history_sync_retry_after_ms': historySyncRetryAfterMs,
+        'history_sync_resource': historySyncResource,
         'version': version,
       };
 }
@@ -323,6 +393,7 @@ final class KaedeAttachment {
     this.width,
     this.height,
     this.blurHash,
+    this.historyMediaUrl,
   });
 
   factory KaedeAttachment.fromJson(Json json) => KaedeAttachment(
@@ -335,6 +406,7 @@ final class KaedeAttachment {
         width: json['width'] is num ? (json['width']! as num).toInt() : null,
         height: json['height'] is num ? (json['height']! as num).toInt() : null,
         blurHash: _string(json['blurhash']),
+        historyMediaUrl: _string(json['history_media_url']),
       );
 
   final EntityRef ref;
@@ -345,6 +417,7 @@ final class KaedeAttachment {
   final int? height;
   final String? blurHash;
   final String scanStatus;
+  final String? historyMediaUrl;
 
   Json toJson() => <String, Object?>{
         'id': ref.id.value,
@@ -356,6 +429,7 @@ final class KaedeAttachment {
         'height': height,
         'blurhash': blurHash,
         'scan_status': scanStatus,
+        'history_media_url': historyMediaUrl,
       };
 }
 
@@ -373,9 +447,14 @@ final class KaedeMessage {
     this.clientNonce,
     this.editedAt,
     this.deliveryStatus,
+    this.failureReason,
+    this.retryable = true,
     this.pinned = false,
     this.reactionCounts = const <String, int>{},
     this.deletedAt,
+    this.historyPageComplete = false,
+    this.historyPageErrorCode,
+    this.historyPageRetryAfterMs,
   });
 
   factory KaedeMessage.fromJson(Json json) {
@@ -407,6 +486,8 @@ final class KaedeMessage {
           ? null
           : DateTime.parse(json['edited_at']! as String).toUtc(),
       deliveryStatus: _string(json['delivery_status']),
+      failureReason: _string(json['failure_reason']),
+      retryable: _boolean(json['retryable'], true),
       pinned: json['pinned'] == true || json['pinned_at'] != null,
       reactionCounts: json['reaction_counts'] is Map
           ? Map<String, int>.unmodifiable(
@@ -418,6 +499,10 @@ final class KaedeMessage {
       deletedAt: _string(json['deleted_at']) == null
           ? null
           : DateTime.parse(json['deleted_at']! as String).toUtc(),
+      historyPageComplete: _boolean(json['history_page_complete']),
+      historyPageErrorCode: _string(json['history_page_error_code']),
+      historyPageRetryAfterMs:
+          (json['history_page_retry_after_ms'] as num?)?.toInt(),
     );
   }
 
@@ -433,9 +518,14 @@ final class KaedeMessage {
   final DateTime createdAt;
   final DateTime? editedAt;
   final String? deliveryStatus;
+  final String? failureReason;
+  final bool retryable;
   final bool pinned;
   final Map<String, int> reactionCounts;
   final DateTime? deletedAt;
+  final bool historyPageComplete;
+  final String? historyPageErrorCode;
+  final int? historyPageRetryAfterMs;
 
   KaedeMessage copyWith({
     KaedeUser? author,
@@ -448,9 +538,16 @@ final class KaedeMessage {
     String? clientNonce,
     DateTime? editedAt,
     String? deliveryStatus,
+    String? failureReason,
+    bool clearFailureReason = false,
+    bool? retryable,
     bool? pinned,
     Map<String, int>? reactionCounts,
     DateTime? deletedAt,
+    bool? historyPageComplete,
+    String? historyPageErrorCode,
+    bool clearHistoryPageErrorCode = false,
+    int? historyPageRetryAfterMs,
   }) =>
       KaedeMessage(
         ref: ref,
@@ -465,9 +562,18 @@ final class KaedeMessage {
         createdAt: createdAt,
         editedAt: editedAt ?? this.editedAt,
         deliveryStatus: deliveryStatus ?? this.deliveryStatus,
+        failureReason:
+            clearFailureReason ? null : failureReason ?? this.failureReason,
+        retryable: retryable ?? this.retryable,
         pinned: pinned ?? this.pinned,
         reactionCounts: reactionCounts ?? this.reactionCounts,
         deletedAt: deletedAt ?? this.deletedAt,
+        historyPageComplete: historyPageComplete ?? this.historyPageComplete,
+        historyPageErrorCode: clearHistoryPageErrorCode
+            ? null
+            : historyPageErrorCode ?? this.historyPageErrorCode,
+        historyPageRetryAfterMs:
+            historyPageRetryAfterMs ?? this.historyPageRetryAfterMs,
       );
 
   Json toJson() => <String, Object?>{
@@ -487,9 +593,14 @@ final class KaedeMessage {
         'created_at': createdAt.toUtc().toIso8601String(),
         'edited_at': editedAt?.toUtc().toIso8601String(),
         'delivery_status': deliveryStatus,
+        'failure_reason': failureReason,
+        'retryable': retryable,
         'pinned': pinned,
         'reaction_counts': reactionCounts,
         'deleted_at': deletedAt?.toUtc().toIso8601String(),
+        'history_page_complete': historyPageComplete,
+        'history_page_error_code': historyPageErrorCode,
+        'history_page_retry_after_ms': historyPageRetryAfterMs,
       };
 }
 
@@ -524,3 +635,79 @@ final class GuildMember {
         'timeout_until': timeoutUntil?.toUtc().toIso8601String(),
       };
 }
+
+GuildMember overlayGuildMemberProfile(
+  GuildMember member,
+  Map<EntityRef, KaedeUser> userProfiles,
+) {
+  final user = userProfiles[member.user.ref];
+  if (user == null || identical(user, member.user)) return member;
+  return GuildMember(
+    user: user,
+    roleIds: member.roleIds,
+    nickname: member.nickname,
+    timeoutUntil: member.timeoutUntil,
+  );
+}
+
+final class GuildSelfModerationStatus {
+  const GuildSelfModerationStatus({
+    required this.guildRef,
+    required this.timedOut,
+    required this.timeoutIndefinite,
+    this.detailsAvailable = true,
+    this.timeoutUntil,
+    this.reason,
+  });
+
+  factory GuildSelfModerationStatus.fromJson(Json json) {
+    final until = _string(json['timeout_until']);
+    return GuildSelfModerationStatus(
+      guildRef: EntityRef(
+        Snowflake('${json['guild_id']}'),
+        Domain('${json['guild_domain']}'),
+      ),
+      timedOut: json['timed_out'] == true,
+      timeoutIndefinite: json['timeout_indefinite'] == true,
+      detailsAvailable: json['details_available'] != false,
+      timeoutUntil: until == null ? null : DateTime.parse(until).toUtc(),
+      reason: _string(json['reason'])?.trim(),
+    );
+  }
+
+  final EntityRef guildRef;
+  final bool timedOut;
+  final DateTime? timeoutUntil;
+  final bool timeoutIndefinite;
+  final bool detailsAvailable;
+  final String? reason;
+
+  bool activeAt([DateTime? now]) {
+    if (!timedOut) return false;
+    if (timeoutIndefinite) return timeoutUntil == null;
+    final until = timeoutUntil;
+    return until != null && until.isAfter((now ?? DateTime.now()).toUtc());
+  }
+
+  Json toJson() => <String, Object?>{
+        'guild_id': guildRef.id.value,
+        'guild_domain': guildRef.domain.value,
+        'timed_out': timedOut,
+        'timeout_until': timeoutUntil?.toIso8601String(),
+        'timeout_indefinite': timeoutIndefinite,
+        'details_available': detailsAvailable,
+        'reason': reason,
+      };
+}
+
+bool shouldRetrySelfModerationStatus(
+  GuildSelfModerationStatus status, {
+  required bool appActive,
+  required bool conversationPaneVisible,
+  required EntityRef? selectedGuild,
+}) =>
+    status.activeAt() &&
+    !status.detailsAvailable &&
+    appActive &&
+    conversationPaneVisible &&
+    selectedGuild == status.guildRef;

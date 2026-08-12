@@ -10,13 +10,15 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from anyio import WouldBlock
 from sqlalchemy.ext.asyncio import AsyncSession
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.typing import Subprotocol
 
 from app.core.federation import canonical_request_target
+from app.core.json_limits import strict_json_loads
 from app.core.settings import Settings
-from app.federation.client import federation_signing_headers
+from app.federation.client import OUTBOUND_FEDERATION_LIMITER, federation_signing_headers
 from app.federation.network import (
     ensure_peer,
     normalize_domain,
@@ -201,8 +203,8 @@ async def _open_link(
         async with asyncio.timeout(5):
             hello = await socket.recv(decode=True)
         try:
-            hello_payload = json.loads(hello) if isinstance(hello, str) else None
-        except json.JSONDecodeError:
+            hello_payload = strict_json_loads(hello) if isinstance(hello, str) else None
+        except ValueError:
             hello_payload = None
         if not isinstance(hello_payload, dict) or hello_payload.get("op") != "hello":
             await socket.close(code=1002)
@@ -219,6 +221,25 @@ async def _open_link(
 
 
 async def send_link_batch(
+    session: AsyncSession,
+    settings: Settings,
+    destination: str,
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    # Share the same small admission pool as signed HTTP. Delivery callers hold
+    # SQL rows and transaction locks, so waiting here behind slow peer sockets
+    # would otherwise turn the hot-link optimization into DB-pool starvation.
+    try:
+        OUTBOUND_FEDERATION_LIMITER.acquire_nowait()
+    except WouldBlock as exc:
+        raise FederationLinkError("outbound federation is busy; retry shortly") from exc
+    try:
+        return await _send_link_batch_admitted(session, settings, destination, events)
+    finally:
+        OUTBOUND_FEDERATION_LIMITER.release()
+
+
+async def _send_link_batch_admitted(
     session: AsyncSession,
     settings: Settings,
     destination: str,
@@ -275,7 +296,7 @@ async def send_link_batch(
                 raw = await pooled.socket.recv(decode=True)
             if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_LINK_FRAME_BYTES:
                 raise FederationLinkError("peer returned an invalid hot-link frame")
-            payload = json.loads(raw)
+            payload = strict_json_loads(raw)
             if (
                 not isinstance(payload, dict)
                 or payload.get("op") != "results"

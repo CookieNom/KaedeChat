@@ -10,6 +10,7 @@ export interface UserSummary {
   bio?: string | null;
   custom_status?: string | null;
   profile_version?: string;
+  profile_resolved?: boolean;
   handle: string;
 }
 
@@ -34,6 +35,12 @@ export interface Channel {
   last_message_domain: string | null;
   recipients?: UserSummary[];
   version?: string | null;
+  /** Whether this instance retained only the newest part of a remote DM. */
+  history_truncated?: boolean;
+  history_retention?: 'authoritative' | 'rolling_replica_cache';
+  history_remote_available?: boolean;
+  oldest_available_message_ref?: FederatedIdentity | null;
+  history_degraded_code?: 'FEDERATED_DM_HISTORY_TRUNCATED' | string | null;
 }
 
 export interface Guild {
@@ -50,6 +57,12 @@ export interface Guild {
   federated_history_policy?: 'disabled' | 'full_retained';
   history_policy_generation?: string;
   unavailable: boolean;
+  sync_status?: 'ready' | 'syncing' | 'stale' | 'failed' | 'quota_paused';
+  sync_error_code?: string | null;
+  history_sync_status?: 'syncing' | 'retrying' | 'ready' | 'failed';
+  history_sync_error_code?: string | null;
+  history_sync_retry_after_ms?: number | null;
+  history_sync_resource?: string | null;
   channels?: Channel[];
   roles?: Role[];
   emojis?: CustomEmoji[];
@@ -106,12 +119,17 @@ export interface Message {
   edited_at: string | null;
   deleted_at: string | null;
   created_at: string;
-  delivery_status?: 'pending' | 'delivered' | 'failed';
+  delivery_status?: 'pending' | 'retrying' | 'delivered' | 'failed';
   pending?: boolean;
   queued?: boolean;
   failed?: boolean;
   failure_reason?: string;
   retryable?: boolean;
+  /** True only on the oldest item of a final on-demand authority page. */
+  history_page_complete?: boolean;
+  /** Nonterminal failure while extending this page from the DM authority. */
+  history_page_error_code?: string;
+  history_page_retry_after_ms?: number;
 }
 
 export interface Attachment {
@@ -125,6 +143,13 @@ export interface Attachment {
   blurhash: string | null;
   scan_status: 'pending' | 'clean' | 'infected' | 'failed';
   variants: Record<string, { width?: number; height?: number; content_type?: string }>;
+  /**
+   * Same-origin, authenticated stream for media returned by an on-demand
+   * federated history page. These attachments are intentionally not inserted
+   * into the local replica cache, so their ordinary attachment route may not
+   * exist.
+   */
+  history_media_url?: string | null;
 }
 
 export interface ReadStateStatus {

@@ -12,7 +12,9 @@
 </script>
 
 <script lang="ts">
+  import { userErrorMessage } from '$lib/api/client';
   import type { Attachment, Message, PresenceStatus, Role, UserSummary } from '$lib/chat/types';
+  import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import { entityRef } from '$lib/chat/refs';
   import { inviteReferencesInMessage } from '$lib/chat/invites';
   import { gifFavoriteForUrl, isGifFavorite, klipyGifUrl, toggleGifFavorite } from '$lib/chat/gifs';
@@ -82,6 +84,9 @@
   let deleteConfirmationButton = $state<HTMLButtonElement | null>(null);
   let feedback = $state('');
   let mediaViewer = $state<Attachment | null>(null);
+  let mediaFailures = $state<Record<string, string>>({});
+  let mediaAttempts = $state<Record<string, number>>({});
+  let attachmentActionError = $state('');
   let menuListenersActive = false;
   const closeExclusiveMenu = (restoreFocus: boolean) => closeMenu(restoreFocus);
 
@@ -96,11 +101,55 @@
   let gifFavorited = $derived(gifUrl ? isGifFavorite(gifUrl) : false);
   const linkPreviewUrl = $derived(previewableLink(message.content));
 
+  function attachmentKey(attachment: Attachment): string {
+    return `${attachment.id}@${attachment.origin_domain}`;
+  }
+
+  function markMediaFailed(attachment: Attachment, event: Event) {
+    const target = event.currentTarget as HTMLImageElement | HTMLVideoElement;
+    mediaFailures = {
+      ...mediaFailures,
+      [attachmentKey(attachment)]:
+        target.dataset.mediaErrorMessage ??
+        `Could not load ${attachment.filename}. Check your connection and try again.`
+    };
+  }
+
+  function retryMedia(attachment: Attachment) {
+    const key = attachmentKey(attachment);
+    const nextFailures = { ...mediaFailures };
+    delete nextFailures[key];
+    mediaFailures = nextFailures;
+    mediaAttempts = { ...mediaAttempts, [key]: (mediaAttempts[key] ?? 0) + 1 };
+  }
+
+  async function downloadAttachment(attachment: Attachment) {
+    attachmentActionError = '';
+    try {
+      await downloadAuthenticatedMedia(
+        {
+          path: attachmentMediaPath(
+            attachment.origin_domain,
+            attachment.id,
+            'original',
+            attachment.history_media_url
+          ),
+          contentType: attachment.content_type
+        },
+        attachment.filename
+      );
+    } catch (caught) {
+      attachmentActionError = userErrorMessage(
+        caught,
+        `Could not download ${attachment.filename}. Try again.`
+      );
+    }
+  }
+
   function authorName(): string {
     return (
       message.webhook?.name ??
-      message.author?.display_name ??
-      message.author?.username ??
+      (message.author ? userDisplayName(message.author) : null) ??
       'Unknown author'
     );
   }
@@ -245,7 +294,7 @@
       await navigator.clipboard.writeText(value);
       feedback = 'Copied to clipboard.';
     } catch {
-      feedback = 'Clipboard access was denied.';
+      feedback = 'Browser denied clipboard access. Allow clipboard permission and try again.';
     }
   }
 
@@ -349,7 +398,9 @@
 
 <article
   bind:this={rowElement}
-  class:sending={message.pending || message.delivery_status === 'pending'}
+  class:sending={message.pending ||
+    message.delivery_status === 'pending' ||
+    message.delivery_status === 'retrying'}
   class:failed={message.failed || message.delivery_status === 'failed'}
   class:compact
   class:menu-open={menuOpen}
@@ -373,9 +424,17 @@
   {/if}
   <button
     class="message-avatar"
-    class:profile-trigger={Boolean(message.author && !message.webhook && onViewProfile)}
+    class:profile-trigger={Boolean(
+      message.author?.profile_resolved !== false &&
+      message.author &&
+      !message.webhook &&
+      onViewProfile
+    )}
     type="button"
-    disabled={!message.author || Boolean(message.webhook) || !onViewProfile}
+    disabled={message.author?.profile_resolved === false ||
+      !message.author ||
+      Boolean(message.webhook) ||
+      !onViewProfile}
     aria-label={message.author ? `View ${authorName()}'s profile` : 'Unknown author'}
     onclick={viewProfile}
   >
@@ -389,7 +448,11 @@
         alt=""
       />
     {:else}
-      {compact ? '' : (message.author?.username.slice(0, 1).toUpperCase() ?? '•')}
+      {compact
+        ? ''
+        : message.author?.profile_resolved === false
+          ? '•'
+          : (message.author?.username.slice(0, 1).toUpperCase() ?? '•')}
     {/if}
     {#if !compact && message.author && !message.webhook}
       <i class={`presence-dot presence-${presence}`} aria-hidden="true"></i>
@@ -407,9 +470,9 @@
         <span aria-hidden="true">↪</span>
         {#if referencedMessage}
           <strong
-            >{referencedMessage.author?.display_name ??
-              referencedMessage.author?.username ??
-              'Unknown author'}</strong
+            >{referencedMessage.author
+              ? userDisplayName(referencedMessage.author)
+              : 'Unknown author'}</strong
           >
           <span
             >{referencedMessage.deleted_at
@@ -423,7 +486,7 @@
     {/if}
     {#if !compact}
       <header>
-        {#if message.author && !message.webhook && onViewProfile}
+        {#if message.author && message.author.profile_resolved !== false && !message.webhook && onViewProfile}
           <button class="message-author" type="button" onclick={viewProfile}>{authorName()}</button>
         {:else}
           <strong>{authorName()}</strong>
@@ -470,67 +533,97 @@
           {:else if attachment.scan_status === 'failed'}
             <span class="attachment-file">Attachment processing unavailable</span>
           {:else if attachment.content_type.startsWith('image/')}
-            <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- authenticated media is served by the API, not a Svelte route -->
-            <button
-              class="attachment-preview-button"
-              type="button"
-              aria-label={`Open ${attachment.filename}`}
-              onclick={() => (mediaViewer = attachment)}
-            >
-              <img
-                use:authenticatedMedia={{
-                  path: attachmentMediaPath(
-                    attachment.origin_domain,
-                    attachment.id,
-                    'thumbnail_512'
-                  ),
-                  contentType: attachment.content_type
-                }}
-                alt={attachment.filename}
-                width={attachment.width ?? 512}
-                height={attachment.height ?? 320}
-              />
-            </button>
+            {#if mediaFailures[attachmentKey(attachment)]}
+              <div class="attachment-load-error" role="alert">
+                <span>{mediaFailures[attachmentKey(attachment)]}</span>
+                <button type="button" onclick={() => retryMedia(attachment)}>Try again</button>
+              </div>
+            {:else}
+              {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
+                <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- authenticated media is served by the API, not a Svelte route -->
+                <button
+                  class="attachment-preview-button"
+                  type="button"
+                  aria-label={`Open ${attachment.filename}`}
+                  onclick={() => (mediaViewer = attachment)}
+                >
+                  <img
+                    use:authenticatedMedia={{
+                      path: attachmentMediaPath(
+                        attachment.origin_domain,
+                        attachment.id,
+                        'thumbnail_512',
+                        attachment.history_media_url
+                      ),
+                      contentType: attachment.content_type
+                    }}
+                    onerror={(event) => markMediaFailed(attachment, event)}
+                    alt={attachment.filename}
+                    width={attachment.width ?? 512}
+                    height={attachment.height ?? 320}
+                  />
+                </button>
+              {/key}
+            {/if}
           {:else if attachment.content_type.startsWith('video/')}
-            <div class="attachment-video">
-              <video
-                use:authenticatedMedia={{
-                  path: attachmentMediaPath(attachment.origin_domain, attachment.id, 'original'),
-                  contentType: attachment.content_type
-                }}
-                controls
-                playsinline
-                preload="metadata"
-              >
-                <track kind="captions" />
-              </video>
-              <button type="button" onclick={() => (mediaViewer = attachment)}>Open viewer</button>
-            </div>
+            {#if mediaFailures[attachmentKey(attachment)]}
+              <div class="attachment-load-error" role="alert">
+                <span>{mediaFailures[attachmentKey(attachment)]}</span>
+                <button type="button" onclick={() => retryMedia(attachment)}>Try again</button>
+              </div>
+            {:else}
+              {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
+                <div class="attachment-video">
+                  <video
+                    use:authenticatedMedia={{
+                      path: attachmentMediaPath(
+                        attachment.origin_domain,
+                        attachment.id,
+                        'original',
+                        attachment.history_media_url
+                      ),
+                      contentType: attachment.content_type
+                    }}
+                    onerror={(event) => markMediaFailed(attachment, event)}
+                    controls
+                    playsinline
+                    preload="metadata"
+                  >
+                    <track kind="captions" />
+                  </video>
+                  <button type="button" onclick={() => (mediaViewer = attachment)}
+                    >Open viewer</button
+                  >
+                </div>
+              {/key}
+            {/if}
           {:else}
             <button
               type="button"
               class="attachment-file"
-              onclick={() =>
-                downloadAuthenticatedMedia(
-                  {
-                    path: attachmentMediaPath(attachment.origin_domain, attachment.id, 'original'),
-                    contentType: attachment.content_type
-                  },
-                  attachment.filename
-                )}
+              onclick={() => void downloadAttachment(attachment)}
             >
               📎 {attachment.filename}
             </button>
           {/if}
         {/each}
       </div>
+      {#if attachmentActionError}
+        <p class="form-error" role="alert">{attachmentActionError}</p>
+      {/if}
     {/if}
-    {#if message.edited_at || message.failed || message.delivery_status === 'failed' || message.queued}
+    {#if message.edited_at || message.failed || message.delivery_status === 'failed' || message.delivery_status === 'retrying' || message.queued}
       <div class="message-meta-actions">
         {#if message.edited_at}<small>(edited)</small>{/if}
         {#if message.failed || message.delivery_status === 'failed'}
           <small class="delivery-failed" role="status">
             {message.failure_reason ?? 'Message not delivered.'}
+          </small>
+        {/if}
+        {#if message.delivery_status === 'retrying'}
+          <small role="status">
+            {message.failure_reason ??
+              'The receiving instance is temporarily at capacity. Kaede is retrying automatically.'}
           </small>
         {/if}
         {#if (message.failed || message.delivery_status === 'failed') && onRetry && message.retryable !== false}
@@ -557,7 +650,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M20 15a4 4 0 0 1-4 4H8l-4 2V7a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v8Z" />
           </svg>
-          <span>Message {message.author.display_name ?? message.author.username}</span>
+          <span>Message {userDisplayName(message.author)}</span>
         </button>
       {/if}
       {#if onReply && !message.deleted_at}
@@ -585,7 +678,7 @@
           <span>{gifFavorited ? 'Remove from GIF favorites' : 'Add to GIF favorites'}</span>
         </button>
       {/if}
-      {#if message.author && !message.webhook && onViewProfile}
+      {#if message.author && message.author.profile_resolved !== false && !message.webhook && onViewProfile}
         <button type="button" role="menuitem" tabindex="-1" onclick={viewProfile}>
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="12" cy="8" r="4" />
@@ -597,7 +690,10 @@
           type="button"
           role="menuitem"
           tabindex="-1"
-          onclick={(event) => copy(`@${message.author?.handle}`, event)}
+          onclick={(event) => {
+            const handle = message.author ? userPublicHandle(message.author) : null;
+            if (handle) void copy(`@${handle}`, event);
+          }}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M16 8a4 4 0 1 1-4-4c4 0 7 3 7 7v1a3 3 0 0 1-6 0V8" />
@@ -637,7 +733,7 @@
                 <path d="M12 3 4 6v5c0 5 3.4 8.2 8 10 4.6-1.8 8-5 8-10V6l-8-3Z" />
               {/if}
             </svg>
-            <span>{action.label} {message.author.display_name ?? message.author.username}</span>
+            <span>{action.label} {userDisplayName(message.author)}</span>
           </button>
         {/each}
       {/if}

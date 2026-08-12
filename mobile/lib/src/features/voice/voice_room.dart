@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
@@ -167,9 +170,18 @@ final class VoiceRoom extends ConsumerWidget {
                     child: SizedBox(
                       width: double.infinity,
                       child: Listener(
-                        onPointerDown: (_) => session.setPushHeld(true),
-                        onPointerUp: (_) => session.setPushHeld(false),
-                        onPointerCancel: (_) => session.setPushHeld(false),
+                        onPointerDown: (_) => unawaited(_runVoiceAction(
+                          context,
+                          () => session.setPushHeld(true),
+                        )),
+                        onPointerUp: (_) => unawaited(_runVoiceAction(
+                          context,
+                          () => session.setPushHeld(false),
+                        )),
+                        onPointerCancel: (_) => unawaited(_runVoiceAction(
+                          context,
+                          () => session.setPushHeld(false),
+                        )),
                         child: FilledButton.tonalIcon(
                           onPressed: () {},
                           icon: Icon(session.pushHeld
@@ -240,7 +252,10 @@ final class VoiceRoom extends ConsumerWidget {
                 if (session.canSpeak &&
                     (session.pushToTalk || session.canUseVad))
                   TextButton.icon(
-                    onPressed: session.toggleInputMode,
+                    onPressed: () => _runVoiceAction(
+                      context,
+                      session.toggleInputMode,
+                    ),
                     icon: Icon(session.pushToTalk
                         ? Icons.touch_app_rounded
                         : Icons.graphic_eq_rounded),
@@ -304,7 +319,7 @@ final class VoiceRoom extends ConsumerWidget {
         children: [
           IconButton.filledTonal(
             tooltip: label,
-            onPressed: tap,
+            onPressed: tap == null ? null : () => _runVoiceAction(context, tap),
             style: IconButton.styleFrom(
               backgroundColor: destructive
                   ? Theme.of(context).colorScheme.errorContainer
@@ -320,6 +335,23 @@ final class VoiceRoom extends ConsumerWidget {
               style: const TextStyle(fontSize: 10)),
         ],
       );
+
+  Future<void> _runVoiceAction(
+    BuildContext context,
+    Future<void> Function() operation,
+  ) async {
+    try {
+      await operation();
+    } on Object catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(userFacingError(
+          error,
+          summary: 'Could not complete the voice action',
+        )),
+      ));
+    }
+  }
 }
 
 final class _ParticipantTile extends StatefulWidget {
@@ -556,7 +588,12 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
     } on Object catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(this.context).showSnackBar(
-        SnackBar(content: Text('Could not update voice state: $error')),
+        SnackBar(
+          content: Text(userFacingError(
+            error,
+            summary: 'Could not update the voice state',
+          )),
+        ),
       );
     }
   }

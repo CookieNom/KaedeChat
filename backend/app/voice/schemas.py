@@ -21,6 +21,14 @@ class VoiceTokenResponse(BaseModel):
     # Defaults preserve compatibility with peers that predate the explicit
     # grant. New home instances always send the authoritative value.
     can_use_vad: bool = True
+    # Present for a federated guild session. Clients retain this opaque value
+    # and only accept pushed move grants carrying the same correlation.
+    move_session_id: str | None = Field(
+        default=None,
+        min_length=32,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
 
 
 class VoiceFlagsUpdate(BaseModel):
@@ -55,7 +63,20 @@ class VoiceMoveFederationRequest(BaseModel):
     channel_id: SnowflakeString
     target_id: SnowflakeString
     target_domain: FederationDomain
+    move_session_id: str = Field(
+        min_length=32,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    source_room: str = Field(pattern=r"^g\.[0-9]+\.[0-9]+$", max_length=80)
+    source_generation: int = Field(ge=0)
     grant: VoiceTokenResponse
+
+    @model_validator(mode="after")
+    def grant_uses_move_session(self) -> VoiceMoveFederationRequest:
+        if self.grant.move_session_id != self.move_session_id:
+            raise ValueError("voice move grant correlation does not match the request")
+        return self
 
 
 class VoiceBrokerRequest(BaseModel):
@@ -65,6 +86,11 @@ class VoiceBrokerRequest(BaseModel):
     channel_id: SnowflakeString
     actor_id: SnowflakeString
     actor_domain: FederationDomain
+    move_session_id: str = Field(
+        min_length=32,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
 
 
 class DMVoiceBrokerRequest(BaseModel):

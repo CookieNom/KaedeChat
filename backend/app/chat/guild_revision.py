@@ -11,6 +11,7 @@ from app.core.task_wake import enqueue_best_effort
 from app.db.models import Channel, Guild, GuildMember, User
 from app.federation.events import build_envelope, queue_event
 from app.federation.guilds import (
+    SNAPSHOT_NEUTRAL_GUILD_EVENTS,
     assign_guild_sequence,
     remote_destinations_with_channel_access,
     store_guild_event,
@@ -98,6 +99,9 @@ async def queue_guild_mutation(
 
     if guild.origin_domain != settings.domain or actor.origin_domain != settings.domain:
         raise RuntimeError("only a guild home and local actor may emit guild mutations")
+    snapshot_changed = event_type not in SNAPSHOT_NEUTRAL_GUILD_EVENTS
+    if snapshot_changed:
+        guild.snapshot_generation = int(getattr(guild, "snapshot_generation", 1) or 1) + 1
     await session.flush()
     seq = await assign_guild_sequence(session, guild)
     context: dict[str, Any] = {
@@ -105,6 +109,8 @@ async def queue_guild_mutation(
         "guild_domain": guild.origin_domain,
         "seq": str(seq),
     }
+    if snapshot_changed:
+        context["snapshot_generation"] = str(guild.snapshot_generation)
     if channel is not None:
         context.update(
             {

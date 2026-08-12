@@ -44,18 +44,22 @@
     )
   );
 
+  async function loadEmoji() {
+    loading = true;
+    loadFailed = false;
+    try {
+      unicodeEmojis = await loadUnicodeEmojis();
+    } catch {
+      unicodeEmojis = [];
+      loadFailed = true;
+    } finally {
+      loading = false;
+    }
+  }
+
   onMount(() => {
     searchInput?.focus();
-    void loadUnicodeEmojis()
-      .then((emojis) => {
-        unicodeEmojis = emojis;
-      })
-      .catch(() => {
-        loadFailed = true;
-      })
-      .finally(() => {
-        loading = false;
-      });
+    void loadEmoji();
   });
 </script>
 
@@ -128,7 +132,10 @@
     {#if loading && category !== 'custom'}
       <p>Loading emoji…</p>
     {:else if loadFailed && category !== 'custom'}
-      <p>Could not load emoji.</p>
+      <div role="alert">
+        <p class="form-error">Could not load emoji data. Check your connection and try again.</p>
+        <button class="show-more" type="button" onclick={() => void loadEmoji()}>Try again</button>
+      </div>
     {:else if category !== 'custom' || normalizedQuery}
       <div class="emoji-grid">
         {#each visibleUnicode as emoji (emoji.value)}
@@ -143,7 +150,9 @@
         </button>
       {/if}
     {/if}
-    {#if !matchingCustom.length && !matchingUnicode.length}<p>No emoji found.</p>{/if}
+    {#if !loading && !loadFailed && !matchingCustom.length && !matchingUnicode.length}
+      <p>No emoji found.</p>
+    {/if}
   </div>
   <footer>
     <span aria-hidden="true">{matchingUnicode[0]?.value ?? '😀'}</span>

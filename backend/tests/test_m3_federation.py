@@ -1,7 +1,9 @@
 import base64
 import gzip
+import hashlib
 import json
 import socket
+import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -9,25 +11,41 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import HTTPException
 from pydantic import ValidationError
 from starlette.requests import Request
+from starlette.websockets import WebSocket
 
+import app.api.federation as federation_api
+from app.api.federation import (
+    _guild_snapshot_cursor_changed,
+    federation_user_profile_by_ref,
+    visible_guild_channels_for_origin,
+)
 from app.core.federation import (
     SECURITY_CRITICAL_GUILD_EVENTS,
+    SigningInput,
     block_covers_domain,
+    content_sha256,
     federation_policy_holds_event,
     sign_envelope,
+    sign_request,
     verify_envelope,
 )
 from app.core.gateway_ops import EVENT_NAMES
 from app.core.settings import Settings
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
-from app.db.models import Channel
-from app.federation.client import silence_blocks_path
+from app.db.models import Channel, Instance, PeerKey, User
+from app.federation.client import (
+    OUTBOUND_FEDERATION_LIMITER,
+    signed_request,
+    silence_blocks_path,
+)
 from app.federation.delivery import (
     BACKOFF_SECONDS,
+    drain_destination,
     expired_guild_context,
     lock_outbox_destinations,
     publish_dm_delivery_update,
@@ -51,28 +69,49 @@ from app.federation.guilds import (
 )
 from app.federation.link import websocket_url
 from app.federation.network import (
+    PEER_DISCOVERY_LIMITER,
+    FederationInstanceQuotaExceeded,
     FederationNetworkError,
     bounded_http_request,
+    decode_federation_response_json,
+    ensure_peer,
+    ensure_remote_instance_record,
     normalize_domain,
     peer_base_url,
+    peer_key_history_exceeds_limit,
     peer_key_needs_refresh,
     public_address,
     public_addresses,
     retire_omitted_peer_keys,
 )
-from app.federation.replication import resolve_delegated_profile, validate_snowflake_timestamp
+from app.federation.replication import (
+    insert_unresolved_remote_user,
+    remote_media_dimensions,
+    resolve_delegated_profile,
+    sanitized_remote_blurhash,
+    sanitized_remote_variants,
+    unresolved_remote_username,
+    upsert_remote_user,
+    validate_snowflake_timestamp,
+)
 from app.federation.schemas import DMOpenFederationRequest, EventEnvelope, RemoteUserProfile
 from app.federation.security import (
     FederationPrincipal,
     admit_unknown_key_refresh,
+    authenticate_federation,
+    authenticate_federation_websocket,
     bounded_request_body,
+    consume_request_nonce,
     enforce_federation_route_rate_limit,
     enforce_federation_source_rate_limit,
     enforce_origin_event_rate_limit,
     event_timestamp_allowed,
     federation_event_policy_code,
+    federation_request_nonce,
     lock_block_policy_shared,
+    refresh_event_signing_keys,
     require_guild_federation_access,
+    require_pinned_request_nonce,
     validated_event_envelope,
 )
 from app.federation.users import refresh_remote_user, resolve_handle
@@ -95,6 +134,191 @@ def settings(**overrides: object) -> Settings:
     }
     values.update(overrides)
     return Settings(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_rejected_peer_refresh_does_not_mutate_cached_trust(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    old_material = bytes(range(32))
+    new_material = bytes(reversed(range(32)))
+    instance = Instance(
+        domain="beta.localhost",
+        is_self=False,
+        display_name="Trusted beta",
+        software_version="1.0",
+        capabilities=["request-nonce/1"],
+        current_key_id="ed25519:old",
+        last_seen_at=now,
+    )
+    old_key = PeerKey(
+        domain="beta.localhost",
+        key_id="ed25519:old",
+        public_key=old_material,
+        fetched_at=now - timedelta(days=2),
+    )
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=instance),
+        scalar=AsyncMock(side_effect=[old_key, True, old_key, 1]),
+        scalars=AsyncMock(return_value=[old_key]),
+        add=AsyncMock(),
+        flush=AsyncMock(),
+    )
+    client = httpx.AsyncClient()
+    monkeypatch.setattr(
+        "app.federation.network.peer_http_client",
+        AsyncMock(return_value=("http://beta-api:8000", client)),
+    )
+    responses = [
+        httpx.Response(
+            200,
+            request=httpx.Request("GET", "http://beta-api:8000/.well-known/kaede/server"),
+            json={"server": "beta.localhost", "versions": ["1"], "capabilities": []},
+        ),
+        httpx.Response(
+            200,
+            request=httpx.Request("GET", "http://beta-api:8000/_kaede/v1/keys"),
+            json={
+                "server_name": "beta.localhost",
+                "current_key_id": "ed25519:new",
+                "verify_keys": {"ed25519:new": base64.b64encode(new_material).decode("ascii")},
+                "old_verify_keys": {},
+                "display_name": "Attacker controlled",
+                "software_version": "9.9",
+            },
+        ),
+    ]
+    monkeypatch.setattr(
+        "app.federation.network.bounded_http_request",
+        AsyncMock(side_effect=responses),
+    )
+
+    with pytest.raises(FederationNetworkError, match="pinned security capability"):
+        await ensure_peer(cast(Any, session), settings(), "beta.localhost", force=True)
+
+    assert instance.display_name == "Trusted beta"
+    assert instance.software_version == "1.0"
+    assert instance.capabilities == ["request-nonce/1"]
+    assert instance.current_key_id == "ed25519:old"
+    assert old_key.public_key == old_material
+    assert old_key.expired_at is None
+    session.add.assert_not_awaited()
+    session.flush.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_outbound_federation_capacity_fails_before_touching_database() -> None:
+    borrowers = [object() for _ in range(4)]
+    for borrower in borrowers:
+        OUTBOUND_FEDERATION_LIMITER.acquire_on_behalf_of_nowait(borrower)
+    session = SimpleNamespace(get=AsyncMock(), scalar=AsyncMock())
+    try:
+        with pytest.raises(FederationNetworkError, match="busy"):
+            await signed_request(
+                cast(Any, session),
+                settings(),
+                "GET",
+                "beta.localhost",
+                "/_kaede/v1/test",
+            )
+    finally:
+        for borrower in borrowers:
+            OUTBOUND_FEDERATION_LIMITER.release_on_behalf_of(borrower)
+
+    session.get.assert_not_awaited()
+    session.scalar.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_signed_request_maps_transport_failure_to_federation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("GET", "https://beta.localhost/_kaede/v1/test")
+    client = httpx.AsyncClient()
+    monkeypatch.setattr(
+        "app.federation.client._prepare_signed_request",
+        AsyncMock(
+            return_value=(
+                "https://beta.localhost",
+                client,
+                "/_kaede/v1/test",
+                b"",
+                {},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "app.federation.client.bounded_http_request",
+        AsyncMock(side_effect=httpx.ReadError("peer reset the stream", request=request)),
+    )
+
+    with pytest.raises(FederationNetworkError, match="request failed"):
+        await signed_request(
+            cast(Any, SimpleNamespace()),
+            settings(),
+            "GET",
+            "beta.localhost",
+            "/_kaede/v1/test",
+        )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_destination_drain_returns_without_querying_rows() -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.scalar_calls = 0
+            self.scalars = AsyncMock()
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def scalar(self, _statement: object) -> bool | None:
+            self.scalar_calls += 1
+            # Shared policy lock, then fail-fast destination drain lock.
+            return None if self.scalar_calls == 1 else False
+
+    session = FakeSession()
+
+    assert (
+        await drain_destination(
+            lambda: session,  # type: ignore[arg-type]
+            settings(),
+            "beta.localhost",
+        )
+        == 0
+    )
+    assert session.scalar_calls == 2
+    session.scalars.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_peer_discovery_capacity_fails_before_refresh_lock_or_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    borrowers = [object() for _ in range(4)]
+    for borrower in borrowers:
+        PEER_DISCOVERY_LIMITER.acquire_on_behalf_of_nowait(borrower)
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=None),
+        scalar=AsyncMock(return_value=None),
+    )
+    peer_client = AsyncMock()
+    monkeypatch.setattr("app.federation.network.peer_http_client", peer_client)
+    try:
+        with pytest.raises(FederationNetworkError, match="discovery is busy"):
+            await ensure_peer(cast(Any, session), settings(), "beta.localhost", force=True)
+    finally:
+        for borrower in borrowers:
+            PEER_DISCOVERY_LIMITER.release_on_behalf_of(borrower)
+
+    # One lock-free cache lookup is allowed; no advisory refresh lock or peer
+    # request may be attempted while the global discovery budget is exhausted.
+    assert session.scalar.await_count == 1
+    peer_client.assert_not_awaited()
 
 
 def test_federated_snowflake_timestamp_must_match_signed_creation_time() -> None:
@@ -164,6 +388,313 @@ def test_peer_key_cache_refreshes_and_retires_omitted_keys() -> None:
     retire_omitted_peer_keys([current, omitted], {current.key_id}, now)
     assert current.expired_at is None
     assert omitted.expired_at == now
+
+
+def test_peer_key_history_cap_counts_only_new_immutable_ids() -> None:
+    assert not peer_key_history_exceeds_limit(
+        512,
+        {"ed25519:known"},
+        {"ed25519:known"},
+        512,
+    )
+    assert peer_key_history_exceeds_limit(
+        512,
+        {"ed25519:known"},
+        {"ed25519:known", "ed25519:new"},
+        512,
+    )
+
+
+@pytest.mark.asyncio
+async def test_remote_instance_admission_cap_is_global_and_bounded() -> None:
+    session = cast(
+        Any,
+        SimpleNamespace(
+            get=AsyncMock(side_effect=[None, None]),
+            scalar=AsyncMock(side_effect=[None, 100]),
+        ),
+    )
+    with pytest.raises(FederationInstanceQuotaExceeded, match="configured limit") as rejected:
+        await ensure_remote_instance_record(
+            session,
+            settings(federation_max_remote_instances=100),
+            "gamma.localhost",
+        )
+    assert rejected.value.detail() == {"code": "FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED"}
+    assert rejected.value.detail(federation=True) == {
+        "code": "KAED_FED_INSTANCE_STORAGE_QUOTA_EXCEEDED"
+    }
+
+
+@pytest.mark.asyncio
+async def test_delegated_third_party_profile_becomes_an_opaque_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    placeholder = User(
+        id=77,
+        origin_domain="gamma.localhost",
+        is_local=False,
+        username=unresolved_remote_username(77, "gamma.localhost"),
+        profile_resolved=False,
+    )
+    session = cast(
+        Any,
+        SimpleNamespace(
+            get=AsyncMock(side_effect=[None, placeholder]),
+            execute=AsyncMock(),
+        ),
+    )
+    admit_identity = AsyncMock(return_value=(None, "beta.localhost"))
+    monkeypatch.setattr(
+        "app.federation.replication.admit_remote_user_identity",
+        admit_identity,
+    )
+    claimed = RemoteUserProfile(
+        id="77",
+        origin_domain="gamma.localhost",
+        username="spoofed_name",
+        profile_version=99,
+    )
+
+    resolved = await resolve_delegated_profile(
+        session,
+        settings(),
+        claimed,
+        authority_origin="beta.localhost",
+    )
+
+    assert resolved is placeholder
+    assert resolved.username.startswith("history_")
+    assert resolved.username != claimed.username
+    assert not resolved.profile_resolved
+    admit_identity.assert_awaited_once_with(
+        session,
+        settings(),
+        77,
+        "gamma.localhost",
+        introduced_by_domain="beta.localhost",
+    )
+
+
+@pytest.mark.asyncio
+async def test_opaque_identity_retries_a_preexisting_predictable_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = 77
+    origin = "gamma.localhost"
+    legacy_alias = "history_" + hashlib.sha256(f"{user_id}@{origin}".encode()).hexdigest()[:20]
+    aliases = iter([legacy_alias.removeprefix("history_"), "f" * 24])
+    monkeypatch.setattr(
+        "app.federation.replication.secrets.token_hex",
+        lambda _length: next(aliases),
+    )
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.row: User | None = None
+            self.statements: list[object] = []
+
+        async def get(self, _model: object, identity: object) -> User | None:
+            assert identity == (user_id, origin)
+            return self.row
+
+        async def execute(self, statement: object) -> object:
+            self.statements.append(statement)
+            params = cast(Any, statement).compile().params
+            # A resolved authoritative user on another composite ID already
+            # owns the alias generated by the legacy deterministic scheme.
+            if params["username"] != legacy_alias:
+                self.row = User(
+                    id=user_id,
+                    origin_domain=origin,
+                    is_local=False,
+                    username=params["username"],
+                    profile_resolved=False,
+                    federation_introduced_by_domain="beta.localhost",
+                )
+            return object()
+
+    session = FakeSession()
+    placeholder = await insert_unresolved_remote_user(
+        cast(Any, session),
+        user_id=user_id,
+        origin_domain=origin,
+        introduced_by_domain="beta.localhost",
+    )
+
+    assert placeholder.username == f"history_{'f' * 24}"
+    assert len(placeholder.username) == 32
+    assert len(session.statements) == 2
+    for statement in session.statements:
+        sql = str(cast(Any, statement).compile())
+        assert "ON CONFLICT DO NOTHING" in sql
+        assert "ON CONFLICT (id, origin_domain)" not in sql
+
+
+@pytest.mark.asyncio
+async def test_authoritative_profile_handle_conflict_keeps_placeholder_nonfatally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    placeholder = User(
+        id=77,
+        origin_domain="gamma.localhost",
+        is_local=False,
+        username="history_deadbeef",
+        profile_resolved=False,
+        federation_introduced_by_domain="beta.localhost",
+    )
+    session = SimpleNamespace(scalar=AsyncMock(return_value=88))
+    monkeypatch.setattr(
+        "app.federation.replication.admit_remote_user_identity",
+        AsyncMock(return_value=(placeholder, "gamma.localhost")),
+    )
+
+    result = await upsert_remote_user(
+        cast(Any, session),
+        settings(),
+        RemoteUserProfile(
+            id="77",
+            origin_domain="gamma.localhost",
+            username="already_owned",
+            display_name="Untrusted collision",
+            profile_version=2,
+        ),
+    )
+
+    assert result is placeholder
+    assert result.username == "history_deadbeef"
+    assert result.display_name is None
+    assert not result.profile_resolved
+    conflict_query = session.scalar.await_args.args[0]
+    assert "lower(users.username)" in str(conflict_query)
+
+
+@pytest.mark.asyncio
+async def test_new_authoritative_profile_handle_conflict_falls_back_to_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    placeholder = User(
+        id=77,
+        origin_domain="gamma.localhost",
+        is_local=False,
+        username="history_deadbeef",
+        profile_resolved=False,
+        federation_introduced_by_domain="gamma.localhost",
+    )
+    session = SimpleNamespace(
+        execute=AsyncMock(),
+        get=AsyncMock(return_value=None),
+        scalar=AsyncMock(return_value=88),
+    )
+    monkeypatch.setattr(
+        "app.federation.replication.admit_remote_user_identity",
+        AsyncMock(return_value=(None, "gamma.localhost")),
+    )
+    insert_placeholder = AsyncMock(return_value=placeholder)
+    monkeypatch.setattr(
+        "app.federation.replication.insert_unresolved_remote_user",
+        insert_placeholder,
+    )
+
+    result = await upsert_remote_user(
+        cast(Any, session),
+        settings(),
+        RemoteUserProfile(
+            id="77",
+            origin_domain="gamma.localhost",
+            username="already_owned",
+            profile_version=2,
+        ),
+    )
+
+    assert result is placeholder
+    assert not result.profile_resolved
+    insert_placeholder.assert_awaited_once_with(
+        session,
+        user_id=77,
+        origin_domain="gamma.localhost",
+        introduced_by_domain="gamma.localhost",
+    )
+
+
+@pytest.mark.asyncio
+async def test_delegated_profile_cannot_spoof_a_resolved_third_party_user() -> None:
+    resolved_user = User(
+        id=77,
+        origin_domain="gamma.localhost",
+        is_local=False,
+        username="real_name",
+        profile_resolved=True,
+    )
+    session = cast(Any, SimpleNamespace(get=AsyncMock(return_value=resolved_user)))
+    claimed = RemoteUserProfile(
+        id="77",
+        origin_domain="gamma.localhost",
+        username="spoofed_name",
+        profile_version=100,
+    )
+
+    with pytest.raises(ValueError, match="authoritative identity"):
+        await resolve_delegated_profile(
+            session,
+            settings(),
+            claimed,
+            authority_origin="beta.localhost",
+        )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"width": True, "height": 10},
+        {"width": -1, "height": 10},
+        {"width": 2**31, "height": 1},
+        {"width": 20_000, "height": 20_000},
+        {"width": 10, "height": None},
+    ],
+)
+def test_remote_attachment_dimensions_are_bounded(metadata: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="dimensions"):
+        remote_media_dimensions(cast(Any, metadata))
+
+
+def test_remote_attachment_variants_are_fixed_and_sanitized() -> None:
+    variants = sanitized_remote_variants(
+        {
+            "thumbnail_128": {
+                "object_key": "must-not-cross-the-trust-boundary",
+                "content_type": "image/webp",
+                "size": 1234,
+                "width": 128,
+                "height": 64,
+                "processing_version": 2,
+            },
+            "future_unrecognized_variant": {"arbitrary": "data"},
+        },
+        max_bytes=2048,
+    )
+    assert set(variants) == {"thumbnail_128"}
+    assert "object_key" not in variants["thumbnail_128"]
+    with pytest.raises(ValueError, match="variant size"):
+        sanitized_remote_variants(
+            {
+                "poster": {
+                    "content_type": "image/webp",
+                    "size": 2049,
+                    "width": 10,
+                    "height": 10,
+                }
+            },
+            max_bytes=2048,
+        )
+
+
+def test_remote_attachment_blurhash_is_bounded() -> None:
+    assert sanitized_remote_blurhash("abcdef") == "abcdef"
+    with pytest.raises(ValueError, match="blurhash"):
+        sanitized_remote_blurhash("x" * 129)
+    with pytest.raises(ValueError, match="blurhash"):
+        sanitized_remote_blurhash("abc\ndef")
 
 
 def test_omitted_replicated_channel_becomes_an_inaccessible_tombstone() -> None:
@@ -356,6 +887,7 @@ async def test_legacy_asset_update_applies_and_unblocks_the_guild_sequence(
     assert guild.icon_hash == "a" * 64
     assert guild.last_event_seq == 27
     assert guild.next_event_seq == 28
+    assert guild.snapshot_generation == 2
     assert guild.sync_status == "ready"
     purge_history.assert_awaited_once()
 
@@ -364,6 +896,27 @@ def test_snapshot_rate_scope_is_bound_to_the_structural_revision() -> None:
     assert guild_snapshot_rate_scope(42, 7, paginated=False) == "guild-snapshot-start:42:7"
     assert guild_snapshot_rate_scope(42, 8, paginated=False) == "guild-snapshot-start:42:8"
     assert guild_snapshot_rate_scope(42, 8, paginated=True) == "guild-snapshot-page:42:8"
+
+
+def test_snapshot_cursor_survives_only_message_sequence_advances() -> None:
+    assert not _guild_snapshot_cursor_changed(
+        current_seq=12,
+        current_generation=4,
+        requested_seq=9,
+        requested_generation=4,
+    )
+    assert _guild_snapshot_cursor_changed(
+        current_seq=12,
+        current_generation=5,
+        requested_seq=9,
+        requested_generation=4,
+    )
+    assert _guild_snapshot_cursor_changed(
+        current_seq=12,
+        current_generation=4,
+        requested_seq=9,
+        requested_generation=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -568,6 +1121,7 @@ def test_block_policy_holds_durable_traffic_and_protects_reconciliation() -> Non
     assert {
         "guild.access.revoked",
         "guild.instance_access.revoked",
+        "guild.leave.request",
         "guild.resync.required",
         "relationship.remove",
     } == SECURITY_CRITICAL_GUILD_EVENTS
@@ -724,20 +1278,51 @@ async def test_peer_response_is_bounded_while_streaming() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bounded_peer_response_is_not_decoded_twice() -> None:
+async def test_bounded_peer_response_rejects_compression_before_decoding() -> None:
     encoded = gzip.compress(b'{"snapshot":"ok"}')
-    transport = httpx.MockTransport(
-        lambda _request: httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=encoded)
-    )
+
+    def compressed_response(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Accept-Encoding"] == "identity"
+        return httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=encoded)
+
+    transport = httpx.MockTransport(compressed_response)
     async with httpx.AsyncClient(transport=transport) as client:
-        response = await bounded_http_request(
-            client,
-            "GET",
-            "https://beta.example/snapshot",
-            max_response_bytes=1024,
-        )
-    assert response.json() == {"snapshot": "ok"}
-    assert "Content-Encoding" not in response.headers
+        with pytest.raises(FederationNetworkError, match="encoded response"):
+            await bounded_http_request(
+                client,
+                "GET",
+                "https://beta.example/snapshot",
+                max_response_bytes=1024,
+            )
+
+
+def test_federation_response_json_uses_strict_protocol_decoding() -> None:
+    response = httpx.Response(200, content=b'{"events":[],"cursor":"7"}')
+
+    assert decode_federation_response_json(response) == {"events": [], "cursor": "7"}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b'{"event_id":"1","event_id":"2"}',
+        b'{"value":NaN}',
+        b'{"value":1.5}',
+        b'{"value":9007199254740992}',
+    ],
+)
+def test_federation_response_json_rejects_ambiguous_peer_payloads(content: bytes) -> None:
+    response = httpx.Response(200, content=content)
+
+    with pytest.raises(FederationNetworkError, match="invalid federation JSON"):
+        decode_federation_response_json(response)
+
+
+def test_federation_response_json_enforces_its_byte_bound() -> None:
+    response = httpx.Response(200, content=b"{}")
+
+    with pytest.raises(FederationNetworkError, match="size limit"):
+        decode_federation_response_json(response, max_response_bytes=1)
 
 
 @pytest.mark.asyncio
@@ -767,6 +1352,285 @@ async def test_unknown_key_refresh_consumes_both_unauthenticated_quotas() -> Non
     with pytest.raises(HTTPException) as raised:
         await admit_unknown_key_refresh(cast(Any, LimitedRedis()), "192.0.2.10", "beta.example")
     assert raised.value.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_v2_request_nonce_is_validated_pinned_and_single_use() -> None:
+    nonce = "abcdefghijklmnopqrstuv"
+    assert federation_request_nonce({"X-Kaede-Version": "2", "X-Kaede-Nonce": nonce}) == nonce
+    with pytest.raises(HTTPException) as malformed:
+        federation_request_nonce({"X-Kaede-Version": "2", "X-Kaede-Nonce": "short"})
+    assert malformed.value.status_code == 400
+
+    peer = cast(Any, SimpleNamespace(capabilities=["request-nonce/1"]))
+    with pytest.raises(HTTPException) as downgraded:
+        require_pinned_request_nonce(peer, None)
+    assert cast(dict[str, object], downgraded.value.detail)["code"] == ("KAED_FED_NONCE_REQUIRED")
+
+    class FakeRedis:
+        accepted = True
+
+        async def set(self, *_args: object, **_kwargs: object) -> bool:
+            return self.accepted
+
+    redis = FakeRedis()
+    configured = settings(federation_clock_skew_seconds=300)
+    await consume_request_nonce(cast(Any, redis), configured, "beta.localhost", nonce)
+    redis.accepted = False
+    with pytest.raises(HTTPException) as replayed:
+        await consume_request_nonce(cast(Any, redis), configured, "beta.localhost", nonce)
+    assert replayed.value.status_code == 409
+    assert cast(dict[str, object], replayed.value.detail)["code"] == ("KAED_FED_REPLAYED_REQUEST")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "websocket"])
+async def test_authenticated_origin_is_limited_before_nonce_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+    transport: str,
+) -> None:
+    configured = settings()
+    origin = "beta.localhost"
+    key_id = "ed25519:transport"
+    nonce = "abcdefghijklmnopqrstuv"
+    timestamp = int(time.time())
+    path = "/_kaede/v1/link" if transport == "websocket" else "/_kaede/v1/test"
+    private_key = Ed25519PrivateKey.generate()
+    signing_input = SigningInput(
+        method="GET",
+        request_target=path,
+        origin=origin,
+        destination=configured.domain,
+        timestamp=timestamp,
+        content_hash=content_sha256(b""),
+        nonce=nonce,
+    )
+    signature = base64.b64encode(sign_request(signing_input, private_key)).decode("ascii")
+    headers = {
+        "Authorization": f'Kaede origin="{origin}",key="{key_id}",sig="{signature}"',
+        "X-Kaede-Version": "2",
+        "X-Kaede-Nonce": nonce,
+        "X-Kaede-Timestamp": str(timestamp),
+    }
+    instance = SimpleNamespace(
+        capabilities=["request-nonce/1"],
+        federation_mode="open",
+        last_seen_at=None,
+    )
+    peer_key = SimpleNamespace(
+        public_key=private_key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        ),
+        fetched_at=datetime.now(UTC),
+        expired_at=None,
+    )
+
+    class FakeSession:
+        async def get(self, model: object, _key: object, **_kwargs: object) -> object | None:
+            if model is Instance:
+                return instance
+            if model is PeerKey:
+                return peer_key
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    async def no_op(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def no_block(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    order: list[str] = []
+
+    async def record_origin_limit(*_args: object, **_kwargs: object) -> None:
+        order.append("origin-limit")
+
+    async def record_nonce(*_args: object, **_kwargs: object) -> None:
+        order.append("nonce")
+
+    monkeypatch.setattr("app.federation.security.lock_block_policy_shared", no_op)
+    monkeypatch.setattr("app.federation.security.matching_block", no_block)
+    monkeypatch.setattr("app.federation.security.enforce_federation_source_rate_limit", no_op)
+    monkeypatch.setattr("app.federation.security.enforce_origin_rate_limit", record_origin_limit)
+    monkeypatch.setattr("app.federation.security.consume_request_nonce", record_nonce)
+    monkeypatch.setattr("app.federation.security.federation_client_ip", lambda *_args: "192.0.2.1")
+    monkeypatch.setattr(
+        "app.federation.security.federation_websocket_client_ip",
+        lambda *_args: "192.0.2.1",
+    )
+
+    raw_headers = [(name.lower().encode(), value.encode()) for name, value in headers.items()]
+    session = cast(Any, FakeSession())
+    redis = cast(Any, object())
+    if transport == "http":
+        request = Request(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "https",
+                "path": path,
+                "raw_path": path.encode(),
+                "query_string": b"",
+                "headers": raw_headers,
+                "client": ("192.0.2.1", 443),
+                "server": (configured.domain, 443),
+            }
+        )
+        request._body = b""
+        await authenticate_federation(request, session, redis, configured)
+    else:
+
+        async def receive() -> dict[str, object]:
+            return {"type": "websocket.disconnect"}
+
+        async def send(_message: dict[str, object]) -> None:
+            return None
+
+        websocket = WebSocket(
+            {
+                "type": "websocket",
+                "http_version": "1.1",
+                "scheme": "wss",
+                "path": path,
+                "raw_path": path.encode(),
+                "query_string": b"",
+                "headers": raw_headers,
+                "client": ("192.0.2.1", 443),
+                "server": (configured.domain, 443),
+                "subprotocols": [],
+            },
+            receive,
+            send,
+        )
+        await authenticate_federation_websocket(websocket, session, redis, configured)
+
+    assert order == ["origin-limit", "nonce"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ['{"op":"ping"}', "{" + '"padding":"x",' * 1000])
+async def test_hot_link_rate_limit_closes_before_parsing_any_frame(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    class FakeSession:
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            return None
+
+    class FakeRedis:
+        async def eval(self, script: str, _keys: int, *_args: object) -> int:
+            assert script == federation_api.LINK_ADMIT_LUA
+            return 1
+
+        async def zrem(self, *_args: object) -> None:
+            return None
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.headers = {"Sec-WebSocket-Protocol": federation_api.FEDERATION_LINK_SUBPROTOCOL}
+            self.app = SimpleNamespace(
+                state=SimpleNamespace(
+                    sessionmaker=lambda: FakeSession(),
+                    redis=FakeRedis(),
+                    snowflake=object(),
+                )
+            )
+            self.closed: list[int] = []
+
+        async def accept(self, **_kwargs: object) -> None:
+            return None
+
+        async def send_json(self, _payload: object) -> None:
+            return None
+
+        async def receive_text(self) -> str:
+            return raw
+
+        async def close(self, *, code: int) -> None:
+            self.closed.append(code)
+
+    parse = AsyncMock()
+    monkeypatch.setattr(
+        federation_api,
+        "authenticate_federation_websocket",
+        AsyncMock(return_value=FederationPrincipal("beta.localhost", "key")),
+    )
+    monkeypatch.setattr(federation_api, "get_settings", lambda: settings())
+    monkeypatch.setattr(
+        federation_api,
+        "enforce_federation_link_frame_rate_limit",
+        AsyncMock(side_effect=HTTPException(status_code=429)),
+    )
+    monkeypatch.setattr(federation_api, "strict_json_loads", parse)
+    monkeypatch.setattr(federation_api, "heartbeat_federation_link", AsyncMock())
+    websocket = FakeWebSocket()
+
+    await federation_api.federation_link(cast(Any, websocket))
+
+    assert websocket.closed == [4429]
+    parse.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_durable_event_key_refresh_is_bounded_and_releases_its_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refreshed = AsyncMock()
+    monkeypatch.setattr("app.federation.security.ensure_peer", refreshed)
+    released: list[tuple[object, ...]] = []
+
+    class FakeRedis:
+        async def exists(self, _key: str) -> int:
+            return 0
+
+        async def set(self, _key: str, _value: str, **kwargs: object) -> bool:
+            assert kwargs == {"ex": 30, "nx": True}
+            return True
+
+        async def eval(self, _script: str, _keys: int, *args: object) -> list[int]:
+            if len(args) == 5:
+                return [1, 1]
+            released.append(args)
+            return [1]
+
+    principal = FederationPrincipal(
+        "beta.localhost",
+        "ed25519:transport",
+        source_ip="192.0.2.10",
+    )
+    session = cast(Any, object())
+    configured = settings()
+    assert await refresh_event_signing_keys(
+        session,
+        cast(Any, FakeRedis()),
+        configured,
+        principal,
+        "ed25519:rotated",
+    )
+    refreshed.assert_awaited_once_with(session, configured, "beta.localhost", force=True)
+    assert released
+
+
+@pytest.mark.asyncio
+async def test_durable_event_key_refresh_does_not_bypass_missing_source_identity() -> None:
+    principal = FederationPrincipal("beta.localhost", "ed25519:transport")
+    assert not await refresh_event_signing_keys(
+        cast(Any, object()),
+        cast(Any, object()),
+        settings(),
+        principal,
+        "ed25519:rotated",
+    )
 
 
 @pytest.mark.asyncio
@@ -836,7 +1700,7 @@ async def test_known_offline_destination_queues_without_key_refresh() -> None:
 
 @pytest.mark.asyncio
 async def test_blocked_unknown_destination_uses_placeholder_without_discovery() -> None:
-    placeholder = SimpleNamespace(domain="blocked.localhost", current_key_id=None)
+    placeholder = SimpleNamespace(domain="blocked.localhost", current_key_id=None, is_self=False)
 
     class FakeSession:
         lookups = 0
@@ -1013,6 +1877,7 @@ async def test_guild_home_cannot_mutate_a_cached_third_party_profile() -> None:
         display_name="Authoritative Carol",
         avatar_hash="authoritative-avatar",
         is_local=False,
+        profile_resolved=True,
     )
 
     class FakeSession:
@@ -1040,23 +1905,54 @@ async def test_guild_home_cannot_mutate_a_cached_third_party_profile() -> None:
 
 
 @pytest.mark.asyncio
-async def test_guild_home_cannot_create_an_unknown_third_party_profile() -> None:
+async def test_guild_home_creates_only_an_opaque_unknown_third_party_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opaque = SimpleNamespace(
+        id=77,
+        origin_domain="gamma.localhost",
+        username=unresolved_remote_username(77, "gamma.localhost"),
+        display_name=None,
+        avatar_hash=None,
+        is_local=False,
+        profile_resolved=False,
+    )
+
     class FakeSession:
-        async def get(self, _model: object, _identity: object) -> None:
-            return None
+        user_lookups = 0
+
+        async def get(self, model: object, identity: object) -> object | None:
+            assert model is User
+            assert identity == (77, "gamma.localhost")
+            self.user_lookups += 1
+            return None if self.user_lookups == 1 else opaque
+
+        async def execute(self, _statement: object) -> object:
+            return object()
+
+    admit_identity = AsyncMock(return_value=(None, "beta.localhost"))
+    monkeypatch.setattr(
+        "app.federation.replication.admit_remote_user_identity",
+        admit_identity,
+    )
 
     delegated = RemoteUserProfile(
         id="77",
         origin_domain="gamma.localhost",
         username="carol",
     )
-    with pytest.raises(ValueError, match="authoritative origin first"):
-        await resolve_delegated_profile(
-            cast(Any, FakeSession()),
-            settings(),
-            delegated,
-            authority_origin="beta.localhost",
-        )
+    resolved = await resolve_delegated_profile(
+        cast(Any, FakeSession()),
+        settings(),
+        delegated,
+        authority_origin="beta.localhost",
+    )
+
+    assert resolved is opaque
+    assert resolved.username != delegated.username
+    assert resolved.display_name is None
+    assert resolved.avatar_hash is None
+    admit_identity.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1066,6 +1962,7 @@ async def test_guild_snapshot_pagination_uses_a_stable_membership_cursor(
     watermark = "2026-07-18T12:00:00+00:00"
     structural = {
         "snapshot_seq": "9",
+        "snapshot_generation": "4",
         "member_snapshot_at": watermark,
         "guild": {"id": "10", "origin_domain": "beta.localhost"},
         "roles": [],
@@ -1115,6 +2012,7 @@ async def test_guild_snapshot_pagination_uses_a_stable_membership_cursor(
         _path: str,
         *,
         query: dict[str, str],
+        **_kwargs: object,
     ) -> httpx.Response:
         queries.append(query)
         return httpx.Response(200, json=pages[len(queries) - 1])
@@ -1130,8 +2028,182 @@ async def test_guild_snapshot_pagination_uses_a_stable_membership_cursor(
             "member_after_id": "11",
             "member_snapshot_at": watermark,
             "member_snapshot_seq": "9",
+            "member_snapshot_generation": "4",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_pages_2001_members_across_intervening_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message may advance event sequence without invalidating member paging."""
+
+    watermark = "2026-07-18T12:00:00+00:00"
+    profiles = [
+        {
+            "user": {
+                "id": str(10_000 + index),
+                "origin_domain": "beta.localhost",
+                "username": f"member_{index}",
+            }
+        }
+        for index in range(2_001)
+    ]
+    structural = {
+        # The authority can now have later message events, but every page keeps
+        # the original baseline sequence and structural generation.
+        "snapshot_seq": "9",
+        "snapshot_generation": "4",
+        "member_snapshot_at": watermark,
+        "guild": {"id": "10", "origin_domain": "beta.localhost"},
+        "roles": [],
+        "channels": [],
+        "overwrites": [],
+    }
+    pages = []
+    for start, stop in ((0, 1000), (1000, 2000), (2000, 2001)):
+        page_members = profiles[start:stop]
+        pages.append(
+            {
+                **structural,
+                "members": page_members,
+                "member_roles": [],
+                "next_member_cursor": (
+                    {
+                        "user_domain": "beta.localhost",
+                        "user_id": page_members[-1]["user"]["id"],
+                    }
+                    if stop < len(profiles)
+                    else None
+                ),
+            }
+        )
+    queries: list[dict[str, str]] = []
+
+    async def fake_signed_request(
+        *_args: object,
+        query: dict[str, str],
+        **_kwargs: object,
+    ) -> httpx.Response:
+        queries.append(query)
+        return httpx.Response(200, json=pages[len(queries) - 1])
+
+    monkeypatch.setattr("app.federation.guilds.signed_request", fake_signed_request)
+    snapshot = await fetch_guild_snapshot(cast(Any, object()), settings(), "beta.localhost", 10)
+
+    assert len(snapshot["members"]) == 2_001
+    assert len(queries) == 3
+    assert queries[1]["member_snapshot_seq"] == "9"
+    assert queries[1]["member_snapshot_generation"] == "4"
+    assert queries[2]["member_snapshot_generation"] == "4"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_pagination_rejects_structural_generation_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watermark = "2026-07-18T12:00:00+00:00"
+    structural = {
+        "snapshot_seq": "9",
+        "snapshot_generation": "4",
+        "member_snapshot_at": watermark,
+        "guild": {"id": "10", "origin_domain": "beta.localhost"},
+        "roles": [],
+        "channels": [],
+        "overwrites": [],
+    }
+    pages = [
+        {
+            **structural,
+            "members": [
+                {
+                    "user": {
+                        "id": "11",
+                        "origin_domain": "beta.localhost",
+                        "username": "owner",
+                    }
+                }
+            ],
+            "member_roles": [],
+            "next_member_cursor": {
+                "user_domain": "beta.localhost",
+                "user_id": "11",
+            },
+        },
+        {
+            **structural,
+            "snapshot_generation": "5",
+            "members": [],
+            "member_roles": [],
+            "next_member_cursor": None,
+        },
+    ]
+    calls = 0
+
+    async def fake_signed_request(*_args: object, **_kwargs: object) -> httpx.Response:
+        nonlocal calls
+        response = httpx.Response(200, json=pages[calls])
+        calls += 1
+        return response
+
+    monkeypatch.setattr("app.federation.guilds.signed_request", fake_signed_request)
+    with pytest.raises(RuntimeError, match="structural generation changed"):
+        await fetch_guild_snapshot(cast(Any, object()), settings(), "beta.localhost", 10)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_visibility_for_2001_members_has_bounded_query_count() -> None:
+    guild = SimpleNamespace(
+        id=10,
+        origin_domain="alpha.localhost",
+        owner_id=1,
+        owner_domain="beta.localhost",
+    )
+    role = SimpleNamespace(
+        id=10,
+        origin_domain="alpha.localhost",
+        permissions=int(1 << 10),  # VIEW_CHANNEL
+    )
+    channel = SimpleNamespace(
+        id=20,
+        origin_domain="alpha.localhost",
+        type=0,
+        parent_id=None,
+        parent_domain=None,
+        permissions_synced=False,
+    )
+    members = [
+        SimpleNamespace(
+            user_id=index + 1,
+            user_domain="beta.localhost",
+            timeout_indefinite=False,
+            timeout_until=None,
+        )
+        for index in range(2_001)
+    ]
+
+    class BulkSession:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.rows = [members, [], []]
+
+        async def scalars(self, _statement: object) -> list[object]:
+            rows = self.rows[self.calls]
+            self.calls += 1
+            return rows
+
+    session = BulkSession()
+    visible = await visible_guild_channels_for_origin(
+        cast(Any, session),
+        cast(Any, guild),
+        "beta.localhost",
+        loaded_roles=[cast(Any, role)],
+        loaded_channels=[cast(Any, channel)],
+    )
+
+    assert visible == [channel]
+    assert session.calls == 3
 
 
 @pytest.mark.asyncio
@@ -1150,10 +2222,55 @@ async def test_successful_gap_fill_restores_a_policy_staled_replica(
         return httpx.Response(200, json={"events": [], "latest_seq": "5"})
 
     monkeypatch.setattr("app.federation.guilds.signed_request", fake_signed_request)
+    monkeypatch.setattr(
+        "app.federation.guilds.admit_replica_storage",
+        AsyncMock(),
+    )
 
     assert await synchronize_guild(cast(Any, object()), settings(), cast(Any, guild)) == []
     assert guild.sync_status == "ready"
     assert not guild.unavailable
+
+
+@pytest.mark.asyncio
+async def test_semantic_poison_gap_page_is_quarantined_and_snapshot_recovered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guild = SimpleNamespace(
+        id=10,
+        origin_domain="beta.localhost",
+        last_event_seq=5,
+        sync_status="stale",
+        sync_error_code=None,
+        sync_error=None,
+        unavailable=False,
+    )
+    session = SimpleNamespace(
+        rollback=AsyncMock(),
+        get=AsyncMock(return_value=guild),
+        commit=AsyncMock(),
+    )
+    response = httpx.Response(
+        200,
+        json={"events": [{}] * 1_001, "latest_seq": "1006"},
+    )
+    fetch_snapshot = AsyncMock(return_value={"snapshot_seq": "1006"})
+    apply_snapshot = AsyncMock()
+    monkeypatch.setattr(
+        "app.federation.guilds.signed_request",
+        AsyncMock(return_value=response),
+    )
+    monkeypatch.setattr("app.federation.guilds.fetch_guild_snapshot", fetch_snapshot)
+    monkeypatch.setattr("app.federation.guilds.apply_guild_snapshot", apply_snapshot)
+
+    assert await synchronize_guild(cast(Any, session), settings(), cast(Any, guild)) == []
+
+    session.rollback.assert_awaited_once()
+    session.commit.assert_awaited_once()
+    fetch_snapshot.assert_awaited_once()
+    apply_snapshot.assert_awaited_once()
+    assert guild.sync_status == "failed"
+    assert guild.unavailable is True
 
 
 @pytest.mark.asyncio
@@ -1248,6 +2365,56 @@ def test_federation_profiles_enforce_database_ids_and_domain_syntax() -> None:
         normalize_domain("bad/.localhost")
 
 
+@pytest.mark.asyncio
+async def test_exact_profile_endpoint_signs_the_requested_local_composite_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = settings(domain="alpha.localhost")
+    user = User(
+        id=42,
+        origin_domain="alpha.localhost",
+        username="alice",
+        is_local=True,
+        profile_resolved=True,
+    )
+    session = SimpleNamespace(get=AsyncMock(return_value=user))
+    redis = SimpleNamespace()
+    rate_limit = AsyncMock()
+    envelope = AsyncMock(return_value={"origin": "alpha.localhost", "type": "user.profile"})
+    monkeypatch.setattr(federation_api, "enforce_federation_route_rate_limit", rate_limit)
+    monkeypatch.setattr(federation_api, "build_envelope", envelope)
+
+    result = await federation_user_profile_by_ref(
+        user_id=42,
+        user_domain="alpha.localhost",
+        principal=FederationPrincipal("beta.localhost", "ed25519:test"),
+        session=cast(Any, session),
+        redis=cast(Any, redis),
+        settings=configured,
+    )
+
+    assert result["type"] == "user.profile"
+    content = envelope.await_args.args[4]
+    assert content["subject"] == {"id": "42", "origin_domain": "alpha.localhost"}
+    assert content["profile"]["id"] == "42"
+    assert content["profile"]["origin_domain"] == "alpha.localhost"
+    rate_limit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_exact_profile_endpoint_does_not_answer_for_another_home() -> None:
+    with pytest.raises(HTTPException) as error:
+        await federation_user_profile_by_ref(
+            user_id=42,
+            user_domain="remote.example",
+            principal=FederationPrincipal("beta.localhost", "ed25519:test"),
+            session=cast(Any, SimpleNamespace()),
+            redis=cast(Any, SimpleNamespace()),
+            settings=settings(domain="alpha.localhost"),
+        )
+    assert error.value.status_code == 404
+
+
 def test_guild_snapshot_rejects_cross_origin_entity_injection() -> None:
     snapshot: dict[str, Any] = {
         "snapshot_seq": "0",
@@ -1295,7 +2462,6 @@ def test_guild_snapshot_rejects_cross_origin_entity_injection() -> None:
                 "nickname": None,
                 "joined_at": "2026-07-17T00:00:00+00:00",
                 "timeout_until": None,
-                "voice_flags": 0,
                 "member_version": "1",
             }
         ],
@@ -1314,6 +2480,33 @@ def test_guild_snapshot_rejects_cross_origin_entity_injection() -> None:
         ],
     }
     validate_guild_snapshot(snapshot, expected_origin="beta.localhost", expected_guild_id=10)
+    with pytest.raises(ValueError, match="joining local member"):
+        validate_guild_snapshot(
+            snapshot,
+            expected_origin="beta.localhost",
+            expected_guild_id=10,
+            required_member=(42, "alpha.localhost"),
+        )
+    snapshot["members"].append(
+        {
+            "user": {
+                "id": "42",
+                "origin_domain": "alpha.localhost",
+                "username": "alice",
+            },
+            "nickname": None,
+            "joined_at": "2026-07-17T00:00:00+00:00",
+            "timeout_until": None,
+            "voice_flags": 0,
+            "member_version": "1",
+        }
+    )
+    validate_guild_snapshot(
+        snapshot,
+        expected_origin="beta.localhost",
+        expected_guild_id=10,
+        required_member=(42, "alpha.localhost"),
+    )
     snapshot["channels"][0]["origin_domain"] = "evil.example"
     with pytest.raises(ValueError, match="channel identity"):
         validate_guild_snapshot(snapshot, expected_origin="beta.localhost", expected_guild_id=10)
@@ -1413,3 +2606,52 @@ def test_guild_snapshot_flattens_child_of_hidden_category() -> None:
         "user_domain": "gamma.localhost",
         "user_id": "77",
     }
+
+
+def test_guild_snapshot_does_not_export_private_moderation_state() -> None:
+    guild = SimpleNamespace(
+        id=10,
+        origin_domain="alpha.localhost",
+        next_event_seq=2,
+        name="Private moderation",
+        description=None,
+        icon_hash=None,
+        banner_hash=None,
+        owner_id=11,
+        owner_domain="alpha.localhost",
+        permission_generation=1,
+        federated_history_policy="disabled",
+        history_policy_generation=1,
+    )
+    member = SimpleNamespace(
+        user_id=11,
+        user_domain="alpha.localhost",
+        nickname=None,
+        joined_at=datetime(2026, 7, 18, tzinfo=UTC),
+        timeout_until=datetime(2026, 7, 19, tzinfo=UTC),
+        timeout_indefinite=False,
+        timeout_reason="private moderator note",
+        voice_flags=3,
+        member_version=2,
+    )
+    user = SimpleNamespace(
+        id=11,
+        origin_domain="alpha.localhost",
+        username="alice",
+        display_name=None,
+        avatar_hash=None,
+    )
+
+    payload = guild_snapshot_payload(
+        cast(Any, guild),
+        [],
+        [],
+        [(cast(Any, member), cast(Any, user))],
+        [],
+        [],
+        member_snapshot_at=datetime(2026, 7, 18, 12, 0, tzinfo=UTC),
+    )
+
+    projected_member = payload["members"][0]
+    assert "timeout_reason" not in projected_member
+    assert "voice_flags" not in projected_member

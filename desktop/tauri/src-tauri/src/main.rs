@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeMap,
+    fmt::Display,
     str::FromStr,
     sync::{
         Arc,
@@ -13,18 +14,20 @@ use std::{
 use bytes::Bytes;
 use kaede_api::{ApiClient, ApiClientError, InstanceEndpoint};
 use kaede_audio::{
-    CaptureSettings, InputMode, NativeCapture, NativePlayback, NoiseSuppression, ProcessorChain,
-    SpeechProcessor, VOICE_SAMPLE_RATE, input_devices, output_devices,
+    AudioError, CaptureSettings, InputMode, NativeCapture, NativePlayback, NoiseSuppression,
+    ProcessorChain, SpeechProcessor, VOICE_SAMPLE_RATE, input_devices, output_devices,
 };
-use kaede_auth::{LoginOutcome, SessionManager};
+use kaede_auth::{AuthError, LoginOutcome, SessionManager};
 use kaede_gateway::{GatewayCommand, GatewayHandle};
 use kaede_platform::{
-    AccountRegistry, DesktopPreferences, InputModePreference, KnownAccount, PlatformPaths,
-    SystemCredentialVault,
+    AccountRegistry, DesktopPreferences, InputModePreference, KnownAccount, PlatformError,
+    PlatformPaths, SystemCredentialVault,
 };
 use kaede_protocol::{Domain, EntityRef};
 use kaede_turnstile::EmbeddedTurnstile;
-use kaede_voice::{VoiceCommand, VoiceHandle, VoiceStatus, camera_devices, screen_sources};
+use kaede_voice::{
+    VoiceCommand, VoiceError, VoiceHandle, VoiceStatus, camera_devices, screen_sources,
+};
 use parking_lot::Mutex as SyncMutex;
 use reqwest::Method;
 use secrecy::SecretString;
@@ -109,20 +112,118 @@ impl NativeError {
             detail: Value::Null,
         }
     }
+
+    fn operation(code: &str, message: impl Into<String>, source: impl Display) -> Self {
+        tracing::warn!(error_code = code, cause = %source, "native desktop operation failed");
+        Self::local(code, message)
+    }
 }
 
 impl From<ApiClientError> for NativeError {
     fn from(error: ApiClientError) -> Self {
-        if let ApiClientError::Server { status, error } = error {
-            return Self {
+        let message = error.user_message();
+        match error {
+            ApiClientError::Server { status, error } => Self {
                 code: error.code.clone(),
-                message: error.message.clone(),
+                message,
                 status: status.as_u16(),
                 detail: serde_json::to_value(&*error).unwrap_or(Value::Null),
-            };
+            },
+            error => {
+                let code = match &error {
+                    ApiClientError::InvalidEndpoint => "INVALID_NATIVE_ENDPOINT",
+                    ApiClientError::InsecureEndpoint => "INSECURE_NATIVE_ENDPOINT",
+                    ApiClientError::Transport(_) => "NATIVE_TRANSPORT_ERROR",
+                    ApiClientError::Decode(_) => "INVALID_SERVER_RESPONSE",
+                    ApiClientError::UploadLengthMismatch => "UPLOAD_FILE_CHANGED",
+                    ApiClientError::ForbiddenUploadHeader => "UNSAFE_UPLOAD_INSTRUCTIONS",
+                    ApiClientError::UploadRejected(_) => "UPLOAD_REJECTED",
+                    ApiClientError::InvalidRedirect => "INVALID_MEDIA_REDIRECT",
+                    ApiClientError::ResponseTooLarge => "MEDIA_TOO_LARGE",
+                    ApiClientError::Url(_) => "INVALID_SERVER_URL",
+                    ApiClientError::Header(_) => "INVALID_UPLOAD_INSTRUCTIONS",
+                    ApiClientError::Server { .. } => unreachable!("server errors returned above"),
+                };
+                Self::operation(code, message, error)
+            }
         }
-        Self::local("NATIVE_TRANSPORT_ERROR", error.to_string())
     }
+}
+
+impl From<AuthError> for NativeError {
+    fn from(error: AuthError) -> Self {
+        match error {
+            AuthError::Api(error) => error.into(),
+            AuthError::Platform(PlatformError::ChallengeCancelled) => Self::local(
+                "VERIFICATION_CANCELLED",
+                "Verification was cancelled. Try again when you're ready.",
+            ),
+            AuthError::Platform(PlatformError::Keyring(error)) => Self::operation(
+                "CREDENTIAL_STORE_UNAVAILABLE",
+                "Kaede could not access your saved sign-in. Unlock your operating-system credential manager and try again.",
+                error,
+            ),
+            AuthError::Platform(PlatformError::InvalidVaultRecord(error)) => Self::operation(
+                "SAVED_SESSION_INVALID",
+                "Your saved sign-in data is damaged. Remove this saved account and sign in again.",
+                error,
+            ),
+            AuthError::Platform(error) => Self::operation(
+                "DESKTOP_AUTHENTICATION_UNAVAILABLE",
+                "Desktop sign-in could not access a required operating-system service. Restart Kaede and try again.",
+                error,
+            ),
+            AuthError::MissingNativeTokens => Self::operation(
+                "INVALID_AUTHENTICATION_RESPONSE",
+                "Your instance returned an incomplete sign-in response. Update Kaede and try again; if it continues, contact your instance administrator.",
+                "desktop authentication response did not contain native tokens",
+            ),
+            AuthError::UnexpectedAuthState => Self::operation(
+                "INVALID_AUTHENTICATION_RESPONSE",
+                "Your instance returned an unexpected sign-in response. Update Kaede and try again; if it continues, contact your instance administrator.",
+                "the server returned an unexpected authentication state",
+            ),
+            AuthError::NotAuthenticated => Self::local(
+                "NOT_AUTHENTICATED",
+                "Your session is no longer available. Sign in again to continue.",
+            ),
+        }
+    }
+}
+
+impl From<VoiceError> for NativeError {
+    fn from(error: VoiceError) -> Self {
+        match error {
+            VoiceError::Api(error) => error.into(),
+            error => {
+                let message = error.user_message();
+                let code = match &error {
+                    VoiceError::Audio(_) => "VOICE_AUDIO_UNAVAILABLE",
+                    VoiceError::LiveKit(_) => "VOICE_SERVICE_UNAVAILABLE",
+                    VoiceError::Camera(_) | VoiceError::CameraWorker(_) => "CAMERA_UNAVAILABLE",
+                    VoiceError::VoiceActivityDenied => "VOICE_ACTIVITY_NOT_ALLOWED",
+                    VoiceError::CaptureThread(_) => "SCREEN_CAPTURE_UNAVAILABLE",
+                    VoiceError::Api(_) => unreachable!("API voice errors returned above"),
+                };
+                Self::operation(code, message, error)
+            }
+        }
+    }
+}
+
+fn audio_device_error(code: &str, kind: &str, error: AudioError) -> NativeError {
+    let message = match &error {
+        AudioError::DeviceNotFound => format!(
+            "The selected {kind} is no longer available. Choose another device and try again."
+        ),
+        AudioError::UnsupportedFormat(_) => format!(
+            "The selected {kind} uses an audio format Kaede does not support. Choose another device and try again."
+        ),
+        AudioError::Backend(_) => format!(
+            "Kaede could not access the selected {kind}. Check your system audio permissions and whether another app is using it, then try again."
+        ),
+    };
+    NativeError::operation(code, message, error)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -198,8 +299,13 @@ async fn native_set_instance(
     instance: String,
     state: State<'_, NativeState>,
 ) -> Result<String, NativeError> {
-    let domain = Domain::parse(instance)
-        .map_err(|error| NativeError::local("INVALID_INSTANCE", error.to_string()))?;
+    let domain = Domain::parse(instance).map_err(|error| {
+        NativeError::operation(
+            "INVALID_INSTANCE",
+            "Enter a valid instance domain, such as chat.example.",
+            error,
+        )
+    })?;
     if state
         .account
         .read()
@@ -225,7 +331,7 @@ async fn native_restore_session(
     })
 }
 
-/// Restore a known account without relying on WebView storage. The account
+/// Restore a known account without relying on `WebView` storage. The account
 /// index contains no secrets; refresh credentials remain in the platform vault.
 async fn restore_known_account(
     state: &NativeState,
@@ -251,9 +357,13 @@ async fn restore_known_account(
         leave_active_voice(state).await;
     }
 
-    let registry = AccountRegistry::load(&state.paths)
-        .await
-        .map_err(|error| NativeError::local("ACCOUNT_REGISTRY_FAILED", error.to_string()))?;
+    let registry = AccountRegistry::load(&state.paths).await.map_err(|error| {
+        NativeError::operation(
+            "ACCOUNT_REGISTRY_FAILED",
+            "Kaede could not read your saved accounts. Restart the app and try again.",
+            error,
+        )
+    })?;
     let known = match preferred {
         Some(domain) => registry
             .accounts
@@ -264,8 +374,13 @@ async fn restore_known_account(
     };
 
     let domain = if let Some(known) = known {
-        Domain::parse(known.instance.clone())
-            .map_err(|error| NativeError::local("INVALID_STORED_INSTANCE", error.to_string()))?
+        Domain::parse(known.instance.clone()).map_err(|error| {
+            NativeError::operation(
+                "INVALID_STORED_INSTANCE",
+                "A saved account has an invalid instance address. Remove that saved account and sign in again.",
+                error,
+            )
+        })?
     } else if let Some(domain) = preferred {
         domain.clone()
     } else {
@@ -287,7 +402,7 @@ async fn restore_known_account(
                         session,
                         account_key: known.account_key.clone(),
                     },
-                    &state,
+                    state,
                 )
                 .await?;
             }
@@ -298,10 +413,7 @@ async fn restore_known_account(
                     account = %known.account_key,
                     "stored desktop session could not be restored"
                 );
-                return Err(NativeError::local(
-                    "SESSION_RESTORE_FAILED",
-                    "Kaede could not read the saved session from the operating-system credential vault. Try reopening the app.",
-                ));
+                return Err(error.into());
             }
         }
     }
@@ -344,10 +456,7 @@ async fn challenge_token(
     session: &NativeSession,
     action: &str,
 ) -> Result<Option<SecretString>, NativeError> {
-    let config = session
-        .config()
-        .await
-        .map_err(|error| NativeError::local("AUTH_CONFIG_FAILED", error.to_string()))?;
+    let config = session.config().await.map_err(NativeError::from)?;
     if !config.turnstile.enabled {
         return Ok(None);
     }
@@ -361,7 +470,7 @@ async fn challenge_token(
         .solve_turnstile(site_key, action, uuid::Uuid::new_v4().to_string())
         .await
         .map(Some)
-        .map_err(|error| NativeError::local("TURNSTILE_CANCELLED", error.to_string()))
+        .map_err(NativeError::from)
 }
 
 async fn activate_account(account: NativeAccount, state: &NativeState) -> Result<(), NativeError> {
@@ -372,7 +481,7 @@ async fn activate_account(account: NativeAccount, state: &NativeState) -> Result
         .session
         .access_token()
         .await
-        .map_err(|error| NativeError::local("NOT_AUTHENTICATED", error.to_string()))?;
+        .map_err(NativeError::from)?;
     let gateway = kaede_gateway::spawn(account.api.endpoint().gateway_url().clone(), token);
     start_gateway_forwarder(gateway, state).await;
     *state.account.write().await = Some(Arc::new(account));
@@ -409,7 +518,13 @@ async fn remember_account(
 ) -> Result<(), NativeError> {
     let mut registry = AccountRegistry::load(&state.paths)
         .await
-        .map_err(|error| NativeError::local("ACCOUNT_REGISTRY_FAILED", error.to_string()))?;
+        .map_err(|error| {
+            NativeError::operation(
+                "ACCOUNT_REGISTRY_FAILED",
+                "Kaede could not read your saved accounts. Your sign-in succeeded, but this account could not be added to the account chooser.",
+                error,
+            )
+        })?;
     registry.remember(KnownAccount {
         instance: domain.to_string(),
         account_key: account_key.to_owned(),
@@ -419,18 +534,34 @@ async fn remember_account(
     registry
         .save(&state.paths)
         .await
-        .map_err(|error| NativeError::local("ACCOUNT_REGISTRY_FAILED", error.to_string()))
+        .map_err(|error| {
+            NativeError::operation(
+                "ACCOUNT_REGISTRY_FAILED",
+                "Your sign-in succeeded, but Kaede could not save this account in the account chooser. Check that the app can write to its settings directory.",
+                error,
+            )
+        })
 }
 
 async fn forget_account(state: &NativeState, account_key: &str) -> Result<(), NativeError> {
-    let mut registry = AccountRegistry::load(&state.paths)
-        .await
-        .map_err(|error| NativeError::local("ACCOUNT_REGISTRY_FAILED", error.to_string()))?;
+    let mut registry = AccountRegistry::load(&state.paths).await.map_err(|error| {
+        NativeError::operation(
+            "ACCOUNT_REGISTRY_FAILED",
+            "Kaede could not read your saved accounts. Restart the app and try signing out again.",
+            error,
+        )
+    })?;
     registry.forget(account_key);
     registry
         .save(&state.paths)
         .await
-        .map_err(|error| NativeError::local("ACCOUNT_REGISTRY_FAILED", error.to_string()))
+        .map_err(|error| {
+            NativeError::operation(
+                "ACCOUNT_REGISTRY_FAILED",
+                "You were signed out, but Kaede could not remove the account from the account chooser. Restart the app and remove it again.",
+                error,
+            )
+        })
 }
 
 async fn login_request(body: &Value, state: &NativeState) -> Result<Value, NativeError> {
@@ -460,13 +591,13 @@ async fn login_request(body: &Value, state: &NativeState) -> Result<Value, Nativ
     let mut outcome = session
         .login(identifier, password, "Kaede Desktop", supplied.as_ref())
         .await
-        .map_err(|error| NativeError::local("LOGIN_FAILED", error.to_string()))?;
+        .map_err(NativeError::from)?;
     if matches!(outcome, LoginOutcome::ChallengeRequired) {
         let token = challenge_token(&session, "kaede-login-v1").await?;
         outcome = session
             .login(identifier, password, "Kaede Desktop", token.as_ref())
             .await
-            .map_err(|error| NativeError::local("LOGIN_FAILED", error.to_string()))?;
+            .map_err(NativeError::from)?;
     }
     match outcome {
         LoginOutcome::Authenticated => {
@@ -508,12 +639,17 @@ async fn mfa_request(body: &Value, state: &NativeState) -> Result<Value, NativeE
         .lock()
         .await
         .take()
-        .ok_or_else(|| NativeError::local("MFA_TICKET_INVALID", "Start sign-in again."))?;
+        .ok_or_else(|| {
+            NativeError::local(
+                "MFA_TICKET_INVALID",
+                "Your sign-in attempt expired. Start sign-in again to request a new authentication challenge.",
+            )
+        })?;
     match pending
         .session
         .complete_mfa(&pending.ticket, code, "Kaede Desktop")
         .await
-        .map_err(|error| NativeError::local("MFA_FAILED", error.to_string()))?
+        .map_err(NativeError::from)?
     {
         LoginOutcome::Authenticated => {
             let domain = pending.api.endpoint().domain().clone();
@@ -532,7 +668,7 @@ async fn mfa_request(body: &Value, state: &NativeState) -> Result<Value, NativeE
         }
         _ => Err(NativeError::local(
             "MFA_FAILED",
-            "Authentication was not completed.",
+            "Authentication was not completed. Start sign-in again and retry your authentication code.",
         )),
     }
 }
@@ -553,9 +689,14 @@ async fn register_request(body: &Value, state: &NativeState) -> Result<Value, Na
     let result = session
         .register(username, email, password, challenge.as_ref())
         .await
-        .map_err(|error| NativeError::local("REGISTRATION_FAILED", error.to_string()))?;
-    serde_json::to_value(result)
-        .map_err(|error| NativeError::local("NATIVE_SERIALIZATION_ERROR", error.to_string()))
+        .map_err(NativeError::from)?;
+    serde_json::to_value(result).map_err(|error| {
+        NativeError::operation(
+            "INVALID_REGISTRATION_RESPONSE",
+            "Your account was created, but Kaede could not read the confirmation. Try signing in.",
+            error,
+        )
+    })
 }
 
 async fn generic_request(
@@ -586,67 +727,61 @@ async fn native_api_request(
 ) -> Result<NativeResponse, NativeError> {
     let path = request.path.trim_start_matches('/');
     let body = request.body.as_ref().unwrap_or(&Value::Null);
-    let special =
-        match (request.method.as_str(), path) {
-            ("POST", "auth/login") => Some(login_request(body, &state).await?),
-            ("POST", "auth/mfa") => Some(mfa_request(body, &state).await?),
-            ("POST", "auth/register") => Some(register_request(body, &state).await?),
-            ("POST", "auth/refresh") => {
-                let account = state
-                    .account
-                    .read()
-                    .await
-                    .clone()
-                    .ok_or_else(|| NativeError::local("NOT_AUTHENTICATED", "Sign in again."))?;
-                account.session.refresh().await.map_err(|error| {
-                    NativeError::local("SESSION_REFRESH_FAILED", error.to_string())
-                })?;
-                Some(json!({"status": "ok"}))
+    let special = match (request.method.as_str(), path) {
+        ("POST", "auth/login") => Some(login_request(body, &state).await?),
+        ("POST", "auth/mfa") => Some(mfa_request(body, &state).await?),
+        ("POST", "auth/register") => Some(register_request(body, &state).await?),
+        ("POST", "auth/refresh") => {
+            let account = state.account.read().await.clone().ok_or_else(|| {
+                NativeError::local(
+                    "NOT_AUTHENTICATED",
+                    "Your session is no longer available. Sign in again to continue.",
+                )
+            })?;
+            account.session.refresh().await.map_err(NativeError::from)?;
+            Some(json!({"status": "ok"}))
+        }
+        ("POST", "auth/logout") => {
+            if let Some(account) = state.account.write().await.take() {
+                let account_key = account.account_key.clone();
+                account.session.logout().await.map_err(NativeError::from)?;
+                forget_account(&state, &account_key).await?;
             }
-            ("POST", "auth/logout") => {
-                if let Some(account) = state.account.write().await.take() {
-                    let account_key = account.account_key.clone();
-                    account
-                        .session
-                        .logout()
+            if let Some(commands) = state.gateway_commands.write().await.take() {
+                let _ = commands.send(GatewayCommand::Shutdown).await;
+            }
+            leave_active_voice(&state).await;
+            Some(json!({"status": "ok"}))
+        }
+        _ => {
+            let api = configured_api(&state).await?;
+            let response = match generic_request(&api, &request).await {
+                Ok(response) => response,
+                Err(ApiClientError::Server { status, .. }) if status.as_u16() == 401 => {
+                    let account = state.account.read().await.clone().ok_or_else(|| {
+                        NativeError::local(
+                            "NOT_AUTHENTICATED",
+                            "Your session is no longer available. Sign in again to continue.",
+                        )
+                    })?;
+                    account.session.refresh().await.map_err(NativeError::from)?;
+                    generic_request(&api, &request)
                         .await
-                        .map_err(|error| NativeError::local("LOGOUT_FAILED", error.to_string()))?;
-                    forget_account(&state, &account_key).await?;
+                        .map_err(NativeError::from)?
                 }
-                if let Some(commands) = state.gateway_commands.write().await.take() {
-                    let _ = commands.send(GatewayCommand::Shutdown).await;
+                Err(error) => return Err(error.into()),
+            };
+            if path == "auth/config" {
+                let mut body = response.body;
+                if body.get("turnstile").is_some() {
+                    body["turnstile"]["enabled"] = Value::Bool(false);
+                    body["native_challenge"] = Value::Bool(true);
                 }
-                leave_active_voice(&state).await;
-                Some(json!({"status": "ok"}))
+                return Ok(NativeResponse { body, ..response });
             }
-            _ => {
-                let api = configured_api(&state).await?;
-                let response = match generic_request(&api, &request).await {
-                    Ok(response) => response,
-                    Err(ApiClientError::Server { status, .. }) if status.as_u16() == 401 => {
-                        let account = state.account.read().await.clone().ok_or_else(|| {
-                            NativeError::local("NOT_AUTHENTICATED", "Sign in again.")
-                        })?;
-                        account.session.refresh().await.map_err(|error| {
-                            NativeError::local("SESSION_REFRESH_FAILED", error.to_string())
-                        })?;
-                        generic_request(&api, &request)
-                            .await
-                            .map_err(NativeError::from)?
-                    }
-                    Err(error) => return Err(error.into()),
-                };
-                if path == "auth/config" {
-                    let mut body = response.body;
-                    if body.get("turnstile").is_some() {
-                        body["turnstile"]["enabled"] = Value::Bool(false);
-                        body["native_challenge"] = Value::Bool(true);
-                    }
-                    return Ok(NativeResponse { body, ..response });
-                }
-                return Ok(response);
-            }
-        };
+            return Ok(response);
+        }
+    };
     let mut value = special.unwrap_or(Value::Null);
     if path == "auth/config" && value.get("turnstile").is_some() {
         value["turnstile"]["enabled"] = Value::Bool(false);
@@ -662,28 +797,44 @@ async fn native_api_request(
 const NATIVE_MEDIA_MAX_BYTES: usize = 20 * 1024 * 1024;
 
 fn validate_attachment_media_path(path: &str) -> Result<&str, NativeError> {
-    if path.contains(['?', '#', '\\']) {
+    if path.contains(['#', '\\']) || !path.starts_with('/') || path.starts_with("//") {
         return Err(NativeError::local(
             "INVALID_MEDIA_PATH",
-            "The requested media path is invalid.",
+            "This media link is invalid. Ask the sender to upload the file again.",
+        ));
+    }
+    if validate_history_media_path(path) {
+        return Ok(path.trim_start_matches('/'));
+    }
+    if path.contains('?') {
+        return Err(NativeError::local(
+            "INVALID_MEDIA_PATH",
+            "This media link is invalid. Ask the sender to upload the file again.",
         ));
     }
     let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     let ["media", domain, id, variant] = parts.as_slice() else {
         return Err(NativeError::local(
             "INVALID_MEDIA_PATH",
-            "The requested media path is invalid.",
+            "This media link is invalid. Ask the sender to upload the file again.",
         ));
     };
-    Domain::parse(domain)
-        .map_err(|_| NativeError::local("INVALID_MEDIA_PATH", "The media domain is invalid."))?;
+    Domain::parse(domain).map_err(|_| {
+        NativeError::local(
+            "INVALID_MEDIA_PATH",
+            "This media link contains an invalid instance address. Ask the sender to upload the file again.",
+        )
+    })?;
     let numeric_id = id.parse::<u64>().map_err(|_| {
-        NativeError::local("INVALID_MEDIA_PATH", "The media identifier is invalid.")
+        NativeError::local(
+            "INVALID_MEDIA_PATH",
+            "This media link contains an invalid file identifier. Ask the sender to upload the file again.",
+        )
     })?;
     if numeric_id == 0 || numeric_id > i64::MAX as u64 || numeric_id.to_string() != *id {
         return Err(NativeError::local(
             "INVALID_MEDIA_PATH",
-            "The media identifier is invalid.",
+            "This media link contains an invalid file identifier. Ask the sender to upload the file again.",
         ));
     }
     if !matches!(
@@ -692,10 +843,62 @@ fn validate_attachment_media_path(path: &str) -> Result<&str, NativeError> {
     ) {
         return Err(NativeError::local(
             "INVALID_MEDIA_PATH",
-            "The media variant is invalid.",
+            "This media preview is unavailable. Open the original file or ask the sender to upload it again.",
         ));
     }
     Ok(path.trim_start_matches('/'))
+}
+
+fn validate_history_media_path(path: &str) -> bool {
+    let Some((route, query)) = path.split_once('?') else {
+        return false;
+    };
+    let parts = route.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    let [
+        "api",
+        "v1",
+        "dms",
+        conversation,
+        "history-media",
+        message,
+        attachment,
+        variant,
+    ] = parts.as_slice()
+    else {
+        return false;
+    };
+    if conversation.parse::<EntityRef>().is_err()
+        || message.parse::<EntityRef>().is_err()
+        || attachment.parse::<EntityRef>().is_err()
+        || !matches!(
+            *variant,
+            "original" | "thumbnail_128" | "thumbnail_512" | "thumbnail_1024" | "poster"
+        )
+    {
+        return false;
+    }
+    let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
+    if pairs.len() != 2 {
+        return false;
+    }
+    let expires = pairs
+        .iter()
+        .find(|(key, _)| key == "expires")
+        .map(|(_, value)| value.as_ref());
+    let token = pairs
+        .iter()
+        .find(|(key, _)| key == "token")
+        .map(|(_, value)| value.as_ref());
+    expires.is_some_and(|value| {
+        !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+            && value.parse::<u64>().is_ok_and(|timestamp| timestamp > 0)
+    }) && token.is_some_and(|value| {
+        (40..=48).contains(&value.len())
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    })
 }
 
 #[tauri::command]
@@ -705,25 +908,22 @@ async fn native_media_request(
 ) -> Result<Response, NativeError> {
     let path = validate_attachment_media_path(&path)?;
     let api = configured_api(&state).await?;
-    let bytes =
-        match api.get_root_bytes(path, NATIVE_MEDIA_MAX_BYTES).await {
-            Ok(bytes) => bytes,
-            Err(ApiClientError::Server { status, .. }) if status.as_u16() == 401 => {
-                let account = state
-                    .account
-                    .read()
-                    .await
-                    .clone()
-                    .ok_or_else(|| NativeError::local("NOT_AUTHENTICATED", "Sign in again."))?;
-                account.session.refresh().await.map_err(|error| {
-                    NativeError::local("SESSION_REFRESH_FAILED", error.to_string())
-                })?;
-                api.get_root_bytes(path, NATIVE_MEDIA_MAX_BYTES)
-                    .await
-                    .map_err(NativeError::from)?
-            }
-            Err(error) => return Err(error.into()),
-        };
+    let bytes = match api.get_root_bytes(path, NATIVE_MEDIA_MAX_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(ApiClientError::Server { status, .. }) if status.as_u16() == 401 => {
+            let account = state.account.read().await.clone().ok_or_else(|| {
+                NativeError::local(
+                    "NOT_AUTHENTICATED",
+                    "Your session is no longer available. Sign in again to continue.",
+                )
+            })?;
+            account.session.refresh().await.map_err(NativeError::from)?;
+            api.get_root_bytes(path, NATIVE_MEDIA_MAX_BYTES)
+                .await
+                .map_err(NativeError::from)?
+        }
+        Err(error) => return Err(error.into()),
+    };
     Ok(Response::new(bytes.to_vec()))
 }
 
@@ -735,27 +935,52 @@ async fn native_upload_object(
     let InvokeBody::Raw(payload) = request.body() else {
         return Err(NativeError::local(
             "INVALID_UPLOAD_BODY",
-            "Expected a binary upload body.",
+            "Kaede could not read the selected file. Select it again and retry the upload.",
         ));
     };
     let length_bytes: [u8; 4] = payload
         .get(..4)
         .and_then(|value| value.try_into().ok())
-        .ok_or_else(|| NativeError::local("INVALID_UPLOAD_BODY", "Upload metadata is missing."))?;
+        .ok_or_else(|| {
+            NativeError::local(
+                "INVALID_UPLOAD_BODY",
+                "Upload instructions are missing. Select the file again and retry.",
+            )
+        })?;
     let ticket_length = u32::from_le_bytes(length_bytes) as usize;
     let ticket_end = 4_usize.checked_add(ticket_length).ok_or_else(|| {
-        NativeError::local("INVALID_UPLOAD_BODY", "Upload metadata is too large.")
+        NativeError::local(
+            "INVALID_UPLOAD_BODY",
+            "The upload instructions are invalid. Select the file again and retry.",
+        )
     })?;
     let ticket: NativeUploadTicket =
         serde_json::from_slice(payload.get(4..ticket_end).ok_or_else(|| {
-            NativeError::local("INVALID_UPLOAD_BODY", "Upload metadata is truncated.")
+            NativeError::local(
+                "INVALID_UPLOAD_BODY",
+                "The upload instructions are incomplete. Select the file again and retry.",
+            )
         })?)
-        .map_err(|error| NativeError::local("INVALID_UPLOAD_BODY", error.to_string()))?;
-    let bytes = payload
-        .get(ticket_end..)
-        .ok_or_else(|| NativeError::local("INVALID_UPLOAD_BODY", "Upload body is truncated."))?;
-    let url = url::Url::parse(&ticket.upload_url)
-        .map_err(|error| NativeError::local("INVALID_UPLOAD_URL", error.to_string()))?;
+        .map_err(|error| {
+            NativeError::operation(
+                "INVALID_UPLOAD_BODY",
+                "Kaede could not read the upload instructions. Select the file again and retry.",
+                error,
+            )
+        })?;
+    let bytes = payload.get(ticket_end..).ok_or_else(|| {
+        NativeError::local(
+            "INVALID_UPLOAD_BODY",
+            "Kaede could not read the complete file. Select it again and retry the upload.",
+        )
+    })?;
+    let url = url::Url::parse(&ticket.upload_url).map_err(|error| {
+        NativeError::operation(
+            "INVALID_UPLOAD_URL",
+            "The upload link is invalid or expired. Select the file again to request a new link.",
+            error,
+        )
+    })?;
     let api = configured_api(&state).await?;
     api.upload_presigned(
         url,
@@ -819,13 +1044,17 @@ async fn native_gateway_command(
             guild_domain: required_string(&payload, "guild_domain")?,
             ranges: serde_json::from_value(payload.get("ranges").cloned().unwrap_or_default())
                 .map_err(|error| {
-                    NativeError::local("INVALID_GATEWAY_COMMAND", error.to_string())
+                    NativeError::operation(
+                        "INVALID_GATEWAY_COMMAND",
+                        "Kaede could not request the member list. Close and reopen the guild, then try again.",
+                        error,
+                    )
                 })?,
         },
         _ => {
             return Err(NativeError::local(
                 "INVALID_GATEWAY_COMMAND",
-                "Unknown gateway command.",
+                "This realtime action is not supported by this version of Kaede. Update the app and try again.",
             ));
         }
     };
@@ -835,19 +1064,38 @@ async fn native_gateway_command(
         .await
         .as_ref()
         .ok_or_else(|| {
-            NativeError::local("GATEWAY_DISCONNECTED", "Realtime connection is offline.")
+            NativeError::local(
+                "GATEWAY_DISCONNECTED",
+                "Realtime updates are offline. Check your connection and wait for Kaede to reconnect.",
+            )
         })?
         .send(command)
         .await
-        .map_err(|_| NativeError::local("GATEWAY_DISCONNECTED", "Realtime connection is offline."))
+        .map_err(|_| {
+            NativeError::local(
+                "GATEWAY_DISCONNECTED",
+                "Realtime updates disconnected before this action was sent. Wait for Kaede to reconnect and try again.",
+            )
+        })
 }
 
 fn required_string(value: &Value, key: &str) -> Result<String, NativeError> {
+    let label = match key {
+        "guild_id" | "guild_domain" => "guild information",
+        _ => "required information",
+    };
     value
         .get(key)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-        .ok_or_else(|| NativeError::local("INVALID_NATIVE_ARGUMENT", format!("Missing {key}.")))
+        .ok_or_else(|| {
+            NativeError::local(
+                "INVALID_NATIVE_ARGUMENT",
+                format!(
+                    "Kaede could not complete this action because {label} is missing. Reopen this screen and try again."
+                ),
+            )
+        })
 }
 
 fn replace_global_hotkey(
@@ -865,9 +1113,10 @@ fn replace_global_hotkey(
     let manager = app.global_shortcut();
     if let Some(next) = replacement.as_deref() {
         manager.register(next).map_err(|error| {
-            NativeError::local(
+            NativeError::operation(
                 "INVALID_PUSH_TO_TALK_HOTKEY",
-                format!("Could not register this shortcut: {error}"),
+                "That push-to-talk shortcut could not be registered. Choose a different key combination; this one may be reserved by your system or another app.",
+                error,
             )
         })?;
     }
@@ -877,9 +1126,10 @@ fn replace_global_hotkey(
         if let Some(next) = replacement.as_deref() {
             let _ = manager.unregister(next);
         }
-        return Err(NativeError::local(
+        return Err(NativeError::operation(
             "GLOBAL_HOTKEY_UNAVAILABLE",
-            format!("Could not replace the previous shortcut: {error}"),
+            "Kaede could not replace the previous push-to-talk shortcut. The previous shortcut is still active; choose a different combination and try again.",
+            error,
         ));
     }
     registration.registered = replacement;
@@ -902,19 +1152,43 @@ fn native_hotkey_status(state: State<'_, NativeState>) -> String {
 async fn native_audio_devices() -> Result<Value, NativeError> {
     let inputs = tokio::task::spawn_blocking(input_devices)
         .await
-        .map_err(|error| NativeError::local("AUDIO_ENUMERATION_FAILED", error.to_string()))?
-        .map_err(|error| NativeError::local("AUDIO_ENUMERATION_FAILED", error.to_string()))?;
+        .map_err(|error| {
+            NativeError::operation(
+                "AUDIO_ENUMERATION_FAILED",
+                "Kaede's audio-device scan stopped unexpectedly. Restart the app and open voice settings again.",
+                error,
+            )
+        })?
+        .map_err(|error| audio_device_error("AUDIO_ENUMERATION_FAILED", "microphone", error))?;
     let outputs = tokio::task::spawn_blocking(output_devices)
         .await
-        .map_err(|error| NativeError::local("AUDIO_ENUMERATION_FAILED", error.to_string()))?
-        .map_err(|error| NativeError::local("AUDIO_ENUMERATION_FAILED", error.to_string()))?;
+        .map_err(|error| {
+            NativeError::operation(
+                "AUDIO_ENUMERATION_FAILED",
+                "Kaede's audio-device scan stopped unexpectedly. Restart the app and open voice settings again.",
+                error,
+            )
+        })?
+        .map_err(|error| audio_device_error("AUDIO_ENUMERATION_FAILED", "speaker", error))?;
     let cameras = tokio::task::spawn_blocking(camera_devices)
         .await
-        .map_err(|error| NativeError::local("CAMERA_ENUMERATION_FAILED", error.to_string()))?
-        .unwrap_or_default();
+        .map_err(|error| {
+            NativeError::operation(
+                "CAMERA_ENUMERATION_FAILED",
+                "Kaede's camera scan stopped unexpectedly. Restart the app and open voice settings again.",
+                error,
+            )
+        })?
+        .map_err(NativeError::from)?;
     let screens = tokio::task::spawn_blocking(screen_sources)
         .await
-        .map_err(|error| NativeError::local("SCREEN_ENUMERATION_FAILED", error.to_string()))?;
+        .map_err(|error| {
+            NativeError::operation(
+                "SCREEN_ENUMERATION_FAILED",
+                "Kaede could not list screens and windows. Check screen-recording permission, restart the app, and try again.",
+                error,
+            )
+        })?;
     Ok(json!({
         "inputs": inputs,
         "outputs": outputs,
@@ -958,7 +1232,7 @@ async fn native_test_input(
     drop(preferences);
     tokio::task::spawn_blocking(move || {
         let capture = NativeCapture::open(&settings)
-            .map_err(|error| NativeError::local("AUDIO_INPUT_FAILED", error.to_string()))?;
+            .map_err(|error| audio_device_error("AUDIO_INPUT_FAILED", "microphone", error))?;
         let mut processors = ProcessorChain::default();
         processors.push(Box::new(SpeechProcessor::from_settings(&settings)));
         let mut peak = 0.0_f32;
@@ -970,7 +1244,13 @@ async fn native_test_input(
         Ok(peak)
     })
     .await
-    .map_err(|error| NativeError::local("AUDIO_INPUT_FAILED", error.to_string()))?
+    .map_err(|error| {
+        NativeError::operation(
+            "AUDIO_INPUT_FAILED",
+            "The microphone test stopped unexpectedly. Restart Kaede and try the test again.",
+            error,
+        )
+    })?
 }
 
 #[tauri::command]
@@ -982,7 +1262,7 @@ async fn native_test_output(
     let output = device_id;
     tokio::task::spawn_blocking(move || {
         let playback = NativePlayback::open(output.as_deref())
-            .map_err(|error| NativeError::local("AUDIO_OUTPUT_FAILED", error.to_string()))?;
+            .map_err(|error| audio_device_error("AUDIO_OUTPUT_FAILED", "speaker", error))?;
         let frame_samples = (VOICE_SAMPLE_RATE / 100) as usize;
         for frame in 0..60 {
             let samples = (0..frame_samples)
@@ -1007,7 +1287,13 @@ async fn native_test_output(
         Ok(())
     })
     .await
-    .map_err(|error| NativeError::local("AUDIO_OUTPUT_FAILED", error.to_string()))?
+    .map_err(|error| {
+        NativeError::operation(
+            "AUDIO_OUTPUT_FAILED",
+            "The speaker test stopped unexpectedly. Restart Kaede and try the test again.",
+            error,
+        )
+    })?
 }
 
 #[tauri::command]
@@ -1025,8 +1311,13 @@ async fn join_native_voice(
     state: &NativeState,
 ) -> Result<(), NativeError> {
     let generation = state.voice_generation.fetch_add(1, Ordering::AcqRel) + 1;
-    let entity = EntityRef::from_str(&reference)
-        .map_err(|error| NativeError::local("INVALID_VOICE_REFERENCE", error.to_string()))?;
+    let entity = EntityRef::from_str(&reference).map_err(|error| {
+        NativeError::operation(
+            "INVALID_VOICE_REFERENCE",
+            "This voice channel reference is invalid. Close and reopen the channel, then try joining again.",
+            error,
+        )
+    })?;
     let account =
         state.account.read().await.clone().ok_or_else(|| {
             NativeError::local("NOT_AUTHENTICATED", "Sign in before joining voice.")
@@ -1039,7 +1330,7 @@ async fn join_native_voice(
     } else {
         kaede_voice::join_channel(account.api.clone(), &entity, capture, output).await
     }
-    .map_err(|error| NativeError::local("VOICE_JOIN_FAILED", error.to_string()))?;
+    .map_err(NativeError::from)?;
     if state.voice_generation.load(Ordering::Acquire) != generation {
         handle.leave().await;
         return Ok(());
@@ -1087,11 +1378,21 @@ async fn native_voice_control(
     };
     voice
         .as_mut()
-        .ok_or_else(|| NativeError::local("VOICE_NOT_CONNECTED", "Join voice first."))?
+        .ok_or_else(|| {
+            NativeError::local(
+                "VOICE_NOT_CONNECTED",
+                "Join a voice channel before using voice controls.",
+            )
+        })?
         .commands
         .send(command)
         .await
-        .map_err(|_| NativeError::local("VOICE_DISCONNECTED", "The voice session ended."))?;
+        .map_err(|_| {
+            NativeError::local(
+                "VOICE_DISCONNECTED",
+                "The voice session ended before that change was applied. Join voice again and retry.",
+            )
+        })?;
     let mut ui = state.voice_ui.write().await;
     match control {
         VoiceControl::Mute => ui.muted = true,
@@ -1182,7 +1483,10 @@ async fn native_voice_next_video(
     };
     let participant = frame.participant.as_bytes();
     let participant_length: u16 = participant.len().try_into().map_err(|_| {
-        NativeError::local("INVALID_VIDEO_FRAME", "Participant identity is too long.")
+        NativeError::local(
+            "INVALID_VIDEO_FRAME",
+            "An incoming video stream could not be displayed. Leave voice and join again; update Kaede if it keeps happening.",
+        )
     })?;
     let mut packet = Vec::with_capacity(15 + participant.len() + frame.rgba.len());
     packet.extend_from_slice(b"KVD1");
@@ -1197,8 +1501,13 @@ async fn native_voice_next_video(
 
 #[tauri::command]
 async fn native_preferences_get(state: State<'_, NativeState>) -> Result<Value, NativeError> {
-    serde_json::to_value(&*state.preferences.read().await)
-        .map_err(|error| NativeError::local("PREFERENCES_INVALID", error.to_string()))
+    serde_json::to_value(&*state.preferences.read().await).map_err(|error| {
+        NativeError::operation(
+            "PREFERENCES_INVALID",
+            "Kaede could not read your desktop preferences. Restart the app; if the problem continues, reset desktop settings.",
+            error,
+        )
+    })
 }
 
 #[tauri::command]
@@ -1226,7 +1535,13 @@ async fn native_preferences_set(
     preferences
         .save(&state.paths)
         .await
-        .map_err(|error| NativeError::local("PREFERENCES_SAVE_FAILED", error.to_string()))?;
+        .map_err(|error| {
+            NativeError::operation(
+                "PREFERENCES_SAVE_FAILED",
+                "Kaede could not save your desktop preferences. Check that the app can write to its settings directory and try again.",
+                error,
+            )
+        })?;
     *state.preferences.write().await = preferences;
     let target = if restart_voice {
         state.voice_target.read().await.clone()
@@ -1275,20 +1590,37 @@ fn prepare_native_notifications() -> Result<(), NativeError> {
         .create_subkey(format!(
             r"SOFTWARE\Classes\AppUserModelId\{WINDOWS_NOTIFICATION_APP_ID}"
         ))
-        .map_err(|error| NativeError::local("NOTIFICATION_IDENTITY_FAILED", error.to_string()))?;
+        .map_err(|error| {
+            NativeError::operation(
+                "NOTIFICATION_IDENTITY_FAILED",
+                "Windows notifications could not be configured. Check that Kaede is allowed to send notifications, then restart the app.",
+                error,
+            )
+        })?;
     key.set_value("DisplayName", &"Kaede Chat")
         .and_then(|_| key.set_value("IconBackgroundColor", &"0"))
-        .map_err(|error| NativeError::local("NOTIFICATION_IDENTITY_FAILED", error.to_string()))?;
+        .map_err(|error| {
+            NativeError::operation(
+                "NOTIFICATION_IDENTITY_FAILED",
+                "Windows notifications could not be configured. Check that Kaede is allowed to send notifications, then restart the app.",
+                error,
+            )
+        })?;
     if let Ok(executable) = std::env::current_exe() {
         let icon_path = executable.to_string_lossy().into_owned();
         key.set_value("IconUri", &icon_path).map_err(|error| {
-            NativeError::local("NOTIFICATION_IDENTITY_FAILED", error.to_string())
+            NativeError::operation(
+                "NOTIFICATION_IDENTITY_FAILED",
+                "Windows notifications could not use the Kaede app identity. Restart the app; if this continues, reinstall Kaede.",
+                error,
+            )
         })?;
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::unnecessary_wraps)]
 fn prepare_native_notifications() -> Result<(), NativeError> {
     Ok(())
 }
@@ -1300,7 +1632,13 @@ fn show_native_notification(_app: &AppHandle, title: &str, body: &str) -> Result
         .title(title)
         .text1(body)
         .show()
-        .map_err(|error| NativeError::local("NOTIFICATION_FAILED", error.to_string()))
+        .map_err(|error| {
+            NativeError::operation(
+                "NOTIFICATION_FAILED",
+                "Windows did not display the notification. Allow Kaede notifications in Windows Settings and turn off Do Not Disturb, then try again.",
+                error,
+            )
+        })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1310,7 +1648,13 @@ fn show_native_notification(app: &AppHandle, title: &str, body: &str) -> Result<
         .title(title)
         .body(body)
         .show()
-        .map_err(|error| NativeError::local("NOTIFICATION_FAILED", error.to_string()))
+        .map_err(|error| {
+            NativeError::operation(
+                "NOTIFICATION_FAILED",
+                "Your system did not display the notification. Allow Kaede notifications and turn off Do Not Disturb, then try again.",
+                error,
+            )
+        })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1333,18 +1677,37 @@ fn main() {
             )),
         };
         if let Err(error) = result {
-            eprintln!("{error}");
+            tracing::error!(%error, "browser verification helper failed");
+            eprintln!(
+                "Kaede could not complete browser verification. Close the verification window and try again."
+            );
             std::process::exit(1);
         }
         return;
     }
 
     let paths = PlatformPaths::discover().unwrap_or_else(|error| {
-        eprintln!("Could not locate Kaede's private application directory: {error}");
+        tracing::error!(%error, "private application directory could not be located");
+        eprintln!(
+            "Kaede could not open its private application-data directory. Check that your account can access the system application-data folder, then restart Kaede."
+        );
         std::process::exit(1);
     });
-    let preferences =
-        tauri::async_runtime::block_on(DesktopPreferences::load(&paths)).unwrap_or_default();
+    let (preferences, startup_notice) = match tauri::async_runtime::block_on(
+        DesktopPreferences::load(&paths),
+    ) {
+        Ok(preferences) => (preferences, None),
+        Err(error) => {
+            tracing::warn!(%error, "desktop preferences could not be loaded; using defaults");
+            (
+                    DesktopPreferences::default(),
+                    Some(
+                        "Kaede could not read your saved desktop settings, so safe defaults were restored. Review and save Voice & Video settings to replace the damaged settings file."
+                            .to_owned(),
+                    ),
+                )
+        }
+    };
     let (gateway_events_tx, gateway_events_rx) = mpsc::unbounded_channel();
     let push_to_talk_sender = Arc::new(SyncMutex::new(None::<mpsc::Sender<VoiceCommand>>));
     let event_sender = push_to_talk_sender.clone();
@@ -1390,7 +1753,7 @@ fn main() {
             },
         ))
         .manage(state)
-        .setup(|app| {
+        .setup(move |app| {
             // Warm the persisted account and OS credential vault immediately.
             // The frontend and configured_api also await/retry this same
             // serialized operation, which closes the hard-restart race.
@@ -1413,6 +1776,12 @@ fn main() {
                             || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
                     })
                     .build()?;
+            if let Some(notice) = startup_notice.as_deref()
+                && let Err(error) =
+                    show_native_notification(app.handle(), "Desktop settings were reset", notice)
+            {
+                tracing::warn!(?error, "desktop settings warning could not be displayed");
+            }
             {
                 let state = app.state::<NativeState>();
                 let configured = state
@@ -1498,7 +1867,10 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
-            eprintln!("Kaede desktop failed: {error}");
+            tracing::error!(%error, "desktop application failed to start");
+            eprintln!(
+                "Kaede could not start its desktop window. Restart the app; if it keeps failing, check the system logs or reinstall Kaede."
+            );
             std::process::exit(1);
         });
 }
@@ -1513,14 +1885,32 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_attachment_media_path;
+    use kaede_api::ApiClientError;
+    use kaede_protocol::ApiError;
+    use reqwest::StatusCode;
+
+    use super::{NativeError, validate_attachment_media_path};
 
     #[test]
     fn attachment_media_paths_are_narrowly_scoped() {
-        assert_eq!(
+        let Ok(valid_path) =
             validate_attachment_media_path("/media/chat.example/75512661369970688/thumbnail_512")
-                .expect("valid attachment path"),
+        else {
+            panic!("expected a valid attachment path");
+        };
+        assert_eq!(
+            valid_path,
             "media/chat.example/75512661369970688/thumbnail_512"
+        );
+        let history_path = "/api/v1/dms/43@home.example/history-media/50@remote.example/60@remote.example/original?expires=2000000000&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO";
+        assert_eq!(
+            validate_attachment_media_path(history_path).ok(),
+            Some(history_path.trim_start_matches('/'))
+        );
+        let expired_history_path = "/api/v1/dms/43@home.example/history-media/50@remote.example/60@remote.example/original?expires=1&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO";
+        assert_eq!(
+            validate_attachment_media_path(expired_history_path).ok(),
+            Some(expired_history_path.trim_start_matches('/'))
         );
         for rejected in [
             "/media/chat.example/0/original",
@@ -1529,11 +1919,54 @@ mod tests {
             "/media/../75512661369970688/original",
             "/media/chat.example/75512661369970688/original?token=secret",
             "/media/chat.example/75512661369970688/original/extra",
+            "https://remote.example/media/60",
+            "//remote.example/media/60",
+            "/api/v1/dms/43@home.example/history-media/50@remote.example/60@remote.example/original?expires=2000000000&token=bad",
+            "/api/v1/users/@me?expires=2000000000&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO",
         ] {
             assert!(
                 validate_attachment_media_path(rejected).is_err(),
                 "{rejected}"
             );
         }
+    }
+
+    #[test]
+    fn native_server_errors_keep_support_details_but_show_clear_wording() {
+        let native = NativeError::from(ApiClientError::Server {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: Box::new(ApiError {
+                code: "INTERNAL_SERVER_ERROR".to_owned(),
+                message: "Internal Server Error".to_owned(),
+                trace_id: Some("7f21d8d0-example-trace".to_owned()),
+                permissions: None,
+                retry_after_ms: None,
+                max_bytes: None,
+                timeout_until: None,
+                timeout_indefinite: None,
+                reason: None,
+                errors: Vec::new(),
+            }),
+        });
+
+        assert_eq!(native.code, "INTERNAL_SERVER_ERROR");
+        assert_eq!(native.status, 500);
+        assert!(native.message.contains("Try again"));
+        assert!(native.message.contains("Error reference: 7f21d8d0-exa."));
+        assert!(!native.message.contains("Internal Server Error"));
+        assert_eq!(native.detail["trace_id"], "7f21d8d0-example-trace");
+    }
+
+    #[test]
+    fn native_operation_errors_do_not_expose_internal_causes() {
+        let error = NativeError::operation(
+            "PREFERENCES_INVALID",
+            "Kaede could not read your desktop preferences. Reset desktop settings and try again.",
+            "expected value at line 4 column 18 in /private/config.json",
+        );
+
+        assert!(error.message.contains("Reset desktop settings"));
+        assert!(!error.message.contains("line 4"));
+        assert_eq!(error.detail, serde_json::Value::Null);
     }
 }

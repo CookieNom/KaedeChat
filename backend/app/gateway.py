@@ -51,6 +51,7 @@ from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityReference, validate_entity_reference
 from app.db.models import (
     Channel,
+    DMConversation,
     DMParticipant,
     Guild,
     GuildMember,
@@ -61,7 +62,11 @@ from app.db.models import (
 )
 from app.db.models import Session as AuthSession
 from app.db.session import create_engine_and_sessionmaker
-from app.tasks import federation_presence_fanout
+from app.federation.dm_storage import (
+    dm_authority_history_available,
+    dm_history_metadata,
+)
+from app.tasks import federation_presence_fanout, history_status_key
 from app.voice.rooms import parse_room_name, participant_identity
 from app.voice.state import update_self_flags
 
@@ -738,7 +743,25 @@ async def identify(
                     .order_by(User.origin_domain, User.username)
                 )
             )
-            dm_channels.append(dm_channel_payload(channel, recipients))
+            conversation = await session.get(
+                DMConversation,
+                (channel.id, channel.origin_domain),
+            )
+            dm_channels.append(
+                dm_channel_payload(
+                    channel,
+                    recipients,
+                    history=dm_history_metadata(
+                        conversation,
+                        local_domain=settings.domain,
+                        remote_available=await dm_authority_history_available(
+                            session,
+                            conversation,
+                            local_domain=settings.domain,
+                        ),
+                    ),
+                )
+            )
     topics = [user_topic(user.origin_domain, user.id)]
     topics.extend(guild_topic(guild.origin_domain, guild.id) for guild in guilds)
     return user, guilds, states, dm_channels, topics
@@ -821,6 +844,92 @@ async def gateway_grant_is_current(
     return active is not None
 
 
+async def guild_history_sync_statuses(
+    redis: Redis,
+    user: User,
+    guilds: list[Guild],
+) -> dict[tuple[int, str], dict[str, object]]:
+    """Load bounded, user-scoped history warnings for a fresh READY.
+
+    The worker hash is a recoverable projection, so malformed or stale fields
+    are ignored rather than allowing cache contents to break gateway login.
+    """
+
+    accessible = {(guild.id, guild.origin_domain) for guild in guilds}
+    status_key = history_status_key(user.origin_domain, user.id)
+    try:
+        raw_statuses = await redis.hgetall(status_key)  # type: ignore[misc]
+    except Exception as exc:
+        # History status is advisory. A Redis projection failure must never
+        # prevent an otherwise valid gateway login or hide the guild itself.
+        log.warning(
+            "guild_history_status_load_failed",
+            user_id=str(user.id),
+            error_type=type(exc).__name__,
+        )
+        return {}
+    statuses: dict[tuple[int, str], dict[str, object]] = {}
+    stale_fields: list[object] = []
+    for status_field, raw in raw_statuses.items():
+        try:
+            encoded_field = (
+                status_field.decode("utf-8")
+                if isinstance(status_field, bytes)
+                else str(status_field)
+            )
+            encoded_payload = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+            guild_ref = validate_entity_reference(encoded_field)
+            guild_id, guild_domain = guild_ref.resolve(settings.domain)
+            payload = json.loads(encoded_payload)
+        except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            stale_fields.append(status_field)
+            continue
+        if (guild_id, guild_domain) not in accessible or not isinstance(payload, dict):
+            stale_fields.append(status_field)
+            continue
+        status = payload.get("status")
+        code = payload.get("code")
+        if status not in {"retrying", "failed"} or not isinstance(code, str):
+            stale_fields.append(status_field)
+            continue
+        projected: dict[str, object] = {
+            "history_sync_status": status,
+            "history_sync_error_code": code,
+        }
+        retry_after_ms = payload.get("retry_after_ms")
+        if (
+            status == "retrying"
+            and isinstance(retry_after_ms, int)
+            and not isinstance(retry_after_ms, bool)
+            and 1_000 <= retry_after_ms <= 86_400_000
+        ):
+            projected["history_sync_retry_after_ms"] = retry_after_ms
+        resource = payload.get("resource")
+        if status == "failed" and resource in {
+            "pages",
+            "messages",
+            "bytes",
+            "reactions",
+            "duration",
+            "delta_requests",
+        }:
+            projected["history_sync_resource"] = resource
+        statuses[(guild_id, guild_domain)] = projected
+    if stale_fields:
+        try:
+            await redis.hdel(status_key, *stale_fields)
+        except Exception as exc:
+            # Cleanup is opportunistic and the hash has a defensive TTL. Keep
+            # serving validated statuses even if this Redis write fails.
+            log.warning(
+                "guild_history_status_cleanup_failed",
+                user_id=str(user.id),
+                stale_count=len(stale_fields),
+                error_type=type(exc).__name__,
+            )
+    return statuses
+
+
 def ready_payload(
     user: User,
     guilds: list[Guild],
@@ -828,13 +937,20 @@ def ready_payload(
     dm_channels: list[dict[str, object]],
     gateway_session_id: str,
     presence_preference: str,
+    history_statuses: dict[tuple[int, str], dict[str, object]] | None = None,
 ) -> dict[str, object]:
     return {
         "v": PROTOCOL_VERSION,
         "session_id": gateway_session_id,
         "presence_preference": presence_preference,
         "user": user_payload(user),
-        "guilds": [guild_payload(guild) for guild in guilds],
+        "guilds": [
+            {
+                **guild_payload(guild),
+                **(history_statuses or {}).get((guild.id, guild.origin_domain), {}),
+            }
+            for guild in guilds
+        ],
         "dm_channels": dm_channels,
         "read_states": [
             {
@@ -1375,7 +1491,10 @@ async def member_payloads(
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
             payload = member_payload(
-                member, member_user, roles[(member.user_id, member.user_domain)]
+                member,
+                member_user,
+                roles[(member.user_id, member.user_domain)],
+                include_private_authority_state=guild_domain == settings.domain,
             )
             payload["presence"] = status
             payloads.append(payload)
@@ -2039,6 +2158,7 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                 )
             sequence += 1
             presence_preference = await current_presence_preference(sessionmaker, redis, user)
+            history_statuses = await guild_history_sync_statuses(redis, user, guilds)
             await websocket.send_json(
                 {
                     "op": GatewayOp.DISPATCH,
@@ -2132,6 +2252,7 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                         dm_channels,
                         gateway_session_id,
                         presence_preference,
+                        history_statuses,
                     ),
                 }
             )

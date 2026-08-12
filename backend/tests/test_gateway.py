@@ -42,6 +42,112 @@ class LimiterRedis:
         return [1, 0, int(global_burst) - self.counts[global_key]]
 
 
+@pytest.mark.asyncio
+async def test_ready_history_status_projection_is_user_scoped_and_safe() -> None:
+    class StatusRedis:
+        def __init__(self) -> None:
+            self.removed_fields: tuple[object, ...] = ()
+
+        async def hgetall(self, key: str) -> dict[bytes, bytes]:
+            assert key == gateway.history_status_key("alpha.test", 7)
+            # The accessible record deliberately follows more than the old
+            # projection cap's worth of stale records. READY must still expose
+            # its warning and clean the stale projection entries.
+            records = {
+                f"{100 + index}@left-{index}.test".encode(): (
+                    b'{"status":"failed","code":"not accessible"}'
+                )
+                for index in range(40)
+            }
+            records[b"42@remote.test"] = json.dumps(
+                {
+                    "guild_id": "42",
+                    "guild_domain": "remote.test",
+                    "status": "retrying",
+                    "code": "KAED_FED_HISTORY_CAPACITY",
+                    "retry_after_ms": 60_000,
+                }
+            ).encode()
+            records[b"broken"] = b"not-json"
+            return records
+
+        async def hdel(self, key: str, *fields: object) -> int:
+            assert key == gateway.history_status_key("alpha.test", 7)
+            self.removed_fields = fields
+            return len(fields)
+
+    user = User(
+        id=7,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        email="maple@example.com",
+        password_hash="hash",
+    )
+    redis = StatusRedis()
+    statuses = await gateway.guild_history_sync_statuses(
+        redis,  # type: ignore[arg-type]
+        user,
+        [SimpleNamespace(id=42, origin_domain="remote.test")],  # type: ignore[list-item]
+    )
+
+    assert statuses == {
+        (42, "remote.test"): {
+            "history_sync_status": "retrying",
+            "history_sync_error_code": "KAED_FED_HISTORY_CAPACITY",
+            "history_sync_retry_after_ms": 60_000,
+        }
+    }
+    assert len(redis.removed_fields) == 41
+    assert b"broken" in redis.removed_fields
+    assert b"42@remote.test" not in redis.removed_fields
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_operation", ["read", "cleanup"])
+async def test_ready_history_status_cache_failure_does_not_break_login(
+    fail_operation: str,
+) -> None:
+    class UnavailableStatusRedis:
+        async def hgetall(self, _key: str) -> dict[bytes, bytes]:
+            if fail_operation == "read":
+                raise ConnectionError("cache unavailable")
+            return {
+                b"42@remote.test": b'{"status":"failed","code":"safe"}',
+                b"99@left.test": b'{"status":"failed","code":"stale"}',
+            }
+
+        async def hdel(self, _key: str, *_fields: object) -> int:
+            if fail_operation == "cleanup":
+                raise ConnectionError("cache unavailable")
+            return 0
+
+    user = User(
+        id=7,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        email="maple@example.com",
+        password_hash="hash",
+    )
+
+    statuses = await gateway.guild_history_sync_statuses(
+        UnavailableStatusRedis(),  # type: ignore[arg-type]
+        user,
+        [SimpleNamespace(id=42, origin_domain="remote.test")],  # type: ignore[list-item]
+    )
+
+    if fail_operation == "read":
+        assert statuses == {}
+    else:
+        assert statuses == {
+            (42, "remote.test"): {
+                "history_sync_status": "failed",
+                "history_sync_error_code": "safe",
+            }
+        }
+
+
 class HandshakeWebSocket:
     def __init__(self, app: SimpleNamespace, payload: object | None = None) -> None:
         self.app = app

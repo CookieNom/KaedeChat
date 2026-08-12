@@ -45,7 +45,7 @@ is normative in [kaede-fed-v1.md](kaede-fed-v1.md).
 - Remote attachment identities remain `(origin_domain, attachment_id, variant)`.
   Fetches use a fixed signed `/_kaede/v1/media/...` path through the shared
   DNS-pinning SSRF guard, reject redirects and oversized responses, re-sniff and
-  re-scan bytes locally, and cache them in the selected store with a 20 GiB LRU
+  re-scan bytes locally, and cache them in the selected store with a 100 GiB LRU
   ceiling and 30-day TTL by default. Cache hits bypass fetch admission; misses
   use a per-user Dragonfly bucket and one of eight process-local fetch/scan/store
   permits so distinct uncached objects cannot exhaust API memory or outbound

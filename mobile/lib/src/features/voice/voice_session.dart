@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -18,6 +19,25 @@ final voiceSessionProvider = ChangeNotifierProvider<VoiceSession>((ref) {
 });
 
 enum VoiceAudioRoute { phone, speaker, bluetooth }
+
+String voiceDisconnectMessage(DisconnectReason? reason) => switch (reason) {
+      DisconnectReason.duplicateIdentity =>
+        'Voice was opened for this account on another device.',
+      DisconnectReason.serverShutdown =>
+        'The voice server restarted. Rejoin in a moment.',
+      DisconnectReason.participantRemoved =>
+        'A moderator disconnected you from voice.',
+      DisconnectReason.roomDeleted => 'This voice room no longer exists.',
+      DisconnectReason.stateMismatch =>
+        'The voice session was out of date. Rejoin the channel.',
+      DisconnectReason.joinFailure =>
+        'Kaede could not join voice. Check your connection and permissions, then try again.',
+      DisconnectReason.signalingConnectionFailure ||
+      DisconnectReason.reconnectAttemptsExceeded =>
+        'The connection to voice was lost. Check your connection and rejoin.',
+      DisconnectReason.clientInitiated => 'You left voice.',
+      _ => 'Voice disconnected. Check your connection and rejoin.',
+    };
 
 /// Owns mobile voice independently of the currently visible route.
 ///
@@ -103,7 +123,12 @@ final class VoiceSession extends ChangeNotifier {
       final url = '${grant['url'] ?? ''}';
       final token = '${grant['token'] ?? ''}';
       if (url.isEmpty || token.isEmpty) {
-        throw StateError('The voice server returned an invalid connection.');
+        throw const KaedeException(
+          code: 'VOICE_HOME_INVALID_RESPONSE',
+          message:
+              'The voice server returned an invalid connection. Try again or contact your instance operator.',
+          status: 502,
+        );
       }
 
       final room = candidate = Room(
@@ -123,7 +148,7 @@ final class VoiceSession extends ChangeNotifier {
       events
         ..on<RoomDisconnectedEvent>((event) {
           if (_room != room) return;
-          _error = event.reason?.toString() ?? 'Voice disconnected.';
+          _error = voiceDisconnectMessage(event.reason);
           notifyListeners();
         })
         ..on<ParticipantConnectedEvent>((_) {
@@ -473,11 +498,12 @@ final class VoiceSession extends ChangeNotifier {
   }
 
   String _friendly(Object exception) {
+    if (exception is KaedeException) return userFacingError(exception);
     final text = '$exception';
     if (text.contains('403') || text.toLowerCase().contains('forbidden')) {
       return 'You do not have permission to join this voice channel.';
     }
-    return text.replaceFirst('Bad state: ', '');
+    return 'Kaede could not connect to voice. Check your connection and microphone permissions, then try again.';
   }
 
   @override

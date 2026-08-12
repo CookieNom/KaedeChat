@@ -3,61 +3,19 @@ import {
   isNativeDesktop,
   nativeError,
   nativeInvoke,
+  type NativeError,
   type NativeResponse
 } from '$lib/platform/native';
+import {
+  apiErrorMessage,
+  ApiError,
+  normalizeErrorDetail,
+  trustedClientErrorMessage,
+  validRetryAfterMs,
+  validTraceId
+} from './errors';
 
-export class ApiError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly status: number,
-    readonly detail: Record<string, unknown> = {}
-  ) {
-    super(message);
-  }
-}
-
-const ERROR_MESSAGES: Record<string, string> = {
-  MISSING_PERMISSIONS: "You don't have permission to do that.",
-  CANNOT_MANAGE_PERMISSIONS: "You can't change those permissions.",
-  CANNOT_GRANT_PERMISSIONS: "You can't grant permissions you don't have.",
-  ROLE_HIERARCHY: 'That member or role is higher than your highest role.',
-  OWNER_IMMUNE: "The guild owner can't be moderated or have their roles changed.",
-  CANNOT_MANAGE_SELF: "You can't use that action on yourself.",
-  ROLE_ORDER_INCOMPLETE:
-    'The role list changed while you were reordering it. Reload and try again.',
-  ROLE_ORDER_NOT_CONTIGUOUS: 'The role order is invalid. Reload and try again.',
-  ROLE_POSITION_BATCH_REQUIRED: 'Reorder roles by dragging them in the role list.',
-  TARGET_CANNOT_CONNECT: "That member doesn't have permission to join this voice channel.",
-  VOICE_NOT_CONNECTED: 'That member is no longer connected to voice.',
-  VOICE_DISABLED: 'Voice is disabled on this instance.',
-  VOICE_HOME_UNREACHABLE: 'The voice server is temporarily unavailable. Try again shortly.',
-  SLOWMODE_RATE_LIMITED: 'Slow mode is active. Wait before sending another message.',
-  USE_EXTERNAL_EMOJIS_REQUIRED: "You don't have permission to use emoji from another guild here.",
-  CUSTOM_EMOJI_SOURCE_ACCESS_REQUIRED: 'You no longer have access to that custom emoji.',
-  CUSTOM_EMOJI_NOT_FOUND: 'That custom emoji no longer exists.',
-  CUSTOM_EMOJI_INVALID: 'That custom emoji reference is invalid.',
-  EMOJI_LIMIT_REACHED: 'This guild has reached its custom emoji limit.',
-  EMOJI_NAME_TAKEN: 'This guild already has an emoji with that name.',
-  EMOJI_TOO_LARGE: 'That emoji image exceeds this instance’s size limit.',
-  ROLE_NOT_MENTIONABLE: 'That role cannot be mentioned.',
-  INVALID_ROLE_MENTION: 'That role mention is no longer valid.',
-  TOO_MANY_ROLE_MENTIONS: 'A message can mention at most 25 roles.',
-  ROLE_MENTION_TOO_LARGE: 'That role mention would notify too many members.'
-};
-
-function readableErrorMessage(
-  code: string,
-  status: number,
-  detail: Record<string, unknown>
-): string {
-  const supplied = typeof detail.message === 'string' ? detail.message.trim() : '';
-  if (supplied && !/^forbidden$/i.test(supplied)) return supplied;
-  const configured = ERROR_MESSAGES[code];
-  if (configured) return configured;
-  if (status === 403) return "You don't have permission to do that.";
-  return supplied || 'Request failed';
-}
+export { ApiError, userErrorMessage } from './errors';
 
 const PUBLIC_AUTH_PATHS = new Set([
   '/auth/config',
@@ -74,6 +32,34 @@ const PUBLIC_AUTH_PATHS = new Set([
 export type RefreshResult = 'ok' | 'invalid' | 'unavailable';
 
 let refreshPromise: Promise<RefreshResult> | null = null;
+const trustedNativeMessages = new WeakMap<Response, string>();
+
+function isStructuredNativeError(value: unknown): value is NativeError & {
+  code: string;
+  message: string;
+  status: number;
+} {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  const validDetail =
+    candidate.detail === undefined ||
+    candidate.detail === null ||
+    (typeof candidate.detail === 'object' &&
+      candidate.detail !== null &&
+      !Array.isArray(candidate.detail));
+  return (
+    typeof candidate.code === 'string' &&
+    /^[A-Z][A-Z0-9_]{1,127}$/.test(candidate.code) &&
+    typeof candidate.message === 'string' &&
+    candidate.message.trim().length > 0 &&
+    candidate.message.length <= 500 &&
+    !/[\r\n\t]/.test(candidate.message) &&
+    typeof candidate.status === 'number' &&
+    Number.isInteger(candidate.status) &&
+    (candidate.status === 0 || (candidate.status >= 400 && candidate.status <= 599)) &&
+    validDetail
+  );
+}
 
 function requestHeaders(init: RequestInit): Headers {
   const headers = new Headers(init.headers);
@@ -198,10 +184,17 @@ async function send(path: string, init: RequestInit): Promise<Response> {
         code: error.code ?? 'NATIVE_TRANSPORT_ERROR',
         message: error.message ?? 'The desktop transport could not complete the request.'
       };
-      return new Response(JSON.stringify({ detail }), {
+      const response = new Response(JSON.stringify({ detail }), {
         status,
         headers: { 'Content-Type': 'application/json' }
       });
+      // Only Rust's structured NativeError envelope contains wording that has
+      // been deliberately written for users. Tauri can also reject with raw
+      // strings or JavaScript errors; those must pass through normal filtering.
+      if (isStructuredNativeError(caught)) {
+        trustedNativeMessages.set(response, caught.message.trim());
+      }
+      return response;
     }
   }
   return fetch(`/api/v1${path}`, {
@@ -223,31 +216,47 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     } else {
       throw new ApiError(
         'SESSION_REFRESH_UNAVAILABLE',
-        'The server is temporarily unavailable. Your session was not cleared.',
+        'The server is temporarily unavailable. Try again shortly; your session was not cleared.',
         503
       );
     }
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    const rawDetail =
-      typeof body === 'object' && body !== null && 'detail' in body
-        ? (body as Record<string, unknown>).detail
-        : body;
-    const detail =
-      typeof rawDetail === 'object' && rawDetail !== null
-        ? (rawDetail as Record<string, unknown>)
-        : typeof rawDetail === 'string'
-          ? { message: rawDetail }
-          : {};
+    const detail = normalizeErrorDetail(body);
+    if (!validTraceId(detail.trace_id)) {
+      const headerTraceId = validTraceId(response.headers.get('X-Kaede-Trace-Id'));
+      if (headerTraceId) detail.trace_id = headerTraceId;
+    }
+    if (validRetryAfterMs(detail.retry_after_ms) === null) {
+      const retryAfterHeader = response.headers.get('Retry-After');
+      const retryAfterSeconds = retryAfterHeader === null ? Number.NaN : Number(retryAfterHeader);
+      if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+        detail.retry_after_ms = Math.min(retryAfterSeconds * 1000, 86_400_000);
+      }
+    }
     const code = typeof detail.code === 'string' ? detail.code : 'REQUEST_FAILED';
+    const trustedNativeMessage = trustedNativeMessages.get(response);
     throw new ApiError(
       code,
-      readableErrorMessage(code, response.status, detail),
+      trustedNativeMessage
+        ? trustedClientErrorMessage(trustedNativeMessage, code, response.status, detail)
+        : apiErrorMessage(code, response.status, detail),
       response.status,
       detail
     );
   }
   if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  try {
+    return (await response.json()) as T;
+  } catch {
+    const traceId = validTraceId(response.headers.get('X-Kaede-Trace-Id'));
+    const detail: Record<string, unknown> = traceId ? { trace_id: traceId } : {};
+    throw new ApiError(
+      'INVALID_SERVER_RESPONSE',
+      apiErrorMessage('INVALID_SERVER_RESPONSE', 502, detail),
+      502,
+      detail
+    );
+  }
 }

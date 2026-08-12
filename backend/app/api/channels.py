@@ -9,7 +9,7 @@ import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from redis.asyncio import Redis
-from sqlalchemy import case, delete, func, insert, select, tuple_, update
+from sqlalchemy import case, delete, exists, func, insert, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,10 +27,16 @@ from app.chat.channel_access import (
     publish_channel_dispatch,
 )
 from app.chat.custom_emojis import validate_custom_emoji_use
-from app.chat.events import publish_dispatch, user_topic
+from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
 from app.chat.mentions import merge_mention_recipients, role_mention_recipients
-from app.chat.payloads import attachment_payload, message_payload, render_message_payload
+from app.chat.payloads import (
+    attachment_payload,
+    dm_channel_payload,
+    guild_payload,
+    message_payload,
+    render_message_payload,
+)
 from app.chat.permissions import require_permissions
 from app.chat.privacy import blocked_between, lock_relationship_pair, require_can_direct_message
 from app.chat.schemas import (
@@ -51,8 +57,10 @@ from app.core.types import EntityRef, EntityReferenceLike
 from app.db.models import (
     Attachment,
     Channel,
+    DMConversation,
     FederationEvent,
     FederationOutbox,
+    Guild,
     GuildMember,
     Message,
     MessageProjection,
@@ -62,6 +70,21 @@ from app.db.models import (
     User,
 )
 from app.federation.client import signed_request
+from app.federation.dm_history import (
+    MAX_DM_HISTORY_RESPONSE_BYTES,
+    dm_history_page_is_complete,
+    merge_dm_history_messages,
+    validate_dm_history_page,
+)
+from app.federation.dm_storage import (
+    FederatedDMQuotaExceeded,
+    admit_federated_dm_message,
+    dm_authority_history_available,
+    dm_history_metadata,
+    dm_message_storage_delta,
+    lock_federated_dm_authority,
+    opaque_dm_history_ref_allowed,
+)
 from app.federation.events import build_envelope, queue_event
 from app.federation.guilds import (
     GuildSequenceGap,
@@ -69,22 +92,65 @@ from app.federation.guilds import (
     assign_guild_sequence,
     remote_destinations_with_channel_access,
     store_guild_event,
-    synchronize_guild,
 )
-from app.federation.network import FederationNetworkError
+from app.federation.network import (
+    FederationNetworkError,
+    decode_federation_response_json,
+)
+from app.federation.replica_storage import (
+    REPLICA_QUOTA_ERROR_CODE,
+    FederationReplicaQuotaExceeded,
+    admit_replica_storage,
+    mark_replica_quota_paused,
+)
 from app.federation.replication import profile_from_user
 from app.federation.security import validated_event_envelope
 from app.media.service import attachments_for_messages, finalize_attachment
 from app.tasks import (
     SET_LATEST_MESSAGE_SCRIPT,
     federation_deliver,
+    federation_guild_sync,
     media_local_purge,
     media_process,
     mentions_fanout,
 )
 
 router = APIRouter(prefix="/api/v1/channels", tags=["messages"])
+DM_REACTIONS_PER_MESSAGE_LIMIT = 100
 log = structlog.get_logger()
+
+
+async def publish_replica_guild_status(redis: Redis, guild: Guild) -> None:
+    """Best-effort live projection for a replica quota pause or recovery."""
+
+    try:
+        await publish_dispatch(
+            redis,
+            guild_topic(guild.origin_domain, guild.id),
+            "GUILD_UPDATE",
+            guild_payload(guild),
+        )
+    except Exception:
+        log.exception(
+            "replica_guild_status_publish_failed",
+            guild_id=str(guild.id),
+            guild_domain=guild.origin_domain,
+        )
+
+
+def raise_proxy_rejection(response: httpx.Response, statuses: set[int]) -> None:
+    """Preserve bounded, typed peer errors for synchronous proxy operations."""
+
+    if response.status_code not in statuses:
+        return
+    try:
+        error_body = decode_federation_response_json(response)
+    except FederationNetworkError:
+        error_body = None
+    raise HTTPException(
+        status_code=response.status_code,
+        detail=parse_upstream_error(error_body, "FEDERATED_WRITE_REJECTED"),
+    )
 
 
 async def require_channel_permissions(
@@ -209,20 +275,12 @@ async def proxy_remote_guild_pin(
         raise HTTPException(
             status_code=503, detail={"code": "FEDERATED_WRITE_UNAVAILABLE"}
         ) from None
-    if response.status_code in {400, 403, 404, 409, 429}:
-        try:
-            error_body = response.json()
-        except ValueError:
-            error_body = None
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=parse_upstream_error(error_body, "FEDERATED_WRITE_REJECTED"),
-        )
+    raise_proxy_rejection(response, {400, 403, 404, 409, 429, 507})
     if response.status_code != 200:
         raise HTTPException(status_code=503, detail={"code": "FEDERATED_WRITE_UNAVAILABLE"})
     try:
-        body = response.json()
-    except ValueError:
+        body = decode_federation_response_json(response)
+    except FederationNetworkError:
         body = None
     if not isinstance(body, dict) or body.get("pinned") != pinned:
         raise HTTPException(status_code=502, detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"})
@@ -258,7 +316,7 @@ async def dm_delivery_statuses(
     settings: Settings,
     channel: Channel,
     messages: list[Message],
-) -> dict[tuple[int, str], str]:
+) -> dict[tuple[int, str], tuple[str, str | None]]:
     """Reconstruct sender-side federated DM delivery state from durable outbox rows."""
     local_ids = [
         str(message.id) for message in messages if message.author_domain == settings.domain
@@ -267,7 +325,11 @@ async def dm_delivery_statuses(
         return {}
     rows = (
         await session.execute(
-            select(FederationEvent.envelope, FederationOutbox.status)
+            select(
+                FederationEvent.envelope,
+                FederationOutbox.status,
+                FederationOutbox.last_error,
+            )
             .join(
                 FederationOutbox,
                 (FederationOutbox.event_origin_domain == FederationEvent.origin_domain)
@@ -282,22 +344,29 @@ async def dm_delivery_statuses(
             )
         )
     ).all()
-    by_message: dict[tuple[int, str], list[str]] = {}
-    for envelope, status_value in rows:
+    by_message: dict[tuple[int, str], list[tuple[str, str | None]]] = {}
+    for envelope, status_value, last_error in rows:
         message = envelope.get("content", {}).get("message", {})
         try:
             reference = (int(message["id"]), str(message["origin_domain"]))
         except (KeyError, TypeError, ValueError):
             continue
-        by_message.setdefault(reference, []).append(str(status_value))
-    result: dict[tuple[int, str], str] = {}
-    for reference, statuses in by_message.items():
-        if any(status in {"failed", "expired"} for status in statuses):
-            result[reference] = "failed"
-        elif all(status == "delivered" for status in statuses):
-            result[reference] = "delivered"
+        by_message.setdefault(reference, []).append(
+            (str(status_value), str(last_error) if last_error is not None else None)
+        )
+    result: dict[tuple[int, str], tuple[str, str | None]] = {}
+    for reference, attempts in by_message.items():
+        statuses = [item[0] for item in attempts]
+        if any(value in {"failed", "expired"} for value in statuses):
+            code = next((item[1] for item in attempts if item[1]), None)
+            result[reference] = ("failed", code)
+        elif all(value == "delivered" for value in statuses):
+            result[reference] = ("delivered", None)
+        elif any(value in {"retry", "circuit"} for value in statuses):
+            code = next((item[1] for item in attempts if item[1]), None)
+            result[reference] = ("retrying", code)
         else:
-            result[reference] = "pending"
+            result[reference] = ("pending", None)
     return result
 
 
@@ -399,10 +468,212 @@ async def list_messages(
             authors.get((item.author_id, item.author_domain)),
             attachments.get((item.id, item.origin_domain), []),
         )
-        delivery_status = delivery_statuses.get((item.id, item.origin_domain))
-        if delivery_status is not None:
-            payload["delivery_status"] = delivery_status
+        delivery = delivery_statuses.get((item.id, item.origin_domain))
+        if delivery is not None:
+            payload["delivery_status"] = delivery[0]
+            if delivery[1] in {
+                "FEDERATED_DM_STORAGE_QUOTA_EXCEEDED",
+                "KAED_FED_DM_STORAGE_QUOTA_EXCEEDED",
+            }:
+                payload["delivery_error_code"] = delivery[1]
+                payload["failure_reason"] = (
+                    "The receiving instance is at capacity. Kaede is retrying automatically."
+                )
         payloads.append(payload)
+    # A non-authoritative DM keeps a bounded recent cache. Once pagination
+    # reaches that cache's lower boundary, fill the remainder from the signed
+    # authority without persisting another durable copy.
+    conversation = (
+        await session.get(DMConversation, (channel.id, channel.origin_domain))
+        if access.guild is None
+        else None
+    )
+    cache_start = (
+        (
+            conversation.history_cache_start_id,
+            conversation.history_cache_start_domain,
+        )
+        if conversation is not None
+        and conversation.history_cache_start_id is not None
+        and conversation.history_cache_start_domain is not None
+        else None
+    )
+    authority_history_available = await dm_authority_history_available(
+        session, conversation, local_domain=settings.domain
+    )
+    should_fetch_remote = False
+    remote_before: tuple[int, str] | None = None
+    if (
+        conversation is not None
+        and conversation.authority_domain != settings.domain
+        and conversation.history_truncated
+        and authority_history_available
+        and cache_start is not None
+        and around is None
+        and after is None
+    ):
+        requested_before = before.resolve(settings.domain) if before is not None else None
+        if payloads:
+            local_oldest = (
+                int(str(payloads[-1]["id"])),
+                str(payloads[-1]["origin_domain"]),
+            )
+            if local_oldest <= cache_start:
+                should_fetch_remote = True
+                remote_before = requested_before
+        else:
+            if requested_before is None or requested_before <= cache_start:
+                should_fetch_remote = True
+                remote_before = requested_before
+    if conversation is not None and should_fetch_remote:
+        # Ask the authority for the complete logical page. Locally-authored
+        # durable rows can be sparse below the rolling boundary; merely filling
+        # the local remainder would otherwise create gaps or pagination loops.
+        remote_limit = limit
+        trusted_profiles = {
+            (participant.id, participant.origin_domain): profile_from_user(participant)
+            for participant in access.participants
+        }
+        participant_refs = set(trusted_profiles)
+        try:
+            remote_messages: list[dict[str, object]] = []
+            remote_complete = False
+            cursor = remote_before
+            # Local-authored rows are deliberately ignored from the untrusted
+            # authority body. Advance through a bounded number of signed pages
+            # to fill the client page without permitting a cursor loop.
+            for _ in range(4):
+                remote_query = {"limit": str(remote_limit)}
+                if cursor is not None:
+                    remote_query.update(
+                        {
+                            "before_id": str(cursor[0]),
+                            "before_domain": cursor[1],
+                        }
+                    )
+                response = await signed_request(
+                    session,
+                    settings,
+                    "GET",
+                    conversation.authority_domain,
+                    f"/_kaede/v1/dms/{conversation.id}/messages",
+                    query=remote_query,
+                    max_response_bytes=MAX_DM_HISTORY_RESPONSE_BYTES,
+                )
+                if response.status_code != 200:
+                    try:
+                        retry_seconds = max(
+                            1, min(3600, int(response.headers.get("Retry-After", "2")))
+                        )
+                    except ValueError:
+                        retry_seconds = 2
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": "FEDERATED_DM_HISTORY_UNAVAILABLE",
+                            "retry_after_ms": retry_seconds * 1000,
+                        },
+                        headers={"Retry-After": str(retry_seconds)},
+                    )
+                body = decode_federation_response_json(
+                    response,
+                    max_response_bytes=MAX_DM_HISTORY_RESPONSE_BYTES,
+                )
+                remote_page = validate_dm_history_page(
+                    body,
+                    settings=settings,
+                    conversation_ref=(conversation.id, conversation.origin_domain),
+                    authority_domain=conversation.authority_domain,
+                    participant_refs=participant_refs,
+                    trusted_profiles=trusted_profiles,
+                    before=cursor,
+                    limit=remote_limit,
+                )
+                if remote_page.ignored_local_refs:
+                    retained_local_refs = set(
+                        (
+                            await session.execute(
+                                select(Message.id, Message.origin_domain).where(
+                                    tuple_(Message.id, Message.origin_domain).in_(
+                                        remote_page.ignored_local_refs
+                                    ),
+                                    Message.channel_id == conversation.id,
+                                    Message.channel_domain == conversation.origin_domain,
+                                    Message.author_domain == settings.domain,
+                                )
+                            )
+                        ).tuples()
+                    )
+                    if retained_local_refs != set(remote_page.ignored_local_refs):
+                        raise FederationNetworkError(
+                            "DM history authority invented a locally-authored message"
+                        )
+                remote_messages.extend(remote_page.messages)
+                remote_complete = remote_page.complete
+                if remote_complete or remote_page.next_before is None:
+                    break
+                cursor = remote_page.next_before
+                unique_refs = {
+                    (str(item["id"]), str(item["origin_domain"]))
+                    for item in [*payloads, *remote_messages]
+                }
+                if len(unique_refs) >= limit:
+                    break
+        except HTTPException as exc:
+            if payloads:
+                payloads[-1]["history_page_error_code"] = "FEDERATED_DM_HISTORY_UNAVAILABLE"
+                detail: dict[str, object] = (
+                    cast(dict[str, object], exc.detail) if isinstance(exc.detail, dict) else {}
+                )
+                retry_after_ms = detail.get("retry_after_ms")
+                if isinstance(retry_after_ms, int):
+                    payloads[-1]["history_page_retry_after_ms"] = retry_after_ms
+                return payloads
+            raise
+        except (httpx.HTTPError, FederationNetworkError, RuntimeError):
+            # The caller keeps its already-rendered cached messages and can
+            # retry the same stable cursor. Never turn a temporary authority
+            # outage into a false end-of-history marker.
+            if payloads:
+                payloads[-1]["history_page_error_code"] = "FEDERATED_DM_HISTORY_UNAVAILABLE"
+                payloads[-1]["history_page_retry_after_ms"] = 2_000
+                return payloads
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "FEDERATED_DM_HISTORY_UNAVAILABLE",
+                    "retry_after_ms": 2_000,
+                },
+                headers={"Retry-After": "2"},
+            ) from None
+        payloads = merge_dm_history_messages(remote_messages, payloads, limit=limit)
+        for payload_item in payloads:
+            payload_item.pop("history_page_complete", None)
+        local_has_more = False
+        if payloads:
+            oldest_merged = (
+                int(str(payloads[-1]["id"])),
+                str(payloads[-1]["origin_domain"]),
+            )
+            local_has_more = bool(
+                await session.scalar(
+                    select(
+                        exists().where(
+                            Message.channel_id == channel.id,
+                            Message.channel_domain == channel.origin_domain,
+                            Message.id >= channel.created_floor_id,
+                            tuple_(Message.id, Message.origin_domain) < oldest_merged,
+                        )
+                    )
+                )
+            )
+        if dm_history_page_is_complete(
+            remote_complete=remote_complete,
+            merged_messages=payloads,
+            remote_messages=remote_messages,
+            local_has_more=local_has_more,
+        ):
+            payloads[-1]["history_page_complete"] = True
     return payloads
 
 
@@ -447,6 +718,15 @@ async def create_message(
     await require_dm_send(session, access, auth.user)
     if channel.type not in {0, 1, 5}:
         raise HTTPException(status_code=400, detail={"code": "NOT_TEXT_CHANNEL"})
+    dm_conversation = (
+        await session.get(DMConversation, (channel.id, channel.origin_domain))
+        if access.guild is None
+        else None
+    )
+    if dm_conversation is not None:
+        # Serialize validation with rolling eviction so a reply target cannot
+        # disappear between lookup and message admission.
+        await lock_federated_dm_authority(session, dm_conversation.authority_domain)
     if payload.client_nonce is not None:
         nonce_lock = int.from_bytes(
             hashlib.blake2b(
@@ -472,10 +752,29 @@ async def create_message(
         if existing is not None:
             return await render_message_payload(session, existing, auth.user)
     referenced: Message | None = None
+    referenced_ref: tuple[int, str] | None = None
     if payload.referenced_message_id is not None:
-        referenced = await channel_message(
-            session, settings, channel, payload.referenced_message_id
+        referenced_ref = payload.referenced_message_id.resolve(settings.domain)
+        referenced = await session.scalar(
+            select(Message).where(
+                Message.id == referenced_ref[0],
+                Message.origin_domain == referenced_ref[1],
+                Message.channel_id == channel.id,
+                Message.channel_domain == channel.origin_domain,
+            )
         )
+        if referenced is None and not opaque_dm_history_ref_allowed(
+            dm_conversation,
+            referenced_ref,
+            participant_domains={participant.origin_domain for participant in access.participants},
+            local_domain=settings.domain,
+            remote_available=await dm_authority_history_available(
+                session,
+                dm_conversation,
+                local_domain=settings.domain,
+            ),
+        ):
+            raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
     explicit_mention_pairs = list(
         dict.fromkeys(item.resolve(settings.domain) for item in payload.mention_user_ids)
     )
@@ -554,6 +853,7 @@ async def create_message(
             ],
             "attachments": [attachment_payload(item) for item in message_attachments],
         }
+        replica_was_quota_paused = access.guild.sync_status == "quota_paused"
         try:
             response = await signed_request(
                 session,
@@ -601,17 +901,16 @@ async def create_message(
                 await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
             response_status.status_code = status.HTTP_202_ACCEPTED
             return {"status": "queued", "client_nonce": payload.client_nonce}
-        if response.status_code in {403, 404, 429}:
-            try:
-                error_body = response.json()
-            except ValueError:
-                error_body = None
-            detail = parse_upstream_error(error_body, "FEDERATED_WRITE_REJECTED")
-            raise HTTPException(status_code=response.status_code, detail=detail)
+        raise_proxy_rejection(response, {403, 404, 429, 507})
         if response.status_code != 200:
             raise HTTPException(status_code=503, detail={"code": "FEDERATED_WRITE_UNAVAILABLE"})
         try:
-            proxied = response.json()
+            proxied = decode_federation_response_json(response)
+        except FederationNetworkError:
+            raise HTTPException(
+                status_code=502, detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"}
+            ) from None
+        try:
             if (
                 not isinstance(proxied, dict)
                 or not isinstance(proxied.get("message"), dict)
@@ -641,8 +940,44 @@ async def create_message(
             try:
                 replicated = await apply_guild_message_event(session, settings, access.guild, event)
             except GuildSequenceGap:
-                await synchronize_guild(session, settings, access.guild)
-                replicated = await apply_guild_message_event(session, settings, access.guild, event)
+                access.guild.sync_status = "stale"
+                await session.commit()
+                await enqueue_best_effort(
+                    federation_guild_sync,
+                    access.guild.origin_domain,
+                    access.guild.id,
+                )
+                for attachment in message_attachments:
+                    await enqueue_best_effort(
+                        media_process, attachment.id, attachment.origin_domain
+                    )
+                response_status.status_code = status.HTTP_202_ACCEPTED
+                return {"status": "queued", "client_nonce": payload.client_nonce}
+            try:
+                await admit_replica_storage(session, settings, access.guild)
+            except FederationReplicaQuotaExceeded as exc:
+                guild_id = access.guild.id
+                guild_domain = access.guild.origin_domain
+                await session.rollback()
+                await mark_replica_quota_paused(
+                    session,
+                    settings,
+                    guild_id,
+                    guild_domain,
+                    exc,
+                )
+                await session.commit()
+                quota_guild = await session.get(
+                    Guild,
+                    (guild_id, guild_domain),
+                    populate_existing=True,
+                )
+                if quota_guild is not None:
+                    await publish_replica_guild_status(redis, quota_guild)
+                raise HTTPException(
+                    status_code=507,
+                    detail={"code": REPLICA_QUOTA_ERROR_CODE},
+                ) from exc
         except (KeyError, TypeError, ValueError):
             raise HTTPException(
                 status_code=502, detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"}
@@ -652,6 +987,14 @@ async def create_message(
                 status_code=503, detail={"code": "FEDERATED_WRITE_UNAVAILABLE"}
             ) from None
         await session.commit()
+        if replica_was_quota_paused:
+            refreshed_guild = await session.get(
+                Guild,
+                (access.guild.id, access.guild.origin_domain),
+                populate_existing=True,
+            )
+            if refreshed_guild is not None:
+                await publish_replica_guild_status(redis, refreshed_guild)
         if replicated is None:
             replicated = await session.get(
                 Message,
@@ -669,9 +1012,52 @@ async def create_message(
         await publish_channel_dispatch(redis, access, "MESSAGE_CREATE", result)
         return result
     message_id = await snowflake.mint()
+    if referenced_ref is not None and referenced_ref >= (message_id, settings.domain):
+        raise HTTPException(status_code=400, detail={"code": "INVALID_MESSAGE_REFERENCE"})
     mention_refs = [
         {"id": str(user_id), "origin_domain": domain} for user_id, domain in mention_pairs
     ]
+    dm_history_changed = False
+    if access.guild is None:
+        conversation = dm_conversation
+        if conversation is None:
+            raise RuntimeError("direct-message channel has no conversation")
+        try:
+            history_before = (
+                conversation.history_truncated,
+                conversation.history_truncated_before_id,
+                conversation.history_truncated_before_domain,
+                conversation.history_cache_start_id,
+                conversation.history_cache_start_domain,
+            )
+            await admit_federated_dm_message(
+                session,
+                settings,
+                conversation,
+                message_id=message_id,
+                message_domain=settings.domain,
+                delta=dm_message_storage_delta(
+                    content=payload.content,
+                    e2ee=payload.e2ee,
+                    mention_user_refs=mention_refs,
+                    attachments=message_attachments,
+                    client_nonce=payload.client_nonce,
+                ),
+                protected_refs=(
+                    {referenced_ref}
+                    if referenced is not None and referenced_ref is not None
+                    else None
+                ),
+            )
+            dm_history_changed = history_before != (
+                conversation.history_truncated,
+                conversation.history_truncated_before_id,
+                conversation.history_truncated_before_domain,
+                conversation.history_cache_start_id,
+                conversation.history_cache_start_domain,
+            )
+        except FederatedDMQuotaExceeded as exc:
+            raise HTTPException(status_code=507, detail=exc.detail()) from exc
     message = (
         await session.scalars(
             insert(Message)
@@ -685,9 +1071,9 @@ async def create_message(
                 content=payload.content,
                 e2ee=payload.e2ee,
                 client_nonce=payload.client_nonce,
-                referenced_message_id=referenced.id if referenced is not None else None,
+                referenced_message_id=(referenced_ref[0] if referenced_ref is not None else None),
                 referenced_message_domain=(
-                    referenced.origin_domain if referenced is not None else None
+                    referenced_ref[1] if referenced_ref is not None else None
                 ),
                 mention_user_refs=mention_refs,
                 flags=(0 if actor_permissions & Permission.EMBED_LINKS else 4),
@@ -772,6 +1158,34 @@ async def create_message(
             ),
         )
         await publish_channel_dispatch(redis, access, "MESSAGE_CREATE", result)
+        if access.guild is None and dm_history_changed and dm_conversation is not None:
+            history = dm_history_metadata(
+                dm_conversation,
+                local_domain=settings.domain,
+                remote_available=await dm_authority_history_available(
+                    session,
+                    dm_conversation,
+                    local_domain=settings.domain,
+                ),
+            )
+            for participant in access.participants:
+                if participant.origin_domain != settings.domain or not participant.is_local:
+                    continue
+                await publish_dispatch(
+                    redis,
+                    user_topic(settings.domain, participant.id),
+                    "CHANNEL_UPDATE",
+                    dm_channel_payload(
+                        channel,
+                        [
+                            user
+                            for user in access.participants
+                            if (user.id, user.origin_domain)
+                            != (participant.id, participant.origin_domain)
+                        ],
+                        history=history,
+                    ),
+                )
     except Exception:
         log.exception(
             "message_postcommit_projection_failed",
@@ -1052,6 +1466,37 @@ async def add_reaction(
         for_update=True,
         require_active=True,
     )
+    if access.guild is None:
+        existing_reaction = await session.get(
+            Reaction,
+            (
+                message.id,
+                message.origin_domain,
+                auth.user.id,
+                auth.user.origin_domain,
+                payload.emoji,
+            ),
+        )
+        if existing_reaction is None:
+            retained_reactions = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Reaction)
+                    .where(
+                        Reaction.message_id == message.id,
+                        Reaction.message_domain == message.origin_domain,
+                    )
+                )
+                or 0
+            )
+            if retained_reactions >= DM_REACTIONS_PER_MESSAGE_LIMIT:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "DM_REACTION_LIMIT_REACHED",
+                        "limit": DM_REACTIONS_PER_MESSAGE_LIMIT,
+                    },
+                )
     inserted = await session.scalar(
         pg_insert(Reaction)
         .values(

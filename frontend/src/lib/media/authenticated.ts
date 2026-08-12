@@ -1,4 +1,5 @@
 import { isNativeDesktop, nativeInvoke } from '$lib/platform/native';
+import { apiErrorMessage } from '$lib/api/errors';
 
 export interface AuthenticatedMediaSource {
   path: string;
@@ -6,6 +7,95 @@ export interface AuthenticatedMediaSource {
 }
 
 type MediaElement = HTMLImageElement | HTMLVideoElement;
+const MAX_THUMBNAIL_BYTES = 16 * 1024 * 1024;
+const MAX_ERROR_BYTES = 64 * 1024;
+const RETRYABLE_MEDIA_CAPACITY_CODES = new Set(['REMOTE_MEDIA_BUSY', 'REMOTE_MEDIA_CACHE_FULL']);
+
+function retryAfterMilliseconds(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.round(seconds * 1000) : null;
+}
+
+function stableJitter(value: string): number {
+  if (!value) return 0;
+  let hash = 2166136261;
+  for (const code of value) hash = Math.imul(hash ^ code.charCodeAt(0), 16777619);
+  return Math.abs(hash) % 251;
+}
+
+export function mediaCapacityRetryDelay(
+  status: number,
+  code: string,
+  retryAfterHeader: string | null,
+  attempt: number,
+  key = ''
+): number | null {
+  if (
+    attempt >= 2 ||
+    !RETRYABLE_MEDIA_CAPACITY_CODES.has(code) ||
+    ![429, 503, 507].includes(status)
+  )
+    return null;
+  const requested = retryAfterMilliseconds(retryAfterHeader) ?? 1000 * (attempt + 1);
+  return Math.min(5000, Math.max(500, requested)) + stableJitter(key);
+}
+
+async function boundedBytes(response: Response, maximum: number): Promise<Uint8Array> {
+  const reader = response.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maximum) throw new Error('Media response exceeded its safe in-memory limit.');
+      chunks.push(value);
+    }
+  } catch (error) {
+    void reader.cancel();
+    throw error;
+  }
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+async function errorDetail(response: Response): Promise<Record<string, unknown>> {
+  const contentLength = Number(response.headers.get('content-length') ?? '0');
+  if (Number.isFinite(contentLength) && contentLength > MAX_ERROR_BYTES) return {};
+  try {
+    const bytes = await boundedBytes(response, MAX_ERROR_BYTES);
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(resolve, milliseconds);
+    signal.addEventListener(
+      'abort',
+      () => {
+        window.clearTimeout(timer);
+        reject(new DOMException('Media request cancelled', 'AbortError'));
+      },
+      { once: true }
+    );
+  });
+}
+
+function isBoundedThumbnail(source: AuthenticatedMediaSource): boolean {
+  return source.contentType.startsWith('image/') && /\/thumbnail_(128|512|1024)$/.test(source.path);
+}
 
 function asBytes(value: ArrayBuffer | Uint8Array | number[]): Uint8Array {
   if (value instanceof Uint8Array) return value;
@@ -23,14 +113,26 @@ function asBlobPart(value: ArrayBuffer | Uint8Array | number[]): ArrayBuffer {
 export function attachmentMediaPath(
   originDomain: string,
   attachmentId: string,
-  variant: 'original' | 'thumbnail_128' | 'thumbnail_512' | 'thumbnail_1024' | 'poster'
+  variant: 'original' | 'thumbnail_128' | 'thumbnail_512' | 'thumbnail_1024' | 'poster',
+  historyMediaUrl?: string | null
 ): string {
+  if (isSafeSameOriginMediaPath(historyMediaUrl)) return historyMediaUrl;
   return `/media/${encodeURIComponent(originDomain)}/${encodeURIComponent(attachmentId)}/${variant}`;
+}
+
+/**
+ * Federation history may supply a temporary authenticated proxy path. Never
+ * accept a URL-like value here: authorization is reserved for the signed-in
+ * Kaede API and must not be sent to a remote media host.
+ */
+export function isSafeSameOriginMediaPath(value: string | null | undefined): value is string {
+  return Boolean(value?.startsWith('/') && !value.startsWith('//') && !value.includes('\\'));
 }
 
 export function authenticatedMedia(node: MediaElement, source: AuthenticatedMediaSource) {
   let generation = 0;
   let objectUrl = '';
+  let controller: AbortController | null = null;
 
   function revokeObjectUrl() {
     if (!objectUrl) return;
@@ -40,10 +142,14 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
 
   async function load(next: AuthenticatedMediaSource) {
     const current = ++generation;
+    controller?.abort();
+    const requestController = new AbortController();
+    controller = requestController;
     revokeObjectUrl();
     node.removeAttribute('data-media-error');
+    node.removeAttribute('data-media-error-message');
 
-    if (!isNativeDesktop()) {
+    if (!isNativeDesktop() && !isBoundedThumbnail(next)) {
       node.src = next.path;
       if (node instanceof HTMLVideoElement) node.load();
       return;
@@ -51,16 +157,60 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
 
     node.removeAttribute('src');
     try {
-      const response = await nativeInvoke<ArrayBuffer | Uint8Array | number[]>(
-        'native_media_request',
-        { path: next.path }
-      );
+      let response: ArrayBuffer | Uint8Array | number[];
+      if (isNativeDesktop()) {
+        response = await nativeInvoke<ArrayBuffer | Uint8Array | number[]>('native_media_request', {
+          path: next.path
+        });
+      } else {
+        let loaded: Uint8Array | null = null;
+        for (let attempt = 0; loaded === null; attempt += 1) {
+          const fetched = await fetch(next.path, {
+            credentials: 'same-origin',
+            headers: { Accept: next.contentType },
+            signal: requestController.signal
+          });
+          if (fetched.ok) {
+            const declared = Number(fetched.headers.get('content-length') ?? '0');
+            if (Number.isFinite(declared) && declared > MAX_THUMBNAIL_BYTES)
+              throw new Error('Media response exceeded its safe in-memory limit.');
+            loaded = await boundedBytes(fetched, MAX_THUMBNAIL_BYTES);
+            break;
+          }
+          const detail = await errorDetail(fetched);
+          const nested =
+            typeof detail.detail === 'object' && detail.detail !== null
+              ? (detail.detail as Record<string, unknown>)
+              : detail;
+          const code = typeof nested.code === 'string' ? nested.code : `HTTP_${fetched.status}`;
+          const delay = mediaCapacityRetryDelay(
+            fetched.status,
+            code,
+            fetched.headers.get('retry-after'),
+            attempt,
+            next.path
+          );
+          if (delay === null) {
+            const failure = new Error(apiErrorMessage(code, fetched.status, nested));
+            failure.name = 'MediaLoadError';
+            throw failure;
+          }
+          await abortableDelay(delay, requestController.signal);
+        }
+        response = loaded ?? new Uint8Array();
+      }
       if (current !== generation) return;
       objectUrl = URL.createObjectURL(new Blob([asBlobPart(response)], { type: next.contentType }));
       node.src = objectUrl;
       if (node instanceof HTMLVideoElement) node.load();
-    } catch {
-      if (current === generation) node.setAttribute('data-media-error', 'true');
+    } catch (error) {
+      if (current === generation && !requestController.signal.aborted) {
+        node.setAttribute('data-media-error', 'true');
+        if (error instanceof Error && error.name === 'MediaLoadError') {
+          node.setAttribute('data-media-error-message', error.message);
+        }
+        node.dispatchEvent(new Event('error'));
+      }
     }
   }
 
@@ -71,6 +221,7 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
     },
     destroy() {
       generation += 1;
+      controller?.abort();
       revokeObjectUrl();
     }
   };

@@ -94,17 +94,135 @@ class Settings(BaseSettings):
     federation_mode: Literal["open", "allowlist"] = "open"
     federation_clock_skew_seconds: int = Field(default=300, ge=30, le=900)
     federation_event_retention_days: int = Field(default=30, ge=7)
+    federation_inbox_max_events_per_origin: int = Field(
+        default=5_000_000, ge=1_000, le=1_000_000_000
+    )
+    federation_inbox_max_bytes_per_origin: int = Field(
+        default=16 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=1024 * 1024 * 1024 * 1024,
+    )
+    federation_inbox_max_events_total: int = Field(default=50_000_000, ge=1_000, le=1_000_000_000)
+    federation_inbox_max_bytes_total: int = Field(
+        default=160 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=1024 * 1024 * 1024 * 1024,
+    )
+    # Discovery documents are fetched before a peer is trusted. Keep both the
+    # number of cached peer identities and each peer's rotated key history
+    # bounded so a collection of otherwise valid domains cannot grow these
+    # tables forever.
+    federation_max_remote_instances: int = Field(default=10_000, ge=100, le=1_000_000)
+    federation_peer_key_history_limit: int = Field(default=512, ge=128, le=10_000)
+    # Non-guild durable state is deliberately independent from the inbox and
+    # remote-guild ledgers.  An authenticated peer must not be able to turn a
+    # stream of valid relationship/DM/identity events into unbounded SQL state.
+    federation_pending_relationships_per_recipient: int = Field(default=1_000, ge=10, le=100_000)
+    federation_pending_relationships_per_recipient_origin: int = Field(
+        default=100, ge=1, le=100_000
+    )
+    federation_pending_relationships_per_origin: int = Field(default=10_000, ge=10, le=1_000_000)
+    federation_remote_users_per_introducer: int = Field(default=100_000, ge=100, le=10_000_000)
+    federation_third_party_instances_per_introducer: int = Field(default=1_000, ge=10, le=100_000)
+    federation_remote_media_tombstones_per_origin: int = Field(
+        default=100_000, ge=1_000, le=10_000_000
+    )
+    federation_dm_max_conversations_per_authority: int = Field(
+        default=1_000_000, ge=100, le=10_000_000
+    )
+    federation_dm_max_conversations_per_remote_origin: int = Field(
+        default=100_000, ge=10, le=10_000_000
+    )
+    federation_dm_max_messages_per_conversation: int = Field(
+        default=5_000_000, ge=100, le=100_000_000
+    )
+    federation_dm_max_messages_per_authority: int = Field(
+        default=50_000_000, ge=100, le=1_000_000_000
+    )
+    federation_dm_max_messages_per_remote_origin: int = Field(
+        default=10_000_000, ge=100, le=1_000_000_000
+    )
+    federation_dm_max_bytes_per_conversation: int = Field(
+        default=32 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=1024 * 1024 * 1024 * 1024,
+    )
+    federation_dm_max_bytes_per_authority: int = Field(
+        default=320 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=10 * 1024 * 1024 * 1024 * 1024,
+    )
+    federation_dm_max_bytes_per_remote_origin: int = Field(
+        default=64 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=10 * 1024 * 1024 * 1024 * 1024,
+    )
+    # A non-authoritative DM replica prunes oldest messages back to these
+    # rolling-cache targets before the hard safety ceilings above are reached.
+    # Authorities never prune message history to satisfy these cache targets.
+    federation_dm_replica_cache_messages_per_conversation: int = Field(
+        default=250_000, ge=100, le=100_000_000
+    )
+    federation_dm_replica_cache_bytes_per_conversation: int = Field(
+        default=2 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=1024 * 1024 * 1024 * 1024,
+    )
+    federation_remote_media_inflight_bytes_per_origin: int = Field(
+        default=256 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=16 * 1024 * 1024 * 1024,
+    )
+    federation_remote_media_inflight_bytes_total: int = Field(
+        default=512 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=64 * 1024 * 1024 * 1024,
+    )
+    # Durable SQL state copied from remote guilds. These are high-water marks,
+    # not history page budgets: live events and resumable imports share them.
+    federation_replica_max_rows_per_guild: int = Field(
+        default=20_000_000, ge=10_000, le=1_000_000_000
+    )
+    federation_replica_max_bytes_per_guild: int = Field(
+        default=64 * 1024 * 1024 * 1024,
+        ge=16 * 1024 * 1024,
+        le=10 * 1024 * 1024 * 1024 * 1024,
+    )
+    federation_replica_max_rows_per_origin: int = Field(
+        default=100_000_000, ge=10_000, le=1_000_000_000
+    )
+    federation_replica_max_bytes_per_origin: int = Field(
+        default=320 * 1024 * 1024 * 1024,
+        ge=16 * 1024 * 1024,
+        le=10 * 1024 * 1024 * 1024 * 1024,
+    )
+    # A remote profile can outlive the last replicated guild/DM row that
+    # referenced it.  Keep a generous grace period for caches and delayed
+    # events, then let the bounded federation retention job remove only
+    # identities with no remaining durable references.
+    federation_remote_identity_retention_days: int = Field(default=30, ge=7, le=3650)
+    federation_remote_identity_gc_batch_size: int = Field(default=5_000, ge=100, le=50_000)
     federation_history_import_enabled: bool = True
     federation_history_export_ttl_minutes: int = Field(default=24 * 60, ge=10, le=7 * 24 * 60)
+    federation_history_max_active_exports_per_origin: int = Field(default=1_000, ge=1, le=1_000_000)
+    federation_history_max_active_exports_total: int = Field(default=10_000, ge=1, le=10_000_000)
+    federation_history_max_active_channel_grants_per_origin: int = Field(
+        default=100_000, ge=1, le=100_000_000
+    )
+    federation_history_max_active_channel_grants_total: int = Field(
+        default=1_000_000, ge=1, le=1_000_000_000
+    )
     federation_history_page_messages: int = Field(default=100, ge=10, le=500)
     federation_history_page_bytes: int = Field(default=512 * 1024, ge=64 * 1024, le=8 * 1024 * 1024)
-    federation_history_max_messages: int = Field(default=250_000, ge=100, le=10_000_000)
+    federation_history_max_messages: int = Field(default=2_000_000, ge=100, le=10_000_000)
     federation_history_max_bytes: int = Field(
-        default=2 * 1024 * 1024 * 1024, ge=1024 * 1024, le=100 * 1024 * 1024 * 1024
+        default=32 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=100 * 1024 * 1024 * 1024,
     )
-    federation_history_max_pages: int = Field(default=100_000, ge=10, le=1_000_000)
-    federation_history_max_reactions: int = Field(default=2_000_000, ge=100, le=100_000_000)
-    federation_history_max_duration_seconds: int = Field(default=3600, ge=60, le=24 * 3600)
+    federation_history_max_pages: int = Field(default=250_000, ge=10, le=1_000_000)
+    federation_history_max_reactions: int = Field(default=10_000_000, ge=100, le=100_000_000)
+    federation_history_max_duration_seconds: int = Field(default=7200, ge=60, le=24 * 3600)
     federation_history_merge_chunk_size: int = Field(default=500, ge=50, le=5_000)
     federation_peer_overrides: dict[str, str] = Field(default_factory=dict)
     federation_ca_file: str | None = None
@@ -132,7 +250,7 @@ class Settings(BaseSettings):
     media_remote_cache_bucket: str = "kaede-remote-cache"
     media_clamav_host: str = "clamav"
     media_clamav_port: int = Field(default=3310, ge=1, le=65535)
-    media_remote_cache_bytes: int = Field(default=20 * 1024 * 1024 * 1024, ge=1)
+    media_remote_cache_bytes: int = Field(default=100 * 1024 * 1024 * 1024, ge=1)
     media_remote_cache_ttl_days: int = Field(default=30, ge=1, le=365)
     media_retention_days: int | None = Field(default=None, ge=1)
     media_emoji_limit: int = Field(default=100, ge=1, le=1000)
@@ -526,6 +644,159 @@ class Settings(BaseSettings):
             raise ValueError("gateway_identify_ip_burst cannot be below its per-second rate")
         if self.refresh_sliding_days > self.refresh_absolute_days:
             raise ValueError("refresh_sliding_days cannot exceed refresh_absolute_days")
+        if self.federation_inbox_max_events_total < self.federation_inbox_max_events_per_origin:
+            raise ValueError(
+                "federation_inbox_max_events_total cannot be below the per-origin limit"
+            )
+        if self.federation_inbox_max_bytes_total < self.federation_inbox_max_bytes_per_origin:
+            raise ValueError(
+                "federation_inbox_max_bytes_total cannot be below the per-origin limit"
+            )
+        if self.federation_remote_media_inflight_bytes_per_origin < self.media_max_attachment_bytes:
+            raise ValueError(
+                "federation_remote_media_inflight_bytes_per_origin cannot be below one "
+                "maximum attachment"
+            )
+        if (
+            self.federation_remote_media_inflight_bytes_total
+            < self.federation_remote_media_inflight_bytes_per_origin
+        ):
+            raise ValueError(
+                "federation_remote_media_inflight_bytes_total cannot be below the per-origin limit"
+            )
+        if self.federation_replica_max_rows_per_origin < self.federation_replica_max_rows_per_guild:
+            raise ValueError(
+                "federation_replica_max_rows_per_origin cannot be below the per-guild limit"
+            )
+        if (
+            self.federation_replica_max_bytes_per_origin
+            < self.federation_replica_max_bytes_per_guild
+        ):
+            raise ValueError(
+                "federation_replica_max_bytes_per_origin cannot be below the per-guild limit"
+            )
+        if (
+            self.federation_history_max_active_exports_total
+            < self.federation_history_max_active_exports_per_origin
+        ):
+            raise ValueError(
+                "federation_history_max_active_exports_total cannot be below the per-origin limit"
+            )
+        if (
+            self.federation_history_max_active_channel_grants_total
+            < self.federation_history_max_active_channel_grants_per_origin
+        ):
+            raise ValueError(
+                "federation_history_max_active_channel_grants_total cannot be below the "
+                "per-origin limit"
+            )
+        if (
+            self.federation_history_max_active_channel_grants_per_origin
+            < self.federation_history_max_active_exports_per_origin
+        ):
+            raise ValueError(
+                "federation_history_max_active_channel_grants_per_origin cannot be below "
+                "the active-export limit"
+            )
+        if (
+            self.federation_history_max_active_channel_grants_total
+            < self.federation_history_max_active_exports_total
+        ):
+            raise ValueError(
+                "federation_history_max_active_channel_grants_total cannot be below the "
+                "active-export limit"
+            )
+        if (
+            self.federation_dm_max_messages_per_authority
+            < self.federation_dm_max_messages_per_conversation
+        ):
+            raise ValueError(
+                "federation_dm_max_messages_per_authority cannot be below the "
+                "per-conversation limit"
+            )
+        if (
+            self.federation_dm_max_bytes_per_authority
+            < self.federation_dm_max_bytes_per_conversation
+        ):
+            raise ValueError(
+                "federation_dm_max_bytes_per_authority cannot be below the per-conversation limit"
+            )
+        if (
+            self.federation_pending_relationships_per_recipient_origin
+            > self.federation_pending_relationships_per_recipient
+        ):
+            raise ValueError(
+                "federation_pending_relationships_per_recipient_origin cannot exceed "
+                "the per-recipient limit"
+            )
+        if (
+            self.federation_pending_relationships_per_recipient_origin
+            > self.federation_pending_relationships_per_origin
+        ):
+            raise ValueError(
+                "federation_pending_relationships_per_recipient_origin cannot exceed "
+                "the per-origin limit"
+            )
+        if (
+            self.federation_dm_max_conversations_per_remote_origin
+            >= self.federation_dm_max_conversations_per_authority
+        ):
+            raise ValueError(
+                "federation_dm_max_conversations_per_remote_origin must be below the "
+                "aggregate authority limit"
+            )
+        if (
+            self.federation_dm_max_messages_per_remote_origin
+            < self.federation_dm_max_messages_per_conversation
+        ):
+            raise ValueError(
+                "federation_dm_max_messages_per_remote_origin cannot be below the "
+                "per-conversation limit"
+            )
+        if (
+            self.federation_dm_max_messages_per_remote_origin
+            >= self.federation_dm_max_messages_per_authority
+        ):
+            raise ValueError(
+                "federation_dm_max_messages_per_remote_origin must be below the "
+                "aggregate authority limit"
+            )
+        if (
+            self.federation_dm_max_bytes_per_remote_origin
+            < self.federation_dm_max_bytes_per_conversation
+        ):
+            raise ValueError(
+                "federation_dm_max_bytes_per_remote_origin cannot be below the "
+                "per-conversation limit"
+            )
+        if (
+            self.federation_dm_max_bytes_per_remote_origin
+            >= self.federation_dm_max_bytes_per_authority
+        ):
+            raise ValueError(
+                "federation_dm_max_bytes_per_remote_origin must be below the "
+                "aggregate authority limit"
+            )
+        if (
+            self.federation_dm_replica_cache_messages_per_conversation
+            > self.federation_dm_max_messages_per_conversation
+        ):
+            raise ValueError(
+                "federation_dm_replica_cache_messages_per_conversation cannot exceed "
+                "the hard per-conversation limit"
+            )
+        if (
+            self.federation_dm_replica_cache_bytes_per_conversation
+            > self.federation_dm_max_bytes_per_conversation
+        ):
+            raise ValueError(
+                "federation_dm_replica_cache_bytes_per_conversation cannot exceed "
+                "the hard per-conversation limit"
+            )
+        if self.federation_history_page_bytes > self.federation_history_max_bytes:
+            raise ValueError(
+                "federation_history_page_bytes cannot exceed federation_history_max_bytes"
+            )
         if self.media_inflight_quota_bytes < self.media_max_attachment_bytes:
             raise ValueError("media_inflight_quota_bytes cannot be below one maximum attachment")
         if self.media_s3_create_buckets is None:

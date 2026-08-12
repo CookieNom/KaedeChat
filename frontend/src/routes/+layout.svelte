@@ -33,6 +33,7 @@
           current === resolve('/register') ||
           current === resolve('/forgot-password')
         ) {
+          // eslint-disable-next-line svelte/no-navigation-without-resolve -- storedNativeRoute accepts only validated in-app paths and the fallback is resolved.
           void goto(storedNativeRoute() ?? resolve('/home'), { replaceState: true });
         }
       })

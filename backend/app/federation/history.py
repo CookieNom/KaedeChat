@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import secrets
 import time
@@ -39,15 +38,34 @@ from app.db.models import (
     User,
 )
 from app.federation.client import signed_request
-from app.federation.network import ensure_peer, normalize_domain
+from app.federation.identity_storage import admit_remote_user_identity
+from app.federation.network import (
+    FederationNetworkError,
+    decode_federation_response_json,
+    ensure_peer,
+    normalize_domain,
+)
+from app.federation.replica_storage import (
+    FederationReplicaQuotaExceeded,
+    admit_replica_storage,
+    mark_replica_quota_paused,
+    reconcile_replica_storage,
+)
 from app.federation.replication import (
     advance_channel_cursor,
     database_snowflake,
+    insert_unresolved_remote_user,
+    remote_media_dimensions,
     replicate_message_attachments,
     resolve_delegated_profile,
+    sanitized_remote_blurhash,
+    sanitized_remote_variants,
+    unresolved_remote_username,
+    validate_snowflake_timestamp,
 )
 from app.federation.schemas import RemoteUserProfile
 from app.federation.security import validated_event_envelope
+from app.media.processing import normalize_declared_type, sanitize_filename
 
 HISTORY_CAPABILITY = "guild-history-sync/1"
 HISTORY_RECENT_FIRST_CAPABILITY = "guild-history-sync/2"
@@ -64,6 +82,168 @@ HISTORY_EVENT_TYPES = frozenset(
 )
 
 ABANDONED_IMPORT_RETENTION = timedelta(days=7)
+HISTORY_DELTA_EVENTS_PER_PAGE = 500
+HISTORY_DELTA_MAX_REQUESTS = 1_000
+HISTORY_TIMESTAMP_TOLERANCE_MS = 60_000
+ACTIVE_HISTORY_EXPORT_STATUSES = ("active", "completed")
+
+HISTORY_CAPACITY_CODE = "KAED_FED_HISTORY_CAPACITY"
+HISTORY_TEMPORARILY_UNAVAILABLE_CODE = "FEDERATED_GUILD_HISTORY_TEMPORARILY_UNAVAILABLE"
+HISTORY_LIMIT_REACHED_CODE = "FEDERATED_GUILD_HISTORY_LIMIT_REACHED"
+HISTORY_REJECTED_CODE = "FEDERATED_GUILD_HISTORY_REJECTED"
+HISTORY_LIMIT_RESOURCES = frozenset(
+    {"pages", "messages", "bytes", "reactions", "duration", "delta_requests"}
+)
+
+
+class FederatedHistorySyncError(RuntimeError):
+    """A safe, stable failure that the history worker may expose to a user.
+
+    Federation response bodies and ordinary exception strings are untrusted
+    operator data.  Keeping the client-facing code and retry metadata on a
+    typed exception prevents the worker from leaking either while still
+    preserving the authority's bounded Retry-After guidance.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        retryable: bool,
+        retry_after_ms: int | None = None,
+        resource: str | None = None,
+    ) -> None:
+        self.code = code
+        self.retryable = retryable
+        self.retry_after_ms = retry_after_ms
+        self.resource = resource if resource in HISTORY_LIMIT_RESOURCES else None
+        super().__init__(code)
+
+    def dispatch_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "code": self.code,
+            "retryable": self.retryable,
+        }
+        if self.retry_after_ms is not None:
+            payload["retry_after_ms"] = self.retry_after_ms
+        if self.resource is not None:
+            payload["resource"] = self.resource
+        return payload
+
+
+class FederatedHistoryLimitExceeded(FederatedHistorySyncError):
+    def __init__(self, resource: str) -> None:
+        super().__init__(
+            HISTORY_LIMIT_REACHED_CODE,
+            retryable=False,
+            resource=resource,
+        )
+
+
+def _history_response_detail(response: Any) -> dict[str, object]:
+    try:
+        body = decode_federation_response_json(response)
+    except Exception:
+        return {}
+    if isinstance(body, dict):
+        detail = body.get("detail", body)
+        if isinstance(detail, dict):
+            return detail
+    return {}
+
+
+def _retry_after_ms(
+    response: Any,
+    fallback_ms: int,
+    *,
+    detail: dict[str, object] | None = None,
+) -> int:
+    """Read a bounded Retry-After value from a signed peer response."""
+
+    candidate = (detail or _history_response_detail(response)).get("retry_after_ms")
+    if isinstance(candidate, int) and not isinstance(candidate, bool):
+        return min(86_400_000, max(1_000, candidate))
+    raw_header = response.headers.get("Retry-After")
+    if isinstance(raw_header, str):
+        try:
+            seconds = float(raw_header)
+        except ValueError:
+            pass
+        else:
+            if seconds >= 0:
+                return min(86_400_000, max(1_000, int(seconds * 1_000)))
+    return min(86_400_000, max(1_000, fallback_ms))
+
+
+def history_response_error(
+    response: Any,
+    *,
+    fallback_retry_after_ms: int = 2_000,
+) -> FederatedHistorySyncError:
+    """Classify a non-success federation response without relaying its body."""
+
+    detail = _history_response_detail(response)
+    upstream_code = detail.get("code")
+    if response.status_code == 429:
+        code = (
+            HISTORY_CAPACITY_CODE
+            if upstream_code == HISTORY_CAPACITY_CODE
+            else HISTORY_TEMPORARILY_UNAVAILABLE_CODE
+        )
+        return FederatedHistorySyncError(
+            code,
+            retryable=True,
+            retry_after_ms=_retry_after_ms(response, 60_000, detail=detail),
+        )
+    if response.status_code in {408, 425, 500, 502, 503, 504}:
+        return FederatedHistorySyncError(
+            HISTORY_TEMPORARILY_UNAVAILABLE_CODE,
+            retryable=True,
+            retry_after_ms=_retry_after_ms(
+                response,
+                fallback_retry_after_ms,
+                detail=detail,
+            ),
+        )
+    return FederatedHistorySyncError(HISTORY_REJECTED_CODE, retryable=False)
+
+
+def user_facing_history_error(exc: Exception) -> FederatedHistorySyncError:
+    """Collapse an importer failure to stable status safe for user dispatch."""
+
+    if isinstance(exc, FederatedHistorySyncError):
+        return exc
+    if isinstance(exc, FederationReplicaQuotaExceeded):
+        return FederatedHistorySyncError(
+            "KAED_FED_REPLICA_QUOTA_EXCEEDED",
+            retryable=False,
+            resource=exc.resource,
+        )
+    if isinstance(exc, FederationNetworkError):
+        return FederatedHistorySyncError(
+            HISTORY_TEMPORARILY_UNAVAILABLE_CODE,
+            retryable=True,
+            retry_after_ms=2_000,
+        )
+    if isinstance(exc, ValueError):
+        return FederatedHistorySyncError(HISTORY_REJECTED_CODE, retryable=False)
+    # Unknown local failures can recover after a worker/database outage. Do
+    # not relay the exception and do not require a user to click Retry.
+    return FederatedHistorySyncError(
+        HISTORY_TEMPORARILY_UNAVAILABLE_CODE,
+        retryable=True,
+        retry_after_ms=2_000,
+    )
+
+
+class HistoryDeltaAdvanced(RuntimeError):
+    def __init__(self, required_seq: int) -> None:
+        super().__init__("live guild delivery advanced during history finalization")
+        self.required_seq = required_seq
+
+
+class UnresolvedHistoryIdentity(ValueError):
+    pass
 
 
 async def cleanup_history_transfers(
@@ -73,10 +253,10 @@ async def cleanup_history_transfers(
 ) -> dict[str, int]:
     """Prune expired grants and abandoned resumable-import state.
 
-    Completed imports are retained because their identity is the provenance
-    anchor for imported messages. Stale non-terminal imports can be safely
-    retried after deletion, while the provenance guard protects against a
-    malformed state transition deleting already-merged history.
+    Imports are retained only while their identity is a provenance anchor for
+    imported messages. Stale attempts and completed empty/fully-purged imports
+    can be retried after deletion, while the provenance guard protects against
+    deleting a still-referenced transfer.
     """
 
     current_time = now or datetime.now(UTC)
@@ -91,7 +271,6 @@ async def cleanup_history_transfers(
     )
     abandoned_imports = await session.execute(
         delete(GuildHistoryImport).where(
-            GuildHistoryImport.status != "completed",
             GuildHistoryImport.updated_at < current_time - ABANDONED_IMPORT_RETENTION,
             ~provenance_exists,
         )
@@ -147,6 +326,87 @@ async def eligible_history_channels(
     ]
 
 
+async def lock_history_export_capacity(session: AsyncSession, requester_origin: str) -> None:
+    """Serialize active grant admission globally, then for one requesting origin."""
+
+    await session.scalar(
+        select(func.pg_advisory_xact_lock(func.hashtextextended("kaede-history-export-global", 0)))
+    )
+    await session.scalar(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended(f"kaede-history-export-origin:{requester_origin}", 0)
+            )
+        )
+    )
+
+
+async def ensure_history_export_capacity(
+    session: AsyncSession,
+    settings: Settings,
+    requester_origin: str,
+    channel_count: int,
+    now: datetime,
+) -> None:
+    """Reject a new authority-side export before its short-lived rows amplify."""
+
+    active_filter = (
+        GuildHistoryExport.status.in_(ACTIVE_HISTORY_EXPORT_STATUSES),
+        GuildHistoryExport.expires_at > now,
+    )
+    active_exports_total = int(
+        await session.scalar(
+            select(func.count()).select_from(GuildHistoryExport).where(*active_filter)
+        )
+        or 0
+    )
+    active_exports_origin = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(GuildHistoryExport)
+            .where(
+                *active_filter,
+                GuildHistoryExport.requester_origin == requester_origin,
+            )
+        )
+        or 0
+    )
+    active_grants_total = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(GuildHistoryExportChannel)
+            .join(GuildHistoryExport, GuildHistoryExport.id == GuildHistoryExportChannel.export_id)
+            .where(*active_filter)
+        )
+        or 0
+    )
+    active_grants_origin = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(GuildHistoryExportChannel)
+            .join(GuildHistoryExport, GuildHistoryExport.id == GuildHistoryExportChannel.export_id)
+            .where(
+                *active_filter,
+                GuildHistoryExport.requester_origin == requester_origin,
+            )
+        )
+        or 0
+    )
+    if (
+        active_exports_total + 1 > settings.federation_history_max_active_exports_total
+        or active_exports_origin + 1 > settings.federation_history_max_active_exports_per_origin
+        or active_grants_total + channel_count
+        > settings.federation_history_max_active_channel_grants_total
+        or active_grants_origin + channel_count
+        > settings.federation_history_max_active_channel_grants_per_origin
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "KAED_FED_HISTORY_CAPACITY", "retry_after_ms": 60_000},
+            headers={"Retry-After": "60"},
+        )
+
+
 async def create_history_export(
     session: AsyncSession,
     settings: Settings,
@@ -168,6 +428,10 @@ async def create_history_export(
     if not channels:
         return None
     now = datetime.now(UTC)
+    # Serialize active-grant admission globally and then per origin. This
+    # prevents many legitimate member identities on one hostile instance from
+    # multiplying short-lived export/channel rows beyond a bounded footprint.
+    await lock_history_export_capacity(session, requester_origin)
     existing = await session.scalar(
         select(GuildHistoryExport)
         .where(
@@ -178,7 +442,7 @@ async def create_history_export(
             GuildHistoryExport.requester_member_version == membership.member_version,
             GuildHistoryExport.permission_generation == guild.permission_generation,
             GuildHistoryExport.history_policy_generation == guild.history_policy_generation,
-            GuildHistoryExport.status.in_(("active", "completed")),
+            GuildHistoryExport.status.in_(ACTIVE_HISTORY_EXPORT_STATUSES),
             GuildHistoryExport.expires_at > now,
         )
         .order_by(GuildHistoryExport.created_at.desc())
@@ -186,6 +450,13 @@ async def create_history_export(
     )
     if existing is not None:
         return existing
+    await ensure_history_export_capacity(
+        session,
+        settings,
+        requester_origin,
+        len(channels),
+        now,
+    )
     export = GuildHistoryExport(
         id=await snowflake.mint(),
         guild_id=guild.id,
@@ -487,6 +758,19 @@ def _event_channel_id(envelope: dict[str, Any]) -> int | None:
         return None
 
 
+def _history_timestamp_ceiling(
+    settings: Settings,
+    *,
+    authenticated_event_ms: int | None = None,
+) -> int:
+    reference_ms = (
+        authenticated_event_ms
+        if authenticated_event_ms is not None
+        else int(datetime.now(UTC).timestamp() * 1000)
+    )
+    return reference_ms + settings.federation_clock_skew_seconds * 1000
+
+
 async def history_export_delta(
     session: AsyncSession,
     export_id: int,
@@ -730,6 +1014,11 @@ async def purge_ineligible_federated_history(
             delete(Message).where(tuple_(Message.id, Message.origin_domain).in_(purged_refs_query))
         )
         removed = int(deleted.rowcount or 0)  # type: ignore[attr-defined]
+        await reconcile_replica_storage(
+            session,
+            guild.id,
+            guild.origin_domain,
+        )
 
     imports = list(
         await session.scalars(
@@ -760,8 +1049,9 @@ async def purge_ineligible_federated_history(
 
 
 def unresolved_history_username(user_id: int, origin: str) -> str:
-    digest = hashlib.sha256(f"{user_id}@{origin}".encode()).hexdigest()[:20]
-    return f"history_{digest}"
+    """Compatibility wrapper for the randomized local-only placeholder alias."""
+
+    return unresolved_remote_username(user_id, origin)
 
 
 def _history_ref(raw: object, field: str) -> tuple[int, str]:
@@ -783,42 +1073,50 @@ async def _ensure_history_identity(
     profile: RemoteUserProfile | None = None,
     authority_origin: str,
 ) -> User:
+    origin = normalize_domain(origin)
+    authority = normalize_domain(authority_origin)
     existing = await session.get(User, (user_id, origin))
     if profile is not None:
         if (int(profile.id), profile.origin_domain) != (user_id, origin):
             raise ValueError("historical author profile identity is invalid")
-        try:
-            return await resolve_delegated_profile(
-                session,
-                settings,
-                profile,
-                authority_origin=authority_origin,
-            )
-        except ValueError:
-            if existing is not None:
-                raise
+        # A delegated guild-history response is not authoritative for a user
+        # homed on some third instance.  In particular, never turn failed
+        # delegated-profile validation into a placeholder in that third
+        # party's namespace.
+        return await resolve_delegated_profile(
+            session,
+            settings,
+            profile,
+            authority_origin=authority,
+        )
     if existing is not None:
         return existing
     if origin == settings.domain:
         raise ValueError("historical data references an unknown local user")
-    await session.execute(
-        pg_insert(Instance)
-        .values(domain=origin, is_self=False, display_name=origin, software_version="unresolved")
-        .on_conflict_do_nothing(index_elements=["domain"])
-    )
-    await session.execute(
-        pg_insert(User)
-        .values(
-            id=user_id,
-            origin_domain=origin,
-            is_local=False,
-            username=unresolved_history_username(user_id, origin),
-            profile_version=1,
-            profile_resolved=False,
+    if origin != authority:
+        raise UnresolvedHistoryIdentity(
+            "historical data references an unresolved third-party identity"
         )
-        .on_conflict_do_nothing(index_elements=["id", "origin_domain"])
+    # The guild home may identify an otherwise-unknown user in its own
+    # namespace (for example a departed reaction author), but the peer record
+    # must already be the authenticated guild authority.  History data may not
+    # manufacture arbitrary Instance rows.
+    instance = await session.get(Instance, origin)
+    if instance is None or instance.is_self:
+        raise ValueError("historical identity authority is unavailable")
+    existing, introducer = await admit_remote_user_identity(
+        session,
+        settings,
+        user_id,
+        origin,
+        introduced_by_domain=authority,
     )
-    placeholder = await session.get(User, (user_id, origin))
+    placeholder = existing or await insert_unresolved_remote_user(
+        session,
+        user_id=user_id,
+        origin_domain=origin,
+        introduced_by_domain=introducer,
+    )
     if placeholder is None:
         raise RuntimeError("historical identity insert did not converge")
     return placeholder
@@ -911,6 +1209,8 @@ def _validate_history_message(
     upper_bound: int,
     before: int | None = None,
     previous_id: int | None = None,
+    timestamp_upper_bound_ms: int | None = None,
+    attachment_max_bytes: int = 15 * 1024 * 1024,
 ) -> tuple[int, dict[str, Any]]:
     if not isinstance(raw, dict):
         raise ValueError("historical message is invalid")
@@ -931,6 +1231,40 @@ def _validate_history_message(
         raise ValueError("historical message references the wrong channel")
     if raw.get("deleted_at") is not None:
         raise ValueError("history export included deleted content")
+    try:
+        created_at = datetime.fromisoformat(str(raw.get("created_at")))
+        edited_at = (
+            datetime.fromisoformat(str(raw["edited_at"]))
+            if raw.get("edited_at") is not None
+            else None
+        )
+    except ValueError:
+        raise ValueError("historical message timestamp is invalid") from None
+    if created_at.tzinfo is None or (edited_at is not None and edited_at.tzinfo is None):
+        raise ValueError("historical message timestamp lacks a timezone")
+    created_ms = int(created_at.timestamp() * 1000)
+    validate_snowflake_timestamp(
+        message_id,
+        created_at,
+        "historical message",
+        # Historical messages normally predate the export event.  Passing the
+        # creation instant here applies the snowflake-to-created_at half of the
+        # live-event invariant; the explicit upper bound below prevents future
+        # cursor and partition poisoning.
+        event_timestamp_ms=created_ms,
+        tolerance_ms=HISTORY_TIMESTAMP_TOLERANCE_MS,
+    )
+    timestamp_ceiling = (
+        timestamp_upper_bound_ms
+        if timestamp_upper_bound_ms is not None
+        else int(datetime.now(UTC).timestamp() * 1000) + HISTORY_TIMESTAMP_TOLERANCE_MS
+    )
+    if created_ms > timestamp_ceiling:
+        raise ValueError("historical message timestamp is after its authenticated bound")
+    if edited_at is not None:
+        edited_ms = int(edited_at.timestamp() * 1000)
+        if edited_at < created_at or edited_ms > timestamp_ceiling:
+            raise ValueError("historical message edit timestamp is invalid")
     content = raw.get("content")
     e2ee = validate_e2ee_envelope(raw.get("e2ee"))
     attachments = raw.get("attachments", [])
@@ -954,24 +1288,94 @@ def _validate_history_message(
         raise ValueError("historical message mixes plaintext and encrypted content")
     if content is None and e2ee is None and not attachments:
         raise ValueError("historical message has no content")
+    client_nonce = raw.get("client_nonce")
+    if client_nonce is not None and (
+        not isinstance(client_nonce, str) or not 1 <= len(client_nonce) <= 64
+    ):
+        raise ValueError("historical message client nonce is invalid")
+    referenced_id = raw.get("referenced_message_id")
+    referenced_domain = raw.get("referenced_message_domain")
+    if (referenced_id is None) != (referenced_domain is None):
+        raise ValueError("historical message reference is incomplete")
+    if referenced_id is not None:
+        database_snowflake(referenced_id, "historical reply")
+        if normalize_domain(str(referenced_domain)) != guild_origin:
+            raise ValueError("historical message reference has a non-authoritative origin")
+    normalized_mentions: list[dict[str, str]] = []
+    seen_mentions: set[tuple[int, str]] = set()
+    for mention in mentions:
+        mention_ref = _history_ref(mention, "historical mention")
+        if mention_ref in seen_mentions:
+            continue
+        seen_mentions.add(mention_ref)
+        normalized_mentions.append({"id": str(mention_ref[0]), "origin_domain": mention_ref[1]})
+    message_type = raw.get("message_type", 0)
+    if message_type == 2:
+        if not isinstance(webhook, dict):
+            raise ValueError("historical webhook attribution is missing")
+        webhook_name = webhook.get("name")
+        webhook_avatar = webhook.get("avatar_hash")
+        if (
+            not isinstance(webhook_name, str)
+            or not 1 <= len(webhook_name) <= 80
+            or not webhook_name.strip()
+        ):
+            raise ValueError("historical webhook name is invalid")
+        if webhook_avatar is not None and (
+            not isinstance(webhook_avatar, str)
+            or len(webhook_avatar) != 64
+            or any(character not in "0123456789abcdef" for character in webhook_avatar)
+        ):
+            raise ValueError("historical webhook avatar is invalid")
+    elif webhook is not None:
+        raise ValueError("ordinary historical message contains webhook attribution")
     profile = RemoteUserProfile.model_validate(raw.get("history_author"))
     if (
         database_snowflake(raw.get("author_id"), "historical author id"),
         normalize_domain(str(raw.get("author_domain", ""))),
     ) != (int(profile.id), profile.origin_domain):
         raise ValueError("historical author profile does not match the message")
-    try:
-        created_at = datetime.fromisoformat(str(raw.get("created_at")))
-        edited_at = (
-            datetime.fromisoformat(str(raw["edited_at"]))
-            if raw.get("edited_at") is not None
-            else None
+    seen_attachments: set[tuple[int, str]] = set()
+    normalized_attachments: list[dict[str, Any]] = []
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            raise ValueError("historical message attachment is invalid")
+        attachment_ref = (
+            database_snowflake(attachment.get("id"), "historical attachment id"),
+            normalize_domain(str(attachment.get("origin_domain", ""))),
         )
-    except ValueError:
-        raise ValueError("historical message timestamp is invalid") from None
-    if created_at.tzinfo is None or (edited_at is not None and edited_at.tzinfo is None):
-        raise ValueError("historical message timestamp lacks a timezone")
-    message_type = raw.get("message_type", 0)
+        if attachment_ref[1] != profile.origin_domain or attachment_ref in seen_attachments:
+            raise ValueError("historical attachment identity is invalid")
+        seen_attachments.add(attachment_ref)
+        filename = attachment.get("filename")
+        content_type = attachment.get("content_type")
+        size = attachment.get("size")
+        if not isinstance(filename, str) or sanitize_filename(filename) != filename:
+            raise ValueError("historical attachment filename is invalid")
+        if not isinstance(content_type, str):
+            raise ValueError("historical attachment content type is invalid")
+        normalized_content_type = normalize_declared_type(content_type)
+        if (
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or not 1 <= size <= attachment_max_bytes
+        ):
+            raise ValueError("historical attachment size is invalid")
+        width, height = remote_media_dimensions(attachment)
+        blurhash = sanitized_remote_blurhash(attachment.get("blurhash"))
+        variants = sanitized_remote_variants(
+            attachment.get("variants", {}), max_bytes=attachment_max_bytes
+        )
+        normalized_attachments.append(
+            {
+                **attachment,
+                "content_type": normalized_content_type,
+                "width": width,
+                "height": height,
+                "blurhash": blurhash,
+                "variants": variants,
+            }
+        )
     flags = raw.get("flags", 0)
     if (
         isinstance(message_type, bool)
@@ -996,6 +1400,11 @@ def _validate_history_message(
             raise ValueError("historical reaction timestamp is invalid") from None
         if reaction_created.tzinfo is None:
             raise ValueError("historical reaction timestamp lacks a timezone")
+        if (
+            reaction_created < created_at
+            or int(reaction_created.timestamp() * 1000) > timestamp_ceiling
+        ):
+            raise ValueError("historical reaction timestamp is outside the message bounds")
     if isinstance(pin, dict):
         database_snowflake(pin.get("pinned_by_id"), "historical pinner")
         normalize_domain(str(pin.get("pinned_by_domain", "")))
@@ -1005,7 +1414,12 @@ def _validate_history_message(
             raise ValueError("historical pin timestamp is invalid") from None
         if pinned_at.tzinfo is None:
             raise ValueError("historical pin timestamp lacks a timezone")
-    return message_id, dict(raw)
+        if pinned_at < created_at or int(pinned_at.timestamp() * 1000) > timestamp_ceiling:
+            raise ValueError("historical pin timestamp is outside the message bounds")
+    validated = dict(raw)
+    validated["mention_user_refs"] = normalized_mentions
+    validated["attachments"] = normalized_attachments
+    return message_id, validated
 
 
 async def _stage_history_pages(
@@ -1041,14 +1455,15 @@ async def _stage_history_pages(
                 next_before_id=upper_bound,
             )
             session.add(channel_state)
+            await admit_replica_storage(session, settings, guild)
             await session.commit()
         elif channel_state.upper_bound_id != upper_bound:
             raise ValueError("historical channel grant changed while resuming")
         while not channel_state.complete:
             if time.monotonic() >= deadline:
-                raise RuntimeError("historical import exceeded its duration budget")
+                raise FederatedHistoryLimitExceeded("duration")
             if history_import.pages_downloaded >= settings.federation_history_max_pages:
-                raise RuntimeError("historical import exceeded its page budget")
+                raise FederatedHistoryLimitExceeded("pages")
             after = 0
             query: dict[str, str]
             if recent_first:
@@ -1078,8 +1493,8 @@ async def _stage_history_pages(
                 request_timeout=30,
             )
             if response.status_code != 200:
-                raise RuntimeError("historical message page request failed")
-            payload = response.json()
+                raise history_response_error(response)
+            payload = decode_federation_response_json(response)
             if not isinstance(payload, dict):
                 raise ValueError("historical message page is invalid")
             raw_messages = payload.get("messages")
@@ -1103,6 +1518,8 @@ async def _stage_history_pages(
                     upper_bound=upper_bound,
                     before=channel_state.next_before_id if recent_first else None,
                     previous_id=previous_id if recent_first else None,
+                    timestamp_upper_bound_ms=_history_timestamp_ceiling(settings),
+                    attachment_max_bytes=settings.media_max_attachment_bytes,
                 )
                 await session.execute(
                     pg_insert(GuildHistoryStagedMessage)
@@ -1134,11 +1551,11 @@ async def _stage_history_pages(
             next_reactions = history_import.reactions_downloaded + reactions
             next_bytes = history_import.bytes_downloaded + response_bytes
             if next_messages > settings.federation_history_max_messages:
-                raise RuntimeError("historical import exceeded its message budget")
+                raise FederatedHistoryLimitExceeded("messages")
             if next_reactions > settings.federation_history_max_reactions:
-                raise RuntimeError("historical import exceeded its reaction budget")
+                raise FederatedHistoryLimitExceeded("reactions")
             if next_bytes > settings.federation_history_max_bytes:
-                raise RuntimeError("historical import exceeded its byte budget")
+                raise FederatedHistoryLimitExceeded("bytes")
             history_import.pages_downloaded += 1
             history_import.messages_downloaded = next_messages
             history_import.reactions_downloaded = next_reactions
@@ -1149,6 +1566,7 @@ async def _stage_history_pages(
             complete = payload.get("complete")
             if complete is True:
                 channel_state.complete = True
+                await admit_replica_storage(session, settings, guild)
                 await session.commit()
                 continue
             cursor_name = "next_before" if recent_first else "next_after"
@@ -1163,12 +1581,65 @@ async def _stage_history_pages(
                 channel_state.next_before_id = parsed_next
             elif parsed_next != last or parsed_next <= after:
                 raise ValueError("historical message cursor is invalid")
+            await admit_replica_storage(session, settings, guild)
             await session.commit()
     return history_import.messages_downloaded
 
 
+async def _revalidate_staged_history_message(
+    session: AsyncSession,
+    settings: Settings,
+    history_import: GuildHistoryImport,
+    staged: GuildHistoryStagedMessage,
+    *,
+    authenticated_event_ms: int | None = None,
+) -> dict[str, Any]:
+    channel_state = await session.get(
+        GuildHistoryImportChannel,
+        (
+            history_import.export_id,
+            history_import.export_domain,
+            staged.channel_id,
+            staged.channel_domain,
+        ),
+    )
+    if channel_state is None:
+        raise ValueError("staged history message has no channel grant")
+    message_id, validated = _validate_history_message(
+        staged.payload,
+        guild_origin=history_import.guild_domain,
+        channel_id=staged.channel_id,
+        after=0,
+        upper_bound=channel_state.upper_bound_id,
+        timestamp_upper_bound_ms=_history_timestamp_ceiling(settings),
+        attachment_max_bytes=settings.media_max_attachment_bytes,
+    )
+    if authenticated_event_ms is not None:
+        created_at = datetime.fromisoformat(str(validated.get("created_at")))
+        if int(created_at.timestamp() * 1000) > _history_timestamp_ceiling(
+            settings,
+            authenticated_event_ms=authenticated_event_ms,
+        ):
+            raise ValueError("historical message was created after its delta event")
+    if (
+        message_id,
+        normalize_domain(str(validated.get("origin_domain", ""))),
+        database_snowflake(validated.get("channel_id"), "historical message channel"),
+        normalize_domain(str(validated.get("channel_domain", ""))),
+    ) != (
+        staged.message_id,
+        staged.message_domain,
+        staged.channel_id,
+        staged.channel_domain,
+    ):
+        raise ValueError("staged historical message identity changed during reconciliation")
+    staged.payload = validated
+    return validated
+
+
 async def _apply_history_delta_event(
     session: AsyncSession,
+    settings: Settings,
     history_import: GuildHistoryImport,
     event: dict[str, Any],
 ) -> None:
@@ -1198,13 +1669,23 @@ async def _apply_history_delta_event(
         if not isinstance(raw_message, dict):
             raise ValueError("history delta message update is invalid")
         staged.payload = {**staged.payload, **raw_message}
+        await _revalidate_staged_history_message(
+            session,
+            settings,
+            history_import,
+            staged,
+            authenticated_event_ms=int(event.get("ts", 0)),
+        )
         return
     if event_type == "guild.message.purge":
         author_ref = _history_ref(content.get("author"), "history purge author")
         try:
             cutoff = datetime.fromisoformat(str(content.get("created_after")))
+            deleted_at = datetime.fromisoformat(str(content.get("deleted_at")))
         except ValueError:
-            raise ValueError("history purge cutoff is invalid") from None
+            raise ValueError("history purge timestamp is invalid") from None
+        if cutoff.tzinfo is None or deleted_at.tzinfo is None or cutoff > deleted_at:
+            raise ValueError("history purge timestamp bounds are invalid")
         staged_rows = list(
             await session.scalars(
                 select(GuildHistoryStagedMessage).where(
@@ -1214,15 +1695,17 @@ async def _apply_history_delta_event(
             )
         )
         for staged in staged_rows:
-            raw = staged.payload
-            try:
-                created_at = datetime.fromisoformat(str(raw.get("created_at")))
-            except ValueError:
-                raise ValueError("staged history timestamp is invalid") from None
+            raw = await _revalidate_staged_history_message(
+                session,
+                settings,
+                history_import,
+                staged,
+            )
+            created_at = datetime.fromisoformat(str(raw.get("created_at")))
             if (
                 int(raw.get("author_id", -1)),
                 str(raw.get("author_domain", "")),
-            ) == author_ref and created_at >= cutoff:
+            ) == author_ref and cutoff <= created_at <= deleted_at:
                 await session.delete(staged)
         return
     message_ref = _history_ref(content.get("message"), "history state message")
@@ -1256,7 +1739,10 @@ async def _apply_history_delta_event(
                     "user_id": str(user_ref[0]),
                     "user_domain": user_ref[1],
                     "emoji": emoji,
-                    "created_at": datetime.now(UTC).isoformat(),
+                    "created_at": datetime.fromtimestamp(
+                        int(event.get("ts", 0)) / 1000,
+                        tz=UTC,
+                    ).isoformat(),
                 }
             )
         raw["reactions"] = reactions
@@ -1275,6 +1761,13 @@ async def _apply_history_delta_event(
             else None
         )
     staged.payload = raw
+    await _revalidate_staged_history_message(
+        session,
+        settings,
+        history_import,
+        staged,
+        authenticated_event_ms=int(event.get("ts", 0)),
+    )
 
 
 async def _reconcile_history_delta(
@@ -1284,10 +1777,43 @@ async def _reconcile_history_delta(
     history_import: GuildHistoryImport,
     after_seq: int,
     *,
+    deadline: float,
     commit_pages: bool = True,
 ) -> int:
     cursor = after_seq
-    for _page in range(10_000):
+    if time.monotonic() >= deadline:
+        raise FederatedHistoryLimitExceeded("duration")
+    channel_pages = int(
+        await session.scalar(
+            select(func.coalesce(func.sum(GuildHistoryImportChannel.pages_downloaded), 0)).where(
+                GuildHistoryImportChannel.export_id == history_import.export_id,
+                GuildHistoryImportChannel.export_domain == history_import.export_domain,
+            )
+        )
+        or 0
+    )
+    delta_pages_used = max(0, int(history_import.pages_downloaded) - channel_pages)
+    remaining_page_budget = settings.federation_history_max_pages - int(
+        history_import.pages_downloaded
+    )
+    request_limit = min(
+        HISTORY_DELTA_MAX_REQUESTS - delta_pages_used,
+        remaining_page_budget,
+    )
+    if request_limit <= 0:
+        resource = (
+            "delta_requests" if HISTORY_DELTA_MAX_REQUESTS - delta_pages_used <= 0 else "pages"
+        )
+        raise FederatedHistoryLimitExceeded(resource)
+    for _page in range(request_limit):
+        remaining_time = deadline - time.monotonic()
+        if remaining_time <= 0:
+            raise FederatedHistoryLimitExceeded("duration")
+        remaining_bytes = settings.federation_history_max_bytes - int(
+            history_import.bytes_downloaded
+        )
+        if remaining_bytes <= 0:
+            raise FederatedHistoryLimitExceeded("bytes")
         response = await signed_request(
             session,
             settings,
@@ -1295,14 +1821,57 @@ async def _reconcile_history_delta(
             guild.origin_domain,
             f"/_kaede/v1/guilds/{guild.id}/history-exports/{history_import.export_id}/delta",
             query={"after_seq": str(cursor)},
-            request_timeout=30,
+            request_timeout=min(30.0, remaining_time),
+            max_response_bytes=min(
+                settings.federation_history_page_bytes + 64 * 1024,
+                remaining_bytes,
+            ),
         )
+        if time.monotonic() >= deadline:
+            raise FederatedHistoryLimitExceeded("duration")
         if response.status_code != 200:
-            raise RuntimeError("history reconciliation request failed")
-        payload = response.json()
-        if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
+            raise history_response_error(response)
+        payload = decode_federation_response_json(response)
+        raw_events = payload.get("events") if isinstance(payload, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(raw_events, list)
+            or len(raw_events) > HISTORY_DELTA_EVENTS_PER_PAGE
+            or not isinstance(payload.get("complete"), bool)
+        ):
             raise ValueError("history reconciliation response is invalid")
-        for raw_event in payload["events"]:
+        response_bytes = len(response.content)
+        next_pages = int(history_import.pages_downloaded) + 1
+        next_messages = int(history_import.messages_downloaded) + len(raw_events)
+        next_bytes = int(history_import.bytes_downloaded) + response_bytes
+        reaction_events = sum(
+            1
+            for raw_event in raw_events
+            if isinstance(raw_event, dict)
+            and str(raw_event.get("type", "")).startswith("guild.reaction.")
+        )
+        next_reactions = int(history_import.reactions_downloaded) + reaction_events
+        if next_pages > settings.federation_history_max_pages:
+            raise FederatedHistoryLimitExceeded("pages")
+        if next_messages > settings.federation_history_max_messages:
+            raise FederatedHistoryLimitExceeded("messages")
+        if next_bytes > settings.federation_history_max_bytes:
+            raise FederatedHistoryLimitExceeded("bytes")
+        if next_reactions > settings.federation_history_max_reactions:
+            raise FederatedHistoryLimitExceeded("reactions")
+
+        next_cursor = database_snowflake(payload.get("cursor_seq"), "history delta cursor")
+        complete = payload["complete"] is True
+        if next_cursor < cursor or (next_cursor == cursor and (bool(raw_events) or not complete)):
+            raise ValueError("history reconciliation cursor did not advance")
+        if payload.get("latest_seq") is not None:
+            latest_seq = database_snowflake(payload.get("latest_seq"), "history latest cursor")
+            if latest_seq < cursor or next_cursor > latest_seq:
+                raise ValueError("history reconciliation cursor is outside the remote bound")
+            if complete != (next_cursor >= latest_seq):
+                raise ValueError("history reconciliation completion marker is inconsistent")
+
+        for raw_event in raw_events:
             envelope = await validated_event_envelope(
                 session,
                 settings,
@@ -1311,18 +1880,21 @@ async def _reconcile_history_delta(
             )
             await _apply_history_delta_event(
                 session,
+                settings,
                 history_import,
                 envelope.model_dump(mode="json"),
             )
-        next_cursor = database_snowflake(payload.get("cursor_seq"), "history delta cursor")
-        if next_cursor < cursor:
-            raise ValueError("history reconciliation cursor regressed")
+        history_import.pages_downloaded = next_pages
+        history_import.messages_downloaded = next_messages
+        history_import.bytes_downloaded = next_bytes
+        history_import.reactions_downloaded = next_reactions
         cursor = next_cursor
         if commit_pages:
+            await admit_replica_storage(session, settings, guild)
             await session.commit()
-        if payload.get("complete") is True:
+        if complete:
             return cursor
-    raise RuntimeError("history reconciliation exceeded its page bound")
+    raise FederatedHistoryLimitExceeded("delta_requests")
 
 
 async def _merge_history_import_batch(
@@ -1330,7 +1902,36 @@ async def _merge_history_import_batch(
     settings: Settings,
     guild: Guild,
     history_import: GuildHistoryImport,
+    *,
+    reconciled_seq: int,
 ) -> tuple[int, bool]:
+    locked_guild = await session.scalar(
+        select(Guild)
+        .where(Guild.id == guild.id, Guild.origin_domain == guild.origin_domain)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if locked_guild is None:
+        raise RuntimeError("replicated guild disappeared during history merge")
+    if locked_guild.last_event_seq > reconciled_seq:
+        raise HistoryDeltaAdvanced(locked_guild.last_event_seq)
+    current_member = await session.get(
+        GuildMember,
+        (
+            locked_guild.id,
+            locked_guild.origin_domain,
+            history_import.requester_user_id,
+            history_import.requester_user_domain,
+        ),
+    )
+    if (
+        current_member is None
+        or current_member.member_version != history_import.requester_member_version
+        or locked_guild.permission_generation != history_import.permission_generation
+        or locked_guild.history_policy_generation != history_import.history_policy_generation
+    ):
+        raise RuntimeError("history grant changed during finalization")
+    guild = locked_guild
     staged_rows = list(
         await session.scalars(
             select(GuildHistoryStagedMessage)
@@ -1348,11 +1949,16 @@ async def _merge_history_import_batch(
     imported = 0
     latest_by_channel: dict[tuple[int, str], int] = {}
     for staged in staged_rows:
+        raw = await _revalidate_staged_history_message(
+            session,
+            settings,
+            history_import,
+            staged,
+        )
         staged_channel_ref = (staged.channel_id, staged.channel_domain)
         latest_by_channel[staged_channel_ref] = max(
             latest_by_channel.get(staged_channel_ref, 0), staged.message_id
         )
-        raw = staged.payload
         webhook = raw.get("webhook")
         profile = RemoteUserProfile.model_validate(raw.get("history_author"))
         author = await _ensure_history_identity(
@@ -1436,13 +2042,19 @@ async def _merge_history_import_batch(
                 continue
             user_id = database_snowflake(reaction.get("user_id"), "historical reaction user")
             user_domain = normalize_domain(str(reaction.get("user_domain", "")))
-            await _ensure_history_identity(
-                session,
-                settings,
-                user_id,
-                user_domain,
-                authority_origin=guild.origin_domain,
-            )
+            try:
+                await _ensure_history_identity(
+                    session,
+                    settings,
+                    user_id,
+                    user_domain,
+                    authority_origin=guild.origin_domain,
+                )
+            except UnresolvedHistoryIdentity:
+                # Reaction attribution has no embedded authoritative profile in
+                # v1.  Preserve the message while omitting metadata that cannot
+                # safely be tied to an already-resolved third-party identity.
+                continue
             await session.execute(
                 pg_insert(Reaction)
                 .values(
@@ -1459,26 +2071,32 @@ async def _merge_history_import_batch(
         if isinstance(pin, dict):
             pinner_id = database_snowflake(pin.get("pinned_by_id"), "historical pinner")
             pinner_domain = normalize_domain(str(pin.get("pinned_by_domain", "")))
-            await _ensure_history_identity(
-                session,
-                settings,
-                pinner_id,
-                pinner_domain,
-                authority_origin=guild.origin_domain,
-            )
-            await session.execute(
-                pg_insert(Pin)
-                .values(
-                    channel_id=message.channel_id,
-                    channel_domain=message.channel_domain,
-                    message_id=message.id,
-                    message_domain=message.origin_domain,
-                    pinned_by_id=pinner_id,
-                    pinned_by_domain=pinner_domain,
-                    pinned_at=datetime.fromisoformat(str(pin["pinned_at"])),
+            try:
+                await _ensure_history_identity(
+                    session,
+                    settings,
+                    pinner_id,
+                    pinner_domain,
+                    authority_origin=guild.origin_domain,
                 )
-                .on_conflict_do_nothing()
-            )
+            except UnresolvedHistoryIdentity:
+                # As with reactions, v1 pin metadata carries only a reference.
+                # Do not let a guild home manufacture a third party's user row.
+                pass
+            else:
+                await session.execute(
+                    pg_insert(Pin)
+                    .values(
+                        channel_id=message.channel_id,
+                        channel_domain=message.channel_domain,
+                        message_id=message.id,
+                        message_domain=message.origin_domain,
+                        pinned_by_id=pinner_id,
+                        pinned_by_domain=pinner_domain,
+                        pinned_at=datetime.fromisoformat(str(pin["pinned_at"])),
+                    )
+                    .on_conflict_do_nothing()
+                )
         imported += 1
     for (channel_id, channel_domain), message_id in latest_by_channel.items():
         channel = await session.get(Channel, (channel_id, channel_domain))
@@ -1500,6 +2118,7 @@ async def _merge_history_import_batch(
                 ).in_([(row.message_id, row.message_domain) for row in staged_rows]),
             )
         )
+        await admit_replica_storage(session, settings, guild)
         await session.commit()
         remaining = await session.scalar(
             select(GuildHistoryStagedMessage.message_id)
@@ -1519,15 +2138,47 @@ async def _merge_history_import(
     settings: Settings,
     guild: Guild,
     history_import: GuildHistoryImport,
+    *,
+    reconciled_seq: int,
+    deadline: float,
 ) -> int:
     imported = 0
+    cursor = reconciled_seq
     while True:
-        batch_imported, complete = await _merge_history_import_batch(
-            session,
-            settings,
-            guild,
-            history_import,
-        )
+        if time.monotonic() >= deadline:
+            raise FederatedHistoryLimitExceeded("duration")
+        try:
+            batch_imported, complete = await _merge_history_import_batch(
+                session,
+                settings,
+                guild,
+                history_import,
+                reconciled_seq=cursor,
+            )
+        except HistoryDeltaAdvanced as exc:
+            await session.rollback()
+            refreshed_import = await session.get(
+                GuildHistoryImport,
+                (history_import.export_id, history_import.export_domain),
+            )
+            refreshed_guild = await session.get(Guild, (guild.id, guild.origin_domain))
+            if refreshed_import is None or refreshed_guild is None:
+                raise RuntimeError("history import disappeared during reconciliation") from exc
+            history_import = refreshed_import
+            guild = refreshed_guild
+            cursor = await _reconcile_history_delta(
+                session,
+                settings,
+                guild,
+                history_import,
+                cursor,
+                deadline=deadline,
+            )
+            if cursor < exc.required_seq:
+                raise ValueError(
+                    "history reconciliation did not cover the locally applied guild sequence"
+                ) from exc
+            continue
         imported += batch_imported
         if complete:
             break
@@ -1561,8 +2212,8 @@ async def request_and_import_history(
         request_timeout=30,
     )
     if response.status_code != 200:
-        raise RuntimeError("history export request failed")
-    raw_manifest = response.json()
+        raise history_response_error(response)
+    raw_manifest = decode_federation_response_json(response)
     if isinstance(raw_manifest, dict) and raw_manifest.get("available") is False:
         return 0
     (
@@ -1607,6 +2258,7 @@ async def request_and_import_history(
         )
         .on_conflict_do_nothing(constraint="uq_guild_history_imports_grant_generation")
     )
+    await admit_replica_storage(session, settings, guild)
     await session.commit()
     history_import = await session.scalar(select(GuildHistoryImport).where(*grant_conditions))
     if history_import is None:
@@ -1670,13 +2322,15 @@ async def request_and_import_history(
                 guild,
                 history_import,
                 baseline_seq,
+                deadline=deadline,
             )
-            await _reconcile_history_delta(
+            cursor = await _reconcile_history_delta(
                 session,
                 settings,
                 guild,
                 history_import,
                 cursor,
+                deadline=deadline,
             )
             current_guild = await session.scalar(
                 select(Guild)
@@ -1706,6 +2360,8 @@ async def request_and_import_history(
                 settings,
                 current_guild,
                 history_import,
+                reconciled_seq=cursor,
+                deadline=deadline,
             )
             await session.commit()
         completed = await signed_request(
@@ -1719,22 +2375,33 @@ async def request_and_import_history(
         if completed.status_code != 204:
             history_import.ack_error = "history export completion acknowledgement failed"
             await session.commit()
-            raise RuntimeError("history export completion acknowledgement failed")
+            raise history_response_error(completed)
         history_import.remote_acknowledged_at = datetime.now(UTC)
         history_import.ack_error = None
         await session.commit()
         return imported
     except Exception as exc:
         await session.rollback()
+        failure: Exception = user_facing_history_error(exc)
+        if isinstance(exc, FederationReplicaQuotaExceeded):
+            await mark_replica_quota_paused(
+                session,
+                settings,
+                guild.id,
+                guild.origin_domain,
+                exc,
+            )
         failed = await session.get(
             GuildHistoryImport,
             (history_import.export_id, history_import.export_domain),
         )
         if failed is not None and failed.status != "completed":
             failed.status = "failed"
-            failed.error = str(exc)[:500]
+            failed.error = str(failure)[:500]
             await session.commit()
-        raise
+        if failure is exc:
+            raise
+        raise failure from exc
     finally:
         await session.rollback()
         await session.execute(

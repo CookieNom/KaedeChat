@@ -1,7 +1,7 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
-  import { api, ApiError } from '$lib/api/client';
+  import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import type { GifResult } from '$lib/chat/gifs';
   import {
@@ -46,6 +46,7 @@
     ReadStateStatus,
     UserSummary
   } from '$lib/chat/types';
+  import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import {
     GATEWAY_SESSION_RESET_EVENT,
     type Dispatch,
@@ -55,6 +56,7 @@
   import ComposerAutocomplete, {
     type Completion
   } from '$lib/components/ComposerAutocomplete.svelte';
+  import GuildRail from '$lib/components/GuildRail.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import EmojiPicker from '$lib/components/EmojiPicker.svelte';
   import GifPicker from '$lib/components/GifPicker.svelte';
@@ -66,12 +68,9 @@
   import VirtualMessageList from '$lib/components/VirtualMessageList.svelte';
   import { uploadChannelFile, type PendingUpload } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
-  import {
-    compactBadgeCount,
-    directMessageUnreadCount,
-    guildMentionCount
-  } from '$lib/notifications/counts';
+  import { directMessageUnreadCount, guildMentionCount } from '$lib/notifications/counts';
   import { applyReadStateDispatch, type ReadStateDispatch } from '$lib/notifications/read-state';
+  import { ReadAcknowledgementQueue } from '$lib/notifications/read-ack';
   import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
   import VoiceDock from '$lib/voice/VoiceDock.svelte';
@@ -99,6 +98,9 @@
   let content = $state('');
   let gifPickerEnabled = $state(false);
   let gifPickerOpen = $state(false);
+  let gifConfigurationError = $state('');
+  let gifConfigurationLoading = $state(false);
+  let featureController: AbortController | null = null;
   let emojiPickerOpen = $state(false);
   let availableEmojis = $state<CustomEmoji[]>([]);
   let unicodeEmojis = $state<EmojiOption[]>([]);
@@ -124,6 +126,7 @@
   let pinsLoading = $state(false);
   let pinsError = $state('');
   let hasEarlier = $state(true);
+  let authorityHistoryComplete = $state(false);
   let loadingEarlier = $state(false);
   let hasLater = $state(false);
   let loadingLater = $state(false);
@@ -153,9 +156,22 @@
   let mobileNavigationClose = $state<HTMLButtonElement | null>(null);
   let profile = $state<{ user: UserSummary; x: number; y: number } | null>(null);
   let presencePreference = $state<'online' | 'idle' | 'dnd' | 'invisible'>('online');
+  let readStateWarning = $state('');
   const uploadControllers = new SvelteMap<string, AbortController>();
   const pendingSends = new SvelteMap<string, PendingMessageSend>();
   const deliveryRecoveries = new SvelteSet<string>();
+  const readAcknowledgements = new ReadAcknowledgementQueue<Message>({
+    send: (message) =>
+      api(
+        `/channels/${encodeURIComponent(entityRef({ id: message.channel_id, origin_domain: message.channel_domain }))}/ack`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ message_id: entityRef(message) })
+        }
+      ),
+    acknowledged: markMessageAcknowledged,
+    warningChanged: (message) => (readStateWarning = message)
+  });
 
   function guildLandingPath(guild: Guild): string {
     const target = firstNavigableChannel(guild.channels);
@@ -268,6 +284,21 @@
     );
   }
 
+  function reachesRetainedHistoryStart(
+    target: Channel | null,
+    oldest: Message | undefined
+  ): boolean {
+    const retained = target?.oldest_available_message_ref;
+    return Boolean(
+      target?.history_truncated &&
+      !target.history_remote_available &&
+      retained &&
+      oldest &&
+      oldest.id === retained.id &&
+      oldest.origin_domain === retained.origin_domain
+    );
+  }
+
   function resetTyping() {
     typingParticipants = [];
     typing = '';
@@ -294,7 +325,7 @@
       ) ?? recipient;
     typingParticipants = upsertTypingParticipant(typingParticipants, {
       ref: `${userId}@${domain}`,
-      name: user?.display_name ?? user?.username ?? 'Someone'
+      name: user ? userDisplayName(user) : 'Someone'
     });
     refreshTyping();
   }
@@ -316,12 +347,15 @@
           ...unicodeEmojiCompletions(unicodeEmojis, completionQuery.query)
         ]
       : completionQuery?.marker === '@' &&
-          recipient?.handle.toLocaleLowerCase().includes(completionQuery.query.toLocaleLowerCase())
+          recipient &&
+          userPublicHandle(recipient)
+            ?.toLocaleLowerCase()
+            .includes(completionQuery.query.toLocaleLowerCase())
         ? [
             {
               value: `<@${entityRef(recipient)}>`,
-              label: recipient.display_name ?? recipient.username,
-              detail: `@${recipient.handle}`
+              label: userDisplayName(recipient),
+              detail: `@${userPublicHandle(recipient)}`
             }
           ]
         : []
@@ -402,9 +436,12 @@
     void api('/users/@me/settings', {
       method: 'PATCH',
       body: JSON.stringify({ presence_preference: status })
-    }).catch(() => {
-      // The live gateway preference remains effective for this session. A
-      // later settings refresh will reconcile a failed durable update.
+    }).catch((caught) => {
+      if (presencePreference !== status) return;
+      error = `Presence changed for this session, but it could not sync to your other devices. ${userErrorMessage(
+        caught,
+        'The server could not save the presence setting. Try again.'
+      )}`;
     });
     if (currentUser) entities.setPresence(currentUser, status === 'invisible' ? 'offline' : status);
   }
@@ -441,8 +478,8 @@
     try {
       const user = await api<UserSummary>(`/users/lookup?handle=${encodeURIComponent(handle)}`);
       profile = { user, x: window.innerWidth / 2, y: window.innerHeight / 2 };
-    } catch {
-      error = 'Could not load that profile.';
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not load that profile. Try again.');
     }
   }
 
@@ -517,6 +554,20 @@
         const applied = applyMessageDeliveryUpdate(messages, update);
         setMessages(applied.messages);
         if (!applied.matched) void recoverDeliveryUpdate(update);
+      }
+    } else if (dispatch.t === 'USER_UPDATE') {
+      const user = dispatch.d as UserSummary;
+      if (user.id && user.origin_domain) {
+        entities.applyUserProfile(user);
+        const patch = (message: Message): Message =>
+          message.author_id === user.id && message.author_domain === user.origin_domain
+            ? { ...message, author: { ...(message.author ?? user), ...user } }
+            : message;
+        pinnedMessages = pinnedMessages.map(patch);
+        if (replyingMessage) replyingMessage = patch(replyingMessage);
+        if (profile && entityKey(profile.user) === entityKey(user)) {
+          profile = { ...profile, user: { ...profile.user, ...user } };
+        }
       }
     } else if (dispatch.t === 'GUILD_EMOJI_CREATE') {
       const emoji = dispatch.d as CustomEmoji;
@@ -597,13 +648,31 @@
     }
   }
 
+  async function refreshGifConfiguration() {
+    const controller = featureController;
+    if (!controller || gifConfigurationLoading) return;
+    gifConfigurationLoading = true;
+    gifConfigurationError = '';
+    try {
+      const configuration = await loadAuthConfiguration(controller.signal);
+      gifPickerEnabled = configuration.gif_picker_enabled;
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      gifPickerEnabled = false;
+      gifConfigurationError = userErrorMessage(
+        caught,
+        'Could not check whether GIF search is available. Try again.'
+      );
+    } finally {
+      if (featureController === controller) gifConfigurationLoading = false;
+    }
+  }
+
   onMount(() => {
     const client = authenticatedGateway.client;
     gateway = client;
-    const featureController = new AbortController();
-    void loadAuthConfiguration(featureController.signal)
-      .then((configuration) => (gifPickerEnabled = configuration.gif_picker_enabled))
-      .catch(() => (gifPickerEnabled = false));
+    featureController = new AbortController();
+    void refreshGifConfiguration();
     const desktopViewport = window.matchMedia('(min-width: 741px)');
     const viewportChanged = () => {
       if (desktopViewport.matches) closeMobileNavigation(false);
@@ -626,7 +695,9 @@
     desktopViewport.addEventListener('change', viewportChanged);
     viewportChanged();
     return () => {
-      featureController.abort();
+      featureController?.abort();
+      featureController = null;
+      readAcknowledgements.reset();
       loadGeneration += 1;
       snapshotGeneration += 1;
       dispatchBuffer = null;
@@ -698,8 +769,10 @@
       loadingLater = false;
       lastTypingAt = 0;
       hasEarlier = true;
+      authorityHistoryComplete = false;
       pendingSends.clear();
       deliveryRecoveries.clear();
+      readAcknowledgements.reset();
       void load(targetRef, routeGeneration, snapshot, buffered, false, callRevision, targetAround);
     });
   });
@@ -800,7 +873,26 @@
         activeCall = nextCall;
         callJoined = nextCall ? loadedCall.joined : false;
       }
-      hasEarlier = targetAround ? loadedMessages.length > 0 : loadedMessages.length === 50;
+      const loadedChannel =
+        loadedDms.find((item) => matchesEntityRef(targetRef, item, localDomain)) ?? null;
+      const oldestLoaded = loadedMessages.at(-1);
+      authorityHistoryComplete =
+        (preserveMessages && authorityHistoryComplete) ||
+        oldestLoaded?.history_page_complete === true ||
+        (loadedMessages.length === 0 &&
+          loadedChannel?.history_truncated === true &&
+          loadedChannel.history_remote_available === true);
+      if (oldestLoaded?.history_page_error_code === 'FEDERATED_DM_HISTORY_UNAVAILABLE') {
+        error =
+          'Older messages are temporarily unavailable from this conversation’s home instance. Recent cached messages are still shown; retry in a moment.';
+      }
+      hasEarlier =
+        (targetAround
+          ? loadedMessages.length > 0
+          : loadedMessages.length === 50 ||
+            oldestLoaded?.history_page_error_code === 'FEDERATED_DM_HISTORY_UNAVAILABLE') &&
+        !oldestLoaded?.history_page_complete &&
+        !reachesRetainedHistoryStart(loadedChannel, oldestLoaded);
       hasLater = Boolean(targetAround && loadedMessages.length > 0);
       const orderedMessages = loadedMessages.reverse().sort(compareMessages);
       setMessages(
@@ -828,7 +920,7 @@
       forgetConfirmedSends();
       if (dispatchBuffer === buffered) dispatchBuffer = null;
       if (!preserveMessages) {
-        error = caught instanceof ApiError ? caught.message : 'Could not open this conversation.';
+        error = userErrorMessage(caught, 'Could not open this conversation. Try again.');
       } else if (!error) {
         error = 'Live updates resumed, but conversation state could not be refreshed.';
       }
@@ -846,16 +938,34 @@
         `/channels/${encodeURIComponent(targetRef)}/messages?before=${encodeURIComponent(entityRef(oldest))}`
       );
       if (generation !== loadGeneration || targetRef !== dmId) return;
+      // A successful empty page is the unambiguous end of both sources: the
+      // backend would have returned any remaining durable local rows and only
+      // suppresses failures by returning a marked, non-empty cached page.
+      const pageCompletesAuthorityHistory =
+        older.length === 0 || older.at(-1)?.history_page_complete === true;
+      const authorityHistoryError = older.at(-1)?.history_page_error_code;
       const available = Math.max(0, 1_000 - messages.length);
       const prepended = older.reverse().slice(-available);
       const byKey = Object.create(null) as Record<string, Message>;
       for (const message of prepended) byKey[entityKey(message)] = message;
       for (const message of messages) byKey[entityKey(message)] = message;
-      setMessages(Object.values(byKey).sort(compareMessages));
-      hasEarlier = older.length === 50 && messages.length < 1_000;
+      const combined = Object.values(byKey).sort(compareMessages);
+      setMessages(combined);
+      authorityHistoryComplete ||= pageCompletesAuthorityHistory;
+      if (authorityHistoryError === 'FEDERATED_DM_HISTORY_UNAVAILABLE') {
+        error =
+          'Older messages are temporarily unavailable from this conversation’s home instance. Recent cached messages remain visible; retry in a moment.';
+      } else if (error.startsWith('Older messages are temporarily unavailable')) {
+        error = '';
+      }
+      hasEarlier =
+        (older.length === 50 || authorityHistoryError === 'FEDERATED_DM_HISTORY_UNAVAILABLE') &&
+        combined.length < 1_000 &&
+        !pageCompletesAuthorityHistory &&
+        !reachesRetainedHistoryStart(channel, combined[0]);
     } catch (caught) {
       if (generation !== loadGeneration || targetRef !== dmId) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not load earlier messages.';
+      error = userErrorMessage(caught, 'Could not load earlier messages. Try again.');
     } finally {
       if (generation === loadGeneration && targetRef === dmId) loadingEarlier = false;
     }
@@ -879,24 +989,17 @@
       hasLater = newer.length === 50;
     } catch (caught) {
       if (generation !== loadGeneration || targetRef !== dmId) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not load newer messages.';
+      error = userErrorMessage(caught, 'Could not load newer messages. Try again.');
     } finally {
       if (generation === loadGeneration && targetRef === dmId) loadingLater = false;
     }
   }
 
-  async function acknowledge(message: Message) {
+  function markMessageAcknowledged(message: Message) {
     const targetChannel = {
       id: message.channel_id,
       origin_domain: message.channel_domain
     };
-    const succeeded = await api(`/channels/${encodeURIComponent(entityRef(targetChannel))}/ack`, {
-      method: 'POST',
-      body: JSON.stringify({ message_id: entityRef(message) })
-    })
-      .then(() => true)
-      .catch(() => false);
-    if (!succeeded) return;
     setReadStates(
       readStates.map((state) =>
         state.channel_id === targetChannel.id &&
@@ -918,6 +1021,10 @@
           : state
       )
     );
+  }
+
+  function acknowledge(message: Message): Promise<void> {
+    return readAcknowledgements.acknowledge(message);
   }
 
   function reconcile(message: Message) {
@@ -993,7 +1100,7 @@
         finishEditing();
       } catch (caught) {
         if (generation === loadGeneration)
-          error = caught instanceof ApiError ? caught.message : 'Message edit failed.';
+          error = userErrorMessage(caught, 'Could not edit the message. Try again.');
       } finally {
         if (generation === loadGeneration) busy = false;
       }
@@ -1101,7 +1208,7 @@
           error =
             'Those files were already used by another message. Reattach them before retrying.';
         } else {
-          error = caught instanceof ApiError ? caught.message : 'Message failed to send.';
+          error = userErrorMessage(caught, 'Could not send the message. Try again.');
         }
       }
     } finally {
@@ -1147,7 +1254,7 @@
               ? {
                   ...item,
                   status: 'failed',
-                  error: caught instanceof Error ? caught.message : 'Upload failed'
+                  error: userErrorMessage(caught, 'Upload failed. Remove the file and try again.')
                 }
               : item
           );
@@ -1197,7 +1304,7 @@
         revision === callRevision &&
         !activeCall
       )
-        error = caught instanceof ApiError ? caught.message : 'Could not start the call.';
+        error = userErrorMessage(caught, 'Could not start the call. Try again.');
     } finally {
       if (generation === loadGeneration && routeRef === dmId) callBusy = false;
     }
@@ -1235,7 +1342,7 @@
       callRevision += 1;
     } catch (caught) {
       if (generation === loadGeneration && routeRef === dmId && revision === callRevision)
-        error = caught instanceof ApiError ? caught.message : 'Call control failed.';
+        error = userErrorMessage(caught, 'Could not update the call. Try again.');
     } finally {
       if (generation === loadGeneration && routeRef === dmId) callBusy = false;
     }
@@ -1331,7 +1438,10 @@
         `/channels/${encodeURIComponent(entityRef(channel))}/pins`
       );
     } catch (caught) {
-      pinsError = caught instanceof ApiError ? caught.message : 'Could not load pinned messages.';
+      pinsError = userErrorMessage(
+        caught,
+        'Could not load pinned messages. Close this panel and try again.'
+      );
     } finally {
       pinsLoading = false;
     }
@@ -1353,7 +1463,7 @@
         ? [message, ...pinnedMessages.filter((item) => entityKey(item) !== entityKey(message))]
         : pinnedMessages.filter((item) => entityKey(item) !== entityKey(message));
     } catch (caught) {
-      error = caught instanceof ApiError ? caught.message : 'Could not update the pinned message.';
+      error = userErrorMessage(caught, 'Could not update the pinned message. Try again.');
     }
   }
 
@@ -1410,7 +1520,7 @@
       if (editingMessage && entityKey(editingMessage) === entityKey(message)) finishEditing();
     } catch (caught) {
       if (generation !== loadGeneration || routeChannel !== dmId) return;
-      error = caught instanceof ApiError ? caught.message : 'Message deletion failed.';
+      error = userErrorMessage(caught, 'Could not delete the message. Try again.');
     }
   }
 
@@ -1484,7 +1594,7 @@
 <!-- eslint-disable svelte/no-navigation-without-resolve -- authenticated media URLs are API resources, not Svelte routes -->
 
 <svelte:head
-  ><title>{recipient?.display_name ?? recipient?.username ?? 'Direct message'} · Kaede Chat</title
+  ><title>{recipient ? userDisplayName(recipient) : 'Direct message'} · Kaede Chat</title
   ></svelte:head
 >
 <svelte:window
@@ -1503,39 +1613,14 @@
 {/if}
 
 <main class="chat-app">
-  <nav class="guild-spine" aria-label="Guilds">
-    <a
-      class="spine-home active"
-      href={resolve('/home')}
-      aria-label={homeUnreadCount ? `Home, ${homeUnreadCount} unread direct messages` : 'Home'}
-      aria-current="page"
-      title="Home"
-    >
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M4 10.5 12 4l8 6.5v8a1.5 1.5 0 0 1-1.5 1.5h-4v-6h-5v6h-4A1.5 1.5 0 0 1 4 18.5z" />
-      </svg>
-      {#if homeUnreadCount}
-        <small class="rail-unread">{compactBadgeCount(homeUnreadCount)}</small>
-      {/if}
-    </a>
-    <div class="spine-separator" aria-hidden="true"></div>
-    {#each guilds as item (entityKey(item))}
-      {@const mentionCount = guildMentionCount(readStates, item)}
-      <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- guildPath calls resolve before substituting typed parameters -->
-      <a
-        href={guildLandingPath(item)}
-        aria-label={mentionCount ? `${item.name}, ${mentionCount} mentions` : item.name}
-        title={item.name}
-      >
-        {#if item.icon_hash}
-          <img src={assetUrl(item.icon_hash, 'thumbnail_128', item)} alt="" />
-        {:else}
-          {item.name.slice(0, 2).toUpperCase()}
-        {/if}
-        {#if mentionCount}<small class="rail-unread">{compactBadgeCount(mentionCount)}</small>{/if}
-      </a>
-    {/each}
-  </nav>
+  <GuildRail
+    {guilds}
+    homeHref={resolve('/home')}
+    homeActive
+    {homeUnreadCount}
+    guildHref={guildLandingPath}
+    mentionCount={(item) => guildMentionCount(readStates, item)}
+  />
   <aside
     bind:this={mobileNavigationDrawer}
     class:mobile-open={mobileNavigationOpen}
@@ -1613,11 +1698,13 @@
                 alt=""
               />
             {:else}
-              {itemRecipient?.username.slice(0, 1).toUpperCase() ?? '?'}
+              {itemRecipient?.profile_resolved === false
+                ? '•'
+                : (itemRecipient?.username.slice(0, 1).toUpperCase() ?? '?')}
             {/if}
           </span>
           <span>
-            {itemRecipient?.display_name ?? itemRecipient?.username ?? 'Conversation'}
+            {itemRecipient ? userDisplayName(itemRecipient) : 'Conversation'}
           </span>
           {#if unreadFor(item)?.unread}<small class="unread-badge"
               >{Math.max(1, unreadFor(item)?.mention_count ?? 0)}</small
@@ -1675,12 +1762,18 @@
                 class="profile-title-button"
                 type="button"
                 onclick={(event) => openProfile(recipient, event)}
-                >{recipient.display_name ?? recipient.username}</button
+                >{userDisplayName(recipient)}</button
               >
             {:else}
               <strong>Conversation</strong>
             {/if}
-            {#if recipient?.handle}<span>{recipient.handle}</span>{/if}
+            {#if recipient}
+              <span
+                >{recipient.profile_resolved === false
+                  ? 'Profile unavailable'
+                  : recipient.handle}</span
+              >
+            {/if}
           </div>
         </div>
       </div>
@@ -1710,6 +1803,13 @@
         {/if}
       </div>
     </header>
+    {#if readStateWarning}
+      <div class="read-state-warning" role="status">
+        <span>{readStateWarning}</span>
+        <button type="button" onclick={() => void readAcknowledgements.retryNow()}>Retry now</button
+        >
+      </div>
+    {/if}
     <div
       class:has-active-call={Boolean(activeCall && callJoined)}
       class:has-ringing-call={Boolean(activeCall && !callJoined)}
@@ -1717,7 +1817,7 @@
     >
       {#if activeCall && !callJoined}
         <div class="call-ringing dm-call-region" role="status">
-          <strong>{recipient?.display_name ?? recipient?.username ?? 'Someone'} is calling</strong>
+          <strong>{recipient ? userDisplayName(recipient) : 'Someone'} is calling</strong>
           <button disabled={callBusy} onclick={() => callAction('accept')}>Accept</button>
           <button disabled={callBusy} class="decline" onclick={() => callAction('decline')}
             >Decline</button
@@ -1734,14 +1834,24 @@
         </div>
       {/if}
       <div class="message-list" aria-live="polite" role="log" aria-label="Direct messages">
-        {#if error}<p class="form-error message-error">{error}</p>{/if}
+        {#if error}<p class="form-error message-error" role="alert">{error}</p>{/if}
         {#snippet emptyTimeline()}
           {#if channelReady && channel}
-            <section class="channel-welcome">
-              <span class="welcome-mark direct" aria-hidden="true">@</span>
-              <h2>{recipient?.display_name ?? recipient?.username ?? 'New conversation'}</h2>
-              <p>This is the beginning of your direct conversation.</p>
-            </section>
+            {#if channel.history_truncated}
+              <aside class="history-boundary" role="status">
+                <strong>No recent messages are cached</strong>
+                <span>
+                  This instance keeps a rolling cache of this remote conversation. Older messages
+                  are loaded securely from its home instance when available.
+                </span>
+              </aside>
+            {:else}
+              <section class="channel-welcome">
+                <span class="welcome-mark direct" aria-hidden="true">@</span>
+                <h2>{recipient ? userDisplayName(recipient) : 'New conversation'}</h2>
+                <p>This is the beginning of your direct conversation.</p>
+              </section>
+            {/if}
           {/if}
         {/snippet}
         {#key dmId}
@@ -1758,6 +1868,22 @@
             onBottomChange={timelineBottomChanged}
             label="Direct messages"
           >
+            {#snippet historyStart()}
+              {#if channel?.history_truncated && !authorityHistoryComplete}
+                <aside class="history-boundary" role="status">
+                  <strong>Recent history starts here</strong>
+                  <span>
+                    This instance keeps a rolling cache of this remote conversation. Older messages
+                    load on demand from its home instance; retry if that instance is temporarily
+                    unavailable.
+                  </span>
+                </aside>
+              {:else if authorityHistoryComplete}
+                <aside class="history-boundary" role="status">
+                  <strong>This is the beginning of your direct conversation.</strong>
+                </aside>
+              {/if}
+            {/snippet}
             {#snippet renderItem(item)}
               {#if item.kind === 'day'}
                 <div class="timeline-divider" role="separator"><span>{item.label}</span></div>
@@ -1797,11 +1923,7 @@
         <div class="reply-banner">
           <span>
             Replying to
-            <strong
-              >{replyingMessage.author?.display_name ??
-                replyingMessage.author?.username ??
-                'Unknown author'}</strong
-            >
+            <strong>{userDisplayName(replyingMessage.author)}</strong>
           </span>
           <div class="reply-banner-actions">
             <button type="button" onclick={cancelReply} aria-label="Cancel reply">×</button>
@@ -1874,17 +1996,18 @@
             ? `dm-message-suggestions-option-${completionActive}`
             : undefined}
           aria-label="Direct message"
-          placeholder={`Message ${recipient?.display_name ?? recipient?.username ?? 'this conversation'}`}
+          placeholder={`Message ${recipient ? userDisplayName(recipient) : 'this conversation'}`}
           rows="1"
           maxlength="4000"
         ></textarea>
-        {#if gifPickerEnabled && !editingMessage}
+        {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage}
           <button
             class="gif-button"
             class:active={gifPickerOpen}
             type="button"
-            disabled={busy || !channelReady || !channel}
-            aria-label="Choose a GIF"
+            disabled={busy || !channelReady || !channel || !gifPickerEnabled}
+            aria-label={gifPickerEnabled ? 'Choose a GIF' : 'GIF availability could not be checked'}
+            title={gifPickerEnabled ? 'Choose a GIF' : gifConfigurationError}
             aria-expanded={gifPickerOpen}
             onclick={() => {
               gifPickerOpen = !gifPickerOpen;
@@ -1924,6 +2047,18 @@
           </svg>
         </button>
       </form>
+      {#if gifConfigurationError}
+        <p class="composer-feature-warning" role="status">
+          <span>{gifConfigurationError}</span>
+          <button
+            type="button"
+            disabled={gifConfigurationLoading}
+            onclick={() => void refreshGifConfiguration()}
+          >
+            {gifConfigurationLoading ? 'Checking…' : 'Retry GIF check'}
+          </button>
+        </p>
+      {/if}
       {#if gifPickerOpen}
         <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
       {/if}
@@ -1945,6 +2080,7 @@
         error={pinsError}
         onClose={() => (pinsOpen = false)}
         onJump={jumpToPinnedMessage}
+        onRetry={() => void loadPins()}
       />
     {/if}
   </section>

@@ -28,6 +28,31 @@ def test_ed25519_signing_round_trip_and_tamper_rejection() -> None:
     assert not verify_request(changed, signature, private.public_key())
 
 
+def test_v2_request_nonce_is_bound_into_the_signature() -> None:
+    private = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    request = SigningInput(
+        "post",
+        "/_kaede/v1/inbox",
+        "alpha.test",
+        "beta.test",
+        42,
+        "abc",
+        "abcdefghijklmnopqrstuv",
+    )
+    signature = sign_request(request, private)
+    assert verify_request(request, signature, private.public_key())
+    replay_with_changed_nonce = SigningInput(
+        "post",
+        "/_kaede/v1/inbox",
+        "alpha.test",
+        "beta.test",
+        42,
+        "abc",
+        "abcdefghijklmnopqrstuw",
+    )
+    assert not verify_request(replay_with_changed_nonce, signature, private.public_key())
+
+
 def test_kaede_fed_v1_fixed_request_signing_vector() -> None:
     private = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
     body = b'{"events":[]}'

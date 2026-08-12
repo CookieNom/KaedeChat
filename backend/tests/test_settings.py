@@ -87,8 +87,86 @@ def test_conditional_email_and_refresh_settings() -> None:
         settings(federation_history_page_messages=501)
     with pytest.raises(ValidationError):
         settings(federation_history_max_messages=99)
+    with pytest.raises(ValidationError, match="events_total"):
+        settings(
+            federation_inbox_max_events_per_origin=2_000,
+            federation_inbox_max_events_total=1_000,
+        )
+    with pytest.raises(ValidationError, match="bytes_total"):
+        settings(
+            federation_inbox_max_bytes_per_origin=2 * 1024 * 1024,
+            federation_inbox_max_bytes_total=1024 * 1024,
+        )
+    with pytest.raises(ValidationError):
+        settings(federation_max_remote_instances=99)
+    with pytest.raises(ValidationError):
+        settings(federation_peer_key_history_limit=127)
+    with pytest.raises(ValidationError, match="replica_max_rows_per_origin"):
+        settings(
+            federation_replica_max_rows_per_guild=20_000,
+            federation_replica_max_rows_per_origin=10_000,
+        )
+    with pytest.raises(ValidationError, match="replica_max_bytes_per_origin"):
+        settings(
+            federation_replica_max_bytes_per_guild=32 * 1024 * 1024,
+            federation_replica_max_bytes_per_origin=16 * 1024 * 1024,
+        )
+    with pytest.raises(ValidationError, match="replica_cache_messages"):
+        settings(
+            federation_dm_replica_cache_messages_per_conversation=1_001,
+            federation_dm_max_messages_per_conversation=1_000,
+        )
+    with pytest.raises(ValidationError, match="replica_cache_bytes"):
+        settings(
+            federation_dm_replica_cache_bytes_per_conversation=2 * 1024 * 1024,
+            federation_dm_max_bytes_per_conversation=1024 * 1024,
+        )
+    with pytest.raises(ValidationError, match="history_page_bytes"):
+        settings(
+            federation_history_page_bytes=2 * 1024 * 1024,
+            federation_history_max_bytes=1024 * 1024,
+        )
+    with pytest.raises(ValidationError):
+        settings(federation_remote_identity_retention_days=6)
+    with pytest.raises(ValidationError, match="remote_media_inflight_bytes_per_origin"):
+        settings(
+            media_max_attachment_bytes=2 * 1024 * 1024,
+            federation_remote_media_inflight_bytes_per_origin=1024 * 1024,
+        )
+    with pytest.raises(ValidationError, match="remote_media_inflight_bytes_total"):
+        settings(
+            media_max_attachment_bytes=1024 * 1024,
+            federation_remote_media_inflight_bytes_per_origin=2 * 1024 * 1024,
+            federation_remote_media_inflight_bytes_total=1024 * 1024,
+        )
     with pytest.raises(ValidationError):
         settings(audit_retention_days=89)
+
+
+def test_federation_storage_defaults_have_realistic_import_headroom() -> None:
+    configured = settings()
+
+    assert configured.federation_inbox_max_events_per_origin == 5_000_000
+    assert configured.federation_inbox_max_bytes_per_origin == 16 * 1024**3
+    assert configured.federation_inbox_max_events_total == 50_000_000
+    assert configured.federation_inbox_max_bytes_total == 160 * 1024**3
+    assert configured.federation_replica_max_rows_per_guild == 20_000_000
+    assert configured.federation_replica_max_bytes_per_guild == 64 * 1024**3
+    assert configured.federation_replica_max_rows_per_origin == 100_000_000
+    assert configured.federation_replica_max_bytes_per_origin == 320 * 1024**3
+    assert configured.federation_history_max_messages == 2_000_000
+    assert configured.federation_history_max_bytes == 32 * 1024**3
+    assert configured.federation_dm_replica_cache_messages_per_conversation == 250_000
+    assert configured.federation_dm_replica_cache_bytes_per_conversation == 2 * 1024**3
+    assert configured.media_remote_cache_bytes == 100 * 1024**3
+    assert (
+        configured.federation_dm_replica_cache_messages_per_conversation
+        < configured.federation_dm_max_messages_per_conversation
+    )
+    assert (
+        configured.federation_dm_replica_cache_bytes_per_conversation
+        < configured.federation_dm_max_bytes_per_conversation
+    )
 
 
 def test_blank_optional_secrets_are_treated_as_unset() -> None:
@@ -175,6 +253,30 @@ def test_media_configuration_is_bounded_and_secret_safe() -> None:
         settings(media_derived_bucket="Bad_Bucket")
     with pytest.raises(ValidationError, match="without dots"):
         settings(media_s3_addressing_style="virtual", media_derived_bucket="derived.assets")
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {
+            "federation_history_max_active_exports_per_origin": 11,
+            "federation_history_max_active_exports_total": 10,
+        },
+        {
+            "federation_history_max_active_channel_grants_per_origin": 101,
+            "federation_history_max_active_channel_grants_total": 100,
+        },
+        {
+            "federation_history_max_active_exports_per_origin": 11,
+            "federation_history_max_active_channel_grants_per_origin": 10,
+        },
+    ],
+)
+def test_history_export_capacity_configuration_preserves_aggregate_bounds(
+    override: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="federation_history_max_active"):
+        settings(**override)
 
 
 def test_external_s3_defaults_to_non_mutating_bucket_verification() -> None:

@@ -19,14 +19,25 @@ from app.chat.payloads import dm_channel_payload
 from app.chat.privacy import blocked_between, require_can_direct_message
 from app.chat.schemas import DMOpenRequest
 from app.core.dm import dm_authority_domain, dm_pair_key
+from app.core.errors import parse_upstream_error
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.db.models import Channel, DMConversation, DMParticipant, User
 from app.federation.client import signed_request
+from app.federation.dm_storage import (
+    FederatedDMQuotaExceeded,
+    admit_federated_dm_conversation,
+    dm_authority_history_available,
+    dm_history_metadata,
+    register_federated_dm_conversation,
+)
 from app.federation.events import build_envelope, queue_event
-from app.federation.network import FederationNetworkError
+from app.federation.network import (
+    FederationNetworkError,
+    decode_federation_response_json,
+)
 from app.federation.replication import profile_from_user, replicate_conversation
 from app.federation.schemas import RemoteUserProfile
 from app.federation.users import resolve_handle
@@ -63,10 +74,37 @@ def recipients_for(actor: User, participants: list[User]) -> list[User]:
     ]
 
 
+async def rendered_dm_channel(
+    session: AsyncSession,
+    settings: Settings,
+    channel: Channel,
+    actor: User,
+    participants: list[User] | None = None,
+) -> dict[str, object]:
+    if participants is None:
+        participants = await conversation_participants(session, channel.id, channel.origin_domain)
+    conversation = await session.get(
+        DMConversation,
+        (channel.id, channel.origin_domain),
+    )
+    return dm_channel_payload(
+        channel,
+        recipients_for(actor, participants),
+        history=dm_history_metadata(
+            conversation,
+            local_domain=settings.domain,
+            remote_available=await dm_authority_history_available(
+                session, conversation, local_domain=settings.domain
+            ),
+        ),
+    )
+
+
 @router.get("")
 async def list_direct_messages(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> list[dict[str, object]]:
     channels = list(
         await session.scalars(
@@ -89,7 +127,9 @@ async def list_direct_messages(
     result: list[dict[str, object]] = []
     for channel in channels:
         participants = await conversation_participants(session, channel.id, channel.origin_domain)
-        result.append(dm_channel_payload(channel, recipients_for(auth.user, participants)))
+        result.append(
+            await rendered_dm_channel(session, settings, channel, auth.user, participants)
+        )
     return result
 
 
@@ -175,6 +215,15 @@ async def open_direct_message(
             }
         if response.status_code == 403:
             raise HTTPException(status_code=403, detail={"code": "CANNOT_DM_USER"})
+        if response.status_code == 507:
+            try:
+                error_body = decode_federation_response_json(response)
+            except FederationNetworkError:
+                error_body = None
+            raise HTTPException(
+                status_code=507,
+                detail=parse_upstream_error(error_body, "FEDERATED_DM_STORAGE_QUOTA_EXCEEDED"),
+            )
         if response.status_code == 429 or response.status_code >= 500:
             request_envelope = await build_envelope(
                 session,
@@ -195,13 +244,13 @@ async def open_direct_message(
         if response.status_code != 200:
             raise HTTPException(status_code=502, detail={"code": "FEDERATION_DM_OPEN_FAILED"})
         try:
-            response_payload = response.json()
+            response_payload = decode_federation_response_json(response)
             if not isinstance(response_payload, dict):
                 raise ValueError("DM authority response must be an object")
             response_profiles = [
                 RemoteUserProfile.model_validate(item) for item in response_payload["participants"]
             ]
-        except (KeyError, TypeError, ValueError):
+        except (FederationNetworkError, KeyError, TypeError, ValueError):
             raise HTTPException(
                 status_code=502, detail={"code": "FEDERATION_DM_RESPONSE_INVALID"}
             ) from None
@@ -227,13 +276,15 @@ async def open_direct_message(
                 conversation_payload,
                 response_profiles,
             )
+        except FederatedDMQuotaExceeded as exc:
+            raise HTTPException(status_code=507, detail=exc.detail()) from exc
         except (KeyError, TypeError, ValueError, RuntimeError):
             raise HTTPException(
                 status_code=502, detail={"code": "FEDERATION_DM_RESPONSE_INVALID"}
             ) from None
         await session.commit()
         participants = await conversation_participants(session, channel.id, channel.origin_domain)
-        result = dm_channel_payload(channel, recipients_for(auth.user, participants))
+        result = await rendered_dm_channel(session, settings, channel, auth.user, participants)
         await publish_dispatch(
             redis,
             user_topic(settings.domain, auth.user.id),
@@ -242,6 +293,17 @@ async def open_direct_message(
         )
         return result
     conversation_id = await snowflake.mint()
+    participant_domains = {auth.user.origin_domain, target.origin_domain}
+    try:
+        federated = await admit_federated_dm_conversation(
+            session,
+            settings,
+            authority_domain=authority,
+            pair_key=pair_key,
+            participant_domains=participant_domains,
+        )
+    except FederatedDMQuotaExceeded as exc:
+        raise HTTPException(status_code=507, detail=exc.detail()) from exc
     inserted_id = await session.scalar(
         pg_insert(DMConversation)
         .values(
@@ -256,6 +318,19 @@ async def open_direct_message(
     )
     created = inserted_id is not None
     if created:
+        conversation = await session.get(
+            DMConversation,
+            (conversation_id, settings.domain),
+        )
+        if conversation is None:
+            raise RuntimeError("new direct-message conversation disappeared")
+        if federated:
+            await register_federated_dm_conversation(
+                session,
+                settings,
+                conversation,
+                participant_domains=participant_domains,
+            )
         channel = Channel(
             id=conversation_id,
             origin_domain=settings.domain,
@@ -307,6 +382,13 @@ async def open_direct_message(
         )
         if conversation is None:
             raise RuntimeError("direct-message conflict did not resolve")
+        if federated:
+            await register_federated_dm_conversation(
+                session,
+                settings,
+                conversation,
+                participant_domains=participant_domains,
+            )
         conversation_id = conversation.id
         existing_channel = await session.scalar(
             select(Channel).where(
@@ -319,7 +401,7 @@ async def open_direct_message(
             raise RuntimeError("direct-message channel is missing")
         channel = existing_channel
     participants = await conversation_participants(session, channel.id, channel.origin_domain)
-    result = dm_channel_payload(channel, recipients_for(auth.user, participants))
+    result = await rendered_dm_channel(session, settings, channel, auth.user, participants)
     if created:
         for participant in participants:
             if participant.origin_domain != settings.domain:
@@ -328,7 +410,7 @@ async def open_direct_message(
                 redis,
                 user_topic(participant.origin_domain, participant.id),
                 "CHANNEL_CREATE",
-                dm_channel_payload(channel, recipients_for(participant, participants)),
+                await rendered_dm_channel(session, settings, channel, participant, participants),
             )
         if target.origin_domain != settings.domain:
             await enqueue_best_effort(federation_deliver, target.origin_domain)

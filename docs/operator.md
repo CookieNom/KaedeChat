@@ -48,6 +48,25 @@ timer. See [the deployment-wizard guide](deployment-wizard.md) for every option
 and generated file. Wizard users must use the two-file Compose command in
 `deploy/generated/README.txt`.
 
+Rerunning the wizard preserves existing quota tuning. As a one-time upgrade,
+it recognizes the exact defaults written by older Kaede setup versions and
+raises `KAEDE_FEDERATION_HISTORY_MAX_MESSAGES` from 250,000 to 2,000,000 and
+`KAEDE_MEDIA_REMOTE_CACHE_BYTES` from 20 GiB to 100 GiB. Other values are left
+unchanged. Operators who maintain `.env` manually should remove those two old
+assignments to inherit current defaults, or update them explicitly after
+checking available PostgreSQL and object-storage capacity.
+
+The wizard's quota menu is optional: keeping current/recommended limits asks no
+individual sizing questions. Common mode covers the rolling DM cache,
+remote-guild byte budgets, retained-history import, remote inbox bytes, and the
+remote-media LRU cache. Advanced mode exposes the remaining abuse, hard,
+per-origin, aggregate, grant, page, and in-flight ceilings. Counts accept
+`K`/`M`/`B`; byte sizes accept decimal `KB`/`MB`/`GB`/`TB` and binary
+`K`/`M`/`G`/`T` or IEC names such as `GiB`. Setup echoes the parsed base value,
+constrains paired prompts so scoped/cache limits cannot exceed aggregate/hard
+limits, and prints a concise summary before writing `.env`. This interface does
+not allocate capacity or infer that the host has enough disk.
+
 The email provider menu includes a disabled mode. In that mode registration
 requires only a username and password, and no verification or delivery intent
 is created. Email changes and self-service password recovery are also disabled;
@@ -562,6 +581,187 @@ durable. Export before bulk changes, review subdomain inclusion, and retain the
 export with the deployment revision. Removing a block schedules authoritative
 replica reconciliation rather than blindly releasing stale writes.
 
+### Federation storage budgets
+
+`make setup` can edit these values without requiring raw byte calculations.
+Choose common tuning for the principal retained-cache budgets or advanced
+tuning for every admission and aggregate ceiling; keeping the default choice
+preserves current values. Setup enforces the same cross-setting relationships
+as production preflight, while `make env-check` remains the final
+deployment-boundary check after manual edits.
+
+Retained inbox claims and signed event envelopes are bounded independently for
+each remote origin and for the whole instance. The defaults are five million
+claims and 16 GiB of envelopes per origin, with a 50-million-claim and 160 GiB
+instance-wide ceiling. These are admission ceilings, not reservations: raising
+them does not allocate disk, and the database still needs normal free-space,
+WAL, index, vacuum, and backup headroom. Adjust
+`KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN`,
+`KAEDE_FEDERATION_INBOX_MAX_BYTES_PER_ORIGIN`,
+`KAEDE_FEDERATION_INBOX_MAX_EVENTS_TOTAL`, and
+`KAEDE_FEDERATION_INBOX_MAX_BYTES_TOTAL` for the expected peer and guild volume.
+Keep the global limits at least as large as their per-origin counterparts.
+
+When either budget is full, newly signed events receive a retryable
+`KAED_FED_INBOX_QUOTA_EXCEEDED` result and are not claimed or applied; delivery
+can resume after retention frees space or an operator raises the limit. The
+daily federation-retention task removes expired rows and reconciles quota
+counters against retained database state. Admission locks the singleton global
+ledger before the applicable origin ledger, so concurrent origins cannot each
+overshoot the instance-wide ceiling. It also removes inaccessible remote
+guild replicas after the final local membership is gone. Alert on repeated
+quota responses: they can indicate an undersized deployment, a stuck retention
+worker, or an abusive peer. Blocking a peer stops new application traffic but
+does not replace normal retention or a reviewed database-capacity plan.
+
+Peer discovery metadata is bounded as well. The defaults retain at most 10,000
+remote instance records and 512 verification-key IDs per peer. Set
+`KAEDE_FEDERATION_MAX_REMOTE_INSTANCES` and
+`KAEDE_FEDERATION_PEER_KEY_HISTORY_LIMIT` to match the intended federation
+reach. New, previously unknown peers are rejected after either applicable cap
+is reached; already-known peers continue to work unless they try to add more
+key IDs. The nightly retention job deletes retired keys after the signed-event
+retention window, so ordinary key rotation eventually frees capacity. A peer
+must allocate a new key ID when its key material changes.
+
+Current peers also advertise replay-protected signed requests. After that
+capability is observed it is pinned for the peer; removing it from discovery is
+treated as a security downgrade. Legacy peers remain on the version 1 signing
+form during rolling upgrades, while updated peers automatically use one-time,
+signature-bound request nonces.
+
+Federated state outside guild replicas is capped separately. Pending friend
+requests are limited per recipient, per origin, and per recipient/origin pair;
+remote profiles and third-party identity namespaces remain charged to the peer
+that introduced them until physical garbage collection. Media deletion markers
+are retained only for the signed-event retention window and capped per origin.
+Cross-instance DMs use trigger-maintained conversation/message/byte ledgers for
+the conversation authority and for each remote origin. The per-remote-origin
+defaults are deliberately below the shared authority totals, so one peer cannot
+consume the capacity reserved for every other peer when this instance is the DM
+authority. Hard defaults allow one million conversations, 50 million messages,
+and 320 GiB at an authority; a single remote origin is limited to 100,000
+conversations, 10 million messages, and 64 GiB. A single conversation has a
+five-million-message / 32 GiB hard ceiling.
+
+Non-authoritative DM replicas normally stay far below those safety backstops.
+They retain a rolling cache of up to the newest 250,000 remote-authored message
+copies or 2 GiB of replaceable remote-authored rows per conversation, whichever
+fills first. Locally authored user data is durable and is never evicted based
+on an acknowledgement from another instance. Pins, the actual newest message,
+unfinished mention/push projections, and locally owned attachment source rows
+are also protected. Older remote-authored pages are fetched on demand from the
+signed conversation authority and are not re-persisted; a temporary authority
+outage leaves recent cached messages visible and shows an actionable Retry.
+On-demand attachment requests are bound end-to-end to the exact signed
+conversation, message, and attachment references; a cached object is still
+re-authorized with its origin before it is served to a user.
+Their rendered same-origin HMAC paths expire after 15 minutes. An authenticated
+participant can transparently renew an expired, authentic path, but the home
+still repeats the exact origin authorization before serving either cached or
+newly fetched bytes. This keeps Retry working on an old rendered page without
+turning the path into a public or cross-conversation media capability.
+DM pins are structurally limited to one row per retained message. Reactions are
+not accepted as federated DM child events; the authoritative client mutation
+path caps a single DM message at 100 distinct reaction rows and reports a clear
+limit error, preventing reaction churn from bypassing the message/byte policy.
+Rolling eviction begins only after the authority advertises
+`dm-history-page/1`, so a rolling upgrade cannot strand history on an older
+peer. The authority never prunes history to meet a replica cache target. Tune
+those targets with
+`KAEDE_FEDERATION_DM_REPLICA_CACHE_MESSAGES_PER_CONVERSATION` and
+`KAEDE_FEDERATION_DM_REPLICA_CACHE_BYTES_PER_CONVERSATION`; each must remain at
+or below its corresponding hard per-conversation ceiling. Tune the
+`KAEDE_FEDERATION_PENDING_RELATIONSHIPS_*`,
+`KAEDE_FEDERATION_REMOTE_USERS_PER_INTRODUCER`,
+`KAEDE_FEDERATION_THIRD_PARTY_INSTANCES_PER_INTRODUCER`,
+`KAEDE_FEDERATION_REMOTE_MEDIA_TOMBSTONES_PER_ORIGIN`, and
+`KAEDE_FEDERATION_DM_MAX_*` settings conservatively; startup rejects fairness
+limits that exceed their aggregate boundary.
+
+When a pending relationship allowance is reached, the receiving server returns
+the privacy-preserving terminal code
+`KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED`. It does not disclose which
+recipient/origin dimension filled. The sender clears only the exact still-pending
+request identified by its correlation token and tells the initiating user that
+the request was not delivered; newer requests, friendships, and blocks remain
+untouched.
+
+Remote identity and instance namespace limits report
+`FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED` or
+`FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED` to local API clients (HTTP 507),
+and their `KAED_FED_*` counterparts to peers. Public responses omit current and
+maximum counts. Affected DM opens and proxy writes fail visibly rather than
+remaining pending, while a remote-guild replica enters `quota_paused` without
+advancing its sequence so synchronization can safely resume when capacity is
+available.
+
+Durable remote-guild replicas have a second, independent high-water mark. A
+trigger-maintained ledger counts messages, reactions, memberships, attachment
+metadata, message projections, history staging/provenance, and structural guild
+rows. Membership charges include a conservative companion allowance for the
+remote identity profile they materialize. Byte estimates include each serialized
+SQL row plus heap and index allowances; downloaded media objects remain governed by
+`KAEDE_MEDIA_REMOTE_CACHE_BYTES`. A plain retained message normally incurs at
+least one 4 KiB message row and one 2 KiB projection row; retained-history
+provenance adds at least another 1 KiB row, and staging temporarily adds at
+least 4 KiB. Each reaction is at least 1 KiB, each attachment metadata row at
+least 4 KiB, and each member at least 4 KiB. Use those conservative charges,
+not average message text size, when sizing PostgreSQL.
+
+Defaults allow 20 million rows / 64 GiB per remote guild and 100 million rows /
+320 GiB across all guilds from one origin. That gives a two-million-message
+history import room for projections, provenance, reactions, members, and
+structural rows instead of letting the import budget consume the entire replica
+budget by itself.
+Configure these with `KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_GUILD`,
+`KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD`,
+`KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_ORIGIN`, and
+`KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN`; origin limits must not be below
+the corresponding guild limits.
+
+Live replication and retained-history merges use the same atomic ledger. An
+operation that would cross a high-water mark is rolled back before its guild
+sequence is advanced, and the replica enters `quota_paused` with
+`KAED_FED_REPLICA_QUOTA_EXCEEDED`. Raising the applicable limit permits retry;
+revocation, channel purge, history cleanup, and orphan-guild deletion release
+their charges transactionally through the same ledger. Treat a paused replica
+as either a capacity-planning signal or a potentially abusive peer, and review
+the origin before raising a limit substantially.
+
+The daily retention cycle also removes at most 5,000 aged remote user profiles
+and 5,000 unused remote instance namespaces per run by default, but only after
+the identity has no durable foreign-key reference from
+any guild, DM, message, reaction, attachment, relationship, moderation, or
+history row. The collector derives those checks from the database model and
+uses non-blocking row locks, so new reference types are preserved automatically
+and concurrent activity cannot race a destructive cascade. The default grace
+period is 30 days; configure it with
+`KAEDE_FEDERATION_REMOTE_IDENTITY_RETENTION_DAYS` (minimum 7 days). Configure
+the bounded work per cycle with
+`KAEDE_FEDERATION_REMOTE_IDENTITY_GC_BATCH_SIZE`.
+
+Federated media has independent live-transfer and retained-cache budgets. Each
+cache miss reserves the configured maximum attachment size atomically across API
+replicas, then streams into a bounded spool file for local type validation and
+ClamAV scanning. Defaults allow 256 MiB in flight per remote origin and 512 MiB
+across the instance; tune
+`KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN` and
+`KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_TOTAL`, keeping the latter at least
+as large and each at least one maximum attachment. These live-transfer guards
+stay intentionally much smaller than retained storage because increasing them
+only increases concurrent network, memory, and spool-file exposure.
+
+`KAEDE_MEDIA_REMOTE_CACHE_BYTES` defaults to 100 GiB and is a strict admission
+ceiling serialized with the eviction worker, not merely an eventual target.
+The cache is automatically pruned in least-recently-accessed order to a 90%
+low-water mark, in addition to TTL and signed deletion cleanup. A full cache
+schedules eviction and returns a retryable error instead of allowing unbounded
+object-store growth. This rolling remote cache is separate from the unchanged
+10 GiB authoritative per-user upload quota. The bundled alert fires if cache
+admission still reaches the ceiling, which can indicate a stalled eviction
+worker, undeletable orphan objects, or a genuinely undersized target.
+
 ## Federated retained history
 
 The `guild-history-sync/1` extension is advertised automatically. Export remains
@@ -577,7 +777,21 @@ bound grants and resource use with
 `KAEDE_FEDERATION_HISTORY_MERGE_CHUNK_SIZE`, and
 `KAEDE_FEDERATION_HISTORY_MAX_MESSAGES`. Current peers advertise
 `guild-history-sync/2-recent-first`; version 1 remains available for rolling
-upgrades.
+upgrades. Defaults cap one import at two million messages, ten million
+reactions, 250,000 pages, 32 GiB of validated payloads, and two hours. A larger
+replica ceiling does not make an individual import unbounded; raise these
+import limits deliberately after checking database and worker capacity.
+
+Authority-side grants are also bounded while active. Defaults permit 1,000
+exports and 100,000 per-channel grant rows per requesting origin, with global
+ceilings of 10,000 exports and 1,000,000 grant rows. Configure
+`KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN`,
+`KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_TOTAL`,
+`KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN`, and
+`KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_TOTAL`. Admission is
+transaction-serialized across API workers. A full budget returns retryable
+`KAED_FED_HISTORY_CAPACITY`; expired grants stop counting immediately and the
+retention job later removes their physical rows.
 
 Imported history is a local replica. Policy and permission loss trigger an
 immediate best-effort purge when the authoritative update arrives, and a
@@ -599,6 +813,12 @@ observability preflight rejects a blank or documented placeholder before any
 profile service starts. Prometheus, Loki, and Grafana have restart policies and
 readiness checks. Metrics cover API health, connected gateway sessions, pending/failed
 federation delivery, delivery failures, and task duration/run/failure totals.
+Federation metrics also expose retained remote event rows/bytes, configured
+inbox capacity, trigger-accounted replica rows/bytes, quota-paused guilds, and
+quota deferrals. They also expose the configured remote-media LRU ceiling and
+admissions rejected at that ceiling. The bundled alerts warn at 80% inbox
+utilization, on any inbox rejection, when remote-media eviction cannot make
+room, and when a remote guild remains quota-paused.
 Loki intentionally has no privileged host log collector; connect a separately
 reviewed collector if centralized logs are required.
 

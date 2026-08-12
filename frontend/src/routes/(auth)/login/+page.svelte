@@ -1,6 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { api, ApiError } from '$lib/api/client';
+  import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import { safeReturnPath } from '$lib/auth/return-path';
   import TurnstileWidget from '$lib/components/TurnstileWidget.svelte';
@@ -95,7 +95,7 @@
           if (alreadyVisible) turnstileWidget?.reset();
         }
       } else {
-        error = 'Could not sign in.';
+        error = userErrorMessage(caught, 'Could not sign in. Check your details and try again.');
       }
     } finally {
       busy = false;

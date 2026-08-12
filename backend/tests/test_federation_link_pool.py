@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.federation.link as link
 from app.core.settings import Settings
+from app.federation.client import OUTBOUND_FEDERATION_LIMITER
 
 
 class FakeSocket:
@@ -66,6 +67,35 @@ async def send(destination: str, number: int) -> dict[str, object]:
         destination,
         batch(number),
     )
+
+
+@pytest.mark.asyncio
+async def test_hot_link_fails_before_network_when_shared_outbound_budget_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await link.close_federation_links()
+    opened = False
+
+    async def fake_open(
+        _session: AsyncSession,
+        _settings: Settings,
+        _destination: str,
+    ) -> link._PooledLink:
+        nonlocal opened
+        opened = True
+        return pooled(FakeSocket())
+
+    monkeypatch.setattr(link, "_open_link", fake_open)
+    borrowers = [object() for _ in range(OUTBOUND_FEDERATION_LIMITER.total_tokens)]
+    for borrower in borrowers:
+        OUTBOUND_FEDERATION_LIMITER.acquire_on_behalf_of_nowait(borrower)
+    try:
+        with pytest.raises(link.FederationLinkError, match="outbound federation is busy"):
+            await send("slow.example", 1)
+        assert not opened
+    finally:
+        for borrower in borrowers:
+            OUTBOUND_FEDERATION_LIMITER.release_on_behalf_of(borrower)
 
 
 @pytest.mark.asyncio

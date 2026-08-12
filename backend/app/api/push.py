@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import AuthenticatedUser, get_redis, get_session, require_user
 from app.auth.security import encrypt_secret
+from app.chat.payloads import public_user_display_name
 from app.chat.permissions import get_permissions
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
@@ -305,7 +306,7 @@ async def redeem_push_notification(
             )
         )
     )
-    author_name = message.webhook_name or author.display_name or author.username
+    author_name = message.webhook_name or public_user_display_name(author)
     avatar_hash = message.webhook_avatar_hash or author.avatar_hash
     if avatar_hash is not None and (
         len(avatar_hash) != 64

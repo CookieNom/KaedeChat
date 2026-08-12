@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { userErrorMessage } from '$lib/api/client';
   import { isNativeDesktop, setNativeInstance, storedNativeInstance } from '$lib/platform/native';
 
   let {
@@ -20,8 +21,11 @@
       instance = await setNativeInstance(instance);
       onready?.();
       return true;
-    } catch {
-      error = 'Enter a valid Kaede server domain, such as chat.example.com.';
+    } catch (caught) {
+      error = userErrorMessage(
+        caught,
+        'Could not connect to that Kaede server. Check the domain, such as chat.example.com, and try again.'
+      );
       return false;
     }
   }

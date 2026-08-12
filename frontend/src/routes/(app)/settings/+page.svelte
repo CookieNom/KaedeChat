@@ -1,6 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { api, ApiError, expireBrowserSession } from '$lib/api/client';
+  import { api, expireBrowserSession, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import type { UserSummary } from '$lib/chat/types';
   import Icon from '$lib/components/Icon.svelte';
@@ -102,7 +102,7 @@
       })
       .catch((caught: unknown) => {
         if (controller.signal.aborted || generation !== lifecycle) return;
-        error = caught instanceof ApiError ? caught.message : 'Could not load settings.';
+        error = userErrorMessage(caught, 'Could not load settings. Try again.');
       });
     return () => {
       lifecycle += 1;
@@ -137,7 +137,10 @@
   }
 
   function actionError(caught: unknown, fallback: string) {
-    error = caught instanceof ApiError || caught instanceof Error ? caught.message : fallback;
+    const actionableFallback = /(?:try again|reload|choose|check|contact|sign in)/i.test(fallback)
+      ? fallback
+      : `${fallback.replace(/\.$/, '')}. Try again.`;
+    error = userErrorMessage(caught, actionableFallback);
   }
 
   async function savePreferences() {
@@ -287,11 +290,13 @@
       if (controller.signal.aborted || generation !== lifecycle) return;
       if (permission !== 'granted') {
         browserNotificationsDraft = false;
-        error = isNativeDesktop()
-          ? 'Desktop notifications could not be enabled on this computer.'
-          : browserNotifications.supported
-            ? 'Browser notifications are blocked. Allow them in this site’s browser settings.'
-            : 'This browser does not support notifications.';
+        error =
+          browserNotifications.permissionError ||
+          (isNativeDesktop()
+            ? 'Desktop notifications could not be enabled. Check system notification settings and try again.'
+            : browserNotifications.supported
+              ? 'Browser notifications are blocked. Allow them in this site’s browser settings and try again.'
+              : 'This browser does not support notifications.');
         return;
       }
     }
@@ -348,7 +353,10 @@
       notice =
         'Test notification sent. If it did not appear, check Windows notification settings and Do Not Disturb or Focus Assist.';
     } catch (caught) {
-      error = nativeError(caught).message ?? 'Could not send the test desktop notification.';
+      error = userErrorMessage(
+        nativeError(caught),
+        'Could not send the test desktop notification. Check system notification settings and try again.'
+      );
     } finally {
       testingNotification = false;
     }
@@ -460,7 +468,7 @@
       notice = `${label} copied.`;
       error = '';
     } catch {
-      error = 'Clipboard access was denied by the browser.';
+      error = 'Browser denied clipboard access. Allow clipboard permission and try again.';
     }
   }
 

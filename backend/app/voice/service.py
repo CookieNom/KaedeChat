@@ -9,6 +9,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.payloads import public_user_display_name
 from app.chat.permissions import get_permissions
 from app.core.permissions import Permission
 from app.core.settings import Settings
@@ -59,6 +60,8 @@ async def authoritative_guild_token(
     channel: Channel,
     guild: Guild,
     actor: User,
+    move_session_id: str | None = None,
+    disconnect_previous: bool = True,
 ) -> VoiceTokenResponse:
     require_voice_enabled(settings)
     if guild.origin_domain != settings.domain or channel.origin_domain != settings.domain:
@@ -82,7 +85,7 @@ async def authoritative_guild_token(
     room = guild_room_name(guild.id, channel.id)
     identity = participant_identity(actor.id, actor.origin_domain)
     previous_raw = await redis.get(f"voice:user-room:{identity}")
-    if previous_raw is not None:
+    if disconnect_previous and previous_raw is not None:
         previous_room = (
             previous_raw.decode() if isinstance(previous_raw, bytes) else str(previous_raw)
         )
@@ -116,13 +119,15 @@ async def authoritative_guild_token(
         "can_stream": can_stream,
         "can_use_vad": can_use_vad,
     }
+    if move_session_id is not None:
+        metadata["move_session_id"] = move_session_id
     try:
         await LiveKitControl(settings).ensure_room(room)
         token, expires_at = mint_join_token(
             settings,
             room=room,
             identity=identity,
-            display_name=actor.display_name or actor.username,
+            display_name=public_user_display_name(actor),
             metadata=metadata,
             can_speak=can_speak,
             can_stream=can_stream,
@@ -144,6 +149,7 @@ async def authoritative_guild_token(
         can_speak=can_speak,
         can_stream=can_stream,
         can_use_vad=can_use_vad,
+        move_session_id=move_session_id,
     )
 
 
@@ -182,4 +188,14 @@ def parse_minted_metadata(raw: str, *, room: str, identity: str) -> dict[str, ob
     )
     if not room_matches:
         raise ValueError("voice metadata room mismatch")
+    move_session_id = metadata.get("move_session_id")
+    if move_session_id is not None and (
+        not isinstance(move_session_id, str)
+        or not 32 <= len(move_session_id) <= 64
+        or any(
+            not (character.isascii() and (character.isalnum() or character in "_-"))
+            for character in move_session_id
+        )
+    ):
+        raise ValueError("invalid voice move correlation")
     return cast(dict[str, object], metadata)

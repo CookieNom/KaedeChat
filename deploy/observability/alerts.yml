@@ -16,3 +16,26 @@ groups:
         for: 5m
         labels: { severity: warning }
         annotations: { summary: "Kaede federation delivery failures are elevated" }
+      - alert: KaedeFederationStorageQuota
+        expr: increase(kaede_federation_inbox_quota_rejections_total[15m]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Kaede is deferring federation events because retained storage is full" }
+      - alert: KaedeFederationInboxCapacity
+        expr: >-
+          kaede_federation_inbox_retained_events / kaede_federation_inbox_capacity_events > 0.8
+          or
+          kaede_federation_inbox_retained_bytes / kaede_federation_inbox_capacity_bytes > 0.8
+        for: 15m
+        labels: { severity: warning }
+        annotations: { summary: "Kaede federation inbox storage is above 80% of its configured limit" }
+      - alert: KaedeFederationReplicaQuotaPaused
+        expr: kaede_federation_replica_quota_paused_guilds > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "One or more remote guild replicas are paused by a storage quota" }
+      - alert: KaedeFederationRemoteMediaCacheFull
+        expr: increase(kaede_federation_remote_media_cache_quota_rejections_total[15m]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Kaede remote-media LRU cache is deferring admissions at its hard ceiling" }

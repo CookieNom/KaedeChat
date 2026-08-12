@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -156,7 +157,17 @@ final class KaedeApiClient {
             status: 502);
       }
     } on DioException catch (error) {
-      throw KaedeException.fromDio(error);
+      final failure = KaedeException.fromDio(error);
+      throw KaedeException(
+        code: 'UPLOAD_FAILED',
+        message: failure.status == 403
+            ? 'The upload authorization expired. Choose the file and try again.'
+            : failure.message,
+        status: failure.status,
+        traceId: failure.traceId,
+        retryAfter: failure.retryAfter,
+        details: failure.details,
+      );
     }
   }
 
@@ -184,18 +195,26 @@ final class KaedeApiClient {
           await request.close().timeout(const Duration(minutes: 3));
       await response.drain<void>();
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw const KaedeException(
+        throw KaedeException(
           code: 'UPLOAD_FAILED',
-          message: 'The upload could not be completed.',
-          status: 502,
+          message: response.statusCode == 403
+              ? 'The upload authorization expired. Choose the file and try again.'
+              : response.statusCode >= 500
+                  ? 'Attachment storage is temporarily unavailable. Try again later.'
+                  : 'Attachment storage rejected the upload. Choose the file and try again.',
+          status: response.statusCode,
         );
       }
     } on KaedeException {
       rethrow;
-    } on Object {
-      throw const KaedeException(
+    } on Object catch (error) {
+      throw KaedeException(
         code: 'UPLOAD_FAILED',
-        message: 'The upload could not be completed.',
+        message: error is FileSystemException
+            ? 'Kaede could not read the selected file. Choose it again and check available device storage.'
+            : error is TimeoutException
+                ? 'The upload took too long. Check your connection and try again.'
+                : 'Kaede could not reach attachment storage. Check your connection and try again.',
         status: 502,
       );
     } finally {
@@ -277,14 +296,36 @@ final class KaedeApiClient {
           continue;
         }
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          await response.drain<void>();
-          throw KaedeException(
-            code: 'MEDIA_DOWNLOAD_FAILED',
-            message: response.statusCode == 403
-                ? 'You no longer have access to this attachment.'
-                : 'The attachment could not be downloaded.',
-            status: response.statusCode,
-          );
+          final body = await _boundedErrorBody(response);
+          final requestOptions = RequestOptions(path: uri.toString());
+          final error = KaedeException.fromDio(DioException(
+            requestOptions: requestOptions,
+            type: DioExceptionType.badResponse,
+            response: Response<Object?>(
+              requestOptions: requestOptions,
+              statusCode: response.statusCode,
+              data: body,
+              headers: Headers.fromMap(<String, List<String>>{
+                if (response.headers.value(HttpHeaders.retryAfterHeader)
+                    case final retry?)
+                  HttpHeaders.retryAfterHeader: <String>[retry],
+              }),
+            ),
+          ));
+          throw error.code == 'HTTP_ERROR'
+              ? KaedeException(
+                  code: 'MEDIA_DOWNLOAD_FAILED',
+                  message: response.statusCode == 403
+                      ? 'You no longer have access to this attachment.'
+                      : response.statusCode == 404
+                          ? 'This attachment no longer exists.'
+                          : response.statusCode >= 500
+                              ? 'Attachment storage is temporarily unavailable. Try again later.'
+                              : 'Attachment storage rejected the download. Try again.',
+                  status: response.statusCode,
+                  retryAfter: error.retryAfter,
+                )
+              : error;
         }
         final temporary = File('${destination.path}.part');
         await temporary.parent.create(recursive: true);
@@ -306,14 +347,33 @@ final class KaedeApiClient {
       );
     } on KaedeException {
       rethrow;
-    } on Object {
-      throw const KaedeException(
+    } on Object catch (error) {
+      throw KaedeException(
         code: 'MEDIA_DOWNLOAD_FAILED',
-        message: 'The attachment could not be downloaded.',
+        message: error is FileSystemException
+            ? 'Kaede could not save this attachment. Check available device storage and try again.'
+            : error is TimeoutException
+                ? 'The attachment download took too long. Check your connection and try again.'
+                : 'Kaede could not reach attachment storage. Check your connection and try again.',
         status: 502,
       );
     } finally {
       client.close(force: true);
+    }
+  }
+
+  static Future<Object?> _boundedErrorBody(HttpClientResponse response) async {
+    const maximum = 64 * 1024;
+    final bytes = <int>[];
+    await for (final chunk in response) {
+      if (bytes.length + chunk.length > maximum) return null;
+      bytes.addAll(chunk);
+    }
+    if (bytes.isEmpty) return null;
+    try {
+      return jsonDecode(utf8.decode(bytes));
+    } on Object {
+      return null;
     }
   }
 

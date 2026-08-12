@@ -13,6 +13,86 @@ final class GatewayEvent {
   final int? sequence;
 }
 
+enum GatewayConnectionPhase { connecting, connected, reconnecting, offline }
+
+/// User-visible health for the realtime transport. The message is deliberately
+/// written here, at the protocol boundary, so WebSocket errors and close
+/// reasons never leak implementation details into the UI.
+final class GatewayHealth {
+  const GatewayHealth(this.phase, {this.message});
+
+  final GatewayConnectionPhase phase;
+  final String? message;
+
+  bool get isConnected => phase == GatewayConnectionPhase.connected;
+}
+
+String gatewayCloseMessage(int? code) => switch (code) {
+      4003 => 'The realtime session expired. Reconnecting…',
+      4004 =>
+        'Realtime sign-in was rejected. Sign out and back in if this continues.',
+      4006 => 'Realtime updates fell out of sync. Refreshing the session…',
+      4008 => 'Realtime updates were rate limited. Retrying in 5 seconds…',
+      4009 => 'The realtime session timed out. Reconnecting…',
+      1000 => 'The realtime connection closed. Reconnecting…',
+      _ => 'Realtime updates were interrupted. Reconnecting…',
+    };
+
+final class GatewayCloseDetails {
+  const GatewayCloseDetails(this.message, {this.retryAfter});
+
+  final String message;
+  final Duration? retryAfter;
+}
+
+/// Parses the small, structured subset of close metadata that is safe and
+/// useful to a user. Arbitrary server close text is never displayed.
+GatewayCloseDetails gatewayCloseDetails(int? code, Object? rawReason) {
+  Map<String, Object?>? payload;
+  if (rawReason is String && rawReason.length <= 2048) {
+    try {
+      payload = _gatewayObject(jsonDecode(rawReason));
+    } on Object {
+      // Non-JSON close reasons are intentionally ignored.
+    }
+  }
+  final reasonCode =
+      '${payload?['code'] ?? payload?['error'] ?? ''}'.trim().toUpperCase();
+  final rawRetry = payload?['retry_after_ms'];
+  final retryMs = rawRetry is num &&
+          rawRetry.isFinite &&
+          rawRetry >= 0 &&
+          rawRetry <= 300000
+      ? rawRetry.ceil()
+      : null;
+  final retryAfter = retryMs == null ? null : Duration(milliseconds: retryMs);
+  final retryText = retryMs == null
+      ? ''
+      : ' Retrying in ${max(1, (retryMs / 1000).ceil())} seconds.';
+  if (reasonCode == 'RATE_LIMITED' ||
+      code == GatewayCloseCode.rateLimited.value &&
+          reasonCode != 'SESSION_LIMIT') {
+    final effectiveRetry = retryAfter ?? const Duration(seconds: 5);
+    return GatewayCloseDetails(
+      'Realtime updates were rate limited.${retryText.isEmpty ? ' Retrying in 5 seconds.' : retryText}',
+      retryAfter: effectiveRetry,
+    );
+  }
+  if (reasonCode == 'SESSION_LIMIT') {
+    final effectiveRetry = retryAfter ?? const Duration(seconds: 30);
+    return GatewayCloseDetails(
+      'This account has too many active realtime sessions. Close Kaede on another device, then retry.${retryText.isEmpty ? ' Kaede will retry in 30 seconds.' : retryText}',
+      retryAfter: effectiveRetry,
+    );
+  }
+  return GatewayCloseDetails(
+    gatewayCloseMessage(code),
+    retryAfter: code == GatewayCloseCode.rateLimited.value
+        ? const Duration(seconds: 5)
+        : null,
+  );
+}
+
 const maximumGatewayFrameCharacters = 1024 * 1024;
 
 /// A validated protocol envelope. Keeping decoding pure makes the trust
@@ -133,6 +213,7 @@ final class GatewayClient {
 
   final Future<SessionTokens?> Function() tokens;
   final _events = StreamController<GatewayEvent>.broadcast();
+  final _healthEvents = StreamController<GatewayHealth>.broadcast(sync: true);
   WebSocketChannel? _socket;
   StreamSubscription<Object?>? _subscription;
   Timer? _heartbeat;
@@ -145,18 +226,39 @@ final class GatewayClient {
   bool _awaitingHeartbeatAck = false;
   Future<void>? _reconnecting;
   int _malformedFrames = 0;
+  var _health = const GatewayHealth(
+    GatewayConnectionPhase.offline,
+    message: 'Realtime updates are not connected.',
+  );
 
   static const _maximumMalformedFrames = 3;
 
   Stream<GatewayEvent> get events => _events.stream;
+  Stream<GatewayHealth> get health => _healthEvents.stream;
+  GatewayHealth get currentHealth => _health;
 
   Future<void> connect(SessionTokens tokens) async {
     _tokens = tokens;
     _closed = false;
+    _setHealth(
+      const GatewayHealth(
+        GatewayConnectionPhase.connecting,
+        message: 'Connecting realtime updates…',
+      ),
+    );
     try {
       await _openTransport(tokens);
     } on Object {
-      if (!_closed) unawaited(_reconnect(_generation));
+      if (!_closed) {
+        _setHealth(const GatewayHealth(
+          GatewayConnectionPhase.reconnecting,
+          message: 'Could not connect realtime updates. Retrying…',
+        ));
+        unawaited(_reconnect(
+          _generation,
+          reason: 'Could not connect realtime updates. Retrying…',
+        ));
+      }
       rethrow;
     }
   }
@@ -187,8 +289,19 @@ final class GatewayClient {
           (_, __) => _rejectMalformedFrame(generation),
         ),
       ),
-      onDone: () => _reconnect(generation),
-      onError: (_) => _reconnect(generation),
+      onDone: () {
+        final close = gatewayCloseDetails(
+          socket.closeCode,
+          socket.closeReason,
+        );
+        unawaited(_reconnect(
+          generation,
+          reason: close.message,
+          minimumDelay: close.retryAfter,
+        ));
+      },
+      onError: (_) => unawaited(_reconnect(generation,
+          reason: 'Could not reach realtime updates. Retrying…')),
       cancelOnError: true,
     );
   }
@@ -215,6 +328,7 @@ final class GatewayClient {
     _generation += 1;
     await _disconnectTransport();
     await _events.close();
+    await _healthEvents.close();
   }
 
   Future<void> disconnect() async {
@@ -226,6 +340,7 @@ final class GatewayClient {
     _awaitingHeartbeatAck = false;
     _reconnecting = null;
     await _disconnectTransport();
+    _setHealth(const GatewayHealth(GatewayConnectionPhase.offline));
   }
 
   Future<void> _receive(Object? raw, int generation) async {
@@ -247,7 +362,10 @@ final class GatewayClient {
       _awaitingHeartbeatAck = false;
       _heartbeat = Timer.periodic(Duration(milliseconds: interval), (_) {
         if (_awaitingHeartbeatAck) {
-          unawaited(_reconnect(generation));
+          unawaited(_reconnect(
+            generation,
+            reason: 'Realtime updates stopped responding. Reconnecting…',
+          ));
           return;
         }
         _awaitingHeartbeatAck = true;
@@ -255,7 +373,10 @@ final class GatewayClient {
       });
       final currentTokens = _tokens;
       if (currentTokens == null) {
-        await _reconnect(generation);
+        await _reconnect(
+          generation,
+          reason: 'The realtime session is unavailable. Reconnecting…',
+        );
         return;
       }
       final token = currentTokens.accessToken;
@@ -281,13 +402,19 @@ final class GatewayClient {
       return;
     }
     if (op == GatewayOp.reconnect.value) {
-      await _reconnect(generation);
+      await _reconnect(
+        generation,
+        reason: 'The server requested a realtime reconnect…',
+      );
       return;
     }
     if (op == GatewayOp.invalidSession.value) {
       _sessionId = null;
       _sequence = null;
-      await _reconnect(generation);
+      await _reconnect(
+        generation,
+        reason: 'The realtime session expired. Starting a new session…',
+      );
       return;
     }
     if (op != GatewayOp.dispatch.value) return;
@@ -314,7 +441,10 @@ final class GatewayClient {
           ));
           _sessionId = null;
           _sequence = null;
-          await _reconnect(generation);
+          await _reconnect(
+            generation,
+            reason: 'Realtime updates fell out of sync. Refreshing…',
+          );
           return;
         case GatewaySequenceDecision.accept:
           break;
@@ -324,8 +454,10 @@ final class GatewayClient {
     if (name == 'READY') {
       _sessionId = data['session_id']! as String;
       _reconnectAttempts = 0;
+      _setHealth(const GatewayHealth(GatewayConnectionPhase.connected));
     } else if (name == 'RESUMED') {
       _reconnectAttempts = 0;
+      _setHealth(const GatewayHealth(GatewayConnectionPhase.connected));
     }
     _events.add(GatewayEvent(name, data, sequence));
   }
@@ -338,8 +470,19 @@ final class GatewayClient {
     }
     // JSON is the only negotiated encoding. Reconnect instead of continuing
     // to parse an untrusted stream after repeated protocol violations.
+    _setHealth(
+      const GatewayHealth(
+        GatewayConnectionPhase.reconnecting,
+        message:
+            'Kaede received repeated invalid realtime updates. Reconnecting safely…',
+      ),
+    );
     await _socket?.sink.close(4002, 'Malformed gateway payload');
-    await _reconnect(generation);
+    await _reconnect(
+      generation,
+      reason:
+          'Kaede received repeated invalid realtime updates. Reconnecting safely…',
+    );
   }
 
   void _send(GatewayOp op, Object? data) {
@@ -352,14 +495,25 @@ final class GatewayClient {
       // A timer or UI action can race a transport close. Route that failure
       // through the one generation-fenced reconnect supervisor instead of
       // surfacing an unhandled asynchronous exception.
-      unawaited(_reconnect(_generation));
+      unawaited(_reconnect(
+        _generation,
+        reason: 'Could not send a realtime update. Reconnecting…',
+      ));
     }
   }
 
-  Future<void> _reconnect(int generation) async {
+  Future<void> _reconnect(
+    int generation, {
+    String? reason,
+    Duration? minimumDelay,
+  }) async {
     if (_closed || generation != _generation) return;
+    _setHealth(GatewayHealth(
+      GatewayConnectionPhase.reconnecting,
+      message: reason ?? 'Realtime updates were interrupted. Reconnecting…',
+    ));
     if (_reconnecting case final pending?) return pending;
-    final pending = _runReconnect(generation);
+    final pending = _runReconnect(generation, minimumDelay: minimumDelay);
     _reconnecting = pending;
     try {
       await pending;
@@ -368,15 +522,30 @@ final class GatewayClient {
     }
   }
 
-  Future<void> _runReconnect(int generation) async {
+  Future<void> _runReconnect(
+    int generation, {
+    Duration? minimumDelay,
+  }) async {
     var expectedGeneration = generation;
     while (!_closed && expectedGeneration == _generation) {
       final attempt = _reconnectAttempts++;
+      if (attempt >= 2) {
+        _setHealth(const GatewayHealth(
+          GatewayConnectionPhase.offline,
+          message:
+              'Realtime updates are offline. Messages may be delayed while Kaede keeps retrying.',
+        ));
+      }
       final ceiling = min(30, 1 << min(attempt, 5));
-      await Future<void>.delayed(Duration(
+      final backoff = Duration(
         milliseconds:
             (ceiling * 750) + Random.secure().nextInt(ceiling * 500 + 1),
-      ));
+      );
+      final delay = minimumDelay != null && minimumDelay > backoff
+          ? minimumDelay
+          : backoff;
+      minimumDelay = null;
+      await Future<void>.delayed(delay);
       if (_closed || expectedGeneration != _generation) return;
       final current = await tokens();
       if (current == null || _closed || expectedGeneration != _generation) {
@@ -384,6 +553,10 @@ final class GatewayClient {
       }
       _tokens = current;
       try {
+        _setHealth(const GatewayHealth(
+          GatewayConnectionPhase.reconnecting,
+          message: 'Reconnecting realtime updates…',
+        ));
         await _openTransport(current);
         return;
       } on Object {
@@ -403,5 +576,13 @@ final class GatewayClient {
     _subscription = null;
     await _socket?.sink.close();
     _socket = null;
+  }
+
+  void _setHealth(GatewayHealth health) {
+    if (_health.phase == health.phase && _health.message == health.message) {
+      return;
+    }
+    _health = health;
+    if (!_healthEvents.isClosed) _healthEvents.add(health);
   }
 }

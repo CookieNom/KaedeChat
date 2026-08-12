@@ -273,11 +273,17 @@ Future<FlutterLocalNotificationsPlugin>
 }
 
 final class PushService {
-  PushService._(this._local, this._firebaseReady, this._destinations);
+  PushService._(
+    this._local,
+    this._firebaseReady,
+    this._destinations,
+    this._healthEvents,
+  );
 
   final FlutterLocalNotificationsPlugin _local;
   final bool _firebaseReady;
   final StreamController<PushDestination> _destinations;
+  final StreamController<String?> _healthEvents;
   final List<StreamSubscription<dynamic>> _subscriptions =
       <StreamSubscription<dynamic>>[];
   PushDestination? _initialDestination;
@@ -285,6 +291,7 @@ final class PushService {
   EntityRef? _visibleChannel;
 
   Stream<PushDestination> get destinations => _destinations.stream;
+  Stream<String?> get health => _healthEvents.stream;
   bool get remotePushAvailable => _firebaseReady;
 
   PushDestination? consumeInitialDestination() {
@@ -337,6 +344,7 @@ final class PushService {
   static Future<PushService> create() async {
     final local = FlutterLocalNotificationsPlugin();
     final destinations = StreamController<PushDestination>.broadcast();
+    final healthEvents = StreamController<String?>.broadcast(sync: true);
     late final PushService service;
     await local.initialize(
       const InitializationSettings(
@@ -369,7 +377,12 @@ final class PushService {
       // Self-hosters can ship without Firebase credentials. Foreground local
       // notifications continue to work; closed-app push remains unavailable.
     }
-    service = PushService._(local, firebaseReady, destinations);
+    service = PushService._(
+      local,
+      firebaseReady,
+      destinations,
+      healthEvents,
+    );
     final launch = await local.getNotificationAppLaunchDetails();
     service._initialDestination =
         PushDestination.parse(launch?.notificationResponse?.payload);
@@ -378,27 +391,46 @@ final class PushService {
   }
 
   Future<void> _startFirebaseListeners() async {
-    _subscriptions.add(FirebaseMessaging.onMessage.listen(_showRemoteMessage));
+    _subscriptions.add(FirebaseMessaging.onMessage.listen(
+      _showRemoteMessage,
+      onError: (_) => _reportHealth(
+        'Background notification delivery was interrupted. Open Kaede to refresh messages while it reconnects.',
+      ),
+    ));
   }
 
   Future<void> _showRemoteMessage(RemoteMessage message) async {
-    final wake = OpaquePushWake.parse(message.data);
-    if (wake == null) return;
-    final redemption = await _redeemOpaqueWake(wake);
-    final notification = redemption.notification;
-    if (notification != null) {
-      if (_appActive && notification.destination.channel == _visibleChannel) {
-        return;
+    try {
+      final wake = OpaquePushWake.parse(message.data);
+      if (wake == null) return;
+      final redemption = await _redeemOpaqueWake(wake);
+      final notification = redemption.notification;
+      if (notification != null) {
+        _reportHealth(null);
+        if (_appActive && notification.destination.channel == _visibleChannel) {
+          return;
+        }
+        await _displayRedeemedNotification(_local, notification);
+      } else if (redemption.showFallback) {
+        _reportHealth(
+          'Notification details could not be fetched securely. A private fallback alert was shown; open Kaede to refresh.',
+        );
+        await show(
+          id: stableNotificationId(wake.eventToken),
+          kind: NotificationKind.activity,
+          title: 'Kaede Chat',
+          body: 'New activity is waiting in Kaede.',
+        );
       }
-      await _displayRedeemedNotification(_local, notification);
-    } else if (redemption.showFallback) {
-      await show(
-        id: stableNotificationId(wake.eventToken),
-        kind: NotificationKind.activity,
-        title: 'Kaede Chat',
-        body: 'New activity is waiting in Kaede.',
+    } on Object {
+      _reportHealth(
+        'A background notification could not be displayed. Open Kaede to view the message and retry notification delivery.',
       );
     }
+  }
+
+  void _reportHealth(String? warning) {
+    if (!_healthEvents.isClosed) _healthEvents.add(warning);
   }
 
   Future<bool> requestPermission() async {
@@ -458,6 +490,8 @@ final class PushService {
       ? FirebaseMessaging.instance.onTokenRefresh
       : const Stream<String>.empty();
 
+  bool get remoteDeliveryAvailable => _firebaseReady;
+
   Future<void> show({
     required int id,
     required NotificationKind kind,
@@ -501,6 +535,7 @@ final class PushService {
       await subscription.cancel();
     }
     await _destinations.close();
+    await _healthEvents.close();
   }
 }
 

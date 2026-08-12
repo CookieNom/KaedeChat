@@ -11,6 +11,7 @@ from app.bootstrap import DomainMismatchError, IdentityKeyError, bootstrap_insta
 from app.core.settings import get_settings
 from app.db.partitions import ensure_message_partitions, month_snowflake_bound
 from app.db.session import create_engine_and_sessionmaker
+from scripts.verification import VerificationFailure, failure_message
 
 
 async def verify() -> None:
@@ -23,7 +24,10 @@ async def verify() -> None:
                 bootstrap_instance(second_session, settings),
             )
             if first.domain != concurrent.domain:
-                raise RuntimeError("concurrent bootstrap did not converge")
+                raise VerificationFailure(
+                    "concurrent bootstrap returned different domains: "
+                    f"{first.domain!r} and {concurrent.domain!r}"
+                )
 
         async def maintain_partitions() -> None:
             async with engine.begin() as connection:
@@ -46,7 +50,7 @@ async def verify() -> None:
             except IdentityKeyError:
                 pass
             else:
-                raise RuntimeError("bootstrap accepted an incorrect secret key")
+                raise VerificationFailure("bootstrap accepted an incorrect secret key")
 
             mismatched = settings.model_copy(update={"domain": "mismatch.localhost"})
             try:
@@ -54,7 +58,7 @@ async def verify() -> None:
             except DomainMismatchError:
                 await session.rollback()
             else:
-                raise RuntimeError("bootstrap accepted a mismatched domain")
+                raise VerificationFailure("bootstrap accepted a mismatched domain")
 
         async with sessionmaker() as session:
             base_id = month_snowflake_bound(2026, 7) + 1
@@ -79,7 +83,7 @@ async def verify() -> None:
             except IntegrityError:
                 pass
             else:
-                raise RuntimeError("database allowed an immutable user handle to change")
+                raise VerificationFailure("database allowed an immutable user handle to change")
             await session.execute(
                 text(
                     "INSERT INTO dm_conversations "
@@ -118,7 +122,9 @@ async def verify() -> None:
                 {"id": base_id + 2, "domain": settings.domain},
             )
             if routed_to != "messages_2026_07":
-                raise RuntimeError(f"message routed to unexpected partition: {routed_to}")
+                raise VerificationFailure(
+                    f"message expected partition 'messages_2026_07'; received {routed_to!r}"
+                )
 
             # Deleting either half of a DM identity must remove the other half.
             await session.execute(
@@ -146,7 +152,10 @@ async def verify() -> None:
                 {"id": base_id + 4, "domain": settings.domain},
             )
             if remaining_dm_channel != 0:
-                raise RuntimeError("deleting a DM conversation left its channel orphaned")
+                raise VerificationFailure(
+                    "deleting a DM conversation expected 0 remaining channel rows; "
+                    f"received {remaining_dm_channel}"
+                )
             await dm_delete.rollback()
 
             try:
@@ -164,7 +173,7 @@ async def verify() -> None:
             except IntegrityError:
                 pass
             else:
-                raise RuntimeError("database accepted an orphan type-1 channel")
+                raise VerificationFailure("database accepted an orphan type-1 channel")
 
             owner_id = base_id
             member_id = base_id + 10
@@ -250,7 +259,10 @@ async def verify() -> None:
                 {"channel_id": guild_channel_id, "domain": settings.domain},
             )
             if remaining_overwrites != 0:
-                raise RuntimeError("member removal left a stale channel overwrite")
+                raise VerificationFailure(
+                    "member removal expected 0 remaining channel overwrites; "
+                    f"received {remaining_overwrites}"
+                )
 
             try:
                 async with session.begin_nested():
@@ -275,7 +287,9 @@ async def verify() -> None:
             except IntegrityError:
                 pass
             else:
-                raise RuntimeError("database accepted an overwrite target from another guild")
+                raise VerificationFailure(
+                    "database accepted an overwrite target from another guild"
+                )
 
             try:
                 async with session.begin_nested():
@@ -293,7 +307,7 @@ async def verify() -> None:
             except IntegrityError:
                 pass
             else:
-                raise RuntimeError("database allowed a guild owner membership to be removed")
+                raise VerificationFailure("database allowed a guild owner membership to be removed")
             await session.rollback()
 
         async with engine.connect() as connection:
@@ -312,7 +326,9 @@ async def verify() -> None:
             )
             expected = {f"messages_2026_{month:02d}" for month in range(1, 10)}
             if not expected <= partitions:
-                raise RuntimeError(f"missing message partitions: {sorted(expected - partitions)}")
+                raise VerificationFailure(
+                    f"database is missing message partitions: {sorted(expected - partitions)}"
+                )
     finally:
         await engine.dispose()
 
@@ -323,4 +339,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except VerificationFailure as error:
+        raise SystemExit(failure_message("schema", error, "make migration-check")) from None

@@ -39,8 +39,8 @@ from app.db.models import (
     RemoteMediaCache,
     User,
 )
-from app.federation.client import signed_request
-from app.federation.guilds import apply_guild_access_revocation
+from app.federation.events import build_envelope, queue_event
+from app.federation.guilds import apply_guild_access_revocation, mark_remote_guild_departed
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["guild-lifecycle"])
 log = structlog.get_logger()
@@ -112,23 +112,27 @@ async def leave_guild(
         )
 
     if guild.origin_domain != settings.domain:
-        # Do not hold a database lock while waiting on another instance.
-        remote_guild_id = guild.id
         remote_guild_domain = guild.origin_domain
-        await session.rollback()
-        response = await signed_request(
+        await mark_remote_guild_departed(
             session,
             settings,
-            "DELETE",
-            remote_guild_domain,
-            f"/_kaede/v1/guilds/{remote_guild_id}/members/@me",
-            payload={"user": {"id": str(actor_id), "domain": actor_domain}},
+            guild_id=guild.id,
+            guild_domain=guild.origin_domain,
+            user_id=actor_id,
+            user_domain=actor_domain,
         )
-        if response.status_code == 404:
-            raise HTTPException(status_code=404, detail={"code": "NOT_A_GUILD_MEMBER"})
-        if response.status_code != 204:
-            raise HTTPException(status_code=502, detail={"code": "FEDERATION_GUILD_LEAVE_FAILED"})
-        guild = await _locked_guild(session, settings, guild_id)
+        leave_request = await build_envelope(
+            session,
+            settings,
+            "guild.leave.request",
+            auth.user,
+            {"user": {"id": str(actor_id), "domain": actor_domain}},
+            context={
+                "guild_id": str(guild.id),
+                "guild_domain": guild.origin_domain,
+            },
+        )
+        await queue_event(session, settings, remote_guild_domain, leave_request)
         await apply_guild_access_revocation(
             session,
             settings,
@@ -149,7 +153,12 @@ async def leave_guild(
         )
 
     await session.commit()
-    await wake_queued_guild_federation(guild)
+    if guild.origin_domain == settings.domain:
+        await wake_queued_guild_federation(guild)
+    else:
+        from app.tasks import federation_deliver
+
+        await enqueue_best_effort(federation_deliver, guild.origin_domain)
     await _publish_guild_removed(
         redis,
         guild,

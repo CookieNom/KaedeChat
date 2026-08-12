@@ -76,7 +76,7 @@ async def claim_push_sync(redis: Redis, token: str, expected: str | bytes) -> bo
         return False
     if isinstance(claimed, bytes) != isinstance(expected, bytes):
         claimed = claimed.decode("utf-8") if isinstance(claimed, bytes) else claimed.encode()
-    return claimed == expected
+    return bool(claimed == expected)
 
 
 async def discard_push_sync(redis: Redis, token: str) -> None:

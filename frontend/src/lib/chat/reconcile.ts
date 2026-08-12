@@ -6,7 +6,7 @@ export interface MessageDeliveryUpdate {
   message_domain: string;
   channel_id: string;
   channel_domain: string;
-  status: 'delivered' | 'failed';
+  status: 'delivered' | 'failed' | 'retrying';
   code?: string;
   reason?: string | null;
   timeout_until?: string | null;
@@ -31,7 +31,102 @@ export function messageDeliveryFailure(
   if (update.code === 'MISSING_PERMISSIONS') {
     return { reason: 'You no longer have permission to send messages here.', retryable: false };
   }
+  if (
+    update.code === 'FEDERATED_DM_STORAGE_QUOTA_EXCEEDED' ||
+    update.code === 'KAED_FED_DM_STORAGE_QUOTA_EXCEEDED'
+  ) {
+    return {
+      reason:
+        'The receiving instance is out of direct-message cache capacity. Your message was not delivered; try again later or contact that instance’s administrator.',
+      retryable: true
+    };
+  }
+  if (
+    update.code === 'FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED' ||
+    update.code === 'KAED_FED_IDENTITY_STORAGE_QUOTA_EXCEEDED'
+  ) {
+    return {
+      reason:
+        'The receiving instance cannot retain another remote account record, so this message was not delivered. Try again later or contact that instance’s administrator.',
+      retryable: true
+    };
+  }
+  if (
+    update.code === 'FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED' ||
+    update.code === 'KAED_FED_INSTANCE_STORAGE_QUOTA_EXCEEDED'
+  ) {
+    return {
+      reason:
+        'The receiving instance cannot retain another remote server record, so this message was not delivered. Try again later or contact that instance’s administrator.',
+      retryable: true
+    };
+  }
+  if (update.code === 'KAED_FED_INBOX_QUOTA_EXCEEDED') {
+    return {
+      reason:
+        'The receiving instance is temporarily full of federation events, so this message was not delivered. Try again later.',
+      retryable: true
+    };
+  }
+  if (update.code === 'KAED_FED_OUTBOX_CAPACITY_EXCEEDED') {
+    return {
+      reason:
+        'The receiving instance’s outbound federation queue is full. Kaede is retrying automatically.',
+      retryable: true
+    };
+  }
+  if (update.code === 'KAED_FED_REPLICA_QUOTA_EXCEEDED') {
+    return {
+      reason:
+        'The receiving instance paused this remote conversation because its replica cache is full. Try again later or contact that instance’s administrator.',
+      retryable: true
+    };
+  }
+  if (update.code === 'KAED_FED_DELIVERY_EXPIRED') {
+    return {
+      reason:
+        'The remote instance did not accept this message before the delivery window ended. Try again later.',
+      retryable: true
+    };
+  }
+  if (update.code === 'KAED_FED_EVENT_TOO_LARGE') {
+    return {
+      reason: 'This message is too large to send between instances. Reduce its size and try again.',
+      retryable: false
+    };
+  }
   return { retryable: true };
+}
+
+function messageDeliveryRetryingReason(update: MessageDeliveryUpdate): string {
+  if (
+    update.code === 'FEDERATED_DM_STORAGE_QUOTA_EXCEEDED' ||
+    update.code === 'KAED_FED_DM_STORAGE_QUOTA_EXCEEDED'
+  ) {
+    return 'The receiving instance is out of direct-message cache capacity. Kaede will keep retrying automatically.';
+  }
+  if (
+    update.code === 'FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED' ||
+    update.code === 'KAED_FED_IDENTITY_STORAGE_QUOTA_EXCEEDED'
+  ) {
+    return 'The receiving instance cannot retain another remote account record yet. Kaede will keep retrying automatically.';
+  }
+  if (
+    update.code === 'FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED' ||
+    update.code === 'KAED_FED_INSTANCE_STORAGE_QUOTA_EXCEEDED'
+  ) {
+    return 'The receiving instance cannot retain another remote server record yet. Kaede will keep retrying automatically.';
+  }
+  if (update.code === 'KAED_FED_INBOX_QUOTA_EXCEEDED') {
+    return 'The receiving instance is temporarily full of federation events. Kaede will keep retrying automatically.';
+  }
+  if (update.code === 'KAED_FED_OUTBOX_CAPACITY_EXCEEDED') {
+    return 'The receiving instance’s outbound federation queue is full. Kaede will keep retrying automatically.';
+  }
+  if (update.code === 'KAED_FED_REPLICA_QUOTA_EXCEEDED') {
+    return 'The receiving instance paused this remote conversation because its replica cache is full. Kaede will keep retrying automatically.';
+  }
+  return 'The receiving instance is temporarily at capacity. Kaede will keep retrying automatically.';
 }
 
 export function compareMessages(left: Message, right: Message): number {
@@ -121,7 +216,12 @@ export function applyMessageDeliveryUpdate(
       ...message,
       delivery_status: update.status,
       failed: update.status === 'failed',
-      failure_reason: update.status === 'failed' ? failure.reason : undefined,
+      failure_reason:
+        update.status === 'failed'
+          ? failure.reason
+          : update.status === 'retrying'
+            ? messageDeliveryRetryingReason(update)
+            : undefined,
       retryable: update.status === 'failed' ? failure.retryable : undefined
     };
   });

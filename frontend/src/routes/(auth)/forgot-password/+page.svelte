@@ -1,6 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { api } from '$lib/api/client';
+  import { api, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import { onMount, tick } from 'svelte';
 
@@ -32,8 +32,8 @@
       sent = true;
       await tick();
       successPanel?.focus();
-    } catch {
-      error = 'Could not request a reset link. Please try again.';
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not request a reset link. Try again.');
     } finally {
       busy = false;
     }

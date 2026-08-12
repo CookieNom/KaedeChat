@@ -153,7 +153,7 @@ def render_dart() -> str:
     output += "\n};\n\n"
     output += "abstract final class Permission {\n"
     output += "\n".join(
-        f"  static const {dart_name(item.name)} = {item.value};" for item in Permission
+        f"  static const {dart_name(item.name or '')} = {item.value};" for item in Permission
     )
     output += "\n}\n\n"
     output += "enum PermissionDanger { normal, elevated, dangerous, critical }\n\n"
@@ -176,7 +176,12 @@ def render_dart() -> str:
         output += f"    name: {json.dumps(item.permission.name or '')},\n"
         output += f"    bit: {item.permission.value},\n"
         output += f"    label: {json.dumps(item.label)},\n"
-        output += f"    description: {json.dumps(item.description)},\n"
+        description = json.dumps(item.description)
+        if len(f"    description: {description},") <= 80:
+            output += f"    description: {description},\n"
+        else:
+            output += "    description:\n"
+            output += f"        {description},\n"
         output += f"    group: {json.dumps(item.group)},\n"
         output += f"    resourceScopes: {json.dumps(item.resource_scopes)},\n"
         output += f"    channelTypes: {json.dumps(item.channel_types)},\n"

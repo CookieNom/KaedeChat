@@ -304,13 +304,22 @@ pub struct ApiError {
     pub permissions: Option<PermissionBits>,
     pub retry_after_ms: Option<u64>,
     #[serde(default)]
+    pub max_bytes: Option<u64>,
+    #[serde(default)]
+    pub timeout_until: Option<String>,
+    #[serde(default)]
+    pub timeout_indefinite: Option<bool>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
     pub errors: Vec<ValidationIssue>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ValidationIssue {
-    #[serde(default)]
+    #[serde(default, rename = "location", alias = "loc")]
     pub loc: Vec<serde_json::Value>,
+    #[serde(rename = "message", alias = "msg")]
     pub msg: String,
     #[serde(rename = "type")]
     pub kind: String,
@@ -360,5 +369,63 @@ mod tests {
             panic!("permission mask should serialize");
         };
         assert_eq!(serialized, "\"2048\"");
+    }
+
+    #[test]
+    fn current_and_legacy_validation_issues_decode() {
+        let current = serde_json::from_value::<ApiError>(serde_json::json!({
+            "code": "VALIDATION_ERROR",
+            "message": "The password field is required.",
+            "trace_id": "trace.current-123",
+            "retry_after_ms": 1250,
+            "max_bytes": 5_242_880,
+            "timeout_until": "2026-08-12T12:30:00Z",
+            "timeout_indefinite": false,
+            "reason": "Repeated spam",
+            "errors": [{
+                "location": ["body", "password"],
+                "message": "Field required",
+                "type": "missing"
+            }]
+        }));
+        let Ok(current) = current else {
+            panic!("current error envelope should decode");
+        };
+        assert_eq!(
+            current.errors[0].loc,
+            vec![serde_json::json!("body"), serde_json::json!("password")]
+        );
+        assert_eq!(current.errors[0].msg, "Field required");
+        assert_eq!(current.retry_after_ms, Some(1_250));
+        assert_eq!(current.max_bytes, Some(5_242_880));
+        assert_eq!(
+            current.timeout_until.as_deref(),
+            Some("2026-08-12T12:30:00Z")
+        );
+        assert_eq!(current.timeout_indefinite, Some(false));
+        assert_eq!(current.reason.as_deref(), Some("Repeated spam"));
+        let serialized = serde_json::to_value(&current.errors[0]);
+        let Ok(serialized) = serialized else {
+            panic!("validation issue should encode");
+        };
+        assert_eq!(serialized["location"][1], "password");
+        assert_eq!(serialized["message"], "Field required");
+        assert!(serialized.get("loc").is_none());
+        assert!(serialized.get("msg").is_none());
+
+        let legacy = serde_json::from_value::<ApiError>(serde_json::json!({
+            "code": "VALIDATION_ERROR",
+            "message": "Request validation failed",
+            "trace_id": "legacy-trace",
+            "errors": [{
+                "loc": ["body", "display_name"],
+                "msg": "Field is required",
+                "type": "missing"
+            }]
+        }));
+        let Ok(legacy) = legacy else {
+            panic!("legacy error envelope should decode");
+        };
+        assert_eq!(legacy.errors[0].msg, "Field is required");
     }
 }

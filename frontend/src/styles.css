@@ -1392,6 +1392,11 @@ progress {
   display: grid;
   width: 48px;
   height: 48px;
+  min-width: 48px;
+  min-height: 48px;
+  max-width: 48px;
+  max-height: 48px;
+  aspect-ratio: 1 / 1;
   flex: 0 0 auto;
   place-items: center;
   overflow: visible;
@@ -1409,10 +1414,18 @@ progress {
 }
 
 .guild-spine > a img {
+  position: absolute;
+  inset: 0;
+  display: block;
   width: 100%;
   height: 100%;
+  min-width: 100%;
+  min-height: 100%;
+  max-width: 100%;
+  max-height: 100%;
   border-radius: inherit;
   object-fit: cover;
+  object-position: center;
 }
 
 .guild-spine > a:hover,
@@ -4249,11 +4262,51 @@ progress {
 /* Chat */
 
 .message-pane {
+  position: relative;
   display: grid;
   min-width: 0;
   min-height: 0;
   grid-template-rows: 64px minmax(0, 1fr) auto;
   background: var(--surface);
+}
+
+.read-state-warning {
+  position: absolute;
+  z-index: 5;
+  top: 72px;
+  left: 50%;
+  display: flex;
+  max-width: min(680px, calc(100% - 2rem));
+  align-items: center;
+  gap: 0.65rem;
+  transform: translateX(-50%);
+  border: 1px solid color-mix(in srgb, var(--warning) 48%, var(--line));
+  border-radius: 999px;
+  padding: 0.45rem 0.7rem 0.45rem 0.85rem;
+  color: var(--text-soft);
+  background: color-mix(in srgb, var(--surface-raised) 92%, var(--warning));
+  box-shadow: var(--shadow-sm);
+  font-size: 0.7rem;
+}
+
+.read-state-warning button,
+.composer-feature-warning button,
+.voice-roster-health button {
+  flex: 0 0 auto;
+  border: 0;
+  padding: 0;
+  color: var(--accent-text);
+  background: transparent;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.read-state-warning button:disabled,
+.composer-feature-warning button:disabled,
+.voice-roster-health button:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .guild-voice-pane {
@@ -4413,6 +4466,87 @@ progress {
 .history-button:hover:not(:disabled) {
   color: var(--text);
   border-color: var(--line-strong);
+}
+
+.history-boundary {
+  display: grid;
+  gap: 0.2rem;
+  max-width: 42rem;
+  margin: 0.75rem auto 1rem;
+  padding: 0.75rem 1rem;
+  color: var(--text-muted);
+  text-align: center;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 30%, transparent);
+  border-radius: 0.75rem;
+}
+
+.history-boundary strong {
+  color: var(--text);
+}
+
+.sync-warning {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.65rem 1rem;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning, #d99a3e) 18%, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--warning, #d99a3e) 45%, transparent);
+}
+
+.message-pane.sync-paused {
+  grid-template-rows: 64px auto minmax(0, 1fr) auto;
+}
+
+.message-pane.has-status-warning {
+  grid-template-rows: 64px auto minmax(0, 1fr) auto;
+}
+
+.guild-voice-pane.sync-paused,
+.guild-voice-pane.has-status-warning {
+  grid-template-rows: 64px auto minmax(0, 1fr);
+}
+
+.guild-voice-pane.sync-paused .guild-voice-content,
+.guild-voice-pane.has-status-warning .guild-voice-content {
+  grid-row: 3;
+}
+
+.status-warnings {
+  display: grid;
+  min-width: 0;
+}
+
+.sync-warning span {
+  color: var(--text-muted);
+}
+
+.timeout-warning {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.65rem 1rem;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning, #d99a3e) 18%, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--warning, #d99a3e) 45%, transparent);
+}
+
+.timeout-warning span,
+.timeout-warning small {
+  color: var(--text-muted);
+}
+
+.timeout-warning-muted {
+  color: var(--text-muted);
+}
+
+@media (max-width: 740px) {
+  .sync-warning,
+  .timeout-warning {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
 }
 
 .new-message-pill {
@@ -4945,6 +5079,23 @@ progress {
   background: var(--surface-subtle);
   font-size: 0.75rem;
   text-decoration: none;
+}
+
+.attachment-load-error {
+  display: flex;
+  max-width: min(520px, 100%);
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  padding: 0.75rem;
+  color: var(--text-soft);
+  background: var(--surface-subtle);
+}
+
+.attachment-load-error button {
+  flex: 0 0 auto;
 }
 
 .message-meta-actions {
@@ -5898,6 +6049,22 @@ body.media-viewer-open {
   display: grid;
   gap: 0.12rem;
   margin: 0.12rem 0 0.4rem 1.35rem;
+}
+
+.voice-roster-health {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0.15rem 0 0.45rem 1.75rem;
+  color: var(--warning);
+  font-size: 0.63rem;
+}
+
+.voice-roster-health span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .voice-channel-members button {
@@ -7138,6 +7305,16 @@ body.media-viewer-open {
     width: 35px;
     height: 35px;
   }
+}
+
+.composer-feature-warning {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin: 0.35rem 0 0;
+  color: var(--warning);
+  font-size: 0.68rem;
 }
 
 @media (max-width: 600px) {

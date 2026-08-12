@@ -31,6 +31,8 @@ def test_api_and_gateway_register_all_routes() -> None:
         assert "put" in schema["paths"]["/api/v1/guilds/{guild_id}/owner"]
         assert "delete" in schema["paths"]["/api/v1/guilds/{guild_id}"]
         assert "delete" in schema["paths"]["/_kaede/v1/guilds/{guild_id}/members/@me"]
+        assert "get" in schema["paths"]["/api/v1/users/@me/guild-navigation"]
+        assert "put" in schema["paths"]["/api/v1/users/@me/guild-navigation"]
         operation = schema["paths"]["/api/v1/channels/{channel_id}/messages"]["get"]
         parameter = next(item for item in operation["parameters"] if item["name"] == "channel_id")
         assert parameter["schema"]["type"] == "string"
@@ -46,13 +48,22 @@ def test_api_and_gateway_register_all_routes() -> None:
                 )
                 assert missing.json() == {
                     "code": "HTTP_404",
-                    "message": "Not Found",
+                    "message": "The requested item could not be found or is no longer available.",
                     "trace_id": "smoke-trace",
                 }
                 assert missing.headers["Cache-Control"] == "no-store"
                 discovery = await client.get("/.well-known/kaede/server")
                 assert discovery.status_code == 200
                 assert discovery.headers["Cache-Control"].startswith("public,")
+                assert discovery.json()["versions"] == ["1", "2"]
+                assert "request-nonce/1" in discovery.json()["capabilities"]
+                ambiguous = await client.post(
+                    "/_kaede/v1/does-not-exist",
+                    content=b'{"value":1,"value":2}',
+                    headers={"Content-Type": "application/json"},
+                )
+                assert ambiguous.status_code == 400
+                assert ambiguous.json()["code"] == "KAED_FED_INVALID_JSON"
                 oversized_delete = await client.request(
                     "DELETE",
                     "/api/v1/does-not-exist",

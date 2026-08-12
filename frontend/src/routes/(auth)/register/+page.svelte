@@ -1,6 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { api, ApiError } from '$lib/api/client';
+  import { api, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import TurnstileWidget from '$lib/components/TurnstileWidget.svelte';
   import NativeInstanceField from '$lib/components/NativeInstanceField.svelte';
@@ -52,8 +52,11 @@
       selectedInstance = storedNativeInstance();
       applyConfiguration(await loadAuthConfiguration());
       registrationStep = 2;
-    } catch {
-      error = 'Could not reach that Kaede server. Check the domain and try again.';
+    } catch (caught) {
+      error = userErrorMessage(
+        caught,
+        'Could not reach that Kaede server. Check the domain and try again.'
+      );
     } finally {
       busy = false;
     }
@@ -99,7 +102,10 @@
       await tick();
       successPanel?.focus();
     } catch (caught) {
-      error = caught instanceof ApiError ? caught.message : 'Could not create your account.';
+      error = userErrorMessage(
+        caught,
+        'Could not create your account. Check the form and try again.'
+      );
       if (turnstileEnabled) turnstileWidget?.reset();
     } finally {
       busy = false;

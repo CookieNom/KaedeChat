@@ -8,6 +8,8 @@ import secrets
 import time
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from functools import reduce
+from operator import or_ as bit_or
 from typing import Any, cast
 
 import structlog
@@ -22,6 +24,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from redis.asyncio import Redis
 from sqlalchemy import and_, delete, func, or_, select, tuple_
@@ -39,6 +42,7 @@ from app.chat.guild_revision import (
     wake_queued_guild_federation,
 )
 from app.chat.mentions import merge_mention_recipients, role_mention_recipients
+from app.chat.moderation_status import guild_self_moderation_status, sanitize_timeout_reason
 from app.chat.payloads import (
     channel_payload,
     dm_channel_payload,
@@ -47,10 +51,16 @@ from app.chat.payloads import (
     render_message_payload,
     user_payload,
 )
-from app.chat.permissions import calculate_permissions, require_permissions
+from app.chat.permissions import (
+    PermissionOverwrite,
+    require_permissions,
+    resolve_permissions,
+)
 from app.chat.privacy import require_can_direct_message
 from app.core.dm import dm_authority_domain, dm_pair_key
-from app.core.federation import FEDERATION_CAPABILITIES, verify_envelope
+from app.core.federation import FEDERATION_CAPABILITIES, canonical_json, verify_envelope
+from app.core.json_limits import strict_json_loads
+from app.core.metrics import increment_metric
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
@@ -71,6 +81,7 @@ from app.db.models import (
     GuildEvent,
     GuildInstanceBan,
     GuildMember,
+    Instance,
     Invite,
     MemberRole,
     Message,
@@ -80,6 +91,13 @@ from app.db.models import (
     RemoteMediaTombstone,
     Role,
     User,
+)
+from app.federation.delivery import FederationOutboxCapacityExceeded
+from app.federation.dm_history import MAX_DM_HISTORY_RESPONSE_BYTES
+from app.federation.dm_storage import (
+    FederatedDMQuotaExceeded,
+    admit_federated_dm_conversation,
+    register_federated_dm_conversation,
 )
 from app.federation.events import build_envelope, queue_event
 from app.federation.guilds import (
@@ -111,9 +129,26 @@ from app.federation.history import (
     history_export_manifest,
     history_export_page,
 )
-from app.federation.network import FederationNetworkError, normalize_domain
+from app.federation.identity_storage import FederationIdentityQuotaExceeded
+from app.federation.network import (
+    FederationInstanceQuotaExceeded,
+    FederationNetworkError,
+    normalize_domain,
+    peer_key_needs_refresh,
+)
 from app.federation.presence import receive_presence
-from app.federation.relationships import RelationshipApplication, apply_relationship_event
+from app.federation.relationships import (
+    RelationshipApplication,
+    RelationshipQuotaExceeded,
+    apply_relationship_event,
+)
+from app.federation.replica_storage import (
+    REPLICA_QUOTA_ERROR_CODE,
+    FederationReplicaQuotaExceeded,
+    admit_replica_storage,
+    mark_replica_capacity_paused,
+    mark_replica_quota_paused,
+)
 from app.federation.replication import (
     advance_channel_cursor,
     database_snowflake,
@@ -141,12 +176,18 @@ from app.federation.security import (
     FederationPrincipal,
     authenticate_federation,
     authenticate_federation_websocket,
+    enforce_federation_link_frame_rate_limit,
     enforce_federation_route_rate_limit,
     enforce_origin_event_rate_limit,
     event_timestamp_allowed,
     federation_event_policy_code,
+    refresh_event_signing_keys,
     require_guild_federation_access,
     self_instance,
+)
+from app.federation.storage import (
+    current_federation_storage_usage,
+    federation_storage_quota_exceeded,
 )
 from app.media.storage import S3Storage, StorageError
 from app.tasks import (
@@ -159,8 +200,16 @@ from app.tasks import (
 
 router = APIRouter(tags=["federation"])
 log = structlog.get_logger()
+
+MAX_SNAPSHOT_VISIBILITY_MEMBERS = 100_000
+MAX_SNAPSHOT_VISIBILITY_ROLES = 10_000
+MAX_SNAPSHOT_VISIBILITY_CHANNELS = 10_000
+MAX_SNAPSHOT_VISIBILITY_MEMBER_ROLES = 500_000
+MAX_SNAPSHOT_VISIBILITY_OVERWRITES = 100_000
+MAX_SNAPSHOT_VISIBILITY_CHECKS = 1_000_000
 FEDERATION_LINK_SUBPROTOCOL = "kaede-fed.1"
 MAX_LINK_FRAME_BYTES = 1024 * 1024
+MAX_INBOUND_LINK_AGE_SECONDS = 55 * 60
 LINK_ADMIT_LUA = """
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', tonumber(ARGV[1]) - 90000)
 redis.call('ZADD', KEYS[1], tonumber(ARGV[1]), ARGV[2])
@@ -266,14 +315,50 @@ async def federation_link(websocket: WebSocket) -> None:
                     "heartbeat_interval_ms": 30_000,
                 }
             )
+            link_deadline = time.monotonic() + MAX_INBOUND_LINK_AGE_SECONDS
+            local_frame_tokens = 30.0
+            local_byte_tokens = float(2 * 1024 * 1024)
+            local_budget_updated = time.monotonic()
             while True:
-                raw = await websocket.receive_text()
-                if len(raw.encode("utf-8")) > MAX_LINK_FRAME_BYTES:
+                remaining = link_deadline - time.monotonic()
+                if remaining <= 0:
+                    await websocket.close(code=1000)
+                    return
+                try:
+                    async with asyncio.timeout(remaining):
+                        raw = await websocket.receive_text()
+                except TimeoutError:
+                    await websocket.close(code=1000)
+                    return
+                byte_length = len(raw.encode("utf-8"))
+                now_monotonic = time.monotonic()
+                elapsed = max(0.0, now_monotonic - local_budget_updated)
+                local_budget_updated = now_monotonic
+                local_frame_tokens = min(30.0, local_frame_tokens + elapsed * 10.0)
+                local_byte_tokens = min(
+                    float(2 * 1024 * 1024),
+                    local_byte_tokens + elapsed * 512 * 1024,
+                )
+                if local_frame_tokens < 1 or local_byte_tokens < byte_length:
+                    await websocket.close(code=4429)
+                    return
+                local_frame_tokens -= 1
+                local_byte_tokens -= byte_length
+                try:
+                    await enforce_federation_link_frame_rate_limit(
+                        redis,
+                        principal.origin,
+                        byte_length,
+                    )
+                except HTTPException:
+                    await websocket.close(code=4429)
+                    return
+                if byte_length > MAX_LINK_FRAME_BYTES:
                     await websocket.close(code=4409)
                     return
                 try:
-                    frame = json.loads(raw)
-                except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+                    frame = strict_json_loads(raw)
+                except ValueError:
                     await websocket.close(code=4400)
                     return
                 if not isinstance(frame, dict):
@@ -389,12 +474,20 @@ async def authoritative_dm_conversation(
     snowflake: SnowflakeGenerator,
     profiles: list[RemoteUserProfile],
 ) -> tuple[DMConversation, Channel, list[User], bool]:
-    users = [await upsert_remote_user(session, settings, profile) for profile in profiles]
-    handles = [f"{user.username}@{user.origin_domain}" for user in users]
+    handles = [f"{profile.username}@{profile.origin_domain}" for profile in profiles]
     authority = dm_authority_domain(*handles)
     if authority != settings.domain:
         raise HTTPException(status_code=409, detail={"code": "KAED_DM_WRONG_AUTHORITY"})
     pair_key = dm_pair_key(*handles)
+    participant_domains = {profile.origin_domain for profile in profiles}
+    federated = await admit_federated_dm_conversation(
+        session,
+        settings,
+        authority_domain=authority,
+        pair_key=pair_key,
+        participant_domains=participant_domains,
+    )
+    users = [await upsert_remote_user(session, settings, profile) for profile in profiles]
     candidate_id = await snowflake.mint()
     inserted_id = await session.scalar(
         pg_insert(DMConversation)
@@ -413,6 +506,13 @@ async def authoritative_dm_conversation(
         conversation = await session.get(DMConversation, (candidate_id, settings.domain))
         if conversation is None:
             raise RuntimeError("new DM authority conversation disappeared")
+        if federated:
+            await register_federated_dm_conversation(
+                session,
+                settings,
+                conversation,
+                participant_domains=participant_domains,
+            )
         channel = Channel(
             id=candidate_id,
             origin_domain=settings.domain,
@@ -464,6 +564,13 @@ async def authoritative_dm_conversation(
         )
         if participant_refs != {(user.id, user.origin_domain) for user in users}:
             raise RuntimeError("DM authority pair key has inconsistent participants")
+        if federated:
+            await register_federated_dm_conversation(
+                session,
+                settings,
+                conversation,
+                participant_domains=participant_domains,
+            )
     return conversation, channel, users, created
 
 
@@ -545,7 +652,7 @@ async def has_outbound_guild_proxy(
 async def well_known(settings: Settings = Depends(get_settings)) -> dict[str, object]:
     return {
         "server": settings.domain,
-        "versions": ["1"],
+        "versions": ["1", "2"],
         "capabilities": list(FEDERATION_CAPABILITIES),
     }
 
@@ -606,6 +713,62 @@ def verify_event_signature(
     )
 
 
+def validated_rejection_timeout_reason(value: object) -> str | None:
+    """Validate and display-sanitize a user-scoped federation rejection reason."""
+
+    if value is not None and (not isinstance(value, str) or len(value) > 512):
+        raise ValueError("write rejection timeout reason is invalid")
+    return sanitize_timeout_reason(value)
+
+
+async def _apply_authoritative_guild_leave(
+    session: AsyncSession,
+    settings: Settings,
+    guild: Guild,
+    *,
+    user_id: int,
+    user_domain: str,
+    missing_ok: bool,
+) -> bool:
+    """Apply an idempotent remote leave at the guild authority."""
+
+    member = await session.get(
+        GuildMember,
+        (guild.id, guild.origin_domain, user_id, user_domain),
+    )
+    if member is None:
+        if missing_ok:
+            return False
+        raise HTTPException(status_code=404, detail={"code": "NOT_A_GUILD_MEMBER"})
+    if (guild.owner_id, guild.owner_domain) == (user_id, user_domain):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "OWNER_MUST_TRANSFER_OR_DELETE_GUILD"},
+        )
+    owner = await session.get(User, (guild.owner_id, guild.owner_domain))
+    if owner is None or not owner.is_local:
+        raise RuntimeError("local guild owner is unavailable")
+    await session.delete(member)
+    await queue_guild_access_revocation(
+        session,
+        settings,
+        guild,
+        user_id=user_id,
+        user_domain=user_domain,
+        reason="member_left",
+    )
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        owner,
+        "guild.member.remove",
+        {"user": {"id": str(user_id), "origin_domain": user_domain}},
+        snapshot_required=True,
+    )
+    return True
+
+
 async def process_event(
     session: AsyncSession,
     redis: Redis,
@@ -632,15 +795,92 @@ async def process_event(
             code="KAED_FED_EVENT_TIMESTAMP_INVALID",
         )
     signatures = envelope.signatures.get(envelope.origin, {})
-    valid = False
-    for key_id, encoded in signatures.items():
-        peer_key = await session.get(PeerKey, (envelope.origin, key_id))
-        if peer_key is not None and verify_event_signature(envelope, peer_key, encoded):
-            valid = True
-            break
+
+    async def verify_cached_event_signatures() -> tuple[bool, str | None]:
+        refresh_key: str | None = None
+        for key_id, encoded in signatures.items():
+            peer_key = await session.get(PeerKey, (envelope.origin, key_id))
+            if peer_key is None or peer_key_needs_refresh(peer_key, datetime.now(UTC)):
+                refresh_key = refresh_key or key_id
+                continue
+            if verify_event_signature(envelope, peer_key, encoded):
+                return True, refresh_key
+        return False, refresh_key
+
+    valid, refresh_key = await verify_cached_event_signatures()
+    if not valid and refresh_key is not None:
+        refreshed = await refresh_event_signing_keys(
+            session,
+            redis,
+            settings,
+            principal,
+            refresh_key,
+        )
+        if not refreshed:
+            await session.rollback()
+            return InboxResult(
+                event_id=envelope.event_id,
+                status="retry",
+                code="KAED_FED_UNKNOWN_KEY",
+            )
+        valid, _unused_refresh_key = await verify_cached_event_signatures()
     if not valid:
         return InboxResult(
             event_id=envelope.event_id, status="rejected", code="KAED_FED_BAD_EVENT_SIGNATURE"
+        )
+    serialized_envelope = envelope.model_dump(mode="json")
+    envelope_bytes = len(canonical_json(serialized_envelope))
+    prior = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
+    if prior is not None:
+        if prior.status == "processed":
+            result = InboxResult(event_id=envelope.event_id, status="duplicate")
+        elif prior.status == "rejected":
+            result = InboxResult(
+                event_id=envelope.event_id,
+                status="rejected",
+                code=prior.result_code or "KAED_FED_EVENT_REJECTED",
+            )
+        else:
+            result = InboxResult(
+                event_id=envelope.event_id,
+                status="retry",
+                code="KAED_FED_EVENT_RETRY",
+            )
+        await session.rollback()
+        return result
+    # The self Instance row is the singleton global quota ledger. Lock it
+    # before the origin row everywhere so concurrent origins cannot each admit
+    # against a stale global total and retention cannot deadlock admission.
+    global_ledger = await session.scalar(
+        select(Instance).where(Instance.is_self.is_(True)).with_for_update()
+    )
+    if global_ledger is None:
+        await session.rollback()
+        return InboxResult(
+            event_id=envelope.event_id,
+            status="retry",
+            code="KAED_FED_EVENT_RETRY",
+        )
+    peer = await session.scalar(
+        select(Instance)
+        .where(Instance.domain == envelope.origin, Instance.is_self.is_(False))
+        .with_for_update()
+    )
+    if peer is None:
+        await session.rollback()
+        return InboxResult(
+            event_id=envelope.event_id,
+            status="retry",
+            code="KAED_FED_EVENT_RETRY",
+        )
+    usage = current_federation_storage_usage(peer, global_ledger)
+    if federation_storage_quota_exceeded(settings, usage, incoming_bytes=envelope_bytes):
+        await increment_metric(redis, "federation_inbox_quota_rejections")
+        await session.rollback()
+        return InboxResult(
+            event_id=envelope.event_id,
+            status="retry",
+            code="KAED_FED_INBOX_QUOTA_EXCEEDED",
         )
     claimed = await session.scalar(
         pg_insert(FederationInbox)
@@ -679,12 +919,13 @@ async def process_event(
             )
         await session.rollback()
         return result
+    peer.federation_inbox_events += 1
+    global_ledger.federation_inbox_events += 1
     # Keep the idempotency claim in the outer transaction. Event application
     # runs in a savepoint so a rejection cannot briefly remove the claim and
     # allow a concurrent replay to apply the same event.
     await session.flush()
     event_work = await session.begin_nested()
-    serialized_envelope = envelope.model_dump(mode="json")
     inserted_event = await session.scalar(
         pg_insert(FederationEvent)
         .values(
@@ -692,6 +933,7 @@ async def process_event(
             origin_domain=envelope.origin,
             event_type=envelope.type,
             envelope=serialized_envelope,
+            envelope_bytes=envelope_bytes,
             expires_at=datetime.now(UTC) + timedelta(days=settings.federation_event_retention_days),
         )
         .on_conflict_do_nothing(index_elements=["origin_domain", "event_id"])
@@ -740,6 +982,8 @@ async def process_event(
     media_purge_target: tuple[str, int] | None = None
     relationship_application: RelationshipApplication | None = None
     history_access_changed = False
+    authoritative_leave_guild: Guild | None = None
+    authoritative_leave_target: tuple[int, str] | None = None
     durably_committed = False
     try:
         if envelope.type in {
@@ -945,6 +1189,35 @@ async def process_event(
                 raise FederationResyncRetry from exc
             if applied_member is not None and applied_member[1]:
                 replicated_guild_member = applied_member[0]
+        elif envelope.type == "guild.leave.request":
+            guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
+            guild_domain = normalize_domain(str(envelope.context.get("guild_domain", "")))
+            if guild_domain != settings.domain:
+                raise ValueError("guild leave request was sent to the wrong authority")
+            raw_user = envelope.content.get("user")
+            if not isinstance(raw_user, dict) or (
+                str(raw_user.get("id")) != envelope.actor.id
+                or normalize_domain(str(raw_user.get("domain", ""))) != envelope.actor.domain
+            ):
+                raise ValueError("guild leave actor does not match its target")
+            home_leave_guild = await session.scalar(
+                select(Guild)
+                .where(Guild.id == guild_id, Guild.origin_domain == settings.domain)
+                .with_for_update()
+            )
+            if home_leave_guild is None:
+                raise ValueError("guild leave request references an unknown guild")
+            leave_user_id = database_snowflake(envelope.actor.id, "guild leave user id")
+            if await _apply_authoritative_guild_leave(
+                session,
+                settings,
+                home_leave_guild,
+                user_id=leave_user_id,
+                user_domain=envelope.actor.domain,
+                missing_ok=True,
+            ):
+                authoritative_leave_guild = home_leave_guild
+                authoritative_leave_target = (leave_user_id, envelope.actor.domain)
         elif envelope.type in GUILD_MUTATION_EVENT_TYPES | {"guild.event.redacted"}:
             guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
             guild_domain = normalize_domain(str(envelope.context.get("guild_domain", "")))
@@ -1314,10 +1587,7 @@ async def process_event(
             timeout_until = envelope.content.get("timeout_until")
             timeout_indefinite = envelope.content.get("timeout_indefinite", False)
             if rejection_code == "MEMBER_TIMED_OUT":
-                if timeout_reason is not None and (
-                    not isinstance(timeout_reason, str) or len(timeout_reason) > 512
-                ):
-                    raise ValueError("write rejection timeout reason is invalid")
+                timeout_reason = validated_rejection_timeout_reason(timeout_reason)
                 if timeout_until is not None:
                     parsed_timeout = datetime.fromisoformat(str(timeout_until))
                     if parsed_timeout.tzinfo is None:
@@ -1347,33 +1617,65 @@ async def process_event(
             await session.scalar(
                 select(
                     func.pg_advisory_xact_lock(
-                        func.hashtextextended(
-                            f"kaede-remote-media:{attachment_origin}:{attachment_number}", 0
-                        )
+                        func.hashtextextended("kaede-remote-media-cache-budget", 0)
                     )
                 )
             )
+            remote_attachment = await session.get(
+                Attachment, (attachment_number, attachment_origin)
+            )
+            existing_tombstone = await session.get(
+                RemoteMediaTombstone,
+                (attachment_origin, attachment_number),
+            )
+            if existing_tombstone is None:
+                retained_tombstones = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(RemoteMediaTombstone)
+                        .where(RemoteMediaTombstone.origin_domain == attachment_origin)
+                    )
+                    or 0
+                )
+                if retained_tombstones >= settings.federation_remote_media_tombstones_per_origin:
+                    raise ValueError("remote media tombstone quota exceeded")
+            # Keep a bounded tombstone even if the corresponding create has
+            # not arrived yet. This preserves delete-before-create ordering
+            # without allowing permanent attacker-selected state: admission is
+            # per origin and retention expires the row.
             await session.execute(
                 pg_insert(RemoteMediaTombstone)
                 .values(
                     origin_domain=attachment_origin,
                     attachment_id=attachment_number,
                     event_id=envelope.event_id,
+                    expires_at=datetime.now(UTC)
+                    + timedelta(days=settings.federation_event_retention_days),
                 )
-                .on_conflict_do_nothing(index_elements=["origin_domain", "attachment_id"])
-            )
-            remote_attachment = await session.get(
-                Attachment, (attachment_number, attachment_origin)
+                .on_conflict_do_update(
+                    index_elements=["origin_domain", "attachment_id"],
+                    set_={
+                        "event_id": envelope.event_id,
+                        "deleted_at": datetime.now(UTC),
+                        "expires_at": datetime.now(UTC)
+                        + timedelta(days=settings.federation_event_retention_days),
+                    },
+                )
             )
             if remote_attachment is not None:
                 remote_attachment.deleted_at = datetime.now(UTC)
             media_purge_target = (attachment_origin, attachment_number)
         else:
             raise ValueError("unsupported event type")
+        if replicated_guild is not None and replicated_guild not in session.deleted:
+            await admit_replica_storage(session, settings, replicated_guild)
         inbox.status = "processed"
         inbox.result_code = None
         inbox.processed_at = datetime.now(UTC)
         await event_work.commit()
+        if inserted_event is not None:
+            peer.federation_inbox_event_bytes += envelope_bytes
+            global_ledger.federation_inbox_event_bytes += envelope_bytes
         await session.commit()
         durably_committed = True
         if replicated_message is not None:
@@ -1450,6 +1752,19 @@ async def process_event(
                 {
                     "guild_id": str(replicated_guild.id),
                     "user": user_payload(replicated_guild_member),
+                },
+            )
+        if authoritative_leave_guild is not None and authoritative_leave_target is not None:
+            await wake_queued_guild_federation(authoritative_leave_guild)
+            await publish_dispatch(
+                redis,
+                guild_topic(authoritative_leave_guild.origin_domain, authoritative_leave_guild.id),
+                "GUILD_MEMBER_REMOVE",
+                {
+                    "guild_id": str(authoritative_leave_guild.id),
+                    "guild_domain": authoritative_leave_guild.origin_domain,
+                    "user_id": str(authoritative_leave_target[0]),
+                    "user_domain": authoritative_leave_target[1],
                 },
             )
         if replicated_guild_dispatch is not None and replicated_guild is not None:
@@ -1561,6 +1876,324 @@ async def process_event(
                 code="KAED_FED_EVENT_RETRY",
             )
         await event_work.rollback()
+        if isinstance(exc, FederationOutboxCapacityExceeded):
+            # Nothing from this event is durable without its required outbound
+            # follow-up. Remove the inbox claim so the sender can replay after
+            # the bounded destination queue drains.
+            inbox = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
+            if inbox is not None:
+                await session.delete(inbox)
+                peer.federation_inbox_events = max(0, peer.federation_inbox_events - 1)
+                global_ledger.federation_inbox_events = max(
+                    0, global_ledger.federation_inbox_events - 1
+                )
+            await session.commit()
+            return InboxResult(
+                event_id=envelope.event_id,
+                status="retry",
+                code=exc.federation_code,
+            )
+        if isinstance(exc, FederatedDMQuotaExceeded):
+            # Replica capacity is recoverable: its rolling cache may converge
+            # after projections/pins clear or an operator raises capacity, so
+            # preserve replay by removing the inbox claim. Authoritative
+            # history is user-owned and is never silently pruned; reject that
+            # write deliberately with the stable capacity code.
+            retryable = envelope.type == "dm.conversation.create"
+            if envelope.type == "dm.message.create":
+                raw_message = envelope.content.get("message")
+                if isinstance(raw_message, dict):
+                    try:
+                        quota_conversation = await session.get(
+                            DMConversation,
+                            (
+                                database_snowflake(
+                                    raw_message.get("channel_id"), "DM quota channel id"
+                                ),
+                                normalize_domain(str(raw_message.get("channel_domain", ""))),
+                            ),
+                        )
+                    except (FederationNetworkError, ValueError):
+                        quota_conversation = None
+                    retryable = bool(
+                        quota_conversation is not None
+                        and quota_conversation.authority_domain != settings.domain
+                    )
+            inbox = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
+            if retryable:
+                if inbox is not None:
+                    await session.delete(inbox)
+                    peer.federation_inbox_events = max(0, peer.federation_inbox_events - 1)
+                    global_ledger.federation_inbox_events = max(
+                        0, global_ledger.federation_inbox_events - 1
+                    )
+                await session.commit()
+                return InboxResult(
+                    event_id=envelope.event_id,
+                    status="retry",
+                    code="KAED_FED_DM_STORAGE_QUOTA_EXCEEDED",
+                )
+            if inbox is None:
+                raise RuntimeError("federation inbox claim disappeared") from exc
+            inbox.status = "rejected"
+            inbox.result_code = "KAED_FED_DM_STORAGE_QUOTA_EXCEEDED"
+            inbox.error = "federated DM capacity was reached"
+            inbox.processed_at = datetime.now(UTC)
+            # A queued open needs an explicit rejection event so the initiating
+            # client can resolve its operation instead of waiting forever.
+            if envelope.type == "dm.open.request":
+                try:
+                    profiles = DMOpenFederationRequest.model_validate(
+                        {"participants": envelope.content.get("participants")}
+                    ).participants
+                    quota_dm_local_profile = next(
+                        profile for profile in profiles if profile.origin_domain == settings.domain
+                    )
+                    quota_dm_local_user = await session.get(
+                        User,
+                        (
+                            int(quota_dm_local_profile.id),
+                            quota_dm_local_profile.origin_domain,
+                        ),
+                    )
+                    if quota_dm_local_user is not None:
+                        rejected = await build_envelope(
+                            session,
+                            settings,
+                            "dm.open.rejected",
+                            quota_dm_local_user,
+                            {
+                                "target": {
+                                    "id": envelope.actor.id,
+                                    "domain": envelope.actor.domain,
+                                },
+                                "pair_key": str(envelope.content.get("pair_key", "")),
+                                "code": "KAED_FED_DM_STORAGE_QUOTA_EXCEEDED",
+                            },
+                        )
+                        await queue_event(session, settings, envelope.origin, rejected)
+                        delivery_wakes.add(envelope.origin)
+                except (StopIteration, ValidationError, ValueError):
+                    pass
+            await session.commit()
+            for destination in delivery_wakes:
+                await enqueue_best_effort(federation_deliver, destination)
+            return InboxResult(
+                event_id=envelope.event_id,
+                status="rejected",
+                code="KAED_FED_DM_STORAGE_QUOTA_EXCEEDED",
+            )
+        if isinstance(exc, RelationshipQuotaExceeded):
+            inbox = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
+            if inbox is None:
+                raise RuntimeError("federation inbox claim disappeared") from exc
+            inbox.status = "rejected"
+            inbox.result_code = exc.code
+            inbox.error = "pending relationship request capacity was reached"
+            inbox.processed_at = datetime.now(UTC)
+            await session.commit()
+            return InboxResult(
+                event_id=envelope.event_id,
+                status="rejected",
+                code=exc.code,
+            )
+        if isinstance(exc, (FederationIdentityQuotaExceeded, FederationInstanceQuotaExceeded)):
+            delivery_wakes.clear()
+            federation_code = exc.federation_code
+            local_code = exc.code
+
+            # A replica must not skip an event that introduces an identity.
+            # Roll it back, persist a visible pause, and let the sender replay
+            # after the operator raises capacity or cached state is reclaimed.
+            capacity_guild: Guild | None = None
+            try:
+                quota_guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
+                quota_guild_origin = normalize_domain(str(envelope.context.get("guild_domain", "")))
+            except (FederationNetworkError, ValueError):
+                quota_guild_id = None
+                quota_guild_origin = ""
+            if quota_guild_id is not None and quota_guild_origin != settings.domain:
+                await mark_replica_capacity_paused(
+                    session,
+                    settings,
+                    quota_guild_id,
+                    quota_guild_origin,
+                    error_code=local_code,
+                    internal_error=str(exc),
+                )
+                capacity_guild = await session.get(
+                    Guild, (quota_guild_id, quota_guild_origin), populate_existing=True
+                )
+            if capacity_guild is not None:
+                inbox = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
+                if inbox is not None:
+                    await session.delete(inbox)
+                    peer.federation_inbox_events = max(0, peer.federation_inbox_events - 1)
+                    global_ledger.federation_inbox_events = max(
+                        0, global_ledger.federation_inbox_events - 1
+                    )
+                await session.commit()
+                await publish_dispatch(
+                    redis,
+                    guild_topic(capacity_guild.origin_domain, capacity_guild.id),
+                    "GUILD_UPDATE",
+                    guild_payload(capacity_guild),
+                )
+                return InboxResult(
+                    event_id=envelope.event_id,
+                    status="retry",
+                    code=federation_code,
+                )
+
+            local_dm_rejection: tuple[int, str, dict[str, object]] | None = None
+            if envelope.type in {"dm.open.request", "dm.conversation.create"}:
+                try:
+                    profiles = DMOpenFederationRequest.model_validate(
+                        {"participants": envelope.content.get("participants")}
+                    ).participants
+                    handles = [
+                        f"{profile.username}@{profile.origin_domain}" for profile in profiles
+                    ]
+                    pair_key = dm_pair_key(*handles)
+                    local_profile = next(
+                        profile for profile in profiles if profile.origin_domain == settings.domain
+                    )
+                    capacity_local_user = await session.get(
+                        User, (int(local_profile.id), local_profile.origin_domain)
+                    )
+                    if capacity_local_user is not None and (
+                        envelope.type != "dm.open.request"
+                        or str(envelope.content.get("pair_key", "")) == pair_key
+                    ):
+                        if envelope.type == "dm.open.request":
+                            rejected = await build_envelope(
+                                session,
+                                settings,
+                                "dm.open.rejected",
+                                capacity_local_user,
+                                {
+                                    "target": {
+                                        "id": envelope.actor.id,
+                                        "domain": envelope.actor.domain,
+                                    },
+                                    "pair_key": pair_key,
+                                    "code": federation_code,
+                                },
+                            )
+                            await queue_event(session, settings, envelope.origin, rejected)
+                            delivery_wakes.add(envelope.origin)
+                        else:
+                            raw_conversation = envelope.content.get("conversation")
+                            if (
+                                isinstance(raw_conversation, dict)
+                                and str(raw_conversation.get("pair_key", "")) == pair_key
+                            ):
+                                local_dm_rejection = (
+                                    capacity_local_user.id,
+                                    capacity_local_user.origin_domain,
+                                    {"pair_key": pair_key, "code": local_code},
+                                )
+                except (StopIteration, ValidationError, ValueError):
+                    pass
+
+            # A proxy write rejected while introducing its actor needs the same
+            # explicit optimistic-message failure as other authoritative
+            # rejections, but carries the stable capacity code.
+            if envelope.type == "guild.proxy.message.create":
+                try:
+                    async with session.begin_nested():
+                        guild = await home_guild(
+                            session,
+                            settings,
+                            database_snowflake(envelope.context.get("guild_id"), "guild id"),
+                        )
+                        owner = await session.get(User, (guild.owner_id, guild.owner_domain))
+                        if owner is not None and owner.is_local:
+                            rejected = await build_envelope(
+                                session,
+                                settings,
+                                "message.send_rejected",
+                                owner,
+                                {
+                                    "target": {
+                                        "id": envelope.actor.id,
+                                        "domain": envelope.actor.domain,
+                                    },
+                                    "channel_id": str(envelope.content.get("channel_id", "")),
+                                    "client_nonce": str(envelope.content.get("client_nonce", "")),
+                                    "code": federation_code,
+                                },
+                                context={
+                                    "guild_id": str(guild.id),
+                                    "guild_domain": guild.origin_domain,
+                                },
+                            )
+                            await queue_event(session, settings, envelope.origin, rejected)
+                            delivery_wakes.add(envelope.origin)
+                except Exception:
+                    delivery_wakes.clear()
+
+            inbox = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
+            if inbox is None:
+                raise RuntimeError("federation inbox claim disappeared") from exc
+            inbox.status = "rejected"
+            inbox.result_code = federation_code
+            inbox.error = "federated identity capacity was reached"
+            inbox.processed_at = datetime.now(UTC)
+            await session.commit()
+            for destination in delivery_wakes:
+                await enqueue_best_effort(federation_deliver, destination)
+            if local_dm_rejection is not None:
+                await publish_dispatch(
+                    redis,
+                    user_topic(local_dm_rejection[1], local_dm_rejection[0]),
+                    "DM_OPEN_REJECTED",
+                    local_dm_rejection[2],
+                )
+            return InboxResult(
+                event_id=envelope.event_id,
+                status="rejected",
+                code=federation_code,
+            )
+        if isinstance(exc, FederationReplicaQuotaExceeded):
+            quota_guild: Guild | None = None
+            try:
+                quota_guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
+                quota_guild_origin = normalize_domain(str(envelope.context.get("guild_domain", "")))
+            except (FederationNetworkError, ValueError):
+                quota_guild_id = None
+                quota_guild_origin = ""
+            if quota_guild_id is not None:
+                await mark_replica_quota_paused(
+                    session,
+                    settings,
+                    quota_guild_id,
+                    quota_guild_origin,
+                    exc,
+                )
+                quota_guild = await session.get(
+                    Guild, (quota_guild_id, quota_guild_origin), populate_existing=True
+                )
+            inbox = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
+            if inbox is not None:
+                await session.delete(inbox)
+                peer.federation_inbox_events = max(0, peer.federation_inbox_events - 1)
+                global_ledger.federation_inbox_events = max(
+                    0, global_ledger.federation_inbox_events - 1
+                )
+            await session.commit()
+            if quota_guild is not None:
+                await publish_dispatch(
+                    redis,
+                    guild_topic(quota_guild.origin_domain, quota_guild.id),
+                    "GUILD_UPDATE",
+                    guild_payload(quota_guild),
+                )
+            return InboxResult(
+                event_id=envelope.event_id,
+                status="retry",
+                code=REPLICA_QUOTA_ERROR_CODE,
+            )
         if isinstance(exc, FederationResyncRetry):
             # A retry is nonterminal. Removing the still-uncommitted claim lets
             # the sender reapply the event after the replica has synchronized.
@@ -1586,6 +2219,10 @@ async def process_event(
             inbox = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
             if inbox is not None:
                 await session.delete(inbox)
+                peer.federation_inbox_events = max(0, peer.federation_inbox_events - 1)
+                global_ledger.federation_inbox_events = max(
+                    0, global_ledger.federation_inbox_events - 1
+                )
             await session.commit()
             if resync_target is not None:
                 await enqueue_best_effort(
@@ -1677,10 +2314,14 @@ async def federation_inbox(
     raw = await request.body()
     if len(raw) > 1024 * 1024:
         raise HTTPException(status_code=413, detail={"code": "KAED_FED_BATCH_TOO_LARGE"})
-    try:
-        payload = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
-        raise HTTPException(status_code=400, detail={"code": "KAED_FED_INVALID_BATCH"}) from None
+    payload = getattr(request.state, "federation_json", None)
+    if payload is None:
+        try:
+            payload = strict_json_loads(raw)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail={"code": "KAED_FED_INVALID_BATCH"}
+            ) from None
     if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
         raise HTTPException(status_code=400, detail={"code": "KAED_FED_INVALID_BATCH"})
     raw_events = payload["events"]
@@ -1742,6 +2383,47 @@ async def federation_user_lookup(
     return profile_from_user(user)
 
 
+@router.get("/_kaede/v1/users/profile")
+async def federation_user_profile_by_ref(
+    user_id: Snowflake,
+    user_domain: str = Query(min_length=1, max_length=253),
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    """Return a home-signed public profile proof for an exact composite ID."""
+
+    if principal.silenced:
+        raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
+    try:
+        requested_domain = normalize_domain(user_domain)
+    except FederationNetworkError:
+        raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"}) from None
+    if requested_domain != settings.domain:
+        raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "profile-by-ref",
+        capacity=120,
+        refill_per_minute=120,
+    )
+    user = await session.get(User, (int(user_id), settings.domain))
+    if user is None or not user.is_local:
+        raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
+    return await build_envelope(
+        session,
+        settings,
+        "user.profile",
+        user,
+        {
+            "subject": {"id": str(user.id), "origin_domain": user.origin_domain},
+            "profile": profile_from_user(user),
+        },
+    )
+
+
 @router.post("/_kaede/v1/presence", status_code=204)
 async def federation_presence_update(
     payload: PresenceFederationRequest,
@@ -1763,24 +2445,158 @@ async def federation_presence_update(
     return Response(status_code=204)
 
 
-@router.get("/_kaede/v1/media/{attachment_id}/{variant}")
-async def federation_media_get(
-    attachment_id: Snowflake,
-    variant: str,
+@router.get("/_kaede/v1/dms/{conversation_id}/messages")
+async def federation_dm_history_page(
+    conversation_id: Snowflake,
+    before_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
+    before_domain: str | None = Query(default=None, min_length=1, max_length=253),
+    limit: int = Query(default=50, ge=1, le=100),
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
-) -> Response:
-    """Stream a fixed-template media variant to an authenticated participating peer."""
+) -> dict[str, object]:
+    """Return an authorized, bounded DM page without creating another replica."""
 
     require_guild_federation_access(principal)
     await enforce_federation_route_rate_limit(
-        redis, principal.origin, "media-get", capacity=120, refill_per_minute=120
+        redis,
+        principal.origin,
+        "dm-history-page",
+        capacity=3_000,
+        refill_per_minute=3_000,
     )
+    if (before_id is None) != (before_domain is None):
+        raise HTTPException(status_code=400, detail={"code": "INVALID_PAGINATION"})
+    conversation = await session.get(DMConversation, (int(conversation_id), settings.domain))
+    if conversation is None or conversation.authority_domain != settings.domain:
+        raise HTTPException(status_code=404, detail={"code": "KAED_FED_DM_HISTORY_NOT_FOUND"})
+    participates = await session.scalar(
+        select(DMParticipant.user_id)
+        .where(
+            DMParticipant.conversation_id == conversation.id,
+            DMParticipant.conversation_domain == conversation.origin_domain,
+            DMParticipant.user_domain == principal.origin,
+        )
+        .limit(1)
+    )
+    if participates is None:
+        raise HTTPException(status_code=403, detail={"code": "KAED_FED_DM_HISTORY_FORBIDDEN"})
+    conditions = [
+        Message.channel_id == conversation.id,
+        Message.channel_domain == conversation.origin_domain,
+        # A peer may retrieve only bodies authored away from that peer. Its
+        # locally-authored rows are durable source data on that home and are
+        # merged from its own database; the authority is not trusted to echo
+        # or rewrite them.
+        Message.origin_domain != principal.origin,
+    ]
+    if before_id is not None and before_domain is not None:
+        try:
+            normalized_before_domain = normalize_domain(before_domain)
+        except FederationNetworkError:
+            raise HTTPException(status_code=400, detail={"code": "INVALID_PAGINATION"}) from None
+        conditions.append(
+            tuple_(Message.id, Message.origin_domain) < (before_id, normalized_before_domain)
+        )
+    messages = list(
+        await session.scalars(
+            select(Message)
+            .where(*conditions)
+            .order_by(Message.id.desc(), Message.origin_domain.desc())
+            .limit(limit + 1)
+        )
+    )
+    selected = messages[:limit]
+    refs = {(message.id, message.origin_domain) for message in selected}
+    author_refs = {(message.author_id, message.author_domain) for message in selected}
+    authors = {
+        (author.id, author.origin_domain): author
+        for author in await session.scalars(
+            select(User).where(tuple_(User.id, User.origin_domain).in_(author_refs))
+        )
+    }
+    attachments: dict[tuple[int, str], list[Attachment]] = {}
+    if refs:
+        for attachment in await session.scalars(
+            select(Attachment)
+            .where(
+                tuple_(Attachment.message_id, Attachment.message_domain).in_(refs),
+                Attachment.deleted_at.is_(None),
+            )
+            .order_by(Attachment.id)
+        ):
+            attachments.setdefault(
+                (int(attachment.message_id or 0), str(attachment.message_domain)), []
+            ).append(attachment)
+    rendered: list[dict[str, object]] = []
+    for message in selected:
+        author = authors.get((message.author_id, message.author_domain))
+        if author is None:
+            raise RuntimeError("DM history message author disappeared")
+        item = message_payload(
+            message,
+            author,
+            attachments.get((message.id, message.origin_domain), []),
+        )
+        probe = {
+            "conversation_id": str(conversation.id),
+            "conversation_domain": conversation.origin_domain,
+            "messages": [*rendered, item],
+            "next_before": {
+                "id": str(message.id),
+                "origin_domain": message.origin_domain,
+            },
+            "complete": False,
+        }
+        if len(canonical_json(probe)) > MAX_DM_HISTORY_RESPONSE_BYTES:
+            if not rendered:
+                raise HTTPException(
+                    status_code=413,
+                    detail={"code": "KAED_FED_HISTORY_MESSAGE_TOO_LARGE"},
+                )
+            break
+        rendered.append(item)
+    has_more = len(rendered) < len(messages)
+    next_before = (
+        {
+            "id": str(rendered[-1]["id"]),
+            "origin_domain": str(rendered[-1]["origin_domain"]),
+        }
+        if rendered and has_more
+        else None
+    )
+    result: dict[str, object] = {
+        "conversation_id": str(conversation.id),
+        "conversation_domain": conversation.origin_domain,
+        "messages": rendered,
+        "next_before": next_before,
+        "complete": not has_more,
+    }
+    if len(canonical_json(result)) > MAX_DM_HISTORY_RESPONSE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": "KAED_FED_HISTORY_MESSAGE_TOO_LARGE"},
+        )
+    return result
+
+
+async def _federation_media_attachment(
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+    principal: FederationPrincipal,
+    attachment_id: int,
+    variant: str,
+    *,
+    expected_conversation: tuple[int, str] | None = None,
+    expected_message: tuple[int, str] | None = None,
+) -> Attachment:
+    """Authorize media and optionally bind it to an exact DM history assertion."""
+
     if variant not in {"original", "thumbnail_128", "thumbnail_512", "thumbnail_1024", "poster"}:
         raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
-    attachment = await session.get(Attachment, (int(attachment_id), settings.domain))
+    attachment = await session.get(Attachment, (attachment_id, settings.domain))
     if (
         attachment is None
         or attachment.scan_status != "clean"
@@ -1796,6 +2612,14 @@ async def federation_media_get(
         else None
     )
     if message is None or message.deleted_at is not None or channel is None:
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    if (expected_conversation is not None or expected_message is not None) and (
+        expected_conversation is None
+        or expected_message is None
+        or (attachment.message_id, attachment.message_domain) != expected_message
+        or (message.channel_id, message.channel_domain) != expected_conversation
+        or channel.guild_id is not None
+    ):
         raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
     authorized = False
     if channel.guild_id is None:
@@ -1814,57 +2638,157 @@ async def federation_media_get(
     else:
         guild = await session.get(Guild, (channel.guild_id, channel.guild_domain))
         if guild is not None:
-            members = list(
-                await session.scalars(
-                    select(User)
-                    .join(
-                        GuildMember,
-                        (GuildMember.user_id == User.id)
-                        & (GuildMember.user_domain == User.origin_domain),
-                    )
-                    .where(
-                        GuildMember.guild_id == guild.id,
-                        GuildMember.guild_domain == guild.origin_domain,
-                        User.origin_domain == principal.origin,
-                    )
-                    .limit(1000)
-                )
+            visible_channels = await cached_visible_guild_channels_for_origin(
+                session,
+                redis,
+                guild,
+                principal.origin,
             )
-            for member in members:
-                permissions, _ = await calculate_permissions(
-                    session, guild, member, channel=channel
-                )
-                if permissions & Permission.VIEW_CHANNEL:
-                    authorized = True
-                    break
+            authorized = any(
+                (visible.id, visible.origin_domain) == (channel.id, channel.origin_domain)
+                for visible in visible_channels
+            )
     if not authorized:
         # Do not disclose whether the attachment exists to a non-participating peer.
         raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    return attachment
+
+
+def _dm_history_media_scope(
+    *,
+    conversation_id: int | None,
+    conversation_domain: str | None,
+    message_id: int | None,
+    message_domain: str | None,
+) -> tuple[tuple[int, str], tuple[int, str]] | None:
+    values = (conversation_id, conversation_domain, message_id, message_domain)
+    if all(value is None for value in values):
+        return None
+    if (
+        conversation_id is None
+        or conversation_domain is None
+        or message_id is None
+        or message_domain is None
+    ):
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    try:
+        return (
+            (int(conversation_id), normalize_domain(str(conversation_domain))),
+            (int(message_id), normalize_domain(str(message_domain))),
+        )
+    except (FederationNetworkError, TypeError, ValueError):
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"}) from None
+
+
+@router.get("/_kaede/v1/media/{attachment_id}/{variant}/authorize", status_code=204)
+async def federation_dm_history_media_authorize(
+    attachment_id: Snowflake,
+    variant: str,
+    conversation_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
+    conversation_domain: str | None = Query(default=None, min_length=1, max_length=253),
+    message_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
+    message_domain: str | None = Query(default=None, min_length=1, max_length=253),
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    """Confirm that a history attachment belongs to the exact asserted DM message."""
+
+    require_guild_federation_access(principal)
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "dm-history-media-authorize",
+        capacity=3_000,
+        refill_per_minute=3_000,
+    )
+    scope = _dm_history_media_scope(
+        conversation_id=conversation_id,
+        conversation_domain=conversation_domain,
+        message_id=message_id,
+        message_domain=message_domain,
+    )
+    if scope is None:
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    await _federation_media_attachment(
+        session,
+        redis,
+        settings,
+        principal,
+        int(attachment_id),
+        variant,
+        expected_conversation=scope[0],
+        expected_message=scope[1],
+    )
+    return Response(status_code=204)
+
+
+@router.get("/_kaede/v1/media/{attachment_id}/{variant}")
+async def federation_media_get(
+    attachment_id: Snowflake,
+    variant: str,
+    conversation_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
+    conversation_domain: str | None = Query(default=None, min_length=1, max_length=253),
+    message_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
+    message_domain: str | None = Query(default=None, min_length=1, max_length=253),
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    """Stream a fixed-template media variant to an authenticated participating peer."""
+
+    require_guild_federation_access(principal)
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "media-get",
+        capacity=1_200,
+        refill_per_minute=1_200,
+    )
+    scope = _dm_history_media_scope(
+        conversation_id=conversation_id,
+        conversation_domain=conversation_domain,
+        message_id=message_id,
+        message_domain=message_domain,
+    )
+    attachment = await _federation_media_attachment(
+        session,
+        redis,
+        settings,
+        principal,
+        int(attachment_id),
+        variant,
+        expected_conversation=scope[0] if scope is not None else None,
+        expected_message=scope[1] if scope is not None else None,
+    )
     bucket = settings.media_attachments_bucket
     key = attachment.object_key
     content_type = attachment.detected_content_type or attachment.content_type
     if variant != "original":
         raw = attachment.variants.get(variant)
         if not isinstance(raw, dict) or not isinstance(raw.get("object_key"), str):
-            if content_type not in {"image/gif", "image/jpeg", "image/png", "image/webp"}:
-                raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
-        else:
-            bucket = settings.media_derived_bucket
-            key = raw["object_key"]
-            content_type = str(raw.get("content_type", "application/octet-stream"))
+            raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+        bucket = settings.media_derived_bucket
+        key = raw["object_key"]
+        content_type = str(raw.get("content_type", "application/octet-stream"))
     try:
-        body = await S3Storage(settings).get(
+        body = await S3Storage(settings).open_get(
             bucket, key, max_bytes=settings.media_max_attachment_bytes
         )
     except StorageError as exc:
         raise HTTPException(status_code=503, detail={"code": "KAED_MEDIA_UNAVAILABLE"}) from exc
-    return Response(
-        body,
+    headers = {
+        "Cache-Control": "private, max-age=86400, immutable",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if body.size is not None:
+        headers["Content-Length"] = str(body.size)
+    return StreamingResponse(
+        body.chunks(),
         media_type=content_type,
-        headers={
-            "Cache-Control": "private, max-age=86400, immutable",
-            "X-Content-Type-Options": "nosniff",
-        },
+        headers=headers,
     )
 
 
@@ -1885,9 +2809,12 @@ async def federation_dm_open(
     if local_recipient is None or remote_sender is None:
         raise HTTPException(status_code=400, detail={"code": "KAED_DM_INVALID_PARTICIPANTS"})
     await require_can_direct_message(session, remote_sender, local_recipient)
-    conversation, channel, users, created = await authoritative_dm_conversation(
-        session, settings, snowflake, payload.participants
-    )
+    try:
+        conversation, channel, users, created = await authoritative_dm_conversation(
+            session, settings, snowflake, payload.participants
+        )
+    except FederatedDMQuotaExceeded as exc:
+        raise HTTPException(status_code=507, detail=exc.detail(federation=True)) from exc
     await session.commit()
     participants = await session.scalars(
         select(User)
@@ -2057,6 +2984,7 @@ async def federation_guild_join(
         )
         session.add(member)
         invite.uses += 1
+        guild.snapshot_generation += 1
         seq = await assign_guild_sequence(session, guild)
         owner = await session.get(User, (guild.owner_id, guild.owner_domain))
         if owner is None or owner.origin_domain != settings.domain:
@@ -2074,6 +3002,7 @@ async def federation_guild_join(
                 "guild_id": str(guild.id),
                 "guild_domain": guild.origin_domain,
                 "seq": str(seq),
+                "snapshot_generation": str(guild.snapshot_generation),
             },
         )
         store_guild_event(
@@ -2139,34 +3068,13 @@ async def federation_guild_leave(
     if guild is None:
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
     user_id = database_snowflake(payload.user.id, "guild leave user id")
-    member = await session.get(
-        GuildMember,
-        (guild.id, guild.origin_domain, user_id, payload.user.domain),
-    )
-    if member is None:
-        raise HTTPException(status_code=404, detail={"code": "NOT_A_GUILD_MEMBER"})
-    if (guild.owner_id, guild.owner_domain) == (user_id, payload.user.domain):
-        raise HTTPException(status_code=409, detail={"code": "OWNER_MUST_TRANSFER_OR_DELETE_GUILD"})
-    owner = await session.get(User, (guild.owner_id, guild.owner_domain))
-    if owner is None or not owner.is_local:
-        raise RuntimeError("local guild owner is unavailable")
-    await session.delete(member)
-    await queue_guild_access_revocation(
+    await _apply_authoritative_guild_leave(
         session,
         settings,
         guild,
         user_id=user_id,
         user_domain=payload.user.domain,
-        reason="member_left",
-    )
-    await queue_guild_mutation(
-        session,
-        settings,
-        guild,
-        owner,
-        "guild.member.remove",
-        {"user": {"id": str(user_id), "origin_domain": payload.user.domain}},
-        snapshot_required=True,
+        missing_ok=False,
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
@@ -2184,6 +3092,37 @@ async def federation_guild_leave(
     return Response(status_code=204)
 
 
+@router.get("/_kaede/v1/guilds/{guild_id}/members/{user_id}/moderation-status")
+async def federation_self_moderation_status(
+    guild_id: Snowflake,
+    user_id: Snowflake,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    """Return one member's private timeout details to their signed home only."""
+
+    require_guild_federation_access(principal)
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "member-self-moderation",
+        capacity=1_200,
+        refill_per_minute=1_200,
+    )
+    guild = await home_guild(session, settings, int(guild_id), for_share=True)
+    member = await session.get(
+        GuildMember,
+        (guild.id, guild.origin_domain, int(user_id), principal.origin),
+    )
+    if member is None:
+        # Do not distinguish a missing account from a missing membership to a
+        # peer. The signing origin may request only identities it hosts.
+        raise HTTPException(status_code=404, detail={"code": "NOT_A_GUILD_MEMBER"})
+    return guild_self_moderation_status(member).model_dump(mode="json")
+
+
 async def require_origin_guild_member(session: AsyncSession, guild: Guild, origin: str) -> None:
     member = await session.scalar(
         select(GuildMember.user_id).where(
@@ -2197,45 +3136,258 @@ async def require_origin_guild_member(session: AsyncSession, guild: Guild, origi
 
 
 async def visible_guild_channels_for_origin(
-    session: AsyncSession, guild: Guild, origin: str
+    session: AsyncSession,
+    guild: Guild,
+    origin: str,
+    *,
+    loaded_roles: list[Role] | None = None,
+    loaded_channels: list[Channel] | None = None,
 ) -> list[Channel]:
-    """Return channels visible to at least one guild member homed by ``origin``."""
+    """Return origin-visible channels using a bounded, bulk-loaded permission graph."""
 
-    channels = list(
-        await session.scalars(
-            select(Channel)
-            .where(
-                Channel.guild_id == guild.id,
-                Channel.guild_domain == guild.origin_domain,
-                Channel.unavailable.is_(False),
+    channels = loaded_channels
+    if channels is None:
+        channel_rows = list(
+            await session.scalars(
+                select(Channel)
+                .where(
+                    Channel.guild_id == guild.id,
+                    Channel.guild_domain == guild.origin_domain,
+                    Channel.unavailable.is_(False),
+                )
+                .order_by(Channel.position, Channel.id)
+                .limit(MAX_SNAPSHOT_VISIBILITY_CHANNELS + 1)
             )
-            .order_by(Channel.position, Channel.id)
         )
-    )
-    origin_users = list(
-        await session.scalars(
-            select(User)
-            .join(
-                GuildMember,
-                (GuildMember.user_id == User.id) & (GuildMember.user_domain == User.origin_domain),
+        if len(channel_rows) > MAX_SNAPSHOT_VISIBILITY_CHANNELS:
+            raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+        channels = channel_rows
+    elif len(channels) > MAX_SNAPSHOT_VISIBILITY_CHANNELS:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+
+    roles = loaded_roles
+    if roles is None:
+        role_rows = list(
+            await session.scalars(
+                select(Role)
+                .where(Role.guild_id == guild.id, Role.guild_domain == guild.origin_domain)
+                .limit(MAX_SNAPSHOT_VISIBILITY_ROLES + 1)
             )
+        )
+        if len(role_rows) > MAX_SNAPSHOT_VISIBILITY_ROLES:
+            raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+        roles = role_rows
+    elif len(roles) > MAX_SNAPSHOT_VISIBILITY_ROLES:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+
+    origin_members = list(
+        await session.scalars(
+            select(GuildMember)
             .where(
                 GuildMember.guild_id == guild.id,
                 GuildMember.guild_domain == guild.origin_domain,
-                User.origin_domain == origin,
+                GuildMember.user_domain == origin,
             )
+            .limit(MAX_SNAPSHOT_VISIBILITY_MEMBERS + 1)
         )
     )
+    if len(origin_members) > MAX_SNAPSHOT_VISIBILITY_MEMBERS:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+    if len(channels) * len(origin_members) > MAX_SNAPSHOT_VISIBILITY_CHECKS:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+
+    member_role_rows = list(
+        await session.scalars(
+            select(MemberRole)
+            .where(
+                MemberRole.guild_id == guild.id,
+                MemberRole.guild_domain == guild.origin_domain,
+                MemberRole.user_domain == origin,
+            )
+            .limit(MAX_SNAPSHOT_VISIBILITY_MEMBER_ROLES + 1)
+        )
+    )
+    if len(member_role_rows) > MAX_SNAPSHOT_VISIBILITY_MEMBER_ROLES:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+
+    overwrite_rows = list(
+        await session.scalars(
+            select(ChannelOverwrite)
+            .where(
+                ChannelOverwrite.guild_id == guild.id,
+                ChannelOverwrite.guild_domain == guild.origin_domain,
+            )
+            .limit(MAX_SNAPSHOT_VISIBILITY_OVERWRITES + 1)
+        )
+    )
+    if len(overwrite_rows) > MAX_SNAPSHOT_VISIBILITY_OVERWRITES:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+
+    roles_by_ref = {(role.id, role.origin_domain): role for role in roles}
+    role_refs_by_member: dict[tuple[int, str], set[tuple[int, str]]] = {}
+    for member_role in member_role_rows:
+        role_refs_by_member.setdefault((member_role.user_id, member_role.user_domain), set()).add(
+            (member_role.role_id, member_role.role_domain)
+        )
+    overwrites_by_channel: dict[tuple[int, str], list[PermissionOverwrite]] = {}
+    for overwrite in overwrite_rows:
+        overwrites_by_channel.setdefault(
+            (overwrite.channel_id, overwrite.channel_domain), []
+        ).append(
+            PermissionOverwrite(
+                overwrite.target_id,
+                overwrite.target_domain,
+                overwrite.target_type,
+                overwrite.allow,
+                overwrite.deny,
+            )
+        )
+    channels_by_ref = {(channel.id, channel.origin_domain): channel for channel in channels}
+    now = datetime.now(UTC)
+    everyone_ref = (guild.id, guild.origin_domain)
+    member_permission_inputs: list[
+        tuple[GuildMember, tuple[int, str], set[tuple[int, str]], int]
+    ] = []
+    for member in origin_members:
+        member_ref = (member.user_id, member.user_domain)
+        role_refs = {everyone_ref, *role_refs_by_member.get(member_ref, set())}
+        member_permission_inputs.append(
+            (
+                member,
+                member_ref,
+                role_refs,
+                reduce(
+                    bit_or,
+                    (
+                        roles_by_ref[role_ref].permissions
+                        for role_ref in role_refs
+                        if role_ref in roles_by_ref
+                    ),
+                    0,
+                ),
+            )
+        )
+    visibility_work = 0
+    for channel in channels:
+        permission_channel = channel
+        if channel.parent_id is not None and channel.permissions_synced:
+            parent = channels_by_ref.get((channel.parent_id, str(channel.parent_domain)))
+            if parent is None or parent.type != 4:
+                raise HTTPException(status_code=409, detail={"code": "CHANNEL_PARENT_INVALID"})
+            permission_channel = parent
+        visibility_work += len(origin_members) * (
+            1
+            + 3
+            * len(
+                overwrites_by_channel.get(
+                    (permission_channel.id, permission_channel.origin_domain), []
+                )
+            )
+        )
+        if visibility_work > MAX_SNAPSHOT_VISIBILITY_CHECKS:
+            raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
     visible: list[Channel] = []
     for channel in channels:
-        for origin_user in origin_users:
-            permissions, _member = await calculate_permissions(
-                session, guild, origin_user, channel=channel
+        permission_channel = channel
+        if channel.parent_id is not None and channel.permissions_synced:
+            parent = channels_by_ref.get((channel.parent_id, str(channel.parent_domain)))
+            if parent is None or parent.type != 4:
+                raise HTTPException(status_code=409, detail={"code": "CHANNEL_PARENT_INVALID"})
+            permission_channel = parent
+        channel_overwrites = overwrites_by_channel.get(
+            (permission_channel.id, permission_channel.origin_domain), []
+        )
+        for member, member_ref, role_refs, base_permissions in member_permission_inputs:
+            permissions = resolve_permissions(
+                owner=member_ref == (guild.owner_id, guild.owner_domain),
+                user_id=member.user_id,
+                user_domain=member.user_domain,
+                everyone_role_id=guild.id,
+                everyone_role_domain=guild.origin_domain,
+                role_ids=role_refs,
+                base_permissions=base_permissions,
+                overwrites=channel_overwrites,
+                channel_type=channel.type,
+                timed_out=member.timeout_indefinite
+                or (member.timeout_until is not None and member.timeout_until > now),
             )
             if permissions & Permission.VIEW_CHANNEL:
                 visible.append(channel)
                 break
     return visible
+
+
+def guild_visibility_cache_key(guild: Guild, origin: str) -> str:
+    return (
+        f"federation:snapshot-visible:{origin}:{guild.origin_domain}:{guild.id}:"
+        f"{guild.permission_generation}:{guild.snapshot_generation}"
+    )
+
+
+def _guild_snapshot_cursor_changed(
+    *,
+    current_seq: int,
+    current_generation: int,
+    requested_seq: int,
+    requested_generation: int | None,
+) -> bool:
+    if requested_seq > current_seq:
+        return True
+    if requested_generation is None:
+        # Legacy peers invalidate on any event, including an ordinary message.
+        return requested_seq != current_seq
+    return requested_generation != current_generation
+
+
+async def cached_visible_guild_channels_for_origin(
+    session: AsyncSession,
+    redis: Redis,
+    guild: Guild,
+    origin: str,
+    *,
+    loaded_roles: list[Role] | None = None,
+) -> list[Channel]:
+    cache_key = guild_visibility_cache_key(guild, origin)
+    cached_channel_ids: list[int] | None = None
+    cached_visibility = await redis.get(cache_key)
+    if isinstance(cached_visibility, (str, bytes)):
+        try:
+            raw_ids = json.loads(cached_visibility)
+            if (
+                isinstance(raw_ids, list)
+                and len(raw_ids) <= MAX_SNAPSHOT_VISIBILITY_CHANNELS
+                and all(isinstance(item, int) and not isinstance(item, bool) for item in raw_ids)
+            ):
+                cached_channel_ids = raw_ids
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+    if cached_channel_ids is None:
+        channels = await visible_guild_channels_for_origin(
+            session,
+            guild,
+            origin,
+            loaded_roles=loaded_roles,
+        )
+        await redis.set(
+            cache_key,
+            json.dumps([channel.id for channel in channels], separators=(",", ":")),
+            ex=300,
+        )
+        return channels
+    if not cached_channel_ids:
+        return []
+    cached_channels = list(
+        await session.scalars(
+            select(Channel).where(
+                Channel.guild_id == guild.id,
+                Channel.guild_domain == guild.origin_domain,
+                Channel.unavailable.is_(False),
+                Channel.id.in_(cached_channel_ids),
+            )
+        )
+    )
+    by_id = {channel.id: channel for channel in cached_channels}
+    return [by_id[channel_id] for channel_id in cached_channel_ids if channel_id in by_id]
 
 
 @router.post("/_kaede/v1/guilds/{guild_id}/history-exports")
@@ -2375,6 +3527,7 @@ async def federation_guild_snapshot(
     member_after_id: str | None = Query(default=None, max_length=19),
     member_snapshot_at: datetime | None = Query(default=None),
     member_snapshot_seq: str | None = Query(default=None, max_length=19),
+    member_snapshot_generation: str | None = Query(default=None, max_length=19),
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
@@ -2386,6 +3539,7 @@ async def federation_guild_snapshot(
         member_after_id,
         member_snapshot_at,
         member_snapshot_seq,
+        member_snapshot_generation,
     )
     cursor_present = any(value is not None for value in cursor_values)
     await enforce_federation_route_rate_limit(
@@ -2397,14 +3551,28 @@ async def federation_guild_snapshot(
     )
     guild = await home_guild(session, settings, guild_id, for_share=True)
     await require_origin_guild_member(session, guild, principal.origin)
+    admitted = await session.scalar(
+        select(
+            func.pg_try_advisory_xact_lock(
+                func.hashtextextended(
+                    f"kaede-guild-visibility:{principal.origin}:{guild.origin_domain}:{guild.id}",
+                    0,
+                )
+            )
+        )
+    )
+    if admitted is not True:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_BUSY"})
     member_cursor: tuple[str, int] | None = None
     current_snapshot_seq = guild.next_event_seq - 1
+    current_snapshot_generation = guild.snapshot_generation
+    snapshot_seq = current_snapshot_seq
     await enforce_federation_route_rate_limit(
         redis,
         principal.origin,
         guild_snapshot_rate_scope(
             guild.id,
-            current_snapshot_seq,
+            current_snapshot_generation,
             paginated=cursor_present,
         ),
         capacity=120 if cursor_present else 4,
@@ -2428,6 +3596,16 @@ async def federation_guild_snapshot(
             requested_snapshot_seq = database_snowflake(
                 member_snapshot_seq, "member snapshot sequence"
             )
+            requested_snapshot_generation = (
+                database_snowflake(
+                    member_snapshot_generation,
+                    "member snapshot generation",
+                )
+                if member_snapshot_generation is not None
+                else None
+            )
+            if requested_snapshot_generation is not None and requested_snapshot_generation < 1:
+                raise ValueError("member snapshot generation must be positive")
         except (FederationNetworkError, ValueError):
             raise HTTPException(
                 status_code=400, detail={"code": "KAED_FED_INVALID_SNAPSHOT_CURSOR"}
@@ -2438,15 +3616,22 @@ async def federation_guild_snapshot(
             raise HTTPException(
                 status_code=400, detail={"code": "KAED_FED_INVALID_SNAPSHOT_CURSOR"}
             )
-        if requested_snapshot_seq != current_snapshot_seq:
+        if _guild_snapshot_cursor_changed(
+            current_seq=current_snapshot_seq,
+            current_generation=current_snapshot_generation,
+            requested_seq=requested_snapshot_seq,
+            requested_generation=requested_snapshot_generation,
+        ):
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": "KAED_FED_SNAPSHOT_CHANGED",
                     "snapshot_required": True,
                     "latest_seq": str(current_snapshot_seq),
+                    "snapshot_generation": str(current_snapshot_generation),
                 },
             )
+        snapshot_seq = requested_snapshot_seq
         snapshot_at = member_snapshot_at
     else:
         snapshot_at = datetime.now(UTC)
@@ -2455,43 +3640,18 @@ async def federation_guild_snapshot(
             select(Role)
             .where(Role.guild_id == guild.id, Role.guild_domain == guild.origin_domain)
             .order_by(Role.position, Role.id)
+            .limit(MAX_SNAPSHOT_VISIBILITY_ROLES + 1)
         )
     )
-    visibility_cache_key = (
-        f"federation:snapshot-visible:{principal.origin}:{guild.origin_domain}:"
-        f"{guild.id}:{current_snapshot_seq}"
+    if len(roles) > MAX_SNAPSHOT_VISIBILITY_ROLES:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+    channels = await cached_visible_guild_channels_for_origin(
+        session,
+        redis,
+        guild,
+        principal.origin,
+        loaded_roles=roles,
     )
-    cached_channel_ids: list[int] | None = None
-    cached_visibility = await redis.get(visibility_cache_key)
-    if isinstance(cached_visibility, (str, bytes)):
-        try:
-            raw_ids = json.loads(cached_visibility)
-            if isinstance(raw_ids, list) and all(
-                isinstance(item, int) and not isinstance(item, bool) for item in raw_ids
-            ):
-                cached_channel_ids = raw_ids
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-    if cached_channel_ids is None:
-        channels = await visible_guild_channels_for_origin(session, guild, principal.origin)
-        await redis.set(
-            visibility_cache_key,
-            json.dumps([channel.id for channel in channels], separators=(",", ":")),
-            ex=300,
-        )
-    elif cached_channel_ids:
-        cached_channels = list(
-            await session.scalars(
-                select(Channel).where(
-                    Channel.origin_domain == guild.origin_domain,
-                    Channel.id.in_(cached_channel_ids),
-                )
-            )
-        )
-        by_id = {channel.id: channel for channel in cached_channels}
-        channels = [by_id[channel_id] for channel_id in cached_channel_ids if channel_id in by_id]
-    else:
-        channels = []
     member_conditions = [
         GuildMember.guild_id == guild.id,
         GuildMember.guild_domain == guild.origin_domain,
@@ -2532,16 +3692,20 @@ async def federation_guild_snapshot(
     member_roles = (
         list(
             await session.scalars(
-                select(MemberRole).where(
+                select(MemberRole)
+                .where(
                     MemberRole.guild_id == guild.id,
                     MemberRole.guild_domain == guild.origin_domain,
                     tuple_(MemberRole.user_id, MemberRole.user_domain).in_(page_member_refs),
                 )
+                .limit(100_001)
             )
         )
         if page_member_refs
         else []
     )
+    if len(member_roles) > 100_000:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
     channel_refs = {(channel.id, channel.origin_domain) for channel in channels}
     overwrites = list(
         await session.scalars(
@@ -2555,15 +3719,21 @@ async def federation_guild_snapshot(
                 ChannelOverwrite.target_type,
                 ChannelOverwrite.target_id,
             )
+            .limit(MAX_SNAPSHOT_VISIBILITY_OVERWRITES + 1)
         )
     )
+    if len(overwrites) > MAX_SNAPSHOT_VISIBILITY_OVERWRITES:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
     emojis = list(
         await session.scalars(
             select(Emoji)
             .where(Emoji.guild_id == guild.id, Emoji.guild_domain == guild.origin_domain)
             .order_by(Emoji.name, Emoji.id)
+            .limit(1001)
         )
     )
+    if len(emojis) > 1000:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
     return guild_snapshot_payload(
         guild,
         roles,
@@ -2574,6 +3744,7 @@ async def federation_guild_snapshot(
         emojis=emojis,
         member_snapshot_at=snapshot_at,
         next_member_cursor=next_member_cursor,
+        snapshot_seq=snapshot_seq,
     )
 
 
@@ -2583,11 +3754,31 @@ async def federation_guild_events(
     after_seq: int = Query(ge=0, le=MAX_SNOWFLAKE),
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     require_guild_federation_access(principal)
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "guild-events",
+        capacity=300,
+        refill_per_minute=300,
+    )
     guild = await home_guild(session, settings, guild_id, for_share=True)
     await require_origin_guild_member(session, guild, principal.origin)
+    admitted = await session.scalar(
+        select(
+            func.pg_try_advisory_xact_lock(
+                func.hashtextextended(
+                    f"kaede-guild-visibility:{principal.origin}:{guild.origin_domain}:{guild.id}",
+                    0,
+                )
+            )
+        )
+    )
+    if admitted is not True:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_BUSY"})
     events = list(
         await session.scalars(
             select(GuildEvent)
@@ -2616,7 +3807,12 @@ async def federation_guild_events(
         )
     visible_channel_refs = {
         (channel.id, channel.origin_domain)
-        for channel in await visible_guild_channels_for_origin(session, guild, principal.origin)
+        for channel in await cached_visible_guild_channels_for_origin(
+            session,
+            redis,
+            guild,
+            principal.origin,
+        )
     }
     rendered_events: list[dict[str, object]] = []
     owner: User | None = None
@@ -2647,6 +3843,16 @@ async def federation_guild_events(
                     "guild_id": str(guild.id),
                     "guild_domain": guild.origin_domain,
                     "seq": str(event.seq),
+                    **(
+                        {
+                            "snapshot_generation": str(
+                                envelope.get("context", {}).get("snapshot_generation")
+                            )
+                        }
+                        if isinstance(envelope.get("context"), dict)
+                        and envelope["context"].get("snapshot_generation") is not None
+                        else {}
+                    ),
                     **(
                         {"snapshot_required": True}
                         if guild_event_requires_snapshot(envelope)

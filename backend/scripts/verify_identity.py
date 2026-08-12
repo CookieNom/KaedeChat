@@ -15,11 +15,7 @@ from app.email.outbox import drain_email_outbox
 from app.main import app
 from app.tasks import purge_unverified_accounts_in_session
 from scripts.email_tokens import token_from_email
-
-
-def require(condition: bool, message: str) -> None:
-    if not condition:
-        raise RuntimeError(message)
+from scripts.verification import VerificationFailure, failure_message, require
 
 
 async def verify() -> None:
@@ -59,7 +55,10 @@ async def verify() -> None:
             async with app.state.sessionmaker() as database_session:
                 pending_email = await database_session.scalar(select(EmailOutbox))
                 if pending_email is None:
-                    raise RuntimeError("verification email intent was not committed")
+                    raise VerificationFailure(
+                        "registration returned success but committed no "
+                        "verification-email outbox row"
+                    )
                 initial_ciphertext = pending_email.encrypted_payload
                 require(
                     b"maple@example.com" not in initial_ciphertext,
@@ -86,7 +85,9 @@ async def verify() -> None:
                     select(User).where(User.username == "maple")
                 )
                 if registered_user is None:
-                    raise RuntimeError("registered user disappeared")
+                    raise VerificationFailure(
+                        "the registered user row disappeared before account-expiry validation"
+                    )
                 registered_user.created_at = datetime.now(UTC) - timedelta(
                     hours=settings.verification_ttl_hours, minutes=1
                 )
@@ -130,13 +131,21 @@ async def verify() -> None:
             bearer = {"Authorization": f"Bearer {access}", "X-Kaede-Client": "mobile"}
 
             me = await client.get("/api/v1/users/@me", headers=bearer)
-            require(me.status_code == 200 and me.json()["username"] == "maple", "me failed")
+            require(
+                me.status_code == 200 and me.json()["username"] == "maple",
+                "GET /api/v1/users/@me expected HTTP 200 and username 'maple'; "
+                f"received HTTP {me.status_code}: {me.text}",
+            )
             patched = await client.patch(
                 "/api/v1/users/@me/settings",
                 headers=bearer,
                 json={"theme": "dark", "dm_privacy": "friends"},
             )
-            require(patched.json()["theme"] == "dark", "settings patch failed")
+            require(
+                patched.status_code == 200 and patched.json()["theme"] == "dark",
+                "settings update expected HTTP 200 and theme 'dark'; "
+                f"received HTTP {patched.status_code}: {patched.text}",
+            )
 
             web_login = await client.post(
                 "/api/v1/auth/login",
@@ -280,7 +289,11 @@ async def verify() -> None:
                 "/api/v1/auth/password/forgot", json={"email": "maple@example.com"}
             )
             await drain_mail()
-            require(forgot.status_code == 202 and len(emails) == 1, "reset email failed")
+            require(
+                forgot.status_code == 202 and len(emails) == 1,
+                "password-reset request expected HTTP 202 and exactly one email; "
+                f"received HTTP {forgot.status_code}, {len(emails)} emails: {forgot.text}",
+            )
             reset_token = token_from_email(emails.pop()[2])
             reset = await client.post(
                 "/api/v1/auth/password/reset",
@@ -314,4 +327,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except VerificationFailure as error:
+        raise SystemExit(failure_message("identity", error, "make identity-check")) from None

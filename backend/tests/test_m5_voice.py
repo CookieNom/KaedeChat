@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import jwt
 import pytest
@@ -12,8 +13,18 @@ from fastapi import HTTPException, Request
 from livekit import api
 from pydantic import ValidationError
 
-from app.api.voice import livekit_webhook
+from app.api.calls import call_voice_token
+from app.api.voice import (
+    channel_voice_token,
+    federation_voice_move,
+    livekit_webhook,
+    move_member_voice,
+    valid_federated_voice_url,
+)
+from app.core.permissions import Permission
 from app.core.settings import Settings
+from app.core.types import EntityRef
+from app.federation.security import FederationPrincipal
 from app.voice.background import _publish_local_room_snapshot
 from app.voice.livekit import mint_join_token, publication_sources, receive_webhook
 from app.voice.rooms import (
@@ -23,9 +34,28 @@ from app.voice.rooms import (
     parse_room_name,
     participant_identity,
 )
-from app.voice.schemas import CallAction, VoiceBrokerRequest
+from app.voice.schemas import (
+    CallAction,
+    VoiceBrokerRequest,
+    VoiceMoveFederationRequest,
+    VoiceMoveRequest,
+    VoiceTokenResponse,
+)
 from app.voice.service import parse_minted_metadata
-from app.voice.state import CALL_TRANSITION_LUA, Occupant, occupancy_snapshot
+from app.voice.state import (
+    ACTIVATE_FEDERATED_VOICE_SESSION_LUA,
+    ADVANCE_FEDERATED_VOICE_SESSION_LUA,
+    CALL_TRANSITION_LUA,
+    FederatedVoiceSession,
+    Occupant,
+    activate_federated_voice_home_session,
+    advance_federated_voice_home_session,
+    begin_federated_voice_home_session,
+    discard_all_federated_voice_home_sessions,
+    federated_voice_pending_key,
+    federated_voice_session_key,
+    occupancy_snapshot,
+)
 
 VALID_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
 LIVEKIT_SECRET = "livekit-test-secret-000000000000000000000000000000000000000"
@@ -294,6 +324,7 @@ def test_voice_metadata_is_bound_to_identity_and_room() -> None:
         "channel_id": "34",
         "can_speak": True,
         "can_stream": False,
+        "can_use_vad": True,
         "server_mute": False,
         "server_deaf": False,
     }
@@ -313,12 +344,14 @@ def test_voice_metadata_is_bound_to_identity_and_room() -> None:
 
 
 def test_voice_and_call_federation_schemas_forbid_malleable_fields() -> None:
+    move_session_id = "abcdefghijklmnopqrstuvwxyz0123456789_AB"
     request = VoiceBrokerRequest.model_validate(
         {
             "guild_id": "12",
             "channel_id": "34",
             "actor_id": "78",
             "actor_domain": "beta.localhost",
+            "move_session_id": move_session_id,
         }
     )
     assert request.actor_domain == "beta.localhost"
@@ -326,6 +359,506 @@ def test_voice_and_call_federation_schemas_forbid_malleable_fields() -> None:
         VoiceBrokerRequest.model_validate({**request.model_dump(), "admin": True})
     with pytest.raises(ValidationError):
         CallAction(action="ring")  # type: ignore[arg-type]
+
+    grant = VoiceTokenResponse(
+        token="x" * 32,
+        url="wss://alpha.localhost/livekit",
+        room="g.12.35",
+        generation=5,
+        expires_at="2026-08-11T12:00:00+00:00",
+        can_speak=True,
+        can_stream=True,
+        move_session_id=move_session_id,
+    )
+    VoiceMoveFederationRequest(
+        guild_id="12",
+        channel_id="35",
+        target_id="78",
+        target_domain="beta.localhost",
+        move_session_id=move_session_id,
+        source_room="g.12.34",
+        source_generation=4,
+        grant=grant,
+    )
+    with pytest.raises(ValidationError, match="correlation"):
+        VoiceMoveFederationRequest(
+            guild_id="12",
+            channel_id="35",
+            target_id="78",
+            target_domain="beta.localhost",
+            move_session_id="z" * 32,
+            source_room="g.12.34",
+            source_generation=4,
+            grant=grant,
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ws://beta.localhost/livekit",
+        "http://beta.localhost/livekit",
+        "custom://beta.localhost/livekit",
+        "wss://user@beta.localhost/livekit",
+        "wss://beta.localhost:8443/livekit",
+        "wss://beta.localhost/livekit?token=peer-controlled",
+        "wss://beta.localhost/livekit#fragment",
+        "wss://other.localhost/livekit",
+    ],
+)
+def test_federated_voice_urls_reject_downgrades_and_ambiguous_authorities(url: str) -> None:
+    assert not valid_federated_voice_url(url, "beta.localhost")
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["wss://beta.localhost/livekit", "wss://beta.localhost:443/livekit"],
+)
+def test_federated_voice_urls_accept_only_secure_authority_endpoints(url: str) -> None:
+    assert valid_federated_voice_url(url, "beta.localhost")
+
+
+@pytest.mark.asyncio
+async def test_successful_local_voice_replacement_revokes_federated_move_session(
+    monkeypatch: Any,
+) -> None:
+    actor = SimpleNamespace(id=78, origin_domain="alpha.localhost")
+    grant = VoiceTokenResponse(
+        token="x" * 32,
+        url="wss://alpha.localhost/livekit",
+        room="g.12.34",
+        generation=1,
+        expires_at="2026-08-11T12:00:00+00:00",
+        can_speak=True,
+        can_stream=True,
+    )
+    monkeypatch.setattr(
+        "app.api.voice.load_voice_channel",
+        AsyncMock(
+            return_value=(
+                SimpleNamespace(id=34),
+                SimpleNamespace(id=12, origin_domain="alpha.localhost"),
+            )
+        ),
+    )
+    monkeypatch.setattr("app.api.voice.get_permissions", AsyncMock(return_value=Permission.CONNECT))
+    monkeypatch.setattr("app.api.voice.authoritative_guild_token", AsyncMock(return_value=grant))
+    discard = AsyncMock()
+    monkeypatch.setattr("app.api.voice.discard_all_federated_voice_home_sessions", discard)
+    redis = AsyncMock()
+
+    assert (
+        await channel_voice_token(
+            EntityRef("34@alpha.localhost"),
+            SimpleNamespace(user=actor),  # type: ignore[arg-type]
+            AsyncMock(),
+            redis,
+            settings(),
+        )
+        == grant
+    )
+    discard.assert_awaited_once_with(redis, "78@alpha.localhost")
+
+
+@pytest.mark.asyncio
+async def test_successful_dm_voice_replacement_revokes_federated_move_session(
+    monkeypatch: Any,
+) -> None:
+    actor = SimpleNamespace(id=78, origin_domain="alpha.localhost")
+    record = {"authority_domain": "alpha.localhost"}
+    grant = VoiceTokenResponse(
+        token="x" * 32,
+        url="wss://alpha.localhost/livekit",
+        room="d.34.56",
+        generation=1,
+        expires_at="2026-08-11T12:00:00+00:00",
+        can_speak=True,
+        can_stream=True,
+    )
+    monkeypatch.setattr("app.api.calls.get_call", AsyncMock(return_value=record))
+    monkeypatch.setattr("app.api.calls.mint_dm_call_token", AsyncMock(return_value=grant))
+    discard = AsyncMock()
+    monkeypatch.setattr("app.api.calls.discard_all_federated_voice_home_sessions", discard)
+    redis = AsyncMock()
+
+    assert (
+        await call_voice_token(
+            EntityRef("56@alpha.localhost"),
+            SimpleNamespace(user=actor),  # type: ignore[arg-type]
+            AsyncMock(),
+            redis,
+            settings(),
+        )
+        == grant
+    )
+    discard.assert_awaited_once_with(redis, "78@alpha.localhost")
+
+
+class FederatedVoiceRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    async def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    async def set(self, key: str, value: object, **_kwargs: object) -> bool:
+        self.values[key] = str(value)
+        return True
+
+    async def delete(self, *keys: str) -> int:
+        removed = 0
+        for key in keys:
+            removed += self.values.pop(key, None) is not None
+        return removed
+
+    async def eval(self, script: str, key_count: int, *values: object) -> object:
+        keys = [str(value) for value in values[:key_count]]
+        args = [str(value) for value in values[key_count:]]
+        if script == ACTIVATE_FEDERATED_VOICE_SESSION_LUA:
+            if self.values.get(keys[0]) != args[0]:
+                return 0
+            self.values[keys[1]] = json.dumps(
+                {
+                    "authority_domain": args[1],
+                    "guild_id": args[2],
+                    "room": args[3],
+                    "generation": int(args[4]),
+                    "move_session_id": args[0],
+                    "ready": True,
+                    "active": False,
+                }
+            )
+            self.values.pop(keys[0], None)
+            return 1
+        if script == ADVANCE_FEDERATED_VOICE_SESSION_LUA:
+            raw = self.values.get(keys[0])
+            if raw is None:
+                return [0, "missing"]
+            current = json.loads(raw)
+            if not current["ready"]:
+                return [0, "pending"]
+            if (
+                current["move_session_id"] == args[0]
+                and current["authority_domain"] == args[1]
+                and str(current["guild_id"]) == args[2]
+                and current["room"] == args[5]
+                and int(current["generation"]) == int(args[6])
+                and not current["active"]
+            ):
+                return [1, "replay"]
+            expected = (
+                current["move_session_id"],
+                current["authority_domain"],
+                str(current["guild_id"]),
+                current["room"],
+                int(current["generation"]),
+            )
+            received = (args[0], args[1], args[2], args[3], int(args[4]))
+            if expected != received:
+                return [0, "mismatch"]
+            if not current["active"]:
+                return [0, "inactive"]
+            current["room"] = args[5]
+            current["generation"] = int(args[6])
+            current["active"] = False
+            encoded = json.dumps(current)
+            self.values[keys[0]] = encoded
+            return [1, encoded]
+        raise AssertionError("unexpected Redis script")
+
+
+@pytest.mark.asyncio
+async def test_local_voice_replacement_fences_an_inflight_federated_broker() -> None:
+    redis = cast(Any, FederatedVoiceRedis())
+    identity = "78@beta.localhost"
+    redis.values[federated_voice_pending_key(identity)] = "a" * 32
+    redis.values[federated_voice_session_key("home", identity)] = "active"
+
+    assert await discard_all_federated_voice_home_sessions(redis, identity)
+    assert federated_voice_pending_key(identity) not in redis.values
+    assert federated_voice_session_key("home", identity) not in redis.values
+
+
+@pytest.mark.asyncio
+async def test_federated_voice_move_requires_current_source_and_rejects_replay() -> None:
+    redis = cast(Any, FederatedVoiceRedis())
+    identity = "78@beta.localhost"
+    move_session_id = "abcdefghijklmnopqrstuvwxyz0123456789_AB"
+
+    assert (
+        await advance_federated_voice_home_session(
+            redis,
+            identity,
+            move_session_id=move_session_id,
+            authority_domain="alpha.localhost",
+            guild_id="12",
+            source_room="g.12.34",
+            source_generation=4,
+            target_room="g.12.35",
+            target_generation=5,
+        )
+        == "missing"
+    )
+    await begin_federated_voice_home_session(
+        redis,
+        identity,
+        FederatedVoiceSession(
+            authority_domain="alpha.localhost",
+            guild_id="12",
+            room="g.12.34",
+            generation=0,
+            move_session_id=move_session_id,
+        ),
+    )
+    assert redis.values[federated_voice_pending_key(identity)] == move_session_id
+    assert await activate_federated_voice_home_session(
+        redis,
+        identity,
+        move_session_id=move_session_id,
+        authority_domain="alpha.localhost",
+        guild_id="12",
+        room="g.12.34",
+        generation=4,
+    )
+    assert (
+        await advance_federated_voice_home_session(
+            redis,
+            identity,
+            move_session_id=move_session_id,
+            authority_domain="alpha.localhost",
+            guild_id="12",
+            source_room="g.12.34",
+            source_generation=4,
+            target_room="g.12.35",
+            target_generation=5,
+        )
+        == "inactive"
+    )
+    current = json.loads(redis.values[federated_voice_session_key("home", identity)])
+    current["active"] = True
+    redis.values[federated_voice_session_key("home", identity)] = json.dumps(current)
+    assert (
+        await advance_federated_voice_home_session(
+            redis,
+            identity,
+            move_session_id=move_session_id,
+            authority_domain="alpha.localhost",
+            guild_id="12",
+            source_room="g.12.99",
+            source_generation=4,
+            target_room="g.12.35",
+            target_generation=5,
+        )
+        == "mismatch"
+    )
+    assert (
+        await advance_federated_voice_home_session(
+            redis,
+            identity,
+            move_session_id=move_session_id,
+            authority_domain="alpha.localhost",
+            guild_id="12",
+            source_room="g.12.34",
+            source_generation=3,
+            target_room="g.12.35",
+            target_generation=5,
+        )
+        == "mismatch"
+    )
+    assert (
+        await advance_federated_voice_home_session(
+            redis,
+            identity,
+            move_session_id="z" * 32,
+            authority_domain="alpha.localhost",
+            guild_id="12",
+            source_room="g.12.34",
+            source_generation=4,
+            target_room="g.12.35",
+            target_generation=5,
+        )
+        == "mismatch"
+    )
+    assert (
+        await advance_federated_voice_home_session(
+            redis,
+            identity,
+            move_session_id=move_session_id,
+            authority_domain="alpha.localhost",
+            guild_id="12",
+            source_room="g.12.34",
+            source_generation=4,
+            target_room="g.12.35",
+            target_generation=5,
+        )
+        is None
+    )
+    moved = json.loads(redis.values[federated_voice_session_key("home", identity)])
+    assert (moved["room"], moved["generation"]) == ("g.12.35", 5)
+    # A lost HTTP response or dispatch publish can safely retry the exact move;
+    # the endpoint will replay its idempotent client notifications.
+    assert (
+        await advance_federated_voice_home_session(
+            redis,
+            identity,
+            move_session_id=move_session_id,
+            authority_domain="alpha.localhost",
+            guild_id="12",
+            source_room="g.12.34",
+            source_generation=4,
+            target_room="g.12.35",
+            target_generation=5,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_federation_move_endpoint_rejects_unsolicited_before_dispatch(
+    monkeypatch: Any,
+) -> None:
+    move_session_id = "abcdefghijklmnopqrstuvwxyz0123456789_AB"
+    payload = VoiceMoveFederationRequest(
+        guild_id="12",
+        channel_id="35",
+        target_id="78",
+        target_domain="alpha.localhost",
+        move_session_id=move_session_id,
+        source_room="g.12.34",
+        source_generation=4,
+        grant=VoiceTokenResponse(
+            token="x" * 32,
+            url="wss://beta.localhost/livekit",
+            room="g.12.35",
+            generation=5,
+            expires_at="2026-08-11T12:00:00+00:00",
+            can_speak=True,
+            can_stream=True,
+            move_session_id=move_session_id,
+        ),
+    )
+    session = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(id=78)))
+    redis = cast(Any, SimpleNamespace())
+    monkeypatch.setattr("app.api.voice.enforce_federation_route_rate_limit", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.voice.load_voice_channel",
+        AsyncMock(
+            return_value=(
+                SimpleNamespace(id=35),
+                SimpleNamespace(id=12, origin_domain="beta.localhost"),
+            )
+        ),
+    )
+    monkeypatch.setattr("app.api.voice.get_permissions", AsyncMock(return_value=Permission.CONNECT))
+    advance = AsyncMock(return_value="missing")
+    publish = AsyncMock()
+    monkeypatch.setattr("app.api.voice.advance_federated_voice_home_session", advance)
+    monkeypatch.setattr("app.api.voice.publish_dispatch", publish)
+
+    with pytest.raises(HTTPException) as caught:
+        await federation_voice_move(
+            payload,
+            FederationPrincipal(origin="beta.localhost", key_id="test"),
+            cast(Any, session),
+            redis,
+            settings(),
+        )
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {"code": "KAED_VOICE_MOVE_NOT_EXPECTED"}
+    publish.assert_not_awaited()
+
+    advance.return_value = None
+    response = await federation_voice_move(
+        payload,
+        FederationPrincipal(origin="beta.localhost", key_id="test"),
+        cast(Any, session),
+        redis,
+        settings(),
+    )
+    assert response.status_code == 204
+    assert [call.args[2] for call in publish.await_args_list] == [
+        "VOICE_CHANNEL_MOVE",
+        "VOICE_TOKEN",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_remote_move_rejection_preserves_the_source_voice_session(
+    monkeypatch: Any,
+) -> None:
+    guild = SimpleNamespace(id=12, origin_domain="alpha.localhost")
+    source_channel = SimpleNamespace(id=34, origin_domain="alpha.localhost")
+    target_channel = SimpleNamespace(id=35, origin_domain="alpha.localhost")
+    target_user = SimpleNamespace(id=78, origin_domain="beta.localhost")
+    moderator = SimpleNamespace(id=1, origin_domain="alpha.localhost")
+    move_session_id = "abcdefghijklmnopqrstuvwxyz0123456789_AB"
+    move_session = FederatedVoiceSession(
+        move_session_id=move_session_id,
+        authority_domain="alpha.localhost",
+        guild_id="12",
+        room="g.12.34",
+        generation=4,
+        ready=True,
+        active=True,
+    )
+    grant = VoiceTokenResponse(
+        token="x" * 32,
+        url="wss://alpha.localhost/livekit",
+        room="g.12.35",
+        generation=5,
+        expires_at="2026-08-11T12:00:00+00:00",
+        can_speak=True,
+        can_stream=True,
+        move_session_id=move_session_id,
+    )
+    session = AsyncMock()
+    session.get.return_value = target_user
+    redis = AsyncMock()
+    redis.get.return_value = b"g.12.34"
+    monkeypatch.setattr("app.api.guilds.local_guild", AsyncMock(return_value=guild))
+    monkeypatch.setattr("app.api.voice.require_can_manage_member", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.voice.load_voice_channel",
+        AsyncMock(side_effect=[(target_channel, guild), (source_channel, guild)]),
+    )
+    monkeypatch.setattr("app.api.voice.get_permissions", AsyncMock(return_value=Permission.CONNECT))
+    monkeypatch.setattr("app.api.voice.require_permissions", AsyncMock())
+    monkeypatch.setattr("app.api.voice.current_generation", AsyncMock(return_value=4))
+    monkeypatch.setattr(
+        "app.api.voice.get_federated_voice_session",
+        AsyncMock(return_value=move_session),
+    )
+    monkeypatch.setattr("app.api.voice.add_audit_entry", AsyncMock())
+    monkeypatch.setattr("app.api.voice.authoritative_guild_token", AsyncMock(return_value=grant))
+    monkeypatch.setattr(
+        "app.api.voice.signed_request",
+        AsyncMock(return_value=SimpleNamespace(status_code=409)),
+    )
+    bump = AsyncMock()
+    remove = AsyncMock()
+    monkeypatch.setattr("app.api.voice.bump_generation", bump)
+    monkeypatch.setattr("app.api.voice.remove_occupant", remove)
+
+    with pytest.raises(HTTPException) as caught:
+        await move_member_voice(
+            EntityRef("12@alpha.localhost"),
+            EntityRef("78@beta.localhost"),
+            VoiceMoveRequest(channel_id=EntityRef("35@alpha.localhost")),
+            SimpleNamespace(user=moderator),  # type: ignore[arg-type]
+            session,
+            redis,
+            AsyncMock(),
+            settings(),
+            None,
+        )
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {"code": "VOICE_MOVE_REJECTED"}
+    session.rollback.assert_awaited_once()
+    session.commit.assert_not_awaited()
+    bump.assert_not_awaited()
+    remove.assert_not_awaited()
 
 
 async def test_occupancy_staleness_is_explicit_not_silently_empty() -> None:

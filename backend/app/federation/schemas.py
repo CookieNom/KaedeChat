@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 from app.chat.e2ee import validate_e2ee_envelope
+from app.core.json_limits import JsonTreeLimits, validate_json_tree
 from app.core.settings import DOMAIN_RE
+from app.core.text import sanitize_single_line_text
 from app.core.types import EntityRef
 
 MAX_DATABASE_SNOWFLAKE = (1 << 63) - 1
 KEY_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+FEDERATION_EVENT_JSON_LIMITS = JsonTreeLimits(
+    max_depth=24,
+    max_nodes=16_384,
+    max_object_members=1024,
+    max_array_members=4096,
+    max_key_bytes=256,
+    max_string_bytes=1024 * 1024,
+)
 
 
 def _snowflake_string(value: object) -> str:
@@ -63,6 +74,16 @@ class EventEnvelope(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
     content: dict[str, Any] = Field(default_factory=dict)
     signatures: dict[str, dict[str, str]]
+
+    @model_validator(mode="before")
+    @classmethod
+    def bounded_json_structure(cls, value: object) -> object:
+        validate_json_tree(
+            value,
+            limits=FEDERATION_EVENT_JSON_LIMITS,
+            label="federation event envelope",
+        )
+        return value
 
     @field_validator("signatures")
     @classmethod
@@ -142,6 +163,41 @@ class GuildJoinRequest(BaseModel):
 
 class GuildLeaveRequest(BaseModel):
     user: ActorRef
+
+
+class GuildSelfModerationStatus(BaseModel):
+    """Private timeout state returned only to the affected user's home."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    guild_id: SnowflakeString
+    guild_domain: FederationDomain
+    timed_out: bool
+    timeout_until: datetime | None = None
+    timeout_indefinite: bool = False
+    reason: str | None = Field(default=None, max_length=512)
+    details_available: bool = True
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def clean_reason(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        return sanitize_single_line_text(value, max_characters=512)
+
+    @model_validator(mode="after")
+    def consistent_timeout(self) -> GuildSelfModerationStatus:
+        if self.timeout_until is not None and self.timeout_until.tzinfo is None:
+            raise ValueError("timeout expiry requires a timezone")
+        if not self.timed_out:
+            if self.timeout_until is not None or self.timeout_indefinite or self.reason is not None:
+                raise ValueError("inactive moderation status contains timeout details")
+            return self
+        if self.timeout_indefinite == (self.timeout_until is not None):
+            raise ValueError("active timeout requires exactly one duration mode")
+        return self
 
 
 class GuildHistoryExportRequest(BaseModel):

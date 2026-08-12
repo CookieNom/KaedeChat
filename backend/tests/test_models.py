@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from sqlalchemy import CheckConstraint, Computed, ForeignKeyConstraint, UniqueConstraint
 
 from app.db import models  # noqa: F401
@@ -18,10 +20,12 @@ def test_complete_v1_schema_is_registered() -> None:
         "recovery_codes",
         "auth_events",
         "guilds",
+        "federation_replica_usage",
         "guild_events",
         "guild_history_exports",
         "guild_history_export_channels",
         "guild_members",
+        "remote_guild_membership_intents",
         "guild_notification_settings",
         "guild_instance_bans",
         "roles",
@@ -39,6 +43,8 @@ def test_complete_v1_schema_is_registered() -> None:
         "pins",
         "dm_conversations",
         "dm_participants",
+        "federated_dm_storage_usage",
+        "federated_dm_row_charges",
         "read_states",
         "invites",
         "bans",
@@ -49,6 +55,7 @@ def test_complete_v1_schema_is_registered() -> None:
         "federation_outbox",
         "federation_inbox",
         "remote_media_cache",
+        "remote_media_orphans",
         "remote_media_tombstones",
         "user_storage_usage",
         "instance_blocks",
@@ -75,6 +82,12 @@ def test_push_devices_are_local_encrypted_registrations() -> None:
     assert local_user.ondelete == "CASCADE"
 
 
+def test_user_settings_store_synchronized_guild_navigation() -> None:
+    settings = Base.metadata.tables["user_settings"]
+    assert settings.c.guild_navigation.nullable is False
+    assert "JSONB" in str(settings.c.guild_navigation.type)
+
+
 def test_guild_notification_settings_are_membership_scoped() -> None:
     table = Base.metadata.tables["guild_notification_settings"]
     assert tuple(table.primary_key.columns.keys()) == (
@@ -97,6 +110,52 @@ def test_guild_notification_settings_are_membership_scoped() -> None:
     assert "ck_guild_notification_settings_notification_level_value" in constraint_names(
         "guild_notification_settings"
     )
+
+
+def test_remote_guild_membership_intents_survive_replica_purge() -> None:
+    table = Base.metadata.tables["remote_guild_membership_intents"]
+    assert tuple(table.primary_key.columns.keys()) == (
+        "guild_id",
+        "guild_domain",
+        "user_id",
+        "user_domain",
+    )
+    assert not any(
+        element.target_fullname.startswith("guilds.")
+        for constraint in table.foreign_key_constraints
+        for element in constraint.elements
+    )
+    local_user = foreign_key_for_columns(
+        "remote_guild_membership_intents",
+        ("user_id", "user_domain", "user_is_local"),
+    )
+    assert local_user.ondelete == "CASCADE"
+    assert {
+        "ck_remote_guild_membership_intents_guild_is_remote_from_local_user",
+        "ck_remote_guild_membership_intents_state_value",
+        "ck_remote_guild_membership_intents_remote_guild_membership_intents_user_is_local",
+    } <= constraint_names("remote_guild_membership_intents")
+
+
+def test_remote_guild_replica_usage_is_durable_and_cascade_scoped() -> None:
+    guilds = Base.metadata.tables["guilds"]
+    usage = Base.metadata.tables["federation_replica_usage"]
+
+    assert guilds.c.snapshot_generation.nullable is False
+    assert guilds.c.sync_error_code.type.length == 64
+    assert {
+        "ck_guilds_positive_snapshot_generation",
+        "ck_guilds_sync_error_requires_failure",
+    } <= constraint_names("guilds")
+    assert tuple(usage.primary_key.columns.keys()) == ("guild_id", "guild_domain")
+    guild_fk = foreign_key_for_columns("federation_replica_usage", ("guild_id", "guild_domain"))
+    assert guild_fk.ondelete == "CASCADE"
+    assert isinstance(usage.c.total_rows.computed, Computed)
+    assert isinstance(usage.c.total_bytes.computed, Computed)
+    assert {
+        "ck_federation_replica_usage_nonnegative_rows",
+        "ck_federation_replica_usage_nonnegative_bytes",
+    } <= constraint_names("federation_replica_usage")
 
 
 def test_guild_sanctions_have_expiry_and_instance_scope() -> None:
@@ -204,6 +263,7 @@ def test_federated_history_grants_and_import_provenance_are_bound() -> None:
 
 def test_federation_events_and_outbox_references_are_origin_scoped() -> None:
     events = Base.metadata.tables["federation_events"]
+    instances = Base.metadata.tables["instances"]
     outbox = Base.metadata.tables["federation_outbox"]
     assert tuple(events.primary_key.columns.keys()) == ("origin_domain", "event_id")
     event_fk = foreign_key_for_columns(outbox.name, ("event_origin_domain", "event_id"))
@@ -216,6 +276,16 @@ def test_federation_events_and_outbox_references_are_origin_scoped() -> None:
         and tuple(constraint.columns.keys()) == ("destination", "event_origin_domain", "event_id")
         for constraint in outbox.constraints
     )
+    assert events.c.envelope_bytes.nullable is False
+    assert instances.c.federation_inbox_events.nullable is False
+    assert instances.c.federation_inbox_event_bytes.nullable is False
+    assert {
+        "ck_federation_events_nonnegative_envelope_bytes",
+    } <= constraint_names("federation_events")
+    assert {
+        "ck_instances_nonnegative_federation_inbox_events",
+        "ck_instances_nonnegative_federation_inbox_event_bytes",
+    } <= constraint_names("instances")
 
 
 def test_media_staging_objects_have_a_recoverable_cleanup_cursor() -> None:
@@ -373,7 +443,11 @@ def test_channel_and_message_references_cannot_cross_owners() -> None:
         "messages.channel_id",
         "messages.channel_domain",
     )
-    assert has_foreign_key(
+    # Reply and read cursors may remain as opaque composite references after a
+    # capability-gated rolling DM cache evicts the target.  The migration
+    # replaces these two global FKs with constraint triggers that retain the
+    # same-channel invariant everywhere else.
+    assert not has_foreign_key(
         "messages",
         (
             "referenced_message_id",
@@ -383,14 +457,21 @@ def test_channel_and_message_references_cannot_cross_owners() -> None:
         ),
         message_target,
     )
+    assert not has_foreign_key(
+        "read_states",
+        ("last_message_id", "last_message_domain", "channel_id", "channel_domain"),
+        message_target,
+    )
+    migration = (
+        Path(__file__).parents[1] / "migrations/versions/b72c9e4a1f63_federated_dm_rolling_cache.py"
+    ).read_text()
+    assert "CREATE TRIGGER trg_messages_reply_reference" in migration
+    assert "CREATE TRIGGER trg_read_states_last_message_reference" in migration
+    assert "CREATE CONSTRAINT TRIGGER trg_messages_delete_reference" in migration
+
     assert has_foreign_key(
         "channels",
         ("last_message_id", "last_message_domain", "id", "origin_domain"),
-        message_target,
-    )
-    assert has_foreign_key(
-        "read_states",
-        ("last_message_id", "last_message_domain", "channel_id", "channel_domain"),
         message_target,
     )
     assert has_foreign_key(

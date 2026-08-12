@@ -22,12 +22,15 @@ export interface PendingUpload {
   error?: string;
 }
 
-function storageEndpoint(ticket: UploadTicket): string {
-  try {
-    return new URL(ticket.upload_url).host;
-  } catch {
-    return 'the configured media host';
+function uploadStatusMessage(status: number): string {
+  if (status === 401 || status === 403) {
+    return 'Media storage rejected the upload authorization. Choose the file again and retry.';
   }
+  if (status === 413) return 'The file is larger than media storage allows. Choose a smaller file.';
+  if (status === 415) return 'Media storage does not support this file type. Choose another file.';
+  if (status === 429) return 'Media storage is receiving too many uploads. Try again shortly.';
+  if (status >= 500) return 'Media storage is temporarily unavailable. Try again shortly.';
+  return 'Media storage could not accept the file. Choose the file again and retry.';
 }
 
 export function uploadObject(
@@ -74,17 +77,16 @@ export function uploadObject(
     };
     request.onload = () => {
       if (request.status >= 200 && request.status < 300) finish(() => resolve());
-      else finish(() => reject(new Error(`Object upload failed (${request.status})`)));
+      else finish(() => reject(new Error(uploadStatusMessage(request.status))));
     };
     request.onerror = () =>
       finish(() =>
-        reject(
-          new Error(
-            `Could not reach media storage at ${storageEndpoint(ticket)}. Check its DNS, TLS, and CORS configuration.`
-          )
-        )
+        reject(new Error('Could not reach media storage. Check your connection and try again.'))
       );
-    request.ontimeout = () => finish(() => reject(new Error('Object upload timed out')));
+    request.ontimeout = () =>
+      finish(() =>
+        reject(new Error('The upload took too long. Check your connection and try again.'))
+      );
     request.onabort = () =>
       finish(() => reject(new DOMException('Upload cancelled', 'AbortError')));
     signal?.addEventListener('abort', abort, { once: true });

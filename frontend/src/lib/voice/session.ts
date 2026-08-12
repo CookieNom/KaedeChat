@@ -1,5 +1,6 @@
 import { Room, RoomEvent, Track, type Participant } from 'livekit-client';
 import type { LocalTrackPublication, RemoteTrack, RemoteTrackPublication } from 'livekit-client';
+import { userErrorMessage } from '$lib/api/client';
 import { isNativeDesktop, nativeInvoke, type NativeVoiceStatus } from '$lib/platform/native';
 
 export interface VoiceToken {
@@ -11,6 +12,7 @@ export interface VoiceToken {
   can_speak: boolean;
   can_stream: boolean;
   can_use_vad: boolean;
+  move_session_id?: string | null;
 }
 
 export interface VoiceTile {
@@ -70,6 +72,9 @@ export function isUsableVoiceToken(value: VoiceToken, now = Date.now()): boolean
     /^[gd]\.\d+\.\d+$/.test(value.room) &&
     Number.isInteger(value.generation) &&
     value.generation >= 0 &&
+    (value.move_session_id == null ||
+      (typeof value.move_session_id === 'string' &&
+        /^[A-Za-z0-9_-]{32,64}$/.test(value.move_session_id))) &&
     Number.isFinite(expires) &&
     expires > now
   );
@@ -90,6 +95,7 @@ export class VoiceSession extends EventTarget {
   screen = false;
   canSpeak = false;
   canStream = false;
+  moveSessionId: string | null = null;
   error = '';
   #nativePoll: ReturnType<typeof setInterval> | null = null;
   #nativeVideoGeneration = 0;
@@ -114,6 +120,7 @@ export class VoiceSession extends EventTarget {
     });
     this.room.on(RoomEvent.Disconnected, () => {
       this.connected = false;
+      this.moveSessionId = null;
       this.microphone = false;
       this.camera = false;
       this.screen = false;
@@ -135,13 +142,17 @@ export class VoiceSession extends EventTarget {
         this.room.connect(grant.url, grant.token, { autoSubscribe: true })
       );
       this.connected = true;
+      this.moveSessionId = grant.move_session_id ?? null;
       if (grant.can_speak) {
         await this.room.localParticipant.setMicrophoneEnabled(true);
         this.microphone = true;
       }
     } catch (caught) {
       await this.room.disconnect();
-      this.error = caught instanceof Error ? caught.message : 'Could not join voice.';
+      this.error = userErrorMessage(
+        caught,
+        'Could not join voice. Check your network and microphone permission, then try again.'
+      );
       throw caught;
     } finally {
       this.connecting = false;
@@ -161,7 +172,10 @@ export class VoiceSession extends EventTarget {
       await this.#pollNativeStatus();
       this.#startNativeVideoPolling();
     } catch (caught) {
-      this.error = caught instanceof Error ? caught.message : 'Could not join voice.';
+      this.error = userErrorMessage(
+        caught,
+        'Could not join voice. Check your microphone permission and try again.'
+      );
       throw caught;
     } finally {
       this.connecting = false;
@@ -195,7 +209,18 @@ export class VoiceSession extends EventTarget {
       } else if (!this.microphone) {
         this.#nativeSpeakingUntil = 0;
       }
-      this.error = status.message ?? '';
+      const statusFallback =
+        status.state === 'media_error'
+          ? 'Voice connected, but a media device failed. Check your microphone and output device.'
+          : status.state === 'failed'
+            ? 'The voice connection failed. Check your network and try joining again.'
+            : '';
+      this.error = status.message
+        ? userErrorMessage(
+            { message: status.message },
+            statusFallback || 'Voice encountered an error.'
+          )
+        : statusFallback;
       if (status.state === 'disconnected' || status.state === 'failed') {
         if (this.#nativePoll) clearInterval(this.#nativePoll);
         this.#nativePoll = null;
@@ -286,12 +311,14 @@ export class VoiceSession extends EventTarget {
       this.#nativeSpeakingUntil = 0;
       await nativeInvoke('native_voice_leave');
       this.connected = false;
+      this.moveSessionId = null;
       this.connecting = false;
       this.#changed();
       return;
     }
     await this.room.disconnect(true);
     this.connected = false;
+    this.moveSessionId = null;
     this.#changed();
   }
 

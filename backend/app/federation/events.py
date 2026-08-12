@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.federation import (
     POLICY_HELD_OUTBOX_PREFIX,
     SECURITY_CRITICAL_GUILD_EVENTS,
+    canonical_json,
     federation_policy_holds_event,
     policy_held_retry_at,
     sign_envelope,
@@ -19,7 +20,11 @@ from app.core.federation import (
 from app.core.settings import Settings
 from app.db.models import FederationEvent, FederationOutbox, Instance, User
 from app.federation.delivery import MAX_QUEUE_AGE, enforce_queue_limits
-from app.federation.network import FederationNetworkError, normalize_domain
+from app.federation.network import (
+    FederationNetworkError,
+    ensure_remote_instance_record,
+    normalize_domain,
+)
 from app.federation.security import matching_block, self_private_key
 
 
@@ -97,6 +102,7 @@ async def queue_event(
             origin_domain=settings.domain,
             event_type=event_type,
             envelope=envelope,
+            envelope_bytes=len(canonical_json(envelope)),
             # Keep the source envelope beyond the seven-day delivery cutoff so
             # the expiry sweep can inspect it and enqueue a resync marker even
             # when operators configure the minimum retention window.
@@ -174,15 +180,12 @@ async def ensure_queue_destination(
         # A local block must never trigger discovery or any other exchange with
         # the blocked peer. All other first-contact events are also staged
         # offline so peer uptime cannot abort an otherwise valid local write.
-        await session.execute(
-            pg_insert(Instance)
-            .values(
-                domain=destination,
-                is_self=False,
-                display_name=destination,
-                software_version="unresolved",
-            )
-            .on_conflict_do_nothing(index_elements=["domain"])
+        await ensure_remote_instance_record(
+            session,
+            settings,
+            destination,
+            display_name=destination,
+            software_version="unresolved",
         )
         known_destination = await session.get(Instance, destination, populate_existing=True)
         if known_destination is None:

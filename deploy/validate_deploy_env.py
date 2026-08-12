@@ -65,6 +65,56 @@ AUTO_UPDATE_DURATION_RE = re.compile(r"^[1-9][0-9]*(?:s|m|min|h|d|w)$")
 AUTO_UPDATE_REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 AUTO_UPDATE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 AUTO_UPDATE_PATH_RE = re.compile(r"^/[A-Za-z0-9_./-]+$")
+MEDIA_MAX_ATTACHMENT_BYTES_DEFAULT = 15 * 1024**2
+MEDIA_INFLIGHT_QUOTA_BYTES_DEFAULT = 500 * 1024**2
+REMOTE_MEDIA_CACHE_BYTES_DEFAULT = 100 * 1024**3
+FEDERATION_INTEGER_DEFAULTS = {
+    "KAEDE_FEDERATION_CLOCK_SKEW_SECONDS": 300,
+    "KAEDE_FEDERATION_EVENT_RETENTION_DAYS": 30,
+    "KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN": 5_000_000,
+    "KAEDE_FEDERATION_INBOX_MAX_BYTES_PER_ORIGIN": 16 * 1024**3,
+    "KAEDE_FEDERATION_INBOX_MAX_EVENTS_TOTAL": 50_000_000,
+    "KAEDE_FEDERATION_INBOX_MAX_BYTES_TOTAL": 160 * 1024**3,
+    "KAEDE_FEDERATION_MAX_REMOTE_INSTANCES": 10_000,
+    "KAEDE_FEDERATION_PEER_KEY_HISTORY_LIMIT": 512,
+    "KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT": 1_000,
+    "KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT_ORIGIN": 100,
+    "KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_ORIGIN": 10_000,
+    "KAEDE_FEDERATION_REMOTE_USERS_PER_INTRODUCER": 100_000,
+    "KAEDE_FEDERATION_THIRD_PARTY_INSTANCES_PER_INTRODUCER": 1_000,
+    "KAEDE_FEDERATION_REMOTE_MEDIA_TOMBSTONES_PER_ORIGIN": 100_000,
+    "KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_AUTHORITY": 1_000_000,
+    "KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_REMOTE_ORIGIN": 100_000,
+    "KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_CONVERSATION": 5_000_000,
+    "KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_AUTHORITY": 50_000_000,
+    "KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_REMOTE_ORIGIN": 10_000_000,
+    "KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION": 32 * 1024**3,
+    "KAEDE_FEDERATION_DM_MAX_BYTES_PER_AUTHORITY": 320 * 1024**3,
+    "KAEDE_FEDERATION_DM_MAX_BYTES_PER_REMOTE_ORIGIN": 64 * 1024**3,
+    "KAEDE_FEDERATION_DM_REPLICA_CACHE_MESSAGES_PER_CONVERSATION": 250_000,
+    "KAEDE_FEDERATION_DM_REPLICA_CACHE_BYTES_PER_CONVERSATION": 2 * 1024**3,
+    "KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_GUILD": 20_000_000,
+    "KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD": 64 * 1024**3,
+    "KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_ORIGIN": 100_000_000,
+    "KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN": 320 * 1024**3,
+    "KAEDE_FEDERATION_REMOTE_IDENTITY_RETENTION_DAYS": 30,
+    "KAEDE_FEDERATION_REMOTE_IDENTITY_GC_BATCH_SIZE": 5_000,
+    "KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN": 256 * 1024**2,
+    "KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_TOTAL": 512 * 1024**2,
+    "KAEDE_FEDERATION_HISTORY_EXPORT_TTL_MINUTES": 1_440,
+    "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN": 1_000,
+    "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_TOTAL": 10_000,
+    "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN": 100_000,
+    "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_TOTAL": 1_000_000,
+    "KAEDE_FEDERATION_HISTORY_PAGE_MESSAGES": 100,
+    "KAEDE_FEDERATION_HISTORY_PAGE_BYTES": 512 * 1024,
+    "KAEDE_FEDERATION_HISTORY_MAX_MESSAGES": 2_000_000,
+    "KAEDE_FEDERATION_HISTORY_MAX_BYTES": 32 * 1024**3,
+    "KAEDE_FEDERATION_HISTORY_MAX_PAGES": 250_000,
+    "KAEDE_FEDERATION_HISTORY_MAX_REACTIONS": 10_000_000,
+    "KAEDE_FEDERATION_HISTORY_MAX_DURATION_SECONDS": 7_200,
+    "KAEDE_FEDERATION_HISTORY_MERGE_CHUNK_SIZE": 500,
+}
 
 
 class DeploymentConfigurationError(ValueError):
@@ -80,12 +130,24 @@ def _unquote(value: str) -> str:
 def read_env_file(path: Path) -> dict[str, str]:
     if not path.is_file():
         raise DeploymentConfigurationError(
-            f"operator environment is not a file: {path}"
+            f"operator environment file does not exist or is not a regular file: {path}. "
+            "Run `make setup` to create it, or pass --file with the correct path"
         )
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise DeploymentConfigurationError(
+            f"operator environment file is not valid UTF-8: {path}. Save it as UTF-8 "
+            "text, then rerun validation"
+        ) from error
+    except OSError as error:
+        reason = error.strerror or type(error).__name__
+        raise DeploymentConfigurationError(
+            f"cannot read operator environment file {path}: {reason}. Check file "
+            "ownership and permissions, then rerun validation"
+        ) from error
     values: dict[str, str] = {}
-    for line_number, raw_line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), 1
-    ):
+    for line_number, raw_line in enumerate(lines, 1):
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -93,11 +155,12 @@ def read_env_file(path: Path) -> dict[str, str]:
         key = key.strip()
         if not separator or not KEY_RE.fullmatch(key):
             raise DeploymentConfigurationError(
-                f"{path}:{line_number}: expected one KEY=value assignment"
+                f"{path}:{line_number}: expected one KEY=value assignment with a shell-style "
+                "variable name, for example KAEDE_DOMAIN=chat.example.net"
             )
         if key in values:
             raise DeploymentConfigurationError(
-                f"{path}:{line_number}: duplicate setting {key}"
+                f"{path}:{line_number}: duplicate setting {key}; keep exactly one assignment"
             )
         values[key] = _unquote(value.strip())
     return values
@@ -112,12 +175,12 @@ def _deployment_port(values: dict[str, str], name: str, default: int) -> int:
     raw_value = values.get(name, str(default)).strip()
     if not raw_value.isdecimal():
         raise DeploymentConfigurationError(
-            f"{name} must be an integer from 1024 to 65535"
+            f"{name} must be an integer from 1024 to 65535; received {raw_value!r}"
         )
     port = int(raw_value)
     if not 1024 <= port <= 65535:
         raise DeploymentConfigurationError(
-            f"{name} must be an integer from 1024 to 65535"
+            f"{name} must be an integer from 1024 to 65535; received {port}"
         )
     return port
 
@@ -172,7 +235,9 @@ def _validate_voice_ports(values: dict[str, str]) -> None:
         )
     if url_port != ports["LIVEKIT_CONTROL_PORT"]:
         raise DeploymentConfigurationError(
-            "KAEDE_VOICE_LIVEKIT_URL port must match LIVEKIT_CONTROL_PORT"
+            "KAEDE_VOICE_LIVEKIT_URL port must match LIVEKIT_CONTROL_PORT; "
+            f"URL uses {url_port!r}, but LIVEKIT_CONTROL_PORT is "
+            f"{ports['LIVEKIT_CONTROL_PORT']}"
         )
 
 
@@ -203,26 +268,34 @@ def _validate_fcm_service_account(encoded: str) -> None:
         or document["token_uri"] != FCM_AUTH_ENDPOINT
     ):
         raise DeploymentConfigurationError(
-            "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64 is not a valid Firebase service account"
+            "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64 is not a valid Firebase service account. "
+            "Use a service-account JSON file (not google-services.json) with type, "
+            "project_id, client_email, private_key, and Google's OAuth token_uri; rerun "
+            "`make setup` to import it safely"
         )
 
 
 def _validate_auto_update(values: dict[str, str]) -> None:
     enabled = values.get("AUTO_UPDATE_ENABLED", "false").strip().lower()
     if enabled not in {"true", "false"}:
-        raise DeploymentConfigurationError(
-            "AUTO_UPDATE_ENABLED must be true or false"
-        )
+        raise DeploymentConfigurationError("AUTO_UPDATE_ENABLED must be true or false")
     remote = values.get("AUTO_UPDATE_REMOTE", "origin").strip()
     if not AUTO_UPDATE_REMOTE_RE.fullmatch(remote):
-        raise DeploymentConfigurationError("AUTO_UPDATE_REMOTE is invalid")
+        raise DeploymentConfigurationError(
+            "AUTO_UPDATE_REMOTE must be a Git remote name containing only letters, "
+            "digits, dot, underscore, or dash. Do not put a remote URL or "
+            "credentials in this setting"
+        )
     branch = values.get("AUTO_UPDATE_BRANCH", "main").strip()
     if (
         not AUTO_UPDATE_BRANCH_RE.fullmatch(branch)
         or branch.endswith("/")
         or ".." in branch
     ):
-        raise DeploymentConfigurationError("AUTO_UPDATE_BRANCH is invalid")
+        raise DeploymentConfigurationError(
+            "AUTO_UPDATE_BRANCH must be a branch name containing only letters, digits, "
+            "dot, underscore, dash, or slash, without '..' or a trailing slash"
+        )
     interval = values.get("AUTO_UPDATE_INTERVAL", "6h").strip()
     if interval not in {"6h", "12h", "1d", "1w"}:
         raise DeploymentConfigurationError(
@@ -236,19 +309,168 @@ def _validate_auto_update(values: dict[str, str]) -> None:
     timeout = values.get("AUTO_UPDATE_WAIT_TIMEOUT_SECONDS", "300").strip()
     if not timeout.isdecimal() or not 60 <= int(timeout) <= 3600:
         raise DeploymentConfigurationError(
-            "AUTO_UPDATE_WAIT_TIMEOUT_SECONDS must be from 60 through 3600"
+            "AUTO_UPDATE_WAIT_TIMEOUT_SECONDS must be an integer from 60 through 3600"
         )
     backup_hook = values.get("AUTO_UPDATE_BACKUP_HOOK", "").strip()
     if backup_hook and (
         not AUTO_UPDATE_PATH_RE.fullmatch(backup_hook) or ".." in backup_hook
     ):
         raise DeploymentConfigurationError(
-            "AUTO_UPDATE_BACKUP_HOOK must be a safe absolute path"
+            "AUTO_UPDATE_BACKUP_HOOK must be an absolute path containing only letters, "
+            "digits, dot, underscore, dash, and slash, without '..'"
         )
+
+
+def _validate_federation_budgets(values: dict[str, str]) -> None:
+    configured: dict[str, int] = {}
+    for name, default in FEDERATION_INTEGER_DEFAULTS.items():
+        raw_value = values.get(name, str(default)).strip()
+        if not re.fullmatch(r"[0-9]+", raw_value) or int(raw_value) <= 0:
+            raise DeploymentConfigurationError(
+                f"{name} must be a positive integer number of rows, bytes, or time units"
+            )
+        configured[name] = int(raw_value)
+
+    remote_cache_bytes = values.get(
+        "KAEDE_MEDIA_REMOTE_CACHE_BYTES", str(REMOTE_MEDIA_CACHE_BYTES_DEFAULT)
+    ).strip()
+    if not re.fullmatch(r"[0-9]+", remote_cache_bytes) or int(remote_cache_bytes) <= 0:
+        raise DeploymentConfigurationError(
+            "KAEDE_MEDIA_REMOTE_CACHE_BYTES must be a positive integer number of bytes"
+        )
+    maximum_attachment_bytes = values.get(
+        "KAEDE_MEDIA_MAX_ATTACHMENT_BYTES", str(MEDIA_MAX_ATTACHMENT_BYTES_DEFAULT)
+    ).strip()
+    if (
+        not re.fullmatch(r"[0-9]+", maximum_attachment_bytes)
+        or int(maximum_attachment_bytes) <= 0
+    ):
+        raise DeploymentConfigurationError(
+            "KAEDE_MEDIA_MAX_ATTACHMENT_BYTES must be a positive integer number of bytes"
+        )
+    media_inflight_quota_bytes = values.get(
+        "KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES", str(MEDIA_INFLIGHT_QUOTA_BYTES_DEFAULT)
+    ).strip()
+    if (
+        not re.fullmatch(r"[0-9]+", media_inflight_quota_bytes)
+        or int(media_inflight_quota_bytes) <= 0
+    ):
+        raise DeploymentConfigurationError(
+            "KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES must be a positive integer number of bytes"
+        )
+    if int(maximum_attachment_bytes) > int(media_inflight_quota_bytes):
+        raise DeploymentConfigurationError(
+            "KAEDE_MEDIA_MAX_ATTACHMENT_BYTES cannot exceed "
+            "KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES"
+        )
+    if (
+        int(maximum_attachment_bytes)
+        > configured["KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN"]
+    ):
+        raise DeploymentConfigurationError(
+            "KAEDE_MEDIA_MAX_ATTACHMENT_BYTES cannot exceed "
+            "KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN"
+        )
+
+    history_enabled = values.get("KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED", "true")
+    if history_enabled.strip().lower() not in {"true", "false"}:
+        raise DeploymentConfigurationError(
+            "KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED must be true or false"
+        )
+
+    non_strict_bounds = (
+        (
+            "KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN",
+            "KAEDE_FEDERATION_INBOX_MAX_EVENTS_TOTAL",
+        ),
+        (
+            "KAEDE_FEDERATION_INBOX_MAX_BYTES_PER_ORIGIN",
+            "KAEDE_FEDERATION_INBOX_MAX_BYTES_TOTAL",
+        ),
+        (
+            "KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT_ORIGIN",
+            "KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT",
+        ),
+        (
+            "KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT_ORIGIN",
+            "KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_ORIGIN",
+        ),
+        (
+            "KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_CONVERSATION",
+            "KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_REMOTE_ORIGIN",
+        ),
+        (
+            "KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION",
+            "KAEDE_FEDERATION_DM_MAX_BYTES_PER_REMOTE_ORIGIN",
+        ),
+        (
+            "KAEDE_FEDERATION_DM_REPLICA_CACHE_MESSAGES_PER_CONVERSATION",
+            "KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_CONVERSATION",
+        ),
+        (
+            "KAEDE_FEDERATION_DM_REPLICA_CACHE_BYTES_PER_CONVERSATION",
+            "KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION",
+        ),
+        (
+            "KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_GUILD",
+            "KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_ORIGIN",
+        ),
+        (
+            "KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD",
+            "KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN",
+        ),
+        (
+            "KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN",
+            "KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_TOTAL",
+        ),
+        (
+            "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN",
+            "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_TOTAL",
+        ),
+        (
+            "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN",
+            "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_TOTAL",
+        ),
+        (
+            "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN",
+            "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN",
+        ),
+        (
+            "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_TOTAL",
+            "KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_TOTAL",
+        ),
+        ("KAEDE_FEDERATION_HISTORY_PAGE_BYTES", "KAEDE_FEDERATION_HISTORY_MAX_BYTES"),
+    )
+    for lower_name, upper_name in non_strict_bounds:
+        if configured[lower_name] > configured[upper_name]:
+            raise DeploymentConfigurationError(
+                f"{lower_name} cannot exceed {upper_name}"
+            )
+
+    strict_bounds = (
+        (
+            "KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_REMOTE_ORIGIN",
+            "KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_AUTHORITY",
+        ),
+        (
+            "KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_REMOTE_ORIGIN",
+            "KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_AUTHORITY",
+        ),
+        (
+            "KAEDE_FEDERATION_DM_MAX_BYTES_PER_REMOTE_ORIGIN",
+            "KAEDE_FEDERATION_DM_MAX_BYTES_PER_AUTHORITY",
+        ),
+    )
+    for lower_name, upper_name in strict_bounds:
+        if configured[lower_name] >= configured[upper_name]:
+            raise DeploymentConfigurationError(
+                f"{lower_name} must be below {upper_name}"
+            )
 
 
 def validate_values(values: dict[str, str], *, observability: bool) -> None:
     _validate_auto_update(values)
+    _validate_federation_budgets(values)
     environment = values.get("KAEDE_ENVIRONMENT", "production").strip().lower()
     allow_nonproduction = (
         values.get("ALLOW_NONPRODUCTION_DEPLOYMENT", "").lower() == "true"
@@ -293,7 +515,8 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
 
     if values.get("KAEDE_MEDIA_SCAN_ENABLED", "true").strip().lower() != "true":
         raise DeploymentConfigurationError(
-            "KAEDE_MEDIA_SCAN_ENABLED must be true in production"
+            "KAEDE_MEDIA_SCAN_ENABLED must be true in production. Set it to true and "
+            "rerun `make env-check`"
         )
 
     if values.get("KAEDE_VOICE_ENABLED", "false").strip().lower() == "true":
@@ -327,15 +550,26 @@ def validate_file_permissions(path: Path, values: dict[str, str]) -> None:
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode & 0o077:
         raise DeploymentConfigurationError(
-            f"operator environment must not be group/world accessible (mode is {mode:04o})"
+            "operator environment contains secrets and must not be group/world "
+            f"accessible (mode is {mode:04o}); run `chmod 600 {path}`"
         )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--file", type=Path)
-    parser.add_argument("--file-only", action="store_true")
-    parser.add_argument("--observability", action="store_true")
+    parser = argparse.ArgumentParser(
+        description="Validate Kaede Chat deployment settings before starting services."
+    )
+    parser.add_argument("--file", type=Path, help="path to the operator .env file")
+    parser.add_argument(
+        "--file-only",
+        action="store_true",
+        help="validate only --file instead of the current process environment",
+    )
+    parser.add_argument(
+        "--observability",
+        action="store_true",
+        help="also enforce observability-profile settings",
+    )
     arguments = parser.parse_args()
 
     if arguments.file is not None:
@@ -346,7 +580,9 @@ def main() -> None:
             print("operator environment file validation passed")
             return
     elif arguments.file_only:
-        raise DeploymentConfigurationError("--file-only requires --file")
+        raise DeploymentConfigurationError(
+            "--file-only requires --file PATH; for example, --file .env --file-only"
+        )
 
     validate_values(dict(os.environ), observability=arguments.observability)
     print("deployment environment validation passed")

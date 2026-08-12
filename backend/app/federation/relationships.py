@@ -2,15 +2,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.privacy import lock_relationship_pair, relationship
 from app.core.settings import Settings
 from app.db.models import Relationship, User
 from app.federation.events import build_envelope, queue_event
-from app.federation.replication import profile_from_user, upsert_remote_user
+from app.federation.replication import database_snowflake, profile_from_user, upsert_remote_user
 from app.federation.schemas import EventEnvelope, RelationshipEventContent
+
+
+class RelationshipQuotaExceeded(ValueError):
+    """A peer exhausted a bounded pending-request allowance.
+
+    The public federation result is deliberately a single stable code.  It
+    does not reveal whether the recipient, the actor's origin, or the
+    recipient/origin pair hit its limit, because those distinctions would let
+    a remote peer probe a local user's relationship state.
+    """
+
+    code = "KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED"
 
 
 @dataclass(slots=True)
@@ -19,6 +31,84 @@ class RelationshipApplication:
     actor: User
     relation_type: str | None = None
     wake_destination: str | None = None
+
+
+async def admit_pending_relationship_request(
+    session: AsyncSession,
+    settings: Settings,
+    recipient: User,
+    *,
+    actor_id: int,
+    actor_domain: str,
+) -> None:
+    """Serialize and bound a new inbound request before caching its actor."""
+
+    lock_scopes = sorted(
+        {
+            f"kaede-relationship-pending-origin:{actor_domain}",
+            (f"kaede-relationship-pending-recipient:{recipient.id}@{recipient.origin_domain}"),
+        }
+    )
+    for scope in lock_scopes:
+        await session.scalar(select(func.pg_advisory_xact_lock(func.hashtextextended(scope, 0))))
+
+    existing = await session.scalar(
+        select(Relationship.type).where(
+            Relationship.user_id == recipient.id,
+            Relationship.user_domain == recipient.origin_domain,
+            Relationship.target_id == actor_id,
+            Relationship.target_domain == actor_domain,
+        )
+    )
+    if existing is not None:
+        return
+
+    recipient_pending = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(Relationship)
+            .where(
+                Relationship.user_id == recipient.id,
+                Relationship.user_domain == recipient.origin_domain,
+                Relationship.type == "pending_in",
+            )
+        )
+        or 0
+    )
+    if recipient_pending >= settings.federation_pending_relationships_per_recipient:
+        raise RelationshipQuotaExceeded("recipient pending relationship request quota exceeded")
+
+    recipient_origin_pending = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(Relationship)
+            .where(
+                Relationship.user_id == recipient.id,
+                Relationship.user_domain == recipient.origin_domain,
+                Relationship.target_domain == actor_domain,
+                Relationship.type == "pending_in",
+            )
+        )
+        or 0
+    )
+    if recipient_origin_pending >= settings.federation_pending_relationships_per_recipient_origin:
+        raise RelationshipQuotaExceeded(
+            "origin pending relationship quota for this recipient exceeded"
+        )
+
+    origin_pending = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(Relationship)
+            .where(
+                Relationship.target_domain == actor_domain,
+                Relationship.type == "pending_in",
+            )
+        )
+        or 0
+    )
+    if origin_pending >= settings.federation_pending_relationships_per_origin:
+        raise RelationshipQuotaExceeded("origin pending relationship request quota exceeded")
 
 
 def acceptance_matches(
@@ -112,6 +202,14 @@ async def apply_relationship_event(
         actor = await upsert_remote_user(session, settings, content.actor)
         return RelationshipApplication(recipient, actor, "friend")
 
+    if envelope.type == "relationship.request":
+        await admit_pending_relationship_request(
+            session,
+            settings,
+            recipient,
+            actor_id=database_snowflake(content.actor.id, "relationship actor id"),
+            actor_domain=content.actor.origin_domain,
+        )
     actor = await upsert_remote_user(session, settings, content.actor)
     if (actor.id, actor.origin_domain) == (recipient.id, recipient.origin_domain):
         raise ValueError("a user cannot create a relationship with itself")

@@ -1,7 +1,7 @@
 ENV_FILE ?= .env
 OPERATOR_ENV_FILE := $(abspath $(ENV_FILE))
 GENERATED_COMPOSE := $(if $(wildcard deploy/compose.generated.yml),-f deploy/compose.generated.yml,)
-CONFIG_GUARD := test ! -e .kaede-setup.in-progress || { echo 'setup transaction is incomplete; inspect .kaede-setup.in-progress' >&2; exit 2; }
+CONFIG_GUARD := test ! -e .kaede-setup.in-progress || { echo 'setup transaction is incomplete; inspect .kaede-setup.in-progress and rerun make setup before starting services' >&2; exit 2; }
 COMPOSE := $(CONFIG_GUARD); KAEDE_OPERATOR_ENV_FILE="$(OPERATOR_ENV_FILE)" docker compose --env-file "$(ENV_FILE)" -f deploy/compose.yml $(GENERATED_COMPOSE)
 DEV_COMPOSE := docker compose -f deploy/compose.dev.yml
 VALIDATION_RUN_ID := $(shell date +%s%N)
@@ -124,7 +124,7 @@ desktop-dev:
 	cd desktop/tauri && cargo +1.92.0 tauri dev --config src-tauri/tauri.dev.conf.json
 
 env-check:
-	@test -f "$(ENV_FILE)" || { echo 'missing ENV_FILE: $(ENV_FILE)' >&2; exit 2; }
+	@test -f "$(ENV_FILE)" || { echo 'ENV_FILE does not exist: $(ENV_FILE). Run make setup or pass ENV_FILE=/path/to/operator.env' >&2; exit 2; }
 	docker run --rm \
 		-v "$(OPERATOR_ENV_FILE):/run/kaede/operator.env:ro" \
 		-v "$(CURDIR)/deploy/validate_deploy_env.py:/run/kaede/validate_deploy_env.py:ro" \
@@ -248,7 +248,7 @@ generated-compose-check:
 		echo "generated Compose validation skipped (run make setup to create it)"; \
 		exit 0; \
 	fi; \
-	test -f .env || { echo "deploy/compose.generated.yml exists but .env is missing" >&2; exit 2; }; \
+	test -f .env || { echo "deploy/compose.generated.yml exists but .env is missing; rerun make setup to regenerate a matching configuration" >&2; exit 2; }; \
 	args=""; \
 	if grep -q '^KAEDE_MEDIA_STORAGE_BACKEND=s3$$' .env; then args="$$args --external-s3"; fi; \
 	case ",$$(grep '^COMPOSE_PROFILES=' .env | cut -d= -f2-)," in \

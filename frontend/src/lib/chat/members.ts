@@ -1,4 +1,5 @@
 import type { GuildMemberSummary, PresenceStatus, Role } from './types';
+import { userDisplayName } from './users';
 
 export interface GuildMemberGroups {
   hoisted: Array<{ role: Role; members: GuildMemberSummary[] }>;
@@ -15,7 +16,7 @@ const presenceOrder: Record<PresenceStatus, number> = {
 const memberCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 export function memberDisplayName(member: GuildMemberSummary): string {
-  return member.nickname ?? member.user.display_name ?? member.user.username;
+  return member.nickname ?? userDisplayName(member.user);
 }
 
 export function groupGuildMembers(

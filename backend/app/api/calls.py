@@ -19,13 +19,17 @@ from app.api.dependencies import (
 )
 from app.chat.channel_access import load_channel_access
 from app.chat.events import publish_dispatch, user_topic
+from app.chat.payloads import public_user_display_name
 from app.chat.privacy import blocked_between, require_can_direct_message
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.types import EntityRef
 from app.db.models import Channel, DMParticipant, User
 from app.federation.client import signed_request
-from app.federation.network import FederationNetworkError
+from app.federation.network import (
+    FederationNetworkError,
+    decode_federation_response_json,
+)
 from app.federation.security import (
     FederationPrincipal,
     authenticate_federation,
@@ -49,6 +53,7 @@ from app.voice.state import (
     apply_authoritative_call,
     create_call,
     current_generation,
+    discard_all_federated_voice_home_sessions,
     get_active_call,
     get_call,
     is_call_accepted,
@@ -377,9 +382,11 @@ async def act_on_call(
         if response.status_code != 200:
             raise HTTPException(status_code=response.status_code, detail={"code": "CALL_REJECTED"})
         try:
-            authority_response = CallResponse.model_validate(response.json())
+            authority_response = CallResponse.model_validate(
+                decode_federation_response_json(response)
+            )
             incoming = authoritative_call_record(record, authority_response, payload.action)
-        except ValueError as exc:
+        except (FederationNetworkError, ValueError) as exc:
             raise HTTPException(
                 status_code=502, detail={"code": "CALL_HOME_INVALID_RESPONSE"}
             ) from exc
@@ -455,7 +462,7 @@ async def mint_dm_call_token(
             settings,
             room=room,
             identity=identity,
-            display_name=user.display_name or user.username,
+            display_name=public_user_display_name(user),
             metadata=metadata,
             can_speak=True,
             can_stream=True,
@@ -487,8 +494,11 @@ async def call_voice_token(
     record = await get_call(redis, authority, call_id)
     if record is None or record.get("authority_domain") != authority:
         raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
+    identity = participant_identity(auth.user.id, auth.user.origin_domain)
     if authority == settings.domain:
-        return await mint_dm_call_token(session, redis, settings, record, auth.user)
+        grant = await mint_dm_call_token(session, redis, settings, record, auth.user)
+        await discard_all_federated_voice_home_sessions(redis, identity)
+        return grant
     await require_call_policy(session, settings, record, auth.user)
     try:
         response = await signed_request(
@@ -510,11 +520,13 @@ async def call_voice_token(
     if response.status_code != 200:
         raise HTTPException(status_code=response.status_code, detail={"code": "VOICE_DENIED"})
     try:
-        return VoiceTokenResponse.model_validate(response.json())
-    except (ValueError, json.JSONDecodeError) as exc:
+        grant = VoiceTokenResponse.model_validate(decode_federation_response_json(response))
+    except (FederationNetworkError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=502, detail={"code": "VOICE_HOME_INVALID_RESPONSE"}
         ) from exc
+    await discard_all_federated_voice_home_sessions(redis, identity)
+    return grant
 
 
 @router.post("/_kaede/v1/voice/dm-token", response_model=VoiceTokenResponse)

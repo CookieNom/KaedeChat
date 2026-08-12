@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api } from '$lib/api/client';
+  import { api, userErrorMessage } from '$lib/api/client';
 
   interface Preview {
     url: string;
@@ -12,11 +12,15 @@
 
   let { url }: { url: string } = $props();
   let preview = $state<Preview | null>(null);
+  let loadError = $state('');
+  let loadAttempt = $state(0);
 
   $effect(() => {
     const target = url;
+    void loadAttempt;
     const controller = new AbortController();
     preview = null;
+    loadError = '';
     void api<Preview>('/link-previews', {
       method: 'POST',
       body: JSON.stringify({ url: target }),
@@ -25,13 +29,28 @@
       .then((result) => {
         if (!controller.signal.aborted && target === url) preview = result;
       })
-      .catch(() => undefined);
+      .catch((caught) => {
+        if (!controller.signal.aborted && target === url) {
+          loadError = userErrorMessage(
+            caught,
+            'Could not load this link preview. Open the link directly or try again.'
+          );
+        }
+      });
     return () => controller.abort();
   });
 </script>
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- preview destinations are external URLs returned by the API -->
-{#if preview}
+{#if loadError}
+  <aside class="link-preview link-preview-error" role="alert">
+    <p>{loadError}</p>
+    <div>
+      <a href={url} target="_blank" rel="noopener noreferrer nofollow">Open link</a>
+      <button type="button" onclick={() => (loadAttempt += 1)}>Try again</button>
+    </div>
+  </aside>
+{:else if preview}
   <article class="link-preview">
     {#if preview.media_url && preview.media_type === 'image'}
       <a href={preview.url} target="_blank" rel="noopener noreferrer nofollow">
@@ -109,5 +128,20 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 3;
     line-clamp: 3;
+  }
+  .link-preview-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    border-left-color: var(--danger);
+  }
+  .link-preview-error > div {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 8px;
+    padding: 0;
   }
 </style>

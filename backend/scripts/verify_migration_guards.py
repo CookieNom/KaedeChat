@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.settings import get_settings
 from app.db.session import create_engine_and_sessionmaker
+from scripts.verification import VerificationFailure, failure_message
 
 REVISION = "b46d9a1f2c73"
 FEDERATION_DOMAINS = (
@@ -125,7 +126,9 @@ async def verify_scoped_revision(session: AsyncSession) -> None:
         for value in await session.scalars(text("SELECT version_num FROM alembic_version"))
     }
     if revisions != {REVISION}:
-        raise RuntimeError(f"failed downgrade left Alembic at revisions {sorted(revisions)}")
+        raise VerificationFailure(
+            f"downgrade expected Alembic revision {REVISION}; received {sorted(revisions)}"
+        )
 
     constraint_names = {
         str(value)
@@ -150,7 +153,11 @@ async def verify_scoped_revision(session: AsyncSession) -> None:
         "uq_guild_events_event_id",
     }
     if not required.issubset(constraint_names) or forbidden & constraint_names:
-        raise RuntimeError("failed downgrade did not preserve B46 scoped constraints")
+        raise VerificationFailure(
+            "downgrade did not preserve B46 scoped constraints; missing "
+            f"{sorted(required - constraint_names)}, forbidden present "
+            f"{sorted(forbidden & constraint_names)}"
+        )
 
     primary_key_columns = tuple(
         str(value)
@@ -173,8 +180,9 @@ async def verify_scoped_revision(session: AsyncSession) -> None:
         )
     )
     if primary_key_columns != ("origin_domain", "event_id"):
-        raise RuntimeError(
-            "failed downgrade did not preserve the origin-scoped federation event key"
+        raise VerificationFailure(
+            "federation event primary key expected ('origin_domain', 'event_id'); "
+            f"received {primary_key_columns!r}"
         )
 
 
@@ -193,7 +201,9 @@ async def verify_federation_fixture(session: AsyncSession) -> None:
         },
     )
     if event_count != 2:
-        raise RuntimeError("failed downgrade did not preserve the federation collision fixture")
+        raise VerificationFailure(
+            f"federation collision fixture expected 2 events; received {event_count}"
+        )
 
 
 async def verify_guild_fixture(session: AsyncSession) -> None:
@@ -211,7 +221,9 @@ async def verify_guild_fixture(session: AsyncSession) -> None:
         },
     )
     if event_count != 2:
-        raise RuntimeError("failed downgrade did not preserve the guild collision fixture")
+        raise VerificationFailure(
+            f"guild collision fixture expected 2 events; received {event_count}"
+        )
 
 
 async def run(action: str) -> None:
@@ -232,7 +244,7 @@ async def run(action: str) -> None:
             elif action == "cleanup-guild":
                 await cleanup_guild_fixture(session)
             else:  # pragma: no cover - argparse enforces the choices
-                raise ValueError(action)
+                raise VerificationFailure(f"unsupported migration-guard action: {action!r}")
     finally:
         await engine.dispose()
 
@@ -255,4 +267,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except VerificationFailure as error:
+        raise SystemExit(
+            failure_message("migration guard", error, "make migration-check")
+        ) from None

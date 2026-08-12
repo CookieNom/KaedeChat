@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { splitSpoilers, tokenizeText, tokenKind } from './markdown';
+import { mentionPresentation, splitSpoilers, tokenizeText, tokenKind } from './markdown';
 
 describe('message markdown tokenization', () => {
   it('classifies immutable handles, channels, and emoji without dropping text', () => {
@@ -41,5 +41,29 @@ describe('message markdown tokenization', () => {
       '||second line\ncontinues||',
       ' after'
     ]);
+  });
+
+  it('keeps an unresolved explicit mention actionable by ref without exposing its fake handle', () => {
+    const mention = mentionPresentation(
+      '<@42@remote.example>',
+      [
+        {
+          id: '42',
+          origin_domain: 'remote.example',
+          username: 'history_deadbeef',
+          display_name: null,
+          avatar_hash: null,
+          handle: 'history_deadbeef@remote.example',
+          profile_resolved: false
+        }
+      ],
+      'local.example'
+    );
+
+    expect(mention.text).toBe('@Remote user · remote.example');
+    expect(mention.userRef).toBe('42@remote.example');
+    expect(mention.userHandle).toBeUndefined();
+    expect(mention.title).toBe('Remote user · remote.example');
+    expect(JSON.stringify(mention)).not.toContain('history_deadbeef');
   });
 });

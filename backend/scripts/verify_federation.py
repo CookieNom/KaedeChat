@@ -32,6 +32,7 @@ from app.db.models import (
     UserSettings,
 )
 from app.db.session import create_engine_and_sessionmaker
+from scripts.verification import VerificationFailure, failure_message, require
 
 PASSWORD = "correct horse battery staple"  # noqa: S105 - disposable validation credential
 ALPHA_URL = os.getenv("ALPHA_URL", "http://alpha-api:8000")
@@ -40,11 +41,6 @@ ALPHA_DATABASE_URL = os.environ["ALPHA_DATABASE_URL"]
 BETA_DATABASE_URL = os.environ["BETA_DATABASE_URL"]
 BETA_DRAGONFLY_URL = os.environ["BETA_DRAGONFLY_URL"]
 TLS_CA_FILE = os.getenv("TLS_CA_FILE")
-
-
-def require(condition: bool, message: str) -> None:
-    if not condition:
-        raise RuntimeError(message)
 
 
 def entity_ref(payload: dict[str, Any]) -> str:
@@ -62,7 +58,9 @@ def versioned_headers(auth_headers: dict[str, str], resource: dict[str, Any]) ->
 
     version = resource.get("version")
     if not isinstance(version, str) or not version:
-        raise RuntimeError("resource version is missing")
+        raise VerificationFailure(
+            f"API resource omitted the version required for an If-Match request: {resource!r}"
+        )
     return {**auth_headers, "If-Match": version}
 
 
@@ -138,7 +136,7 @@ async def wait_for(
         if predicate(last):
             return last
         await asyncio.sleep(0.2)
-    raise RuntimeError(f"{message}; last result: {last!r}")
+    raise VerificationFailure(f"{message}; last observed result: {last!r}")
 
 
 async def login(client: httpx.AsyncClient, username: str) -> dict[str, str]:
@@ -1407,27 +1405,40 @@ async def verify() -> None:
             )
         ),
     )
-    require(alpha_messages == 9, "authoritative messages are incomplete")
-    require(beta_dm_messages == 3, "direct-message replicas were removed with guild access")
+    require(
+        alpha_messages == 9,
+        f"authoritative message count expected 9; received {alpha_messages}",
+    )
+    require(
+        beta_dm_messages == 3,
+        "direct-message replica count expected 3 after guild access removal; "
+        f"received {beta_dm_messages}",
+    )
     require(
         beta_guild_messages == 0 and beta_messages == beta_dm_messages,
         "revoked guild message cache was retained",
     )
     beta_inbox = await row_count(BETA_DATABASE_URL, FederationInbox)
-    require(beta_inbox >= 2, "durable federation inbox was not used")
+    require(
+        beta_inbox >= 2,
+        f"durable federation inbox expected at least 2 rows; received {beta_inbox}",
+    )
     pending = await row_count(
         ALPHA_DATABASE_URL,
         FederationOutbox,
         FederationOutbox.status.in_(("pending", "retry", "circuit")),
     )
-    require(pending == 0, "Alpha outbox did not drain")
+    require(pending == 0, f"Alpha outbox expected 0 pending rows; received {pending}")
     guild_replicas = await row_count(
         BETA_DATABASE_URL,
         Guild,
         Guild.id == int(guild_id),
         Guild.origin_domain == "alpha.localhost",
     )
-    require(guild_replicas == 1, "guild snapshot was not persisted")
+    require(
+        guild_replicas == 1,
+        f"guild snapshot expected exactly 1 replica; received {guild_replicas}",
+    )
     dragonfly = Redis.from_url(BETA_DRAGONFLY_URL)
     try:
         active_links = await dragonfly.zcard("federation:link:connections:alpha.localhost")
@@ -1438,4 +1449,7 @@ async def verify() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(verify())
+    try:
+        asyncio.run(verify())
+    except VerificationFailure as error:
+        raise SystemExit(failure_message("federation", error, "make federation-check")) from None

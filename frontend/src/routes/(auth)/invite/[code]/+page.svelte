@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { resolve } from '$app/paths';
-  import { api, ApiError } from '$lib/api/client';
+  import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { formatDateTime } from '$lib/ui/locale';
   import { invitedChannel } from '$lib/chat/invite-preview';
   import { entityRef } from '$lib/chat/refs';
@@ -44,7 +44,10 @@
       .catch((caught: unknown) => {
         if (controller.signal.aborted || generation !== loadGeneration || targetCode !== code)
           return;
-        error = caught instanceof ApiError ? caught.message : 'This invite is unavailable.';
+        error = userErrorMessage(
+          caught,
+          'This invite is unavailable. Ask for a new invite and try again.'
+        );
       });
     return () => controller.abort();
   });
@@ -74,7 +77,7 @@
         sessionStorage.setItem('kaede.return-to', window.location.pathname);
         window.location.assign(resolve('/login'));
       } else {
-        error = caught instanceof ApiError ? caught.message : 'Could not accept this invite.';
+        error = userErrorMessage(caught, 'Could not accept this invite. Try again.');
       }
     } finally {
       if (generation === loadGeneration && targetCode === code) busy = false;

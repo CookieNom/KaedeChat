@@ -1,6 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { api, ApiError } from '$lib/api/client';
+  import { api, userErrorMessage } from '$lib/api/client';
   import {
     hasJoinedGuild,
     invitedChannel,
@@ -17,6 +17,7 @@
   let { reference }: { reference: string } = $props();
   let preview = $state<InvitePreview | null>(null);
   let unavailable = $state(false);
+  let unavailableError = $state('');
   let busy = $state(false);
   let error = $state('');
   let loadGeneration = 0;
@@ -29,13 +30,20 @@
     const generation = ++loadGeneration;
     preview = null;
     unavailable = false;
+    unavailableError = '';
     error = '';
     void loadInvitePreview(target)
       .then((result) => {
         if (generation === loadGeneration) preview = result;
       })
-      .catch(() => {
-        if (generation === loadGeneration) unavailable = true;
+      .catch((caught) => {
+        if (generation === loadGeneration) {
+          unavailable = true;
+          unavailableError = userErrorMessage(
+            caught,
+            'Could not check this invitation. Check your connection and try again.'
+          );
+        }
       });
   });
 
@@ -56,7 +64,10 @@
       window.location.assign(channel ? guildChannelPath(hydrated, channel) : resolve('/home'));
     } catch (caught) {
       if (generation !== loadGeneration) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not join this guild.';
+      error = userErrorMessage(
+        caught,
+        'Could not join this guild. Check the invite and try again.'
+      );
     } finally {
       if (generation === loadGeneration) busy = false;
     }
@@ -92,10 +103,7 @@
 {:else if unavailable}
   <aside class="invite-embed unavailable" aria-label="Unavailable guild invitation">
     <Icon name="server" size={20} />
-    <span
-      ><strong>Invitation unavailable</strong><small>It may have expired or been revoked.</small
-      ></span
-    >
+    <span><strong>Invitation unavailable</strong><small>{unavailableError}</small></span>
   </aside>
 {:else}
   <aside class="invite-embed loading" aria-label="Loading guild invitation">

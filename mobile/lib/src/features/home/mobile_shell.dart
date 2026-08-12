@@ -5,14 +5,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
+import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
+import 'package:uuid/uuid.dart';
 
 final class MobileShell extends ConsumerStatefulWidget {
   const MobileShell({super.key});
@@ -74,6 +78,87 @@ final class _MobileShellState extends ConsumerState<MobileShell>
               ),
             ),
           ),
+        if (state.phase == SessionPhase.ready &&
+            !state.gatewayHealth.isConnected)
+          Material(
+            color: const Color(0xFF4A391B),
+            child: ListTile(
+              dense: true,
+              leading: Icon(
+                state.gatewayHealth.phase == GatewayConnectionPhase.offline
+                    ? Icons.sync_problem_rounded
+                    : Icons.sync_rounded,
+                color: KaedeColors.warning,
+              ),
+              title: Text(
+                state.gatewayHealth.message ??
+                    'Realtime updates are temporarily unavailable.',
+              ),
+              trailing:
+                  state.gatewayHealth.phase == GatewayConnectionPhase.connecting
+                      ? const SizedBox.square(
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : TextButton(
+                          onPressed: () => ref
+                              .read(mobileControllerProvider.notifier)
+                              .retryRealtime(),
+                          child: const Text('Retry'),
+                        ),
+            ),
+          ),
+        if (state.gatewayProtocolWarning case final warning?)
+          Material(
+            color: const Color(0xFF4A391B),
+            child: ListTile(
+              dense: true,
+              leading: const Icon(
+                Icons.warning_amber_rounded,
+                color: KaedeColors.warning,
+              ),
+              title: Text(warning),
+            ),
+          ),
+        if (state.degradedWarnings.isNotEmpty)
+          Material(
+            color: const Color(0xFF4A391B),
+            child: ListTile(
+              dense: true,
+              leading: const Icon(
+                Icons.cloud_sync_outlined,
+                color: KaedeColors.warning,
+              ),
+              title: Text(state.degradedWarnings.values.first),
+              subtitle: state.degradedWarnings.length > 1
+                  ? Text(
+                      '${state.degradedWarnings.length} account areas need to resync.',
+                    )
+                  : null,
+              trailing: TextButton(
+                onPressed: () => ref
+                    .read(mobileControllerProvider.notifier)
+                    .retryDegradedData(),
+                child: const Text('Retry'),
+              ),
+            ),
+          ),
+        if (state.pushWarning case final warning?)
+          Material(
+            color: const Color(0xFF4A391B),
+            child: ListTile(
+              dense: true,
+              leading: const Icon(
+                Icons.notifications_off_outlined,
+                color: KaedeColors.warning,
+              ),
+              title: Text(warning),
+              trailing: TextButton(
+                onPressed: () => _showSection(_ShellSection.settings),
+                child: const Text('Settings'),
+              ),
+            ),
+          ),
         if (voice.connected && voice.channel?.ref != activeChannel?.ref)
           Material(
             color: const Color(0xFF174C3E),
@@ -100,14 +185,24 @@ final class _MobileShellState extends ConsumerState<MobileShell>
                 children: [
                   IconButton(
                     tooltip: voice.muted ? 'Unmute' : 'Mute',
-                    onPressed: voice.canSpeak ? voice.toggleMute : null,
+                    onPressed: voice.canSpeak
+                        ? () => _runVisibleAction(
+                              context,
+                              'Could not change the microphone state',
+                              voice.toggleMute,
+                            )
+                        : null,
                     icon: Icon(voice.muted
                         ? Icons.mic_off_rounded
                         : Icons.mic_rounded),
                   ),
                   IconButton(
                     tooltip: 'Leave voice',
-                    onPressed: () => voice.leave(),
+                    onPressed: () => _runVisibleAction(
+                      context,
+                      'Could not leave voice',
+                      voice.leave,
+                    ),
                     icon: const Icon(Icons.call_end_rounded),
                   ),
                 ],
@@ -313,6 +408,7 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane>
     with AutomaticKeepAliveClientMixin {
   List<GuildMember>? _members;
   String? _error;
+  var _partial = false;
 
   @override
   bool get wantKeepAlive => true;
@@ -329,27 +425,30 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane>
     if (oldWidget.guild.ref != widget.guild.ref) {
       _members = null;
       _error = null;
+      _partial = false;
       _load();
     }
   }
 
   Future<void> _load() async {
+    final requestedGuild = widget.guild;
     try {
       final members = await ref
           .read(mobileControllerProvider.notifier)
           .repository
-          .members(widget.guild.ref);
-      if (mounted) {
+          .members(requestedGuild.ref);
+      if (mounted && widget.guild.ref == requestedGuild.ref) {
         setState(() {
           _members = members;
           _error = null;
+          _partial = false;
         });
       }
-    } on Object {
-      if (mounted) {
+    } on Object catch (error) {
+      if (mounted && widget.guild.ref == requestedGuild.ref) {
         final state = ref.read(mobileControllerProvider);
         final channelRefs =
-            widget.guild.channels.map((channel) => channel.ref).toSet();
+            requestedGuild.channels.map((channel) => channel.ref).toSet();
         final known = <EntityRef, KaedeUser>{};
         if (state.user case final user?) known[user.ref] = user;
         for (final entry in state.messageStore.entries) {
@@ -365,8 +464,12 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane>
               .map((user) => GuildMember(user: user, roleIds: const <String>[]))
               .toList(growable: false);
           _error = _members!.isEmpty
-              ? 'No members are available for this guild yet.'
+              ? userFacingError(
+                  error,
+                  summary: 'Could not load the member list',
+                )
               : null;
+          _partial = _members!.isNotEmpty;
         });
       }
     }
@@ -400,19 +503,32 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane>
                       onRefresh: _load,
                       child: ListView.builder(
                         padding: const EdgeInsets.symmetric(vertical: 8),
-                        itemCount: _members!.length,
+                        itemCount: _members!.length + (_partial ? 1 : 0),
                         itemBuilder: (context, index) {
-                          final member = _members![index];
+                          if (_partial && index == 0) {
+                            return const ListTile(
+                              leading: Icon(
+                                Icons.info_outline_rounded,
+                                color: KaedeColors.warning,
+                              ),
+                              title: Text('Partial member list'),
+                              subtitle: Text(
+                                'Kaede could not load the full roster. These are only members seen in cached messages. Pull down to retry.',
+                              ),
+                            );
+                          }
+                          final member = _members![index - (_partial ? 1 : 0)];
+                          final user = mobile.userProfiles[member.user.ref] ??
+                              member.user;
                           final presence =
-                              mobile.presenceByUser[member.user.ref] ??
-                                  member.user.presence;
+                              mobile.presenceByUser[user.ref] ?? user.presence;
                           return ListTile(
-                            leading: UserAvatar(user: member.user),
-                            title: Text(member.nickname ?? member.user.name),
+                            leading: UserAvatar(user: user),
+                            title: Text(member.nickname ?? user.name),
                             subtitle: Text(_presenceLabel(presence)),
                             onTap: () => showUserProfile(
                               context,
-                              member.user,
+                              user,
                               presence,
                             ),
                           );
@@ -470,7 +586,7 @@ final class _ChatBrowser extends ConsumerWidget {
   }
 }
 
-final class _ServerRail extends StatelessWidget {
+final class _ServerRail extends ConsumerWidget {
   const _ServerRail({
     required this.state,
     required this.onOpenHome,
@@ -484,62 +600,403 @@ final class _ServerRail extends StatelessWidget {
   final VoidCallback onAddGuild;
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-        width: 72,
-        child: ColoredBox(
-          color: KaedeColors.rail,
-          child: SafeArea(
-            right: false,
+  Widget build(BuildContext context, WidgetRef ref) {
+    final navigation =
+        reconcileGuildNavigation(state.guildNavigation, state.guilds);
+    final guildByRef = <EntityRef, KaedeGuild>{
+      for (final guild in state.guilds) guild.ref: guild,
+    };
+    return SizedBox(
+      width: 72,
+      child: ColoredBox(
+        color: KaedeColors.rail,
+        child: SafeArea(
+          right: false,
+          child: Column(
+            children: [
+              const SizedBox(height: 10),
+              _RailButton(
+                label: 'Messages',
+                active: state.selectedGuild == null,
+                onTap: onOpenHome,
+                badge: state.dms.fold(
+                  0,
+                  (total, dm) => total + (state.unreadCounts[dm.ref] ?? 0),
+                ),
+                unread: state.dms.any(
+                  (dm) => (state.unreadCounts[dm.ref] ?? 0) > 0,
+                ),
+                child: const Icon(Icons.chat_bubble_rounded, size: 26),
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 14),
+                child: Divider(height: 12),
+              ),
+              Expanded(
+                child: ReorderableListView.builder(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                  itemCount: navigation.items.length,
+                  onReorder: (oldIndex, newIndex) => ref
+                      .read(mobileControllerProvider.notifier)
+                      .saveGuildNavigation(
+                        reorderGuildNavigation(navigation, oldIndex, newIndex),
+                      ),
+                  itemBuilder: (context, index) {
+                    final item = navigation.items[index];
+                    return switch (item) {
+                      GuildNavigationGuildItem() => Builder(
+                          key: ValueKey('guild:${item.guild.wire}'),
+                          builder: (context) {
+                            final guild = guildByRef[item.guild];
+                            return guild == null
+                                ? const SizedBox.shrink()
+                                : _RailButton(
+                                    label: guild.name,
+                                    active: guild.ref == state.selectedGuild,
+                                    onTap: () => onOpenGuild(guild),
+                                    badge: _guildMentions(state, guild),
+                                    unread: _guildUnread(state, guild),
+                                    child: GuildIcon(guild: guild, size: 54),
+                                  );
+                          },
+                        ),
+                      GuildNavigationGroupItem() => _GuildRailFolder(
+                          key: ValueKey('group:${item.id}'),
+                          state: state,
+                          group: item,
+                          guildByRef: guildByRef,
+                          onOpenGuild: onOpenGuild,
+                          onToggle: () => ref
+                              .read(mobileControllerProvider.notifier)
+                              .saveGuildNavigation(
+                                updateGuildNavigationGroup(
+                                  navigation,
+                                  item.id,
+                                  collapsed: !item.collapsed,
+                                ),
+                              ),
+                        ),
+                    };
+                  },
+                ),
+              ),
+              _RailButton(
+                label: 'Organize guilds',
+                active: false,
+                onTap: () => showModalBottomSheet<void>(
+                  context: context,
+                  isScrollControlled: true,
+                  showDragHandle: true,
+                  builder: (_) => _GuildOrganizerSheet(
+                    initial: navigation,
+                    guilds: state.guilds,
+                  ),
+                ),
+                child: const Icon(Icons.create_new_folder_outlined, size: 24),
+              ),
+              _RailButton(
+                label: 'Add a guild',
+                active: false,
+                onTap: onAddGuild,
+                child: const Icon(Icons.add_rounded,
+                    color: KaedeColors.mint, size: 28),
+              ),
+              const SizedBox(height: 2),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _GuildRailFolder extends StatelessWidget {
+  const _GuildRailFolder({
+    super.key,
+    required this.state,
+    required this.group,
+    required this.guildByRef,
+    required this.onOpenGuild,
+    required this.onToggle,
+  });
+
+  final MobileState state;
+  final GuildNavigationGroupItem group;
+  final Map<EntityRef, KaedeGuild> guildByRef;
+  final ValueChanged<KaedeGuild> onOpenGuild;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final guilds = group.guilds
+        .map((ref) => guildByRef[ref])
+        .whereType<KaedeGuild>()
+        .toList();
+    final mentions =
+        guilds.fold(0, (total, guild) => total + _guildMentions(state, guild));
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: KaedeColors.raised.withValues(alpha: .72),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _RailButton(
+            label: group.name,
+            active: guilds.any((guild) => guild.ref == state.selectedGuild),
+            onTap: onToggle,
+            badge: mentions,
+            unread: guilds.any((guild) => _guildUnread(state, guild)),
+            child: Icon(
+              group.collapsed
+                  ? Icons.folder_rounded
+                  : Icons.folder_open_rounded,
+              color: KaedeColors.coral,
+              size: 29,
+            ),
+          ),
+          if (!group.collapsed)
+            for (final guild in guilds)
+              _RailButton(
+                label: guild.name,
+                active: guild.ref == state.selectedGuild,
+                onTap: () => onOpenGuild(guild),
+                badge: _guildMentions(state, guild),
+                unread: _guildUnread(state, guild),
+                child: GuildIcon(guild: guild, size: 54),
+              ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _GuildGroupDraft {
+  const _GuildGroupDraft(this.name, this.guilds);
+
+  final String name;
+  final List<EntityRef> guilds;
+}
+
+final class _GuildOrganizerSheet extends ConsumerStatefulWidget {
+  const _GuildOrganizerSheet({required this.initial, required this.guilds});
+
+  final GuildNavigation initial;
+  final List<KaedeGuild> guilds;
+
+  @override
+  ConsumerState<_GuildOrganizerSheet> createState() =>
+      _GuildOrganizerSheetState();
+}
+
+final class _GuildOrganizerSheetState
+    extends ConsumerState<_GuildOrganizerSheet> {
+  late GuildNavigation _navigation;
+
+  @override
+  void initState() {
+    super.initState();
+    _navigation = widget.initial;
+  }
+
+  Map<EntityRef, KaedeGuild> get _guildByRef => <EntityRef, KaedeGuild>{
+        for (final guild in widget.guilds) guild.ref: guild,
+      };
+
+  Future<void> _editGroup([GuildNavigationGroupItem? existing]) async {
+    final name = TextEditingController(text: existing?.name ?? 'Guild group');
+    final selected = <EntityRef>{...?existing?.guilds};
+    final draft = await showDialog<_GuildGroupDraft>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(
+              existing == null ? 'Create guild group' : 'Edit guild group'),
+          content: SizedBox(
+            width: 420,
             child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                const SizedBox(height: 10),
-                _RailButton(
-                  label: 'Messages',
-                  active: state.selectedGuild == null,
-                  onTap: onOpenHome,
-                  badge: state.dms.fold(
-                    0,
-                    (total, dm) => total + (state.unreadCounts[dm.ref] ?? 0),
-                  ),
-                  unread: state.dms.any(
-                    (dm) => (state.unreadCounts[dm.ref] ?? 0) > 0,
-                  ),
-                  child: const Icon(Icons.chat_bubble_rounded, size: 26),
+                TextField(
+                  controller: name,
+                  autofocus: true,
+                  maxLength: 32,
+                  decoration: const InputDecoration(labelText: 'Group name'),
                 ),
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 14),
-                  child: Divider(height: 12),
-                ),
-                Expanded(
+                const SizedBox(height: 8),
+                Flexible(
                   child: ListView(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                    shrinkWrap: true,
                     children: [
-                      for (final guild in state.guilds)
-                        _RailButton(
-                          label: guild.name,
-                          active: guild.ref == state.selectedGuild,
-                          onTap: () => onOpenGuild(guild),
-                          badge: _guildMentions(state, guild),
-                          unread: _guildUnread(state, guild),
-                          child: GuildIcon(guild: guild, size: 54),
+                      for (final guild in widget.guilds)
+                        CheckboxListTile(
+                          value: selected.contains(guild.ref),
+                          secondary: GuildIcon(guild: guild, size: 34),
+                          title: Text(guild.name),
+                          subtitle: Text(guild.ref.domain.value),
+                          onChanged: (checked) => setDialogState(() {
+                            if (checked == true) {
+                              selected.add(guild.ref);
+                            } else {
+                              selected.remove(guild.ref);
+                            }
+                          }),
                         ),
                     ],
                   ),
                 ),
-                _RailButton(
-                  label: 'Add a guild',
-                  active: false,
-                  onTap: onAddGuild,
-                  child: const Icon(Icons.add_rounded,
-                      color: KaedeColors.mint, size: 28),
-                ),
-                const SizedBox(height: 2),
               ],
             ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: name.text.trim().isEmpty || selected.isEmpty
+                  ? null
+                  : () => Navigator.pop(
+                        context,
+                        _GuildGroupDraft(name.text.trim(), selected.toList()),
+                      ),
+              child: const Text('Save group'),
+            ),
+          ],
         ),
-      );
+      ),
+    );
+    name.dispose();
+    if (draft == null || !mounted) return;
+    setState(() {
+      _navigation = existing == null
+          ? createGuildNavigationGroup(
+              _navigation,
+              const Uuid().v4(),
+              draft.name,
+              draft.guilds,
+            )
+          : replaceGuildNavigationGroup(
+              _navigation,
+              existing.id,
+              draft.name,
+              draft.guilds,
+            );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final guildByRef = _guildByRef;
+    return SafeArea(
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * .84,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Organize guilds',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'Press and hold a row, then drag it. Groups and ordering sync to web and desktop.',
+                style: TextStyle(color: KaedeColors.muted),
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: ReorderableListView.builder(
+                  itemCount: _navigation.items.length,
+                  onReorder: (oldIndex, newIndex) => setState(() {
+                    _navigation = reorderGuildNavigation(
+                      _navigation,
+                      oldIndex,
+                      newIndex,
+                    );
+                  }),
+                  itemBuilder: (context, index) {
+                    final item = _navigation.items[index];
+                    if (item is GuildNavigationGuildItem) {
+                      final guild = guildByRef[item.guild];
+                      return ListTile(
+                        key: ValueKey('organize-guild:${item.guild.wire}'),
+                        leading: guild == null
+                            ? const Icon(Icons.public_off_rounded)
+                            : GuildIcon(guild: guild, size: 42),
+                        title: Text(guild?.name ?? 'Unavailable guild'),
+                        subtitle: Text(item.guild.domain.value),
+                        trailing: const Icon(Icons.drag_handle_rounded),
+                      );
+                    }
+                    final group = item as GuildNavigationGroupItem;
+                    final names = group.guilds
+                        .map((ref) => guildByRef[ref]?.name)
+                        .whereType<String>()
+                        .join(', ');
+                    return ListTile(
+                      key: ValueKey('organize-group:${group.id}'),
+                      leading: const CircleAvatar(
+                        backgroundColor: KaedeColors.raised,
+                        child: Icon(Icons.folder_rounded,
+                            color: KaedeColors.coral),
+                      ),
+                      title: Text(group.name),
+                      subtitle: Text(names),
+                      trailing: PopupMenuButton<String>(
+                        onSelected: (value) {
+                          if (value == 'edit') {
+                            _editGroup(group);
+                          } else if (value == 'ungroup') {
+                            setState(() {
+                              _navigation =
+                                  ungroupGuildNavigation(_navigation, group.id);
+                            });
+                          }
+                        },
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                              value: 'edit', child: Text('Edit group')),
+                          PopupMenuItem(
+                              value: 'ungroup', child: Text('Ungroup guilds')),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _editGroup,
+                    icon: const Icon(Icons.create_new_folder_outlined),
+                    label: const Text('Create group'),
+                  ),
+                  const Spacer(),
+                  FilledButton.icon(
+                    onPressed: () async {
+                      await ref
+                          .read(mobileControllerProvider.notifier)
+                          .saveGuildNavigation(_navigation);
+                      if (context.mounted) Navigator.pop(context);
+                    },
+                    icon: const Icon(Icons.sync_rounded),
+                    label: const Text('Save'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 final class _DirectMessageBrowser extends ConsumerWidget {
@@ -797,7 +1254,16 @@ final class _GuildBrowser extends ConsumerWidget {
                         channel.type == ChannelType.text ||
                         channel.type == ChannelType.announcement);
                     final channel = target.isEmpty ? null : target.first;
-                    if (channel == null) return;
+                    if (channel == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Create a text channel before creating an invite.',
+                          ),
+                        ),
+                      );
+                      return;
+                    }
                     _createAndShowInvite(context, controller, guild, channel);
                   },
                 ),
@@ -1327,8 +1793,12 @@ Future<void> _createAndShowInvite(BuildContext context,
     );
   } on Object catch (error) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('$error')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(userFacingError(
+          error,
+          summary: 'Could not create the invite',
+        )),
+      ));
     }
   }
 }
@@ -1636,15 +2106,20 @@ final class _RelationshipTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final user = _relationshipUser(relationship);
-    if (user == null) return const SizedBox.shrink();
+    final snapshot = _relationshipUser(relationship);
+    if (snapshot == null) return const SizedBox.shrink();
+    final user =
+        ref.watch(mobileControllerProvider).userProfiles[snapshot.ref] ??
+            snapshot;
     final type = '${relationship['type']}';
     return Card(
       child: ListTile(
         contentPadding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
         leading: UserAvatar(user: user),
         title: Text(user.name),
-        subtitle: Text(user.handle),
+        subtitle: Text(user.profileResolved
+            ? user.handle
+            : 'Profile unavailable · refreshes automatically'),
         onTap: () => _showProfile(context, ref, user, type, onOpenChat),
         trailing: switch (type) {
           'pending_in' => Wrap(
@@ -1676,7 +2151,9 @@ final class _RelationshipTile extends ConsumerWidget {
             ),
           'friend' => IconButton(
               tooltip: 'Message',
-              onPressed: () => _openDm(context, ref, user, onOpenChat),
+              onPressed: user.profileResolved
+                  ? () => _openDm(context, ref, user, onOpenChat)
+                  : null,
               icon: const Icon(Icons.chat_bubble_outline_rounded),
             ),
           'blocked' => TextButton(
@@ -1723,14 +2200,19 @@ Future<void> _relationshipAction(BuildContext context, WidgetRef ref,
     await ref.read(mobileControllerProvider.notifier).refreshNavigation();
   } on Object catch (error) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('$error')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(userFacingError(
+          error,
+          summary: 'Could not update the relationship',
+        )),
+      ));
     }
   }
 }
 
 Future<void> _openDm(BuildContext context, WidgetRef ref, KaedeUser user,
     VoidCallback onOpenChat) async {
+  if (!user.profileResolved) return;
   try {
     final dm = await ref
         .read(mobileControllerProvider.notifier)
@@ -1741,8 +2223,12 @@ Future<void> _openDm(BuildContext context, WidgetRef ref, KaedeUser user,
     onOpenChat();
   } on Object catch (error) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('$error')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(userFacingError(
+          error,
+          summary: 'Could not open the direct message',
+        )),
+      ));
     }
   }
 }
@@ -1750,14 +2236,16 @@ Future<void> _openDm(BuildContext context, WidgetRef ref, KaedeUser user,
 Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
     String relationshipType, VoidCallback onOpenChat) async {
   KaedeUser resolved = user;
-  try {
-    resolved = await ref
-        .read(mobileControllerProvider.notifier)
-        .repository
-        .lookupUser(user.handle);
-  } on Object {
-    // The relationship snapshot remains usable while a remote instance is
-    // temporarily unavailable.
+  if (user.profileResolved) {
+    try {
+      resolved = await ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .lookupUser(user.handle);
+    } on Object {
+      // The relationship snapshot remains usable while a remote instance is
+      // temporarily unavailable.
+    }
   }
   if (!context.mounted) return;
   await showModalBottomSheet<void>(
@@ -1801,8 +2289,12 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
                 children: [
                   Text(resolved.name,
                       style: Theme.of(context).textTheme.headlineMedium),
-                  Text(resolved.handle,
-                      style: const TextStyle(color: KaedeColors.muted)),
+                  Text(
+                    resolved.profileResolved
+                        ? resolved.handle
+                        : 'Profile unavailable · refreshes automatically',
+                    style: const TextStyle(color: KaedeColors.muted),
+                  ),
                   if (resolved.customStatus?.isNotEmpty == true) ...[
                     const SizedBox(height: 12),
                     Chip(label: Text(resolved.customStatus!)),
@@ -1818,16 +2310,19 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
                     Text(resolved.bio!),
                   ],
                   const SizedBox(height: 22),
-                  FilledButton.icon(
-                    onPressed: () {
-                      Navigator.pop(sheetContext);
-                      _openDm(context, ref, resolved, onOpenChat);
-                    },
-                    icon: const Icon(Icons.chat_bubble_outline_rounded),
-                    label: const Text('Message'),
-                  ),
-                  const SizedBox(height: 8),
-                  if (relationshipType != 'friend' &&
+                  if (resolved.profileResolved) ...[
+                    FilledButton.icon(
+                      onPressed: () {
+                        Navigator.pop(sheetContext);
+                        _openDm(context, ref, resolved, onOpenChat);
+                      },
+                      icon: const Icon(Icons.chat_bubble_outline_rounded),
+                      label: const Text('Message'),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  if (resolved.profileResolved &&
+                      relationshipType != 'friend' &&
                       relationshipType != 'pending_out' &&
                       relationshipType != 'blocked')
                     OutlinedButton.icon(
@@ -1904,12 +2399,48 @@ Future<void> _textAction(
             onPressed: () => Navigator.pop(context),
             child: const Text('Cancel')),
         FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            onPressed: () {
+              final value = controller.text.trim();
+              if (value.isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Enter $hint.')),
+                );
+                return;
+              }
+              Navigator.pop(context, value);
+            },
             child: const Text('Continue')),
       ],
     ),
   );
-  if (value?.isNotEmpty == true) await action(value!);
+  if (value?.isNotEmpty == true) {
+    try {
+      await action(value!);
+    } on Object catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(userFacingError(
+          error,
+          summary: 'Could not complete “$title”',
+        )),
+      ));
+    }
+  }
+}
+
+Future<void> _runVisibleAction(
+  BuildContext context,
+  String summary,
+  Future<void> Function() action,
+) async {
+  try {
+    await action();
+  } on Object catch (error) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(userFacingError(error, summary: summary)),
+    ));
+  }
 }
 
 extension _LastOrNull<T> on List<T> {

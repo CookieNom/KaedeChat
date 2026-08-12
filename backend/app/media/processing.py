@@ -5,6 +5,7 @@ import hashlib
 import io
 import re
 import tempfile
+from collections.abc import AsyncIterable, AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -125,7 +126,7 @@ def validate_detected_type(declared: str, detected: str) -> None:
         raise MediaValidationError("declared content type does not match the file")
 
 
-async def clamav_scan(data: bytes, settings: Settings) -> str:
+async def _clamav_scan_chunks(chunks: AsyncIterable[bytes], settings: Settings) -> str:
     if not settings.media_scan_enabled:
         if settings.environment == "production":
             raise RuntimeError("malware scanning cannot be disabled in production")
@@ -138,8 +139,7 @@ async def clamav_scan(data: bytes, settings: Settings) -> str:
         )
         writer = connected_writer
         connected_writer.write(b"zINSTREAM\0")
-        for offset in range(0, len(data), 64 * 1024):
-            chunk = data[offset : offset + 64 * 1024]
+        async for chunk in chunks:
             connected_writer.write(len(chunk).to_bytes(4, "big") + chunk)
             await connected_writer.drain()
         connected_writer.write(b"\0\0\0\0")
@@ -158,6 +158,27 @@ async def clamav_scan(data: bytes, settings: Settings) -> str:
     if rendered.endswith(" FOUND"):
         return "infected"
     raise RuntimeError("malware scanner returned an indeterminate result")
+
+
+async def clamav_scan(data: bytes, settings: Settings) -> str:
+    async def chunks() -> AsyncIterator[bytes]:
+        for offset in range(0, len(data), 64 * 1024):
+            yield data[offset : offset + 64 * 1024]
+
+    return await _clamav_scan_chunks(chunks(), settings)
+
+
+async def clamav_scan_file(path: Path, settings: Settings) -> str:
+    """Scan a spool file without retaining the complete attachment in memory."""
+
+    async def chunks() -> AsyncIterator[bytes]:
+        import anyio
+
+        async with await anyio.open_file(path, "rb") as source:
+            while chunk := await source.read(64 * 1024):
+                yield chunk
+
+    return await _clamav_scan_chunks(chunks(), settings)
 
 
 def _flatten_alpha(image: pyvips.Image) -> pyvips.Image:

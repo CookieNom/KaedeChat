@@ -14,6 +14,7 @@ from redis.asyncio import Redis
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.moderation_status import sanitize_timeout_reason
 from app.core.permissions import ALL_PERMISSIONS, Permission
 from app.db.models import Channel, ChannelOverwrite, Guild, GuildMember, MemberRole, Role, User
 
@@ -299,7 +300,7 @@ async def require_permissions(
                         member.timeout_until.isoformat() if member.timeout_until else None
                     ),
                     "timeout_indefinite": member.timeout_indefinite,
-                    "reason": member.timeout_reason,
+                    "reason": sanitize_timeout_reason(member.timeout_reason),
                 },
             )
         raise HTTPException(

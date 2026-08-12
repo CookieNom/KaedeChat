@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { resolve } from '$app/paths';
-  import { api, ApiError } from '$lib/api/client';
+  import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { firstNavigableChannel, groupChannels } from '$lib/chat/channels';
   import { entityKey, entityRef } from '$lib/chat/refs';
   import type {
@@ -12,11 +12,13 @@
     Role,
     UserSummary
   } from '$lib/chat/types';
+  import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import Icon from '$lib/components/Icon.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { PERMISSION_METADATA, Permission } from '$lib/generated/permissions';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
+  import { chatEntities as entities } from '$lib/stores/entities.svelte';
   import {
     browserNotifications,
     type GuildNotificationLevel,
@@ -284,11 +286,13 @@
     )
   );
   const filteredMembers = $derived(
-    members.filter((member) =>
-      `${member.nickname ?? ''} ${member.user.display_name ?? ''} ${member.user.username}`
-        .toLowerCase()
-        .includes(overwriteSearch.trim().toLowerCase())
-    )
+    members
+      .map(latestMember)
+      .filter((member) =>
+        `${member.nickname ?? ''} ${userDisplayName(member.user)} ${userPublicHandle(member.user) ?? ''}`
+          .toLowerCase()
+          .includes(overwriteSearch.trim().toLowerCase())
+      )
   );
 
   const channelGroups = $derived(groupChannels(guild?.channels ?? []));
@@ -315,8 +319,15 @@
       `${guild.owner_id}@${guild.owner_domain ?? guild.origin_domain}` === currentUserRef
     )
   );
+  function latestMember(member: MemberSummary): MemberSummary {
+    const user = entities.users.get(entityKey(member.user));
+    return user ? { ...member, user: { ...member.user, ...user } } : member;
+  }
+  const currentMembers = $derived(members.map(latestMember));
+  const currentMemberSearchResults = $derived(memberSearchResults.map(latestMember));
+  const currentRoleMemberSearchResults = $derived(roleMemberSearchResults.map(latestMember));
   const ownershipCandidates = $derived(
-    members.filter(
+    currentMembers.filter(
       (member) =>
         member.user.origin_domain === localDomain && entityRef(member.user) !== currentUserRef
     )
@@ -382,10 +393,12 @@
   const canModerateMembers = $derived(canKickMembers || canBanMembers || canTimeoutMembers);
   const visibleMembers = $derived(
     memberSearch.trim()
-      ? memberSearchResults
-      : members.slice(memberPage * MEMBER_PAGE_SIZE, (memberPage + 1) * MEMBER_PAGE_SIZE)
+      ? currentMemberSearchResults
+      : currentMembers.slice(memberPage * MEMBER_PAGE_SIZE, (memberPage + 1) * MEMBER_PAGE_SIZE)
   );
-  const visibleRoleMembers = $derived(roleMemberSearch.trim() ? roleMemberSearchResults : members);
+  const visibleRoleMembers = $derived(
+    roleMemberSearch.trim() ? currentRoleMemberSearchResults : currentMembers
+  );
   const memberPageCount = $derived(
     Math.max(1, Math.ceil(members.length / MEMBER_PAGE_SIZE) + (membersHaveMore ? 1 : 0))
   );
@@ -583,7 +596,7 @@
       }
     } catch (caught) {
       if (selectedChannel && entityKey(selectedChannel) === entityKey(channel))
-        error = caught instanceof ApiError ? caught.message : 'Could not load channel permissions.';
+        error = userErrorMessage(caught, 'Could not load channel permissions. Try again.');
     }
   }
 
@@ -609,7 +622,7 @@
       return role.id === guild.id ? '@everyone' : role.name;
     }
     const member = members.find((candidate) => entityRef(candidate.user) === targetRef);
-    return member?.nickname ?? member?.user.display_name ?? member?.user.username ?? 'Member';
+    return member?.nickname ?? userDisplayName(member?.user);
   }
 
   function overwritePermission(permission: bigint): 'inherit' | 'allow' | 'deny' {
@@ -822,7 +835,7 @@
       if (generation !== loadGeneration || targetGuild !== guildId) return;
     } catch (caught) {
       if (signal.aborted || generation !== loadGeneration || targetGuild !== guildId) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not load guild settings.';
+      error = userErrorMessage(caught, 'Could not load guild settings. Try again.');
     } finally {
       if (generation === loadGeneration && targetGuild === guildId) loading = false;
     }
@@ -862,7 +875,7 @@
         }
         return false;
       }
-      error = caught instanceof ApiError ? caught.message : 'The change could not be saved.';
+      error = userErrorMessage(caught, 'The change could not be saved. Try again.');
       return false;
     } finally {
       if (generation === loadGeneration && targetGuild === guildId) busy = false;
@@ -1041,12 +1054,10 @@
       if (controller.signal.aborted || generation !== loadGeneration || targetGuild !== guildId) {
         return;
       }
-      guildAssetError =
-        caught instanceof ApiError
-          ? caught.message
-          : caught instanceof Error
-            ? caught.message
-            : 'Could not update the guild image.';
+      guildAssetError = userErrorMessage(
+        caught,
+        'Could not update the guild image. Choose the file again and retry.'
+      );
     } finally {
       if (generation === loadGeneration && targetGuild === guildId) {
         busy = false;
@@ -1115,12 +1126,10 @@
       if (emojiInput) emojiInput.value = '';
       notice = `:${created.name}: is ready to use.`;
     } catch (caught) {
-      error =
-        caught instanceof ApiError
-          ? caught.message
-          : caught instanceof Error
-            ? caught.message
-            : 'Could not create emoji.';
+      error = userErrorMessage(
+        caught,
+        'Could not create the emoji. Choose the file again and retry.'
+      );
     } finally {
       emojiBusy = false;
     }
@@ -1140,7 +1149,7 @@
       };
       notice = `:${emoji.name}: was deleted.`;
     } catch (caught) {
-      error = caught instanceof ApiError ? caught.message : 'Could not delete emoji.';
+      error = userErrorMessage(caught, 'Could not delete the emoji. Try again.');
     } finally {
       emojiBusy = false;
     }
@@ -1412,7 +1421,7 @@
     } catch (caught) {
       if (generation !== loadGeneration || targetGuild !== guildId || !guild) return;
       guild = { ...guild, roles: previous };
-      error = caught instanceof ApiError ? caught.message : 'Could not save the role order.';
+      error = userErrorMessage(caught, 'Could not save the role order. Reload and try again.');
       notice = '';
     } finally {
       if (generation === loadGeneration && targetGuild === guildId) {
@@ -1591,7 +1600,7 @@
       (candidate) => entityRef(candidate.user) === ownershipTarget
     );
     if (!guild || !isGuildOwner || !member) return;
-    const targetName = member.user.display_name ?? member.user.username;
+    const targetName = userDisplayName(member.user);
     void openDestructiveConfirmation({
       kind: 'guild-transfer',
       target: member,
@@ -1632,7 +1641,7 @@
       if (generation !== loadGeneration) return;
       guild = { ...guild!, ...updated };
       ownershipTarget = '';
-      notice = `Ownership transferred to ${member.user.display_name ?? member.user.username}.`;
+      notice = `Ownership transferred to ${userDisplayName(member.user)}.`;
     });
   }
 
@@ -1655,7 +1664,7 @@
       );
       notice = 'Invite link copied.';
     } catch {
-      error = 'Clipboard access was denied by the browser.';
+      error = 'Browser denied clipboard access. Allow clipboard permission and try again.';
     }
   }
 
@@ -1693,8 +1702,7 @@
   }
 
   function memberModerationTitle(dialog: MemberModerationDialog): string {
-    const name =
-      dialog.member.nickname ?? dialog.member.user.display_name ?? dialog.member.user.username;
+    const name = dialog.member.nickname ?? userDisplayName(dialog.member.user);
     if (dialog.action === 'untimeout') return `Remove ${name}'s timeout?`;
     return `${dialog.action.slice(0, 1).toUpperCase()}${dialog.action.slice(1)} ${name}?`;
   }
@@ -1831,14 +1839,14 @@
         );
         notice =
           dialog.action === 'timeout'
-            ? `${dialog.member.user.display_name ?? dialog.member.user.username} was timed out${indefinite ? ' indefinitely' : ''}.`
-            : `Timeout removed for ${dialog.member.user.display_name ?? dialog.member.user.username}.`;
+            ? `${userDisplayName(dialog.member.user)} was timed out${indefinite ? ' indefinitely' : ''}.`
+            : `Timeout removed for ${userDisplayName(dialog.member.user)}.`;
       } else if (dialog.action === 'kick') {
         await api(memberPath, { method: 'DELETE', headers, signal: controller.signal });
         if (!stillCurrent()) return;
         members = members.filter((item) => entityKey(item.user) !== entityKey(dialog.member.user));
         clampMemberPage();
-        notice = `${dialog.member.user.display_name ?? dialog.member.user.username} was kicked.`;
+        notice = `${userDisplayName(dialog.member.user)} was kicked.`;
       } else {
         const expiresAt = expiryFor(banDuration);
         await api(
@@ -1866,13 +1874,12 @@
           },
           ...bans.filter((item) => entityKey(item.user) !== entityKey(dialog.member.user))
         ];
-        notice = `${dialog.member.user.display_name ?? dialog.member.user.username} was banned.`;
+        notice = `${userDisplayName(dialog.member.user)} was banned.`;
       }
       if (stillCurrent()) closeMemberModeration();
     } catch (caught) {
       if (!stillCurrent() || controller.signal.aborted) return;
-      error =
-        caught instanceof ApiError ? caught.message : 'The moderation action could not be applied.';
+      error = userErrorMessage(caught, 'The moderation action could not be applied. Try again.');
     } finally {
       if (requestGeneration === memberModerationGeneration) {
         memberModerationController = null;
@@ -1890,7 +1897,7 @@
       );
       if (generation !== loadGeneration) return;
       bans = bans.filter((item) => entityKey(item.user) !== entityKey(ban.user));
-      notice = `${ban.user.display_name ?? ban.user.username} was unbanned.`;
+      notice = `${userDisplayName(ban.user)} was unbanned.`;
     });
   }
 
@@ -1967,7 +1974,7 @@
       return next.length > 0;
     } catch (caught) {
       if (generation === loadGeneration && targetGuild === guildId) {
-        error = caught instanceof ApiError ? caught.message : 'Could not load more members.';
+        error = userErrorMessage(caught, 'Could not load more members. Try again.');
       }
       return false;
     } finally {
@@ -2010,8 +2017,10 @@
         .catch((caught: unknown) => {
           if (controller.signal.aborted || targetGuild !== guildId) return;
           memberSearchResults = [];
-          memberSearchError =
-            caught instanceof ApiError ? caught.message : 'Could not search guild members.';
+          memberSearchError = userErrorMessage(
+            caught,
+            'Could not search guild members. Try again.'
+          );
         })
         .finally(() => {
           if (!controller.signal.aborted && targetGuild === guildId) memberSearchBusy = false;
@@ -2047,8 +2056,10 @@
         .catch((caught: unknown) => {
           if (controller.signal.aborted || targetGuild !== guildId) return;
           roleMemberSearchResults = [];
-          roleMemberSearchError =
-            caught instanceof ApiError ? caught.message : 'Could not search guild members.';
+          roleMemberSearchError = userErrorMessage(
+            caught,
+            'Could not search guild members. Try again.'
+          );
         })
         .finally(() => {
           if (!controller.signal.aborted && targetGuild === guildId) roleMemberSearchBusy = false;
@@ -2761,15 +2772,13 @@
                                       alt=""
                                     />
                                   {:else}
-                                    {(member.nickname ?? member.user.username)
+                                    {(member.nickname ?? userDisplayName(member.user))
                                       .slice(0, 1)
                                       .toUpperCase()}
                                   {/if}
                                 </span>
                                 <span>
-                                  {member.nickname ??
-                                    member.user.display_name ??
-                                    member.user.username}
+                                  {member.nickname ?? userDisplayName(member.user)}
                                 </span>
                               </button>
                             {/each}
@@ -3428,12 +3437,8 @@
                       {#each visibleRoleMembers as member (entityKey(member.user))}
                         <label class="permission-row role-member-row">
                           <span>
-                            <strong
-                              >{member.nickname ??
-                                member.user.display_name ??
-                                member.user.username}</strong
-                            >
-                            <small>{member.user.handle}</small>
+                            <strong>{member.nickname ?? userDisplayName(member.user)}</strong>
+                            <small>{userPublicHandle(member.user) ?? 'Profile unavailable'}</small>
                           </span>
                           <input
                             type="checkbox"
@@ -3532,14 +3537,14 @@
                       alt=""
                     />
                   {:else}
-                    {member.user.username.slice(0, 1).toUpperCase()}
+                    {member.user.profile_resolved === false
+                      ? '•'
+                      : member.user.username.slice(0, 1).toUpperCase()}
                   {/if}
                 </span>
                 <div class="member-management-identity">
-                  <strong
-                    >{member.nickname ?? member.user.display_name ?? member.user.username}</strong
-                  >
-                  <small>{member.user.handle}</small>
+                  <strong>{member.nickname ?? userDisplayName(member.user)}</strong>
+                  <small>{userPublicHandle(member.user) ?? 'Profile unavailable'}</small>
                 </div>
                 <div class="member-role-tags">
                   {#each (guild.roles ?? []).filter((role) => role.id !== guild?.id) as role (entityKey(role))}
@@ -3655,12 +3660,14 @@
                     {#if ban.user.avatar_hash}
                       <img src={assetUrl(ban.user.avatar_hash, 'thumbnail_128', ban.user)} alt="" />
                     {:else}
-                      {ban.user.username.slice(0, 1).toUpperCase()}
+                      {ban.user.profile_resolved === false
+                        ? '•'
+                        : ban.user.username.slice(0, 1).toUpperCase()}
                     {/if}
                   </span>
                   <div>
-                    <strong>{ban.user.display_name ?? ban.user.username}</strong>
-                    <small>{ban.user.handle}</small>
+                    <strong>{userDisplayName(ban.user)}</strong>
+                    <small>{userPublicHandle(ban.user) ?? 'Profile unavailable'}</small>
                     <span>{ban.reason ?? 'No reason provided'}</span>
                   </div>
                   <span
@@ -3915,8 +3922,9 @@
                     <option value="">Choose a local member</option>
                     {#each ownershipCandidates as member (entityKey(member.user))}
                       <option value={entityRef(member.user)}>
-                        {member.nickname ?? member.user.display_name ?? member.user.username} · @{member
-                          .user.handle}
+                        {member.nickname ?? userDisplayName(member.user)} · {userPublicHandle(
+                          member.user
+                        ) ?? 'Profile unavailable'}
                       </option>
                     {/each}
                   </select>
@@ -4032,16 +4040,20 @@
                 alt=""
               />
             {:else}
-              {memberModerationDialog.member.user.username.slice(0, 1).toUpperCase()}
+              {memberModerationDialog.member.user.profile_resolved === false
+                ? '•'
+                : memberModerationDialog.member.user.username.slice(0, 1).toUpperCase()}
             {/if}
           </span>
           <div>
             <strong
               >{memberModerationDialog.member.nickname ??
-                memberModerationDialog.member.user.display_name ??
-                memberModerationDialog.member.user.username}</strong
+                userDisplayName(memberModerationDialog.member.user)}</strong
             >
-            <small>{memberModerationDialog.member.user.handle}</small>
+            <small
+              >{userPublicHandle(memberModerationDialog.member.user) ??
+                'Profile unavailable'}</small
+            >
           </div>
         </div>
         <p id="member-moderation-description" class="confirmation-copy">

@@ -26,7 +26,30 @@ The wizard asks about:
 - optional LiveKit voice/video and observability services;
 - optional source-based automatic updates, including Git remote, branch,
   interval, and an executable pre-update backup hook; and
-- worker counts, upload limits, and non-conflicting host ports.
+- worker counts, upload limits, non-conflicting host ports, and optional
+  federation/storage quota tuning.
+
+Federation and remote-cache sizing is optional. **Keep recommended defaults**
+on a new deployment, or **Keep existing limits** on a rerun, asks no individual
+quota questions and preserves custom values already in `.env`. **Customize
+common storage limits** exposes the operationally useful high-water marks:
+retained federation-event bytes per origin and instance, the rolling DM cache,
+remote-guild replica bytes per guild and origin, one retained-history import,
+and downloaded remote media. **Advanced** additionally exposes event counts,
+identity/relationship abuse caps, DM hard ceilings, replica row counts,
+concurrent media transfer, and history grant/page ceilings.
+
+Count fields accept plain integers or `K`, `M`, and `B` suffixes (for example
+`250K` and `2.5M`). Byte fields accept decimal `KB`, `MB`, `GB`, and `TB`, or
+binary `K`, `M`, `G`, `T`, `KiB`, `MiB`, `GiB`, and `TiB`. Setup shows the
+parsed count or byte value after each answer and prints a core quota summary
+before writing. Paired prompts constrain their next answer so a per-scope or
+cache value cannot exceed its aggregate or hard ceiling. If the attachment
+limit is raised above remote-transfer capacity, setup safely raises the
+in-flight limits enough to receive one maximum attachment. Raising limits does
+not reserve disk; retain PostgreSQL index/WAL/vacuum/backup and object-store
+lifecycle headroom. The default path is recommended unless monitoring shows
+sustained capacity pressure.
 
 If [`gum`](https://github.com/charmbracelet/gum) is already installed, the
 script uses it for the interface and hidden credential prompts. Otherwise it
@@ -52,6 +75,12 @@ database, Dragonfly, Garage, LiveKit, Grafana, and admin secrets. Existing
 non-placeholder durable secrets are preserved on reruns, especially
 `KAEDE_SECRET_KEY`, because it encrypts stored instance signing material. The
 script refuses to change an established instance domain.
+
+Reruns preserve existing quota tuning when either keep option is selected. The
+only automatic quota migrations recognize exact defaults emitted by older
+setup versions: retained-history messages move from 250,000 to 2,000,000 and
+the remote-media cache from 20 GiB to 100 GiB. Any other operator value is left
+unchanged.
 
 Writes are staged, sensitive files are private, output symlinks/hard links are
 rejected, and `flock` prevents concurrent runs when available. Changed files

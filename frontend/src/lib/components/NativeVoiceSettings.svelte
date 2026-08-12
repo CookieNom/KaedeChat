@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { userErrorMessage } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
   import NativeDevicePicker from '$lib/components/NativeDevicePicker.svelte';
   import {
@@ -43,8 +44,13 @@
       }
       devicesUpdatedAt = new Date();
       if (error === 'Could not enumerate this computer’s media devices.') error = '';
-    } catch {
-      if (!silent) error = 'Could not enumerate this computer’s media devices.';
+    } catch (caught) {
+      if (!silent) {
+        error = userErrorMessage(
+          caught,
+          'Could not list this computer’s media devices. Check system privacy settings and try again.'
+        );
+      }
     }
   }
 
@@ -62,8 +68,11 @@
         peak > 0.005
           ? 'Microphone input received.'
           : 'The microphone opened, but no speech was detected.';
-    } catch {
-      error = 'Could not open the selected microphone.';
+    } catch (caught) {
+      error = userErrorMessage(
+        caught,
+        'Could not open the selected microphone. It may be in use or blocked by system privacy settings.'
+      );
     } finally {
       testingInput = false;
     }
@@ -79,8 +88,11 @@
         deviceId: preferences?.output_device?.id ?? null
       });
       notice = 'Played a test tone through the selected output.';
-    } catch {
-      error = 'Could not open the selected output device.';
+    } catch (caught) {
+      error = userErrorMessage(
+        caught,
+        'Could not open the selected output device. Check that it is connected and try again.'
+      );
     } finally {
       testingOutput = false;
     }
@@ -100,7 +112,13 @@
         preferences = loaded;
         hotkeyStatus = shortcutStatus;
       })
-      .catch(() => (error = 'Could not enumerate this computer’s media devices.'))
+      .catch(
+        (caught) =>
+          (error = userErrorMessage(
+            caught,
+            'Could not list this computer’s media devices. Check system privacy settings and try again.'
+          ))
+      )
       .finally(() => (loading = false));
     const meter = setInterval(() => {
       void nativeInvoke<NativeVoiceStatus>('native_voice_status')
@@ -137,8 +155,8 @@
       await nativeInvoke('native_preferences_set', { preferences });
       hotkeyStatus = await nativeInvoke<string>('native_hotkey_status');
       notice = 'Native voice settings saved. Active voice was safely reconnected if needed.';
-    } catch {
-      error = 'Could not save native voice settings.';
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not save native voice settings. Try again.');
     } finally {
       saving = false;
     }

@@ -101,8 +101,12 @@ Future<void> showUserProfile(
                       children: [
                         Text(user.name,
                             style: Theme.of(context).textTheme.headlineSmall),
-                        Text(user.handle,
-                            style: const TextStyle(color: KaedeColors.muted)),
+                        Text(
+                          user.profileResolved
+                              ? user.handle
+                              : 'Profile unavailable · refreshes automatically',
+                          style: const TextStyle(color: KaedeColors.muted),
+                        ),
                         Text(
                           presence == PresenceStatus.dnd
                               ? 'Do not disturb'

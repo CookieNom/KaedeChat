@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/storage/local_database.dart';
 
@@ -67,7 +68,7 @@ final class _BootstrapFailure extends StatelessWidget {
                       ),
                       const SizedBox(height: 16),
                       SelectableText(
-                        error.toString(),
+                        userFacingError(error),
                         textAlign: TextAlign.center,
                         style: const TextStyle(color: Colors.white70),
                       ),

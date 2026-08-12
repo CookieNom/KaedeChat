@@ -55,15 +55,18 @@ read_env() {
 
 safe_regular_file() {
   local path=$1 label=$2
-  [[ -f $path && ! -L $path ]] || die "$label must be a regular, non-symlink file: $path"
-  [[ $(stat -c '%h' "$path") == 1 ]] || die "$label must not be hard-linked: $path"
+  [[ -f $path && ! -L $path ]] || \
+    die "$label must be a regular, non-symlink file: $path. Create or restore that file and correct its configured path before retrying"
+  [[ $(stat -c '%h' "$path") == 1 ]] || \
+    die "$label must not be hard-linked: $path. Replace it with a private regular file"
 }
 
 validate_config() {
   safe_regular_file "$ENV_FILE" 'operator environment'
   local mode
   mode=$(stat -c '%a' "$ENV_FILE")
-  (((8#$mode & 8#077) == 0)) || die "operator environment must not be group/world accessible (mode $mode)"
+  (((8#$mode & 8#077) == 0)) || \
+    die "operator environment contains secrets and must not be group/world accessible (mode $mode); run 'chmod 600 $ENV_FILE'"
 
   ENABLED=$(read_env AUTO_UPDATE_ENABLED false)
   REMOTE=$(read_env AUTO_UPDATE_REMOTE origin)
@@ -72,16 +75,21 @@ validate_config() {
   JITTER=$(read_env AUTO_UPDATE_JITTER 30m)
   BACKUP_HOOK=$(read_env AUTO_UPDATE_BACKUP_HOOK '')
   WAIT_TIMEOUT=$(read_env AUTO_UPDATE_WAIT_TIMEOUT_SECONDS 300)
-  [[ $ENABLED == true || $ENABLED == false ]] || die 'AUTO_UPDATE_ENABLED must be true or false'
-  [[ $REMOTE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'AUTO_UPDATE_REMOTE is invalid'
-  [[ $BRANCH =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && $BRANCH != */ && $BRANCH != *..* ]] || die 'AUTO_UPDATE_BRANCH is invalid'
-  [[ $INTERVAL =~ ^(6h|12h|1d|1w)$ ]] || die 'AUTO_UPDATE_INTERVAL must be 6h, 12h, 1d, or 1w'
-  [[ $JITTER =~ ^[1-9][0-9]*(s|m|min|h|d|w)$ ]] || die 'AUTO_UPDATE_JITTER is invalid'
+  [[ $ENABLED == true || $ENABLED == false ]] || \
+    die "AUTO_UPDATE_ENABLED must be true or false; correct it in $ENV_FILE"
+  [[ $REMOTE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
+    die "AUTO_UPDATE_REMOTE must be a Git remote name containing only letters, digits, dot, underscore, or dash; do not put a remote URL or credentials here"
+  [[ $BRANCH =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && $BRANCH != */ && $BRANCH != *..* ]] || \
+    die "AUTO_UPDATE_BRANCH must be a safe branch name without '..' or a trailing slash; correct it in $ENV_FILE"
+  [[ $INTERVAL =~ ^(6h|12h|1d|1w)$ ]] || \
+    die "AUTO_UPDATE_INTERVAL must be 6h, 12h, 1d, or 1w; correct it in $ENV_FILE"
+  [[ $JITTER =~ ^[1-9][0-9]*(s|m|min|h|d|w)$ ]] || \
+    die "AUTO_UPDATE_JITTER must be a positive systemd duration such as 30m; correct it in $ENV_FILE"
   [[ $WAIT_TIMEOUT =~ ^[0-9]+$ ]] && ((WAIT_TIMEOUT >= 60 && WAIT_TIMEOUT <= 3600)) || \
-    die 'AUTO_UPDATE_WAIT_TIMEOUT_SECONDS must be from 60 through 3600'
+    die "AUTO_UPDATE_WAIT_TIMEOUT_SECONDS must be an integer from 60 through 3600; correct it in $ENV_FILE"
   if [[ -n $BACKUP_HOOK ]]; then
     [[ $BACKUP_HOOK == /* && $BACKUP_HOOK =~ ^/[A-Za-z0-9_./-]+$ && $BACKUP_HOOK != *..* ]] || \
-      die 'AUTO_UPDATE_BACKUP_HOOK must be a safe absolute path'
+      die "AUTO_UPDATE_BACKUP_HOOK must be a safe absolute path without '..'; correct it in $ENV_FILE"
     safe_regular_file "$BACKUP_HOOK" 'backup hook'
     [[ -x $BACKUP_HOOK ]] || die "backup hook is not executable: $BACKUP_HOOK"
   fi
@@ -97,10 +105,20 @@ read_deployed_commit() {
 
 write_deployed_commit() {
   local commit=$1 temporary
-  temporary=$(mktemp "$ROOT/.kaede-auto-update-state.tmp.XXXXXX")
-  printf 'DEPLOYED_COMMIT=%s\n' "$commit" > "$temporary"
-  chmod 600 "$temporary"
-  mv -fT "$temporary" "$STATE_FILE"
+  temporary=$(mktemp "$ROOT/.kaede-auto-update-state.tmp.XXXXXX") || \
+    die "could not create a temporary deployed-state file in $ROOT; check directory permissions"
+  if ! printf 'DEPLOYED_COMMIT=%s\n' "$commit" > "$temporary"; then
+    rm -f -- "$temporary"
+    die "could not write deployed state in $ROOT; check available disk space and directory permissions"
+  fi
+  if ! chmod 600 "$temporary"; then
+    rm -f -- "$temporary"
+    die "could not secure the temporary deployed-state file; check filesystem permissions"
+  fi
+  if ! mv -fT "$temporary" "$STATE_FILE"; then
+    rm -f -- "$temporary"
+    die "could not publish deployed state to $STATE_FILE; check filesystem permissions"
+  fi
 }
 
 compose_command() {
@@ -122,7 +140,8 @@ show_status() {
 mark_current() {
   validate_config
   local head
-  head=$(git -C "$ROOT" rev-parse --verify HEAD) || die 'cannot resolve the current Git commit'
+  head=$(git -C "$ROOT" rev-parse --verify HEAD) || \
+    die "cannot resolve the current Git commit in $ROOT; verify this is a complete Git checkout"
   write_deployed_commit "$head"
   log "recorded currently deployed commit $head"
 }
@@ -134,17 +153,20 @@ run_update() {
     log 'automatic updates are disabled; nothing to do'
     return 0
   fi
-  command -v git >/dev/null || die 'git is required'
-  command -v docker >/dev/null || die 'Docker with the Compose plugin is required'
-  command -v python3 >/dev/null || die 'Python 3 is required for deployment validation'
-  command -v flock >/dev/null || die 'flock is required for automatic updates'
-  [[ ! -e $ROOT/.kaede-setup.in-progress ]] || die 'setup has an incomplete transaction'
+  command -v git >/dev/null || die 'git is required; install Git before enabling automatic updates'
+  command -v docker >/dev/null || die 'Docker is required; install Docker Engine and its Compose plugin'
+  docker compose version >/dev/null 2>&1 || \
+    die "the Docker Compose plugin is unavailable; install it and verify 'docker compose version' succeeds"
+  command -v python3 >/dev/null || die 'Python 3 is required; install Python 3 before enabling automatic updates'
+  command -v flock >/dev/null || die 'flock is required; install the util-linux package before enabling automatic updates'
+  [[ ! -e $ROOT/.kaede-setup.in-progress ]] || \
+    die "setup has an incomplete transaction; inspect $ROOT/.kaede-setup.in-progress and rerun 'make setup' before updating"
   local setup_lock="$ROOT/.kaede-setup.lock"
   [[ ! -L $setup_lock ]] || die 'setup lock must not be a symlink'
   [[ ! -e $setup_lock || $(stat -c '%h' "$setup_lock") == 1 ]] || die 'setup lock must not be hard-linked'
   exec 8>"$setup_lock"
   chmod 600 "$setup_lock"
-  flock -n 8 || die 'setup or another deployment operation is running'
+  flock -n 8 || die 'setup or another deployment operation is running; wait for it to finish, then retry'
   [[ ! -L $LOCK_FILE ]] || die 'update lock must not be a symlink'
   [[ ! -e $LOCK_FILE || $(stat -c '%h' "$LOCK_FILE") == 1 ]] || die 'update lock must not be hard-linked'
   exec 9>"$LOCK_FILE"
@@ -152,27 +174,34 @@ run_update() {
   flock -n 9 || { log 'another automatic update is already running'; return 0; }
 
   [[ -z $(git -C "$ROOT" status --porcelain --untracked-files=no) ]] || \
-    die 'tracked files are modified; commit or restore them before automatic updating'
+    die "tracked files are modified; review 'git -C $ROOT status --short', then commit or restore them before retrying"
   local checked_out
-  checked_out=$(git -C "$ROOT" symbolic-ref --quiet --short HEAD) || die 'the checkout is detached'
-  [[ $checked_out == "$BRANCH" ]] || die "checked-out branch is $checked_out, expected $BRANCH"
-  git -C "$ROOT" remote get-url "$REMOTE" >/dev/null || die "Git remote does not exist: $REMOTE"
+  checked_out=$(git -C "$ROOT" symbolic-ref --quiet --short HEAD) || \
+    die "the checkout is detached; check out the configured branch '$BRANCH' before retrying"
+  [[ $checked_out == "$BRANCH" ]] || \
+    die "checked-out branch is '$checked_out', but AUTO_UPDATE_BRANCH is '$BRANCH'; check out '$BRANCH' or update the setting"
+  git -C "$ROOT" remote get-url "$REMOTE" >/dev/null || \
+    die "Git remote '$REMOTE' does not exist; add it with 'git remote add $REMOTE <repository-url>' or change AUTO_UPDATE_REMOTE"
 
   printf 'Kaede automatic update started at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MARKER_FILE"
   chmod 600 "$MARKER_FILE"
   UPDATE_MARKER_CREATED=true
 
   log "fetching $REMOTE/$BRANCH"
-  git -C "$ROOT" fetch --prune "$REMOTE" "+refs/heads/$BRANCH:refs/remotes/$REMOTE/$BRANCH"
+  git -C "$ROOT" fetch --prune "$REMOTE" "+refs/heads/$BRANCH:refs/remotes/$REMOTE/$BRANCH" || \
+    die "Git fetch failed for '$REMOTE/$BRANCH'; check network access and remote credentials, then retry"
   local current target deployed
-  current=$(git -C "$ROOT" rev-parse --verify HEAD)
-  target=$(git -C "$ROOT" rev-parse --verify "refs/remotes/$REMOTE/$BRANCH^{commit}")
+  current=$(git -C "$ROOT" rev-parse --verify HEAD) || \
+    die "cannot resolve the local HEAD commit in $ROOT; repair the Git checkout before retrying"
+  target=$(git -C "$ROOT" rev-parse --verify "refs/remotes/$REMOTE/$BRANCH^{commit}") || \
+    die "fetch completed but '$REMOTE/$BRANCH' does not resolve to a commit; verify AUTO_UPDATE_REMOTE and AUTO_UPDATE_BRANCH"
   deployed=$(read_deployed_commit)
   if [[ $current != "$target" ]]; then
     git -C "$ROOT" merge-base --is-ancestor "$current" "$target" || \
-      die 'remote history is not a fast-forward; refusing a force-push, downgrade, or local divergence'
+      die "remote history is not a fast-forward; automatic update refused a force-push, downgrade, or local divergence. Compare HEAD with '$REMOTE/$BRANCH' and resolve it manually"
     log "fast-forwarding source from $current to $target"
-    git -C "$ROOT" merge --ff-only "$target"
+    git -C "$ROOT" merge --ff-only "$target" || \
+      die "Git could not fast-forward to $target; inspect 'git -C $ROOT status' and resolve the checkout manually"
   elif [[ $deployed == "$target" ]]; then
     log "already running recorded commit $target"
     return 0
@@ -181,28 +210,35 @@ run_update() {
   fi
 
   [[ -z $(git -C "$ROOT" status --porcelain --untracked-files=no) ]] || \
-    die 'the updated checkout unexpectedly contains tracked modifications'
+    die "the updated checkout unexpectedly contains tracked modifications; inspect 'git -C $ROOT status --short' and deploy manually after resolving them"
   compose_command
   log 'validating the operator environment and new application image'
-  python3 "$ROOT/deploy/validate_deploy_env.py" --file "$ENV_FILE" --file-only
-  "${COMPOSE[@]}" run --rm --no-deps --build preflight
+  python3 "$ROOT/deploy/validate_deploy_env.py" --file "$ENV_FILE" --file-only || \
+    die "deployment environment validation failed; correct the preceding setting error in $ENV_FILE, then retry"
+  "${COMPOSE[@]}" run --rm --no-deps --build preflight || \
+    die 'new application preflight failed; the running deployment was not stopped. Correct the preceding preflight error, then retry'
   log 'building application images before downtime'
-  "${COMPOSE[@]}" build --pull api gateway worker scheduler migrate storage-init frontend-build
+  "${COMPOSE[@]}" build --pull api gateway worker scheduler migrate storage-init frontend-build || \
+    die 'application image build failed; the running deployment was not stopped. Correct the build error, then retry'
 
   if [[ -n $BACKUP_HOOK ]]; then
     log "running configured backup hook $BACKUP_HOOK"
     KAEDE_UPDATE_FROM="${deployed:-$current}" KAEDE_UPDATE_TO="$target" KAEDE_ROOT="$ROOT" \
-      "$BACKUP_HOOK"
+      "$BACKUP_HOOK" || \
+      die "backup hook failed: $BACKUP_HOOK. The running deployment was not stopped; fix the hook or perform a verified backup before retrying"
   else
     log 'WARNING: no AUTO_UPDATE_BACKUP_HOOK is configured; relying on the operator backup policy'
   fi
 
   log 'quiescing application writers and the internal edge'
-  "${COMPOSE[@]}" stop caddy api gateway worker scheduler
+  "${COMPOSE[@]}" stop caddy api gateway worker scheduler || \
+    die "could not stop all application writers; inspect 'docker compose ps' and service logs before retrying or restoring service"
   log 'applying migrations exactly once before application writers restart'
-  "${COMPOSE[@]}" run --rm --no-deps migrate
+  "${COMPOSE[@]}" run --rm --no-deps migrate || \
+    die 'database migration failed after application writers were stopped. Inspect the migration output and database backup; do not start incompatible application images until the migration is resolved'
   log 'starting the updated topology and waiting for health checks'
-  "${COMPOSE[@]}" up -d --no-build --wait --wait-timeout "$WAIT_TIMEOUT"
+  "${COMPOSE[@]}" up -d --no-build --wait --wait-timeout "$WAIT_TIMEOUT" || \
+    die "updated services did not become healthy within $WAIT_TIMEOUT seconds. Inspect 'docker compose ps' and service logs; the source and database migration may already be updated"
   write_deployed_commit "$target"
   log "automatic update completed at $target"
 }

@@ -4,10 +4,16 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 from sqlalchemy import exists, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.settings import Settings
-from app.db.models import Attachment, RemoteMediaCache, RemoteMediaTombstone
+from app.db.models import (
+    Attachment,
+    RemoteMediaCache,
+    RemoteMediaOrphan,
+    RemoteMediaTombstone,
+)
 from app.media.processing import (
     IMAGE_PIPELINE_VERSION,
     IMAGE_TYPES,
@@ -225,6 +231,12 @@ async def sweep_staging_objects(
 
 async def enforce_remote_cache_limit(session: AsyncSession, settings: Settings) -> int:
     storage = S3Storage(settings)
+    await drain_remote_media_orphans(session, settings, storage=storage)
+    await session.scalar(
+        select(
+            func.pg_advisory_xact_lock(func.hashtextextended("kaede-remote-media-cache-budget", 0))
+        )
+    )
     now = datetime.now(UTC)
     rows = list(
         await session.scalars(
@@ -246,33 +258,98 @@ async def enforce_remote_cache_limit(session: AsyncSession, settings: Settings) 
     total = int(
         await session.scalar(select(func.coalesce(func.sum(RemoteMediaCache.size), 0))) or 0
     )
-    total_after_expiry = total - sum(item.size for item in rows)
-    if total_after_expiry > settings.media_remote_cache_bytes:
+    orphan_total = int(
+        await session.scalar(
+            select(func.coalesce(func.sum(RemoteMediaOrphan.size), 0)).where(
+                ~exists(
+                    select(RemoteMediaCache.object_key).where(
+                        RemoteMediaCache.object_key == RemoteMediaOrphan.object_key
+                    )
+                )
+            )
+        )
+        or 0
+    )
+    total_after_expiry = total + orphan_total - sum(item.size for item in rows)
+    # Admission never permits the cache to cross the hard ceiling. Evict to a
+    # low-water mark so a cache already at the ceiling actually makes room for
+    # the request that scheduled this sweep instead of waiting for TTL expiry.
+    low_water_bytes = settings.media_remote_cache_bytes * 9 // 10
+    if total_after_expiry > low_water_bytes:
         overflow = list(
             await session.scalars(
                 select(RemoteMediaCache)
-                .where(RemoteMediaCache.expires_at > now)
+                .where(
+                    RemoteMediaCache.expires_at > now,
+                    ~exists().where(
+                        RemoteMediaTombstone.origin_domain == RemoteMediaCache.origin_domain,
+                        RemoteMediaTombstone.attachment_id == RemoteMediaCache.attachment_id,
+                    ),
+                )
                 .order_by(RemoteMediaCache.last_accessed_at)
                 .limit(500)
                 .with_for_update(skip_locked=True)
             )
         )
         for item in overflow:
-            if total_after_expiry <= settings.media_remote_cache_bytes:
+            if total_after_expiry <= low_water_bytes:
                 break
             rows.append(item)
             total_after_expiry -= item.size
     unique = {(item.origin_domain, item.attachment_id, item.variant): item for item in rows}
-    removed = 0
     for item in unique.values():
-        try:
-            await storage.delete(settings.media_remote_cache_bucket, item.object_key)
-        except StorageError:
-            log.exception(
-                "remote_media_cache_delete_failed",
-                origin=item.origin_domain,
-                attachment_id=str(item.attachment_id),
+        await session.execute(
+            pg_insert(RemoteMediaOrphan)
+            .values(object_key=item.object_key, size=item.size)
+            .on_conflict_do_nothing(index_elements=["object_key"])
+        )
+        await session.delete(item)
+    await session.commit()
+    await drain_remote_media_orphans(session, settings, storage=storage)
+    return len(unique)
+
+
+async def drain_remote_media_orphans(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    storage: S3Storage | None = None,
+    limit: int = 500,
+) -> int:
+    """Retry physical deletions recorded before cache references are removed."""
+
+    if not 1 <= limit <= 5_000:
+        raise ValueError("remote media orphan batch must be between 1 and 5000")
+    object_storage = storage or S3Storage(settings)
+    now = datetime.now(UTC)
+    rows = list(
+        await session.scalars(
+            select(RemoteMediaOrphan)
+            .where(RemoteMediaOrphan.next_retry_at <= now)
+            .order_by(RemoteMediaOrphan.next_retry_at, RemoteMediaOrphan.created_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    removed = 0
+    for item in rows:
+        referenced = bool(
+            await session.scalar(
+                select(exists().where(RemoteMediaCache.object_key == item.object_key))
             )
+        )
+        if referenced:
+            await session.delete(item)
+            continue
+        try:
+            await object_storage.delete(settings.media_remote_cache_bucket, item.object_key)
+        except StorageError:
+            item.attempts += 1
+            item.last_error = "object deletion failed; Kaede will retry"
+            item.next_retry_at = now + timedelta(
+                seconds=min(3600, 5 * (2 ** min(item.attempts, 9)))
+            )
+            log.exception("remote_media_orphan_delete_failed", object_key=item.object_key)
             continue
         await session.delete(item)
         removed += 1
@@ -299,21 +376,16 @@ async def purge_remote_attachment_cache(
         )
     )
     storage = S3Storage(settings)
-    removed = 0
     for item in rows:
-        try:
-            await storage.delete(settings.media_remote_cache_bucket, item.object_key)
-        except StorageError:
-            log.exception(
-                "remote_media_tombstone_delete_failed",
-                origin=origin_domain,
-                attachment_id=str(attachment_id),
-            )
-            continue
+        await session.execute(
+            pg_insert(RemoteMediaOrphan)
+            .values(object_key=item.object_key, size=item.size)
+            .on_conflict_do_nothing(index_elements=["object_key"])
+        )
         await session.delete(item)
-        removed += 1
     await session.commit()
-    return removed
+    await drain_remote_media_orphans(session, settings, storage=storage)
+    return len(rows)
 
 
 async def purge_local_attachment(

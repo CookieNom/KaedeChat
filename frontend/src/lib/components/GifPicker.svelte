@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api/client';
+  import { api, userErrorMessage } from '$lib/api/client';
   import { loadGifFavorites, saveGifFavorites, type GifPage, type GifResult } from '$lib/chat/gifs';
   import { onDestroy, onMount } from 'svelte';
 
@@ -50,7 +50,7 @@
       nextPage = result.next_page;
     } catch (caught) {
       if (controller.signal.aborted) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not load GIFs.';
+      error = userErrorMessage(caught, 'Could not load GIFs. Try again.');
       if (!append) items = [];
     } finally {
       if (request === controller) loading = false;
@@ -146,7 +146,12 @@
       </div>
     {/each}
     {#if view === 'browse' && loading && !items.length}<p class="gif-state">Loading GIFs…</p>{/if}
-    {#if view === 'browse' && error}<p class="gif-state form-error">{error}</p>{/if}
+    {#if view === 'browse' && error}
+      <div class="gif-state" role="alert">
+        <p class="form-error">{error}</p>
+        <button type="button" disabled={loading} onclick={() => void load()}>Try again</button>
+      </div>
+    {/if}
     {#if view === 'browse' && !loading && !error && !items.length}<p class="gif-state">
         No GIFs found.
       </p>{/if}

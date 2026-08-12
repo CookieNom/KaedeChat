@@ -6,6 +6,7 @@ import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:uuid/uuid.dart';
 
@@ -50,9 +51,11 @@ Future<Map<String, Object?>> commitScannedMedia({
 
 void _throwForTerminalMediaStatus(String status) {
   if (status != 'infected' && status != 'failed') return;
-  throw const KaedeException(
+  throw KaedeException(
     code: 'MEDIA_PROCESSING_REJECTED',
-    message: 'The image did not pass media processing.',
+    message: status == 'infected'
+        ? 'The image did not pass the server’s safety scan. Choose a different file.'
+        : 'The server could not process the image. Try another file or try again later.',
     status: 422,
   );
 }
@@ -203,6 +206,18 @@ final class KaedeRepository {
 
   Future<Map<String, Object?>> settings() =>
       api.getJson('/api/v1/users/@me/settings');
+  Future<GuildNavigation> guildNavigation() async => GuildNavigation.fromJson(
+        await api.getJson('/api/v1/users/@me/guild-navigation'),
+      );
+  Future<GuildNavigation> updateGuildNavigation(
+          GuildNavigation navigation) async =>
+      GuildNavigation.fromJson(
+        await api.sendJson(
+          'PUT',
+          '/api/v1/users/@me/guild-navigation',
+          data: navigation.toJson(),
+        ),
+      );
   Future<List<Map<String, Object?>>> readStates() =>
       api.getList('/api/v1/users/@me/read-states');
   Future<Map<String, Object?>> updateSettings(Map<String, Object?> patch) =>
@@ -221,6 +236,10 @@ final class KaedeRepository {
           .toList();
   Future<KaedeGuild> guild(EntityRef ref) async =>
       KaedeGuild.fromJson(await api.getJson('/api/v1/guilds/${ref.wire}'));
+  Future<GuildSelfModerationStatus> selfModerationStatus(
+          EntityRef guild) async =>
+      GuildSelfModerationStatus.fromJson(await api.getJson(
+          '/api/v1/guilds/${guild.wire}/members/@me/moderation-status'));
   Future<KaedeGuild> createGuild(String name) async =>
       KaedeGuild.fromJson(await api.sendJson('POST', '/api/v1/guilds',
           data: <String, Object?>{'name': name}));
@@ -788,7 +807,10 @@ final class KaedeRepository {
     File destination,
   ) =>
       api.downloadToFile(
-        attachmentMediaPath(attachment.ref),
+        attachmentMediaPath(
+          attachment.ref,
+          historyMediaUrl: attachment.historyMediaUrl,
+        ),
         destination,
       );
 

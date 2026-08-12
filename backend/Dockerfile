@@ -16,7 +16,7 @@ FROM dependencies AS development
 COPY . .
 RUN uv sync --locked
 ENV PATH="/opt/venv/bin:$PATH" PYTHONUNBUFFERED=1
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--no-access-log"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--ws-max-size", "1048576", "--no-access-log"]
 
 FROM tooling AS production-dependencies
 COPY pyproject.toml uv.lock ./
@@ -35,4 +35,4 @@ COPY migrations migrations
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin kaede
 ENV PATH="/opt/venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 USER kaede
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "1048576", "--no-access-log"]

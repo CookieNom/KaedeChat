@@ -2340,6 +2340,9 @@ fn install_navigation(
             window.set_new_marker_message(SharedString::default());
             window.set_history_loading(false);
             window.set_history_complete(false);
+            window.set_history_truncated(false);
+            window.set_history_remote_available(false);
+            window.set_history_page_warning(SharedString::default());
         }
         let weak = weak.clone();
         let active = load_active.clone();
@@ -2566,9 +2569,33 @@ fn install_navigation(
             };
             match account.load_older_messages(&channel).await {
                 Ok(batch) => {
-                    let complete = batch.len() < 100;
+                    let page_error = batch
+                        .last()
+                        .and_then(|message| message.history_page_error_code.as_deref());
+                    let complete = page_error.is_none()
+                        && (batch.len() < 100
+                            || batch
+                                .last()
+                                .is_some_and(|message| message.history_page_complete));
+                    let page_warning = batch.last().and_then(|message| {
+                        (message.history_page_error_code.as_deref()
+                            == Some("FEDERATED_DM_HISTORY_UNAVAILABLE"))
+                        .then(|| {
+                            let seconds = message
+                                .history_page_retry_after_ms
+                                .unwrap_or(2_000)
+                                .div_ceil(1_000)
+                                .max(1);
+                            format!(
+                                "Older messages are temporarily unavailable from the home instance. Recent cached messages remain available; try again in about {seconds}s."
+                            )
+                        })
+                    });
                     let _ = weak.upgrade_in_event_loop(move |window| {
                         window.set_history_loading(false);
+                        window.set_history_page_warning(
+                            page_warning.unwrap_or_default().into(),
+                        );
                         if complete {
                             window.set_history_complete(true);
                         }
@@ -5537,11 +5564,14 @@ async fn consume_account_events(
                     }
                 });
             }
-            AccountEvent::VoiceReauthorization(channel) => {
+            AccountEvent::VoiceReauthorization {
+                channel,
+                move_session_id,
+            } => {
                 #[cfg(feature = "native-voice")]
-                reauthorize_voice(account.clone(), channel, weak.clone()).await;
+                reauthorize_voice(account.clone(), channel, move_session_id, weak.clone()).await;
                 #[cfg(not(feature = "native-voice"))]
-                let _ = channel;
+                let _ = (channel, move_session_id);
             }
             AccountEvent::ReconcileRequired => {
                 let _ = weak.upgrade_in_event_loop(|window| {
@@ -5581,6 +5611,7 @@ async fn consume_account_events(
 async fn reauthorize_voice(
     account: Arc<AccountRuntime>,
     channel: EntityRef,
+    move_session_id: Option<String>,
     weak: slint::Weak<AppWindow>,
 ) {
     let (Some(voice), Some(preferences)) = (ACTIVE_VOICE.get(), VOICE_PREFERENCES.get()) else {
@@ -5589,9 +5620,18 @@ async fn reauthorize_voice(
     // A replacement grant is a hard authorization boundary. Stop the old
     // transport first so stale SPEAK/STREAM rights cannot survive a move or
     // permission change, then ask the home instance for the current grant.
-    if let Some(handle) = voice.lock().await.take() {
-        handle.leave().await;
-    }
+    let handle = {
+        let mut active = voice.lock().await;
+        if active
+            .as_ref()
+            .is_none_or(|handle| handle.move_session_id != move_session_id)
+        {
+            return;
+        }
+        active.take()
+    };
+    let Some(handle) = handle else { return };
+    handle.leave().await;
     let preferences = preferences.read().await;
     let capture_settings = kaede_audio::CaptureSettings {
         device_id: preferences.input_device.clone(),
@@ -5641,7 +5681,7 @@ async fn follow_pending_deep_link(account: &Arc<AccountRuntime>, weak: &slint::W
         }
         DeepLink::Message { channel, message } => {
             let result = account
-                .load_around_message(&channel, &message.id)
+                .load_around_message(&channel, &message)
                 .await
                 .map(|_| ());
             (result, Some(channel))
@@ -5759,6 +5799,11 @@ struct UiGuild {
     owner: String,
     description: String,
     history_policy: String,
+    sync_status: String,
+    sync_error_code: String,
+    history_sync_status: String,
+    history_sync_error_code: String,
+    history_sync_retry_after_ms: u64,
 }
 #[derive(Clone)]
 struct UiChannel {
@@ -5774,6 +5819,9 @@ struct UiChannel {
     position: i32,
     synced: bool,
     slow_mode: i32,
+    history_truncated: bool,
+    history_remote_available: bool,
+    oldest_available_message: String,
 }
 #[derive(Clone)]
 struct UiMessage {
@@ -5788,6 +5836,7 @@ struct UiMessage {
     day_label: String,
     body: String,
     pending: bool,
+    retrying: bool,
     failed: bool,
     edited: bool,
     attachments: String,
@@ -5938,6 +5987,60 @@ fn render_message_body(state: &AppState, content: &str) -> String {
     rendered
 }
 
+fn delivery_status_guidance(status: Option<&str>, code: Option<&str>) -> &'static str {
+    match (status, code) {
+        (
+            Some("retrying"),
+            Some("KAED_FED_DM_STORAGE_QUOTA_EXCEEDED" | "FEDERATED_DM_STORAGE_QUOTA_EXCEEDED"),
+        ) => "The receiving instance is making room in its direct-message cache",
+        (Some("retrying"), Some("KAED_FED_INBOX_QUOTA_EXCEEDED")) => {
+            "The receiving instance is temporarily full of federation events"
+        }
+        (Some("retrying"), Some("KAED_FED_REPLICA_QUOTA_EXCEEDED")) => {
+            "The receiving instance's replica cache is temporarily full"
+        }
+        (
+            Some("retrying"),
+            Some(
+                "KAED_FED_IDENTITY_STORAGE_QUOTA_EXCEEDED"
+                | "FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED",
+            ),
+        ) => "The receiving instance's remote-account storage is temporarily full",
+        (
+            Some("retrying"),
+            Some(
+                "KAED_FED_INSTANCE_STORAGE_QUOTA_EXCEEDED"
+                | "FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED",
+            ),
+        ) => "The receiving instance's remote-server storage is temporarily full",
+        (
+            Some("failed"),
+            Some("KAED_FED_DM_STORAGE_QUOTA_EXCEEDED" | "FEDERATED_DM_STORAGE_QUOTA_EXCEEDED"),
+        ) => "The receiving instance reached its direct-message storage limit",
+        (Some("failed"), Some("KAED_FED_INBOX_QUOTA_EXCEEDED")) => {
+            "The receiving instance reached its federation-event limit"
+        }
+        (Some("failed"), Some("KAED_FED_REPLICA_QUOTA_EXCEEDED")) => {
+            "The receiving instance's replica cache is full"
+        }
+        (
+            Some("failed"),
+            Some(
+                "KAED_FED_IDENTITY_STORAGE_QUOTA_EXCEEDED"
+                | "FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED",
+            ),
+        ) => "The receiving instance's remote-account storage is full",
+        (
+            Some("failed"),
+            Some(
+                "KAED_FED_INSTANCE_STORAGE_QUOTA_EXCEEDED"
+                | "FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED",
+            ),
+        ) => "The receiving instance's remote-server storage is full",
+        _ => "",
+    }
+}
+
 fn message_to_ui(
     state: &AppState,
     message: Message,
@@ -5984,6 +6087,7 @@ fn message_to_ui(
         day_label: day_label(&local_time),
         body: render_message_body(state, &content),
         pending: message.delivery_status.as_deref() == Some("pending"),
+        retrying: message.delivery_status.as_deref() == Some("retrying"),
         failed: message.delivery_status.as_deref() == Some("failed"),
         edited: message.edited_at.is_some(),
         attachments: message
@@ -5992,7 +6096,11 @@ fn message_to_ui(
             .map(|attachment| attachment.filename.as_str())
             .collect::<Vec<_>>()
             .join(" · "),
-        failure_reason: String::new(),
+        failure_reason: delivery_status_guidance(
+            message.delivery_status.as_deref(),
+            message.delivery_error_code.as_deref(),
+        )
+        .to_owned(),
         mine: message
             .author
             .as_ref()
@@ -6297,6 +6405,7 @@ fn message_item(item: UiMessage, compact: bool) -> MessageItem {
         time: item.time.into(),
         body: body.into(),
         pending: item.pending,
+        retrying: item.retrying,
         failed: item.failed,
         edited: item.edited,
         attachments: item.attachments.into(),
@@ -6330,6 +6439,7 @@ fn divider_item(kind: &str, label: &str) -> MessageItem {
         time: label.into(),
         body: SharedString::default(),
         pending: false,
+        retrying: false,
         failed: false,
         edited: false,
         attachments: SharedString::default(),
@@ -6433,6 +6543,14 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
             owner: EntityRef::new(guild.owner_id, guild.owner_domain.clone()).to_string(),
             description: guild.description.clone().unwrap_or_default(),
             history_policy: guild.federated_history_policy.clone(),
+            sync_status: guild.sync_status.clone().unwrap_or_default(),
+            sync_error_code: guild.sync_error_code.clone().unwrap_or_default(),
+            history_sync_status: guild.history_sync_status.clone().unwrap_or_default(),
+            history_sync_error_code: guild
+                .history_sync_error_code
+                .clone()
+                .unwrap_or_default(),
+            history_sync_retry_after_ms: guild.history_sync_retry_after_ms.unwrap_or_default(),
         })
         .collect::<Vec<_>>();
     guilds.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
@@ -6494,6 +6612,12 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
             position: channel.position,
             synced: channel.permissions_synced,
             slow_mode: channel.rate_limit_per_user as i32,
+            history_truncated: channel.history_truncated,
+            history_remote_available: channel.history_remote_available,
+            oldest_available_message: channel
+                .oldest_available_message_ref
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string),
         })
         .collect::<Vec<_>>();
     let mut channels = all_channels
@@ -6610,6 +6734,7 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
                             day_label: day_label(&pending_local),
                             body: pending.content.clone(),
                             pending: pending.state != kaede_core::PendingMessageState::Failed,
+                            retrying: false,
                             failed: pending.state == kaede_core::PendingMessageState::Failed,
                             edited: false,
                             attachments: String::new(),
@@ -6830,7 +6955,11 @@ fn ui_snapshot(state: &AppState) -> UiSnapshot {
                 guild: guild.to_string(),
                 initials: initials(&name),
                 name,
-                handle: member.user.handle.clone(),
+                handle: if member.user.profile_resolved {
+                    member.user.handle.clone()
+                } else {
+                    "Profile unavailable · refreshes automatically".to_owned()
+                },
                 roles: member
                     .role_ids
                     .iter()
@@ -6940,6 +7069,13 @@ fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
     window.set_settings_theme(snapshot.theme.into());
     window.set_settings_dm_privacy(snapshot.dm_privacy.into());
     let selected_guild = window.get_selected_guild().to_string();
+    window.set_guild_sync_paused(false);
+    window.set_guild_sync_paused_title("Replica cache is full".into());
+    window.set_guild_sync_paused_message(
+        "Recent guild updates may be missing. Ask this instance's administrator to free space or raise the limit."
+            .into(),
+    );
+    window.set_guild_history_warning(SharedString::default());
     if let Some(guild) = snapshot
         .guilds
         .iter()
@@ -6952,6 +7088,53 @@ fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
         window.set_guild_icon(load_ui_image(&guild.icon));
         window.set_guild_has_banner(!guild.banner.is_empty());
         window.set_guild_banner(load_ui_image(&guild.banner));
+        window.set_guild_sync_paused(guild.sync_status == "quota_paused");
+        match guild.sync_error_code.as_str() {
+            "FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED"
+            | "KAED_FED_IDENTITY_STORAGE_QUOTA_EXCEEDED" => {
+                window.set_guild_sync_paused_title("Remote account cache is full".into());
+                window.set_guild_sync_paused_message(
+                    "This instance cannot cache another account needed by the guild. Ask its administrator to raise or free the identity cache limit."
+                        .into(),
+                );
+            }
+            "FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED"
+            | "KAED_FED_INSTANCE_STORAGE_QUOTA_EXCEEDED" => {
+                window.set_guild_sync_paused_title("Remote server cache is full".into());
+                window.set_guild_sync_paused_message(
+                    "This instance cannot cache another server needed by the guild. Ask its administrator to raise or free the server cache limit."
+                        .into(),
+                );
+            }
+            _ => {}
+        }
+        if guild.history_sync_status == "retrying" {
+            let seconds = guild.history_sync_retry_after_ms.div_ceil(1_000).max(1);
+            let prefix = if guild.history_sync_error_code == "KAED_FED_HISTORY_CAPACITY" {
+                "Older guild history is waiting for remote capacity."
+            } else {
+                "Older guild history is temporarily delayed."
+            };
+            window.set_guild_history_warning(
+                format!(
+                    "{prefix} Recent messages remain available; Kaede retries automatically in about {seconds}s."
+                )
+                .into(),
+            );
+        } else if guild.history_sync_status == "failed" {
+            let warning = match guild.history_sync_error_code.as_str() {
+                "FEDERATED_GUILD_HISTORY_LIMIT_REACHED" => {
+                    "Older guild history stopped at this instance's safety limit. Recent and new messages still work; ask the administrator to raise the federation history limit if needed."
+                }
+                "FEDERATED_GUILD_HISTORY_REJECTED" => {
+                    "Older guild history could not be safely imported from the remote instance. Recent and new messages still work."
+                }
+                _ => {
+                    "Older guild history could not be imported. Recent and new messages still work; contact the instance administrator if it stays unavailable."
+                }
+            };
+            window.set_guild_history_warning(warning.into());
+        }
         let administrator = guild.permissions & permission::ADMINISTRATOR != 0;
         window.set_can_manage_guild(
             administrator || guild.permissions & permission::MANAGE_GUILD != 0,
@@ -7004,6 +7187,9 @@ fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
                     channel.kind.clone(),
                     channel.can_send,
                     channel.topic.clone(),
+                    channel.history_truncated,
+                    channel.history_remote_available,
+                    channel.oldest_available_message.clone(),
                 ),
             )
         })
@@ -7104,16 +7290,51 @@ fn apply_snapshot(window: &AppWindow, snapshot: UiSnapshot) {
         window.set_active_call_state(SharedString::default());
         window.set_active_call_incoming(false);
     }
-    if let Some((name, kind, can_send, topic)) = channel_metadata.get(&selected) {
+    if let Some((
+        name,
+        kind,
+        can_send,
+        topic,
+        history_truncated,
+        history_remote_available,
+        oldest_available,
+    )) = channel_metadata.get(&selected)
+    {
         window.set_selected_channel_name(name.clone().into());
         window.set_selected_channel_kind(kind.clone().into());
         window.set_can_send(*can_send);
         window.set_selected_channel_topic(topic.clone().into());
+        let history_became_remote = *history_remote_available
+            && (!window.get_history_truncated() || !window.get_history_remote_available());
+        window.set_history_truncated(*history_truncated);
+        window.set_history_remote_available(*history_remote_available);
+        if history_became_remote {
+            // A CHANNEL_UPDATE can announce that the local recent-history
+            // window just began rolling. Re-open pagination exactly on that
+            // transition; do not reopen it after an authority page later
+            // proves that the true beginning was reached.
+            window.set_history_complete(false);
+        }
+        if *history_truncated
+            && !*history_remote_available
+            && !oldest_available.is_empty()
+            && snapshot
+                .messages
+                .get(&selected)
+                .and_then(|messages| messages.first())
+                .is_some_and(|message| message.id == oldest_available.as_str())
+        {
+            // The oldest locally retained row is already visible. Do not make
+            // a futile request for history this replica deliberately evicted.
+            window.set_history_complete(true);
+        }
     } else {
         window.set_selected_channel_name(SharedString::default());
         window.set_selected_channel_kind(SharedString::default());
         window.set_can_send(false);
         window.set_selected_channel_topic(SharedString::default());
+        window.set_history_truncated(false);
+        window.set_history_remote_available(false);
     }
     window.set_channels(ModelRc::from(Rc::new(VecModel::from(channels))));
     let mut admin_channels = snapshot
@@ -7780,7 +8001,45 @@ fn desktop_device_name() -> &'static str {
 
 fn friendly_error(error: &str) -> String {
     let normalized = error.to_ascii_uppercase();
-    if normalized.contains("MFA") {
+    if normalized.contains("FEDERATED_DM_HISTORY_UNAVAILABLE") {
+        "Older direct-message history is temporarily unavailable from the conversation's home instance. Your cached messages are safe; try loading earlier messages again in a moment."
+            .to_owned()
+    } else if normalized.contains("FEDERATED_DM_STORAGE_QUOTA_EXCEEDED")
+        || normalized.contains("KAED_FED_DM_STORAGE_QUOTA_EXCEEDED")
+    {
+        "The receiving instance has reached its direct-message storage safety limit. Your message was not accepted; retry later or contact that instance's administrator."
+            .to_owned()
+    } else if normalized.contains("KAED_FED_REPLICA_QUOTA_EXCEEDED") {
+        "This instance paused updates for the remote guild because its replica cache is full. Recent changes may be missing until an administrator frees space or raises the limit."
+            .to_owned()
+    } else if normalized.contains("FEDERATED_GUILD_HISTORY_LIMIT_REACHED") {
+        "Older guild history stopped at this instance's configured safety limit. Recent and new messages still work; ask the instance administrator to raise the federation history limit if needed."
+            .to_owned()
+    } else if normalized.contains("FEDERATED_GUILD_HISTORY_REJECTED") {
+        "Older guild history could not be safely imported from the remote instance. Recent and new messages still work."
+            .to_owned()
+    } else if normalized.contains("KAED_FED_HISTORY_CAPACITY")
+        || normalized.contains("FEDERATED_GUILD_HISTORY_TEMPORARILY_UNAVAILABLE")
+    {
+        "Older guild history is temporarily delayed. Recent messages remain available and Kaede retries automatically."
+            .to_owned()
+    } else if normalized.contains("FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED")
+        || normalized.contains("KAED_FED_IDENTITY_STORAGE_QUOTA_EXCEEDED")
+    {
+        "This instance cannot cache another remote account right now. Contact your instance administrator if this continues."
+            .to_owned()
+    } else if normalized.contains("FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED")
+        || normalized.contains("KAED_FED_INSTANCE_STORAGE_QUOTA_EXCEEDED")
+    {
+        "This instance cannot cache another remote server right now. Contact your instance administrator if this continues."
+            .to_owned()
+    } else if normalized.contains("KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED") {
+        "The receiving instance cannot accept another pending friend request right now. Your request was not delivered."
+            .to_owned()
+    } else if normalized.contains("KAED_FED_INBOX_QUOTA_EXCEEDED") {
+        "The receiving instance is temporarily full of pending federation events. Retry in a little while."
+            .to_owned()
+    } else if normalized.contains("MFA") {
         "Multi-factor authentication is required. The MFA panel will open next.".to_owned()
     } else if normalized.contains("INVALID_CREDENTIALS") || normalized.contains("401") {
         "The username or password was not accepted.".to_owned()
@@ -7849,6 +8108,37 @@ mod tests {
         );
         assert!(friendly_error("ROLE_HIERARCHY").contains("highest role"));
         assert!(friendly_error("SLOW_MODE retry_after_ms=1000").contains("Slow mode"));
+        assert!(
+            friendly_error("507 FEDERATED_DM_STORAGE_QUOTA_EXCEEDED")
+                .contains("receiving instance")
+        );
+        assert!(
+            friendly_error("KAED_FED_REPLICA_QUOTA_EXCEEDED")
+                .contains("Recent changes may be missing")
+        );
+        assert!(
+            friendly_error("503 FEDERATED_DM_HISTORY_UNAVAILABLE")
+                .contains("temporarily unavailable")
+        );
+        assert!(
+            friendly_error("KAED_FED_HISTORY_CAPACITY").contains("retries automatically")
+        );
+        assert!(
+            friendly_error("FEDERATED_GUILD_HISTORY_LIMIT_REACHED")
+                .contains("configured safety limit")
+        );
+        assert!(
+            friendly_error("FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED")
+                .contains("remote account")
+        );
+        assert!(
+            friendly_error("FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED")
+                .contains("remote server")
+        );
+        assert!(
+            friendly_error("KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED")
+                .contains("friend request")
+        );
     }
 
     #[test]

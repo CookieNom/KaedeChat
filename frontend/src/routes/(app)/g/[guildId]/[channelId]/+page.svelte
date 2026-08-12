@@ -1,7 +1,8 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { resolve } from '$app/paths';
-  import { api, ApiError } from '$lib/api/client';
+  import { api, ApiError, userErrorMessage } from '$lib/api/client';
+  import { apiErrorMessage } from '$lib/api/errors';
   import { loadAuthConfiguration } from '$lib/auth/config';
   import type { GifResult } from '$lib/chat/gifs';
   import {
@@ -21,6 +22,14 @@
   } from '$lib/chat/completion';
   import { mentionsUser } from '$lib/chat/mentions';
   import { guildModerationActions } from '$lib/chat/moderation';
+  import { guildHistorySyncGuidance, guildReplicaSyncGuidance } from '$lib/chat/guild-sync';
+  import {
+    selfModerationExpiryDelay,
+    selfModerationGuidance,
+    selfModerationRetryDelay,
+    selfModerationTimerDelay,
+    type SelfModerationStatus
+  } from '$lib/chat/self-moderation';
   import {
     discardAttachments,
     pendingMessageSend,
@@ -59,6 +68,8 @@
     Role,
     UserSummary
   } from '$lib/chat/types';
+  import { userDisplayName } from '$lib/chat/users';
+  import GuildRail from '$lib/components/GuildRail.svelte';
   import {
     GATEWAY_SESSION_RESET_EVENT,
     type Dispatch,
@@ -88,6 +99,7 @@
     guildMentionCount
   } from '$lib/notifications/counts';
   import { applyReadStateDispatch, type ReadStateDispatch } from '$lib/notifications/read-state';
+  import { ReadAcknowledgementQueue } from '$lib/notifications/read-ack';
   import {
     channelSettingsPath,
     directMessagePath,
@@ -116,6 +128,11 @@
   const channelId = $derived(page.params.channelId ?? '');
   const localDomain = typeof window === 'undefined' ? '' : window.location.hostname;
   let guild = $state<Guild | null>(null);
+  let selfModeration = $state<SelfModerationStatus | null>(null);
+  let selfModerationWarning = $state('');
+  let selfModerationRequest = 0;
+  let selfModerationExpiryTimer: number | null = null;
+  let selfModerationRetryTimer: number | null = null;
   const guilds = $derived(entities.guilds.values);
   const messages = $derived(
     entities.messages.values.filter((message) =>
@@ -141,6 +158,9 @@
   let content = $state('');
   let gifPickerEnabled = $state(false);
   let gifPickerOpen = $state(false);
+  let gifConfigurationError = $state('');
+  let gifConfigurationLoading = $state(false);
+  let featureController: AbortController | null = null;
   let emojiPickerOpen = $state(false);
   let availableEmojis = $state<CustomEmoji[]>([]);
   let unicodeEmojis = $state<EmojiOption[]>([]);
@@ -167,6 +187,7 @@
   let snapshotGeneration = 0;
   let typingTimer: number | null = null;
   let gateway: GatewayClient | null = null;
+  let subscribedGuildRef = '';
   let dispatchBuffer: Dispatch[] | null = null;
   let uploads = $state<PendingUpload[]>([]);
   let fileInput = $state<HTMLInputElement | null>(null);
@@ -226,7 +247,10 @@
   let moderationController: AbortController | null = null;
   let moderationGeneration = 0;
   let presencePreference = $state<'online' | 'idle' | 'dnd' | 'invisible'>('online');
+  let readStateWarning = $state('');
   let voiceOccupancy = $state<Record<string, VoiceOccupant[]>>({});
+  let voiceOccupancyErrors = $state<Record<string, string>>({});
+  let voiceOccupancyLoading = $state<Record<string, boolean>>({});
   let voiceOccupancyVersion = 0;
   let voiceRefreshSequence = 0;
   let draggedVoiceMember = $state<{
@@ -247,6 +271,18 @@
   const uploadControllers = new SvelteMap<string, AbortController>();
   const pendingSends = new SvelteMap<string, PendingMessageSend>();
   const collapsedCategories = new SvelteSet<string>();
+  const readAcknowledgements = new ReadAcknowledgementQueue<Message>({
+    send: (message) =>
+      api(
+        `/channels/${encodeURIComponent(entityRef({ id: message.channel_id, origin_domain: message.channel_domain }))}/ack`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ message_id: entityRef(message) })
+        }
+      ),
+    acknowledged: markMessageAcknowledged,
+    warningChanged: (message) => (readStateWarning = message)
+  });
 
   const channel = $derived(
     guild?.channels?.find((item) => matchesEntityRef(channelId, item, localDomain)) ?? null
@@ -317,6 +353,10 @@
       return false;
     }
   }
+
+  const replicaSyncWarning = $derived(guild ? guildReplicaSyncGuidance(guild) : null);
+  const historySyncWarning = $derived(guild ? guildHistorySyncGuidance(guild) : null);
+  const timeoutGuidance = $derived(selfModerationGuidance(selfModeration));
 
   const canCreateCurrentChannelInvite = $derived(
     Boolean(
@@ -394,7 +434,7 @@
       );
     typingParticipants = upsertTypingParticipant(typingParticipants, {
       ref: `${userId}@${domain}`,
-      name: user?.display_name ?? user?.username ?? 'Someone'
+      name: userDisplayName(user)
     });
     refreshTyping();
   }
@@ -447,8 +487,19 @@
   };
   const setReadStates = (items: ReadStateStatus[]) => entities.readStates.replace(items);
   const setMembers = (items: GuildMemberSummary[]) => entities.ingestMembers(items);
+  const preserveHistorySync = (item: Guild): Guild => {
+    const current = entities.guilds.get(entityKey(item));
+    if (!current?.history_sync_status || item.history_sync_status) return item;
+    return {
+      ...item,
+      history_sync_status: current.history_sync_status,
+      history_sync_error_code: current.history_sync_error_code,
+      history_sync_retry_after_ms: current.history_sync_retry_after_ms,
+      history_sync_resource: current.history_sync_resource
+    };
+  };
   const setGuilds = (items: Guild[]) => {
-    entities.ingestGuilds(items);
+    entities.ingestGuilds(items.map(preserveHistorySync));
   };
 
   function setCurrentChannels(channels: Channel[]) {
@@ -560,7 +611,7 @@
     try {
       await navigator.clipboard.writeText(value);
     } catch {
-      error = 'Clipboard access was denied by the browser.';
+      error = 'Browser denied clipboard access. Allow clipboard permission and try again.';
     }
   }
 
@@ -718,8 +769,7 @@
       inviteLink = `${window.location.origin}/invite/${created.code}`;
     } catch (caught) {
       if (dialogGeneration !== inviteDialogGeneration || !inviteDialogOpen) return;
-      inviteDialogError =
-        caught instanceof ApiError ? caught.message : 'Could not create an invite.';
+      inviteDialogError = userErrorMessage(caught, 'Could not create an invite. Try again.');
     } finally {
       if (dialogGeneration === inviteDialogGeneration) inviteDialogBusy = false;
     }
@@ -879,7 +929,10 @@
       saved = true;
     } catch (caught) {
       if (!stillCurrent()) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not save the channel.';
+      error = userErrorMessage(
+        caught,
+        'Could not save the channel. Check its details and try again.'
+      );
     } finally {
       if (stillCurrent()) {
         channelDialogBusy = false;
@@ -920,7 +973,7 @@
       }
     } catch (caught) {
       if (!stillCurrent()) return;
-      error = caught instanceof ApiError ? caught.message : `Could not delete the ${label}.`;
+      error = userErrorMessage(caught, `Could not delete the ${label}. Try again.`);
     } finally {
       if (deletionGeneration === channelDeleteGeneration) channelDeleteBusy = false;
     }
@@ -944,7 +997,7 @@
         )
       );
     } catch (caught) {
-      error = caught instanceof ApiError ? caught.message : 'Could not mark the channel as read.';
+      error = userErrorMessage(caught, 'Could not mark the channel as read. Try again.');
     }
   }
 
@@ -1088,7 +1141,7 @@
     } catch (caught) {
       if (!stillCurrent()) return;
       setCurrentChannels(previous);
-      error = caught instanceof ApiError ? caught.message : 'Could not save the channel order.';
+      error = userErrorMessage(caught, 'Could not save the channel order. Reload and try again.');
       channelOrderStatus = 'Channel order was not saved. The previous order has been restored.';
     } finally {
       if (reorderGeneration === channelReorderGeneration) reorderingChannels = false;
@@ -1124,6 +1177,77 @@
     return matchesEntityRef(guildId, { id: targetId, origin_domain: targetDomain }, localDomain);
   }
 
+  async function refreshSelfModeration(targetGuild = guildId) {
+    if (!targetGuild) return;
+    const request = ++selfModerationRequest;
+    const generation = loadGeneration;
+    try {
+      const status = await api<SelfModerationStatus>(
+        `/guilds/${encodeURIComponent(targetGuild)}/members/@me/moderation-status`
+      );
+      if (request !== selfModerationRequest || generation !== loadGeneration) return;
+      selfModeration = status;
+      selfModerationWarning = '';
+      scheduleSelfModerationExpiry(status);
+      scheduleSelfModerationRetry(status);
+    } catch (caught) {
+      if (request !== selfModerationRequest || generation !== loadGeneration) return;
+      // Keep an already-known active status visible while its home instance is
+      // unreachable. Normal (not timed-out) users get no noisy channel banner.
+      selfModerationWarning = selfModerationGuidance(selfModeration)
+        ? userErrorMessage(
+            caught,
+            'Your timeout details could not be refreshed. Sending is still checked by the guild home.'
+          )
+        : '';
+      scheduleSelfModerationRetry(selfModeration);
+    }
+  }
+
+  function scheduleSelfModerationRetry(status: SelfModerationStatus | null) {
+    if (selfModerationRetryTimer !== null) {
+      window.clearTimeout(selfModerationRetryTimer);
+      selfModerationRetryTimer = null;
+    }
+    if (document.hidden) return;
+    const delay = selfModerationRetryDelay(status);
+    if (delay === null) return;
+    selfModerationRetryTimer = window.setTimeout(() => {
+      selfModerationRetryTimer = null;
+      void refreshSelfModeration();
+    }, delay);
+  }
+
+  function scheduleSelfModerationExpiry(status: SelfModerationStatus | null) {
+    if (selfModerationExpiryTimer !== null) {
+      window.clearTimeout(selfModerationExpiryTimer);
+      selfModerationExpiryTimer = null;
+    }
+    if (!status?.timed_out || status.timeout_indefinite || !status.timeout_until) return;
+    const delay = selfModerationExpiryDelay(status);
+    if (delay === null) return;
+    if (delay <= 0) {
+      scheduleSelfModerationRetry(null);
+      selfModeration = null;
+      return;
+    }
+    const timerDelay = selfModerationTimerDelay(status);
+    if (timerDelay === null) return;
+    selfModerationExpiryTimer = window.setTimeout(() => {
+      selfModerationExpiryTimer = null;
+      // Browsers clamp timers to roughly 24.85 days. A longer timeout must
+      // remain visible and be scheduled again instead of clearing early.
+      const remaining = selfModerationExpiryDelay(selfModeration);
+      if (remaining !== null && remaining > 0) {
+        scheduleSelfModerationExpiry(selfModeration);
+        return;
+      }
+      scheduleSelfModerationRetry(null);
+      selfModeration = null;
+      void refreshSelfModeration();
+    }, timerDelay);
+  }
+
   function presenceFor(user: UserSummary) {
     return entities.presenceFor(user);
   }
@@ -1139,9 +1263,12 @@
     void api('/users/@me/settings', {
       method: 'PATCH',
       body: JSON.stringify({ presence_preference: status })
-    }).catch(() => {
-      // The live gateway preference remains effective for this session. A
-      // later settings refresh will reconcile a failed durable update.
+    }).catch((caught) => {
+      if (presencePreference !== status) return;
+      error = `Presence changed for this session, but it could not sync to your other devices. ${userErrorMessage(
+        caught,
+        'The server could not save the presence setting. Try again.'
+      )}`;
     });
     if (currentUser) entities.setPresence(currentUser, status === 'invisible' ? 'offline' : status);
   }
@@ -1354,7 +1481,7 @@
       });
       voiceOccupancyVersion += 1;
     } catch (caught) {
-      error = caught instanceof ApiError ? caught.message : 'Could not move this voice member.';
+      error = userErrorMessage(caught, 'Could not move this voice member. Try again.');
     } finally {
       voiceModerationBusy = false;
     }
@@ -1414,8 +1541,7 @@
       });
       voiceOccupancyVersion += 1;
     } catch (caught) {
-      error =
-        caught instanceof ApiError ? caught.message : 'Could not disconnect this voice member.';
+      error = userErrorMessage(caught, 'Could not disconnect this voice member. Try again.');
     } finally {
       voiceModerationBusy = false;
     }
@@ -1552,8 +1678,10 @@
       }
     } catch (caught) {
       if (requestGeneration !== moderationGeneration || controller.signal.aborted) return;
-      moderationError =
-        caught instanceof ApiError ? caught.message : 'The moderation action could not be applied.';
+      moderationError = userErrorMessage(
+        caught,
+        'The moderation action could not be applied. Try again.'
+      );
     } finally {
       if (requestGeneration === moderationGeneration) {
         moderationController = null;
@@ -1579,8 +1707,8 @@
     try {
       const user = await api<UserSummary>(`/users/lookup?handle=${encodeURIComponent(handle)}`);
       profile = { user, x: window.innerWidth / 2, y: window.innerHeight / 2 };
-    } catch {
-      error = 'Could not load that profile.';
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not load that profile. Try again.');
     }
   }
 
@@ -1589,35 +1717,62 @@
     if (voiceChannels.length === 0) return;
     const sequence = ++voiceRefreshSequence;
     const version = voiceOccupancyVersion;
+    voiceOccupancyLoading = {
+      ...voiceOccupancyLoading,
+      ...Object.fromEntries(voiceChannels.map((item) => [entityKey(item), true]))
+    };
     const snapshots = await Promise.all(
       voiceChannels.map(async (item) => {
+        const key = entityKey(item);
         try {
           const snapshot = await api<{ participants: VoiceOccupant[] }>(
             `/channels/${encodeURIComponent(entityRef(item))}/voice/occupancy`
           );
-          return [entityKey(item), snapshot.participants] as const;
-        } catch {
-          return null;
+          return { key, participants: snapshot.participants, error: '' };
+        } catch (caught) {
+          return {
+            key,
+            participants: null,
+            error: userErrorMessage(
+              caught,
+              'Could not refresh this voice roster. Check your connection and try again.'
+            )
+          };
         }
       })
     );
-    if (
-      generation !== loadGeneration ||
-      sequence !== voiceRefreshSequence ||
-      version !== voiceOccupancyVersion
-    )
+    if (generation !== loadGeneration || sequence !== voiceRefreshSequence) return;
+    if (version !== voiceOccupancyVersion) {
+      const nextLoading = { ...voiceOccupancyLoading };
+      for (const item of voiceChannels) nextLoading[entityKey(item)] = false;
+      voiceOccupancyLoading = nextLoading;
       return;
-    voiceOccupancy = {
-      ...voiceOccupancy,
-      ...Object.fromEntries(snapshots.filter((snapshot) => snapshot !== null))
-    };
+    }
+    const nextOccupancy = { ...voiceOccupancy };
+    const nextErrors = { ...voiceOccupancyErrors };
+    const nextLoading = { ...voiceOccupancyLoading };
+    for (const snapshot of snapshots) {
+      nextLoading[snapshot.key] = false;
+      if (snapshot.participants) {
+        nextOccupancy[snapshot.key] = snapshot.participants;
+        delete nextErrors[snapshot.key];
+      } else {
+        nextErrors[snapshot.key] = snapshot.error;
+      }
+    }
+    voiceOccupancy = nextOccupancy;
+    voiceOccupancyErrors = nextErrors;
+    voiceOccupancyLoading = nextLoading;
     voiceOccupancyVersion += 1;
   }
 
   function refreshVoiceOccupancy() {
     if (document.visibilityState !== 'visible' || !guild) return;
     const occupiedVoiceChannels = (guild.channels ?? []).filter(
-      (item) => item.type === 2 && (voiceOccupancy[entityKey(item)]?.length ?? 0) > 0
+      (item) =>
+        item.type === 2 &&
+        ((voiceOccupancy[entityKey(item)]?.length ?? 0) > 0 ||
+          Boolean(voiceOccupancyErrors[entityKey(item)]))
     );
     if (occupiedVoiceChannels.length > 0) {
       void loadVoiceOccupancy(occupiedVoiceChannels, loadGeneration);
@@ -1715,7 +1870,11 @@
               : item
           )
         );
-        error = failure.reason ?? `Queued message rejected: ${rejected.code}`;
+        error =
+          failure.reason ??
+          apiErrorMessage(rejected.code || 'REQUEST_FAILED', 400, {
+            message: rejected.reason
+          });
       }
     } else if (dispatch.t === 'GUILD_EMOJI_CREATE') {
       const emoji = dispatch.d as CustomEmoji;
@@ -1731,6 +1890,21 @@
       availableEmojis = availableEmojis.filter(
         (item) => item.guild_id !== removed.id || item.guild_domain !== removed.origin_domain
       );
+    } else if (dispatch.t === 'GUILD_MEMBER_UPDATE') {
+      const update = dispatch.d as {
+        user_id?: string;
+        user_domain?: string;
+        user?: { id?: string; origin_domain?: string };
+      };
+      const userId = update.user_id ?? update.user?.id;
+      const userDomain = update.user_domain ?? update.user?.origin_domain;
+      if (
+        currentUser &&
+        userId === currentUser.id &&
+        (!userDomain || userDomain === currentUser.origin_domain)
+      ) {
+        void refreshSelfModeration();
+      }
     } else if (dispatch.t === 'TYPING_START') {
       const started = dispatch.d as {
         channel_id: string;
@@ -1807,6 +1981,40 @@
         guild = { ...guild, ...updated };
         entities.guilds.upsert(guild);
       }
+    } else if (dispatch.t === 'USER_UPDATE') {
+      const user = dispatch.d as UserSummary;
+      if (user.id && user.origin_domain) {
+        entities.applyUserProfile(user);
+        const patch = (message: Message): Message =>
+          message.author_id === user.id && message.author_domain === user.origin_domain
+            ? { ...message, author: { ...(message.author ?? user), ...user } }
+            : message;
+        pinnedMessages = pinnedMessages.map(patch);
+        if (replyingMessage) replyingMessage = patch(replyingMessage);
+        if (profile && entityKey(profile.user) === entityKey(user)) {
+          profile = { ...profile, user: { ...profile.user, ...user } };
+        }
+      }
+    } else if (dispatch.t === 'GUILD_HISTORY_SYNC_UPDATE') {
+      const update = dispatch.d as {
+        guild_id: string;
+        guild_domain: string;
+        status: Guild['history_sync_status'];
+        code?: string | null;
+        retry_after_ms?: number | null;
+        resource?: string | null;
+      };
+      if (guild && isCurrentGuild(update.guild_id, update.guild_domain)) {
+        guild = {
+          ...guild,
+          history_sync_status: update.status,
+          history_sync_error_code: update.status === 'ready' ? null : (update.code ?? null),
+          history_sync_retry_after_ms:
+            update.status === 'retrying' ? (update.retry_after_ms ?? null) : null,
+          history_sync_resource: update.status === 'failed' ? (update.resource ?? null) : null
+        };
+        entities.guilds.upsert(guild);
+      }
     } else if (dispatch.t === 'GUILD_ROLE_CREATE' || dispatch.t === 'GUILD_ROLE_UPDATE') {
       const role = dispatch.d as Role;
       if (guild && role.guild_id === guild.id && role.guild_domain === guild.origin_domain) {
@@ -1834,8 +2042,6 @@
           )
         };
       }
-    } else if (dispatch.t === 'READY' || dispatch.t === 'RESUMED') {
-      gateway?.subscribeMembers(guildId);
     } else if (dispatch.t === 'GUILD_MEMBER_LIST_UPDATE') {
       const update = dispatch.d as {
         guild_id: string;
@@ -1893,8 +2099,39 @@
       );
       voiceOccupancyVersion += 1;
     } else if (dispatch.t === 'VOICE_TOKEN') {
-      const update = dispatch.d as { grant: import('$lib/voice/session').VoiceToken };
-      window.dispatchEvent(new CustomEvent('kaede:voice-token', { detail: update.grant }));
+      const update = dispatch.d as {
+        move_session_id?: string;
+        grant: import('$lib/voice/session').VoiceToken;
+      };
+      if ((update.move_session_id ?? null) === (update.grant.move_session_id ?? null)) {
+        window.dispatchEvent(new CustomEvent('kaede:voice-token', { detail: update.grant }));
+      }
+    }
+  }
+
+  function ensureMemberSubscription(targetGuild: string) {
+    if (!gateway || !targetGuild || subscribedGuildRef === targetGuild) return;
+    subscribedGuildRef = targetGuild;
+    gateway.subscribeMembers(targetGuild);
+  }
+
+  async function refreshGifConfiguration() {
+    const controller = featureController;
+    if (!controller || gifConfigurationLoading) return;
+    gifConfigurationLoading = true;
+    gifConfigurationError = '';
+    try {
+      const configuration = await loadAuthConfiguration(controller.signal);
+      gifPickerEnabled = configuration.gif_picker_enabled;
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      gifPickerEnabled = false;
+      gifConfigurationError = userErrorMessage(
+        caught,
+        'Could not check whether GIF search is available. Try again.'
+      );
+    } finally {
+      if (featureController === controller) gifConfigurationLoading = false;
     }
   }
 
@@ -1915,10 +2152,8 @@
       emojiPickerOpen = false;
     };
     gateway = client;
-    const featureController = new AbortController();
-    void loadAuthConfiguration(featureController.signal)
-      .then((configuration) => (gifPickerEnabled = configuration.gif_picker_enabled))
-      .catch(() => (gifPickerEnabled = false));
+    featureController = new AbortController();
+    void refreshGifConfiguration();
     try {
       memberRosterOpen = localStorage.getItem('kaede.member-roster.visible') !== 'false';
     } catch {
@@ -1927,8 +2162,17 @@
     const visibilityChanged = () => {
       acknowledgeLatestIfVisible();
       refreshVoiceOccupancy();
+      if (document.hidden) {
+        if (selfModerationRetryTimer !== null) window.clearTimeout(selfModerationRetryTimer);
+        selfModerationRetryTimer = null;
+      } else {
+        void refreshSelfModeration();
+      }
     };
-    const focused = () => refreshVoiceOccupancy();
+    const focused = () => {
+      refreshVoiceOccupancy();
+      void refreshSelfModeration();
+    };
     const voiceRefreshTimer = window.setInterval(refreshVoiceOccupancy, 30_000);
     const sessionReset = () => recoverCurrentRoute();
     const profileRequest = (event: Event) => void openHandleProfile(event);
@@ -1951,9 +2195,11 @@
     viewportChanged();
     client.addEventListener('dispatch', receive);
     client.addEventListener(GATEWAY_SESSION_RESET_EVENT, sessionReset);
-    client.subscribeMembers(guildId);
+    ensureMemberSubscription(guildId);
     return () => {
-      featureController.abort();
+      featureController?.abort();
+      featureController = null;
+      readAcknowledgements.reset();
       loadGeneration += 1;
       snapshotGeneration += 1;
       voiceRefreshSequence += 1;
@@ -1969,9 +2215,15 @@
       desktopViewport.removeEventListener('change', viewportChanged);
       client.removeEventListener('dispatch', receive);
       client.removeEventListener(GATEWAY_SESSION_RESET_EVENT, sessionReset);
+      client.releaseMembers();
+      subscribedGuildRef = '';
       if (gateway === client) gateway = null;
       resetTyping();
       if (slowmodeTimer) window.clearInterval(slowmodeTimer);
+      if (selfModerationExpiryTimer !== null) window.clearTimeout(selfModerationExpiryTimer);
+      selfModerationExpiryTimer = null;
+      if (selfModerationRetryTimer !== null) window.clearTimeout(selfModerationRetryTimer);
+      selfModerationRetryTimer = null;
       resetUploads();
     };
   });
@@ -2050,6 +2302,13 @@
       const buffered: Dispatch[] = [];
       dispatchBuffer = buffered;
       guild = null;
+      selfModeration = null;
+      selfModerationWarning = '';
+      selfModerationRequest += 1;
+      if (selfModerationExpiryTimer !== null) window.clearTimeout(selfModerationExpiryTimer);
+      selfModerationExpiryTimer = null;
+      if (selfModerationRetryTimer !== null) window.clearTimeout(selfModerationRetryTimer);
+      selfModerationRetryTimer = null;
       setMessages([]);
       setMembers([]);
       resetUploads();
@@ -2094,6 +2353,8 @@
       moderationBusy = false;
       moderationError = '';
       voiceOccupancy = {};
+      voiceOccupancyErrors = {};
+      voiceOccupancyLoading = {};
       voiceOccupancyVersion += 1;
       voiceRefreshSequence += 1;
       resetTyping();
@@ -2113,7 +2374,9 @@
       lastTypingAt = 0;
       hasEarlier = true;
       pendingSends.clear();
-      gateway?.subscribeMembers(targetGuild);
+      readAcknowledgements.reset();
+      ensureMemberSubscription(targetGuild);
+      void refreshSelfModeration(targetGuild);
       void load(
         targetGuild,
         targetChannel,
@@ -2182,7 +2445,7 @@
         targetChannel !== channelId
       )
         return;
-      guild = loadedGuild;
+      guild = preserveHistorySync(loadedGuild);
       availableEmojis = loadedEmojis;
       pinnedMessages = loadedPins;
       setGuilds(loadedGuilds);
@@ -2229,7 +2492,7 @@
       forgetConfirmedSends();
       if (dispatchBuffer === buffered) dispatchBuffer = null;
       if (!preserveMessages) {
-        error = caught instanceof ApiError ? caught.message : 'Could not open this channel.';
+        error = userErrorMessage(caught, 'Could not open this channel. Try again.');
       } else if (!error) {
         error = 'Live updates resumed, but channel state could not be refreshed.';
       }
@@ -2256,7 +2519,7 @@
       hasEarlier = older.length === 50 && messages.length < 1_000;
     } catch (caught) {
       if (generation !== loadGeneration || targetChannel !== channelId) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not load earlier messages.';
+      error = userErrorMessage(caught, 'Could not load earlier messages. Try again.');
     } finally {
       if (generation === loadGeneration && targetChannel === channelId) loadingEarlier = false;
     }
@@ -2280,24 +2543,17 @@
       hasLater = newer.length === 50;
     } catch (caught) {
       if (generation !== loadGeneration || targetChannel !== channelId) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not load newer messages.';
+      error = userErrorMessage(caught, 'Could not load newer messages. Try again.');
     } finally {
       if (generation === loadGeneration && targetChannel === channelId) loadingLater = false;
     }
   }
 
-  async function acknowledge(message: Message) {
+  function markMessageAcknowledged(message: Message) {
     const targetChannel = {
       id: message.channel_id,
       origin_domain: message.channel_domain
     };
-    const succeeded = await api(`/channels/${encodeURIComponent(entityRef(targetChannel))}/ack`, {
-      method: 'POST',
-      body: JSON.stringify({ message_id: entityRef(message) })
-    })
-      .then(() => true)
-      .catch(() => false);
-    if (!succeeded) return;
     setReadStates(
       readStates.map((state) =>
         state.channel_id === targetChannel.id &&
@@ -2319,6 +2575,10 @@
           : state
       )
     );
+  }
+
+  function acknowledge(message: Message): Promise<void> {
+    return readAcknowledgements.acknowledge(message);
   }
 
   function reconcile(message: Message) {
@@ -2366,7 +2626,7 @@
         finishEditing();
       } catch (caught) {
         if (generation === loadGeneration)
-          error = caught instanceof ApiError ? caught.message : 'Message edit failed.';
+          error = userErrorMessage(caught, 'Could not edit the message. Try again.');
       } finally {
         if (generation === loadGeneration) busy = false;
       }
@@ -2538,8 +2798,7 @@
             'Those files were already used by another message. Reattach them before retrying.';
         } else {
           error =
-            timeoutReason ??
-            (caught instanceof ApiError ? caught.message : 'Message failed to send.');
+            timeoutReason ?? userErrorMessage(caught, 'Could not send the message. Try again.');
         }
       }
     } finally {
@@ -2593,7 +2852,7 @@
               ? {
                   ...item,
                   status: 'failed',
-                  error: caught instanceof Error ? caught.message : 'Upload failed'
+                  error: userErrorMessage(caught, 'Upload failed. Remove the file and try again.')
                 }
               : item
           );
@@ -2709,7 +2968,10 @@
         `/channels/${encodeURIComponent(entityRef(channel))}/pins`
       );
     } catch (caught) {
-      pinsError = caught instanceof ApiError ? caught.message : 'Could not load pinned messages.';
+      pinsError = userErrorMessage(
+        caught,
+        'Could not load pinned messages. Close this panel and try again.'
+      );
     } finally {
       pinsLoading = false;
     }
@@ -2731,7 +2993,7 @@
         ? [message, ...pinnedMessages.filter((item) => entityKey(item) !== entityKey(message))]
         : pinnedMessages.filter((item) => entityKey(item) !== entityKey(message));
     } catch (caught) {
-      error = caught instanceof ApiError ? caught.message : 'Could not update the pinned message.';
+      error = userErrorMessage(caught, 'Could not update the pinned message. Try again.');
     }
   }
 
@@ -2788,12 +3050,13 @@
       if (editingMessage && entityKey(editingMessage) === entityKey(message)) finishEditing();
     } catch (caught) {
       if (generation !== loadGeneration || routeChannel !== channelId) return;
-      error = caught instanceof ApiError ? caught.message : 'Message deletion failed.';
+      error = userErrorMessage(caught, 'Could not delete the message. Try again.');
     }
   }
 
   async function messageUser(user: UserSummary) {
     if (currentUser && entityKey(user) === entityKey(currentUser)) return;
+    if (user.profile_resolved === false) return;
     const generation = loadGeneration;
     const routeGuild = guildId;
     const routeChannel = channelId;
@@ -2814,7 +3077,7 @@
       window.location.assign(directMessagePath(opened));
     } catch (caught) {
       if (!stillCurrent()) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not open a direct message.';
+      error = userErrorMessage(caught, 'Could not open a direct message. Try again.');
     }
   }
 
@@ -2922,93 +3185,76 @@
 {/if}
 
 {#snippet voiceMembers(target: Channel)}
-  {#if target.type === 2 && occupantsFor(target).length}
-    <div class="voice-channel-members" aria-label={`People in ${target.name}`}>
-      {#each occupantsFor(target) as occupant (occupant.identity)}
-        {@const voiceMember = memberFor(occupant.user_id, occupant.user_domain)}
-        {#if voiceMember}
-          <button
-            type="button"
-            draggable={canMoveVoiceMember(voiceMember.user, target) && !voiceModerationBusy}
-            title={`${voiceMember.user.handle}${occupant.self_mute || occupant.server_mute ? ' · muted' : ''}`}
-            ondragstart={(event) => voiceMemberDragStart(event, occupant, voiceMember.user, target)}
-            ondragend={voiceMemberDragEnd}
-            oncontextmenu={(event) =>
-              openVoiceMemberMenu(event, occupant, voiceMember.user, target)}
-            onclick={(event) => openProfile(voiceMember.user, event)}
-          >
-            <span class="voice-member-avatar">
-              {#if voiceMember.user.avatar_hash}
-                <img
-                  src={assetUrl(voiceMember.user.avatar_hash, 'thumbnail_128', voiceMember.user)}
-                  alt=""
-                />
-              {:else}
-                {(
-                  voiceMember.nickname ??
-                  voiceMember.user.display_name ??
-                  voiceMember.user.username
-                )
-                  .slice(0, 1)
-                  .toUpperCase()}
-              {/if}
-              <i class={`presence-dot presence-${presenceFor(voiceMember.user)}`}></i>
-            </span>
-            <span
-              >{voiceMember.nickname ??
-                voiceMember.user.display_name ??
-                voiceMember.user.username}</span
+  {#if target.type === 2}
+    {@const voiceKey = entityKey(target)}
+    {#if occupantsFor(target).length}
+      <div class="voice-channel-members" aria-label={`People in ${target.name}`}>
+        {#each occupantsFor(target) as occupant (occupant.identity)}
+          {@const voiceMember = memberFor(occupant.user_id, occupant.user_domain)}
+          {#if voiceMember}
+            <button
+              type="button"
+              draggable={canMoveVoiceMember(voiceMember.user, target) && !voiceModerationBusy}
+              title={`${userDisplayName(voiceMember.user)}${occupant.self_mute || occupant.server_mute ? ' · muted' : ''}`}
+              ondragstart={(event) =>
+                voiceMemberDragStart(event, occupant, voiceMember.user, target)}
+              ondragend={voiceMemberDragEnd}
+              oncontextmenu={(event) =>
+                openVoiceMemberMenu(event, occupant, voiceMember.user, target)}
+              onclick={(event) => openProfile(voiceMember.user, event)}
             >
-            {#if occupant.self_mute || occupant.server_mute}<Icon
-                name="microphone-off"
-                size={13}
-              />{/if}
-            {#if occupant.self_deaf || occupant.server_deaf}<span
-                class="voice-state-icon"
-                aria-label="Deafened"
-                title="Deafened"><Icon name="headphones-off" size={13} /></span
-              >{/if}
-          </button>
-        {/if}
-      {/each}
-    </div>
+              <span class="voice-member-avatar">
+                {#if voiceMember.user.avatar_hash}
+                  <img
+                    src={assetUrl(voiceMember.user.avatar_hash, 'thumbnail_128', voiceMember.user)}
+                    alt=""
+                  />
+                {:else}
+                  {(voiceMember.nickname ?? userDisplayName(voiceMember.user))
+                    .slice(0, 1)
+                    .toUpperCase()}
+                {/if}
+                <i class={`presence-dot presence-${presenceFor(voiceMember.user)}`}></i>
+              </span>
+              <span>{voiceMember.nickname ?? userDisplayName(voiceMember.user)}</span>
+              {#if occupant.self_mute || occupant.server_mute}<Icon
+                  name="microphone-off"
+                  size={13}
+                />{/if}
+              {#if occupant.self_deaf || occupant.server_deaf}<span
+                  class="voice-state-icon"
+                  aria-label="Deafened"
+                  title="Deafened"><Icon name="headphones-off" size={13} /></span
+                >{/if}
+            </button>
+          {/if}
+        {/each}
+      </div>
+    {/if}
+    {#if voiceOccupancyErrors[voiceKey]}
+      <div class="voice-roster-health" role="status">
+        <span title={voiceOccupancyErrors[voiceKey]}>{voiceOccupancyErrors[voiceKey]}</span>
+        <button
+          type="button"
+          disabled={voiceOccupancyLoading[voiceKey]}
+          onclick={() => void loadVoiceOccupancy([target], loadGeneration)}
+        >
+          {voiceOccupancyLoading[voiceKey] ? 'Retrying…' : 'Retry'}
+        </button>
+      </div>
+    {/if}
   {/if}
 {/snippet}
 
 <main class:member-roster-visible={memberRosterOpen} class="chat-app">
-  <nav class="guild-spine" aria-label="Guilds">
-    <a
-      class="spine-home"
-      href={resolve('/home')}
-      aria-label={homeUnreadCount ? `Home, ${homeUnreadCount} unread direct messages` : 'Home'}
-      title="Home"
-    >
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M4 10.5 12 4l8 6.5v8a1.5 1.5 0 0 1-1.5 1.5h-4v-6h-5v6h-4A1.5 1.5 0 0 1 4 18.5z" />
-      </svg>
-      {#if homeUnreadCount}
-        <small class="rail-unread">{compactBadgeCount(homeUnreadCount)}</small>
-      {/if}
-    </a>
-    <div class="spine-separator" aria-hidden="true"></div>
-    {#each guilds as item (entityKey(item))}
-      {@const mentionCount = guildMentionCount(readStates, item)}
-      <a
-        class:active={matchesEntityRef(guildId, item, localDomain)}
-        href={guildLandingPath(item)}
-        aria-label={mentionCount ? `${item.name}, ${mentionCount} mentions` : item.name}
-        aria-current={matchesEntityRef(guildId, item, localDomain) ? 'page' : undefined}
-        title={item.name}
-      >
-        {#if item.icon_hash}
-          <img src={assetUrl(item.icon_hash, 'thumbnail_128', item)} alt="" />
-        {:else}
-          {item.name.slice(0, 2).toUpperCase()}
-        {/if}
-        {#if mentionCount}<small class="rail-unread">{compactBadgeCount(mentionCount)}</small>{/if}
-      </a>
-    {/each}
-  </nav>
+  <GuildRail
+    {guilds}
+    homeHref={resolve('/home')}
+    {homeUnreadCount}
+    guildHref={guildLandingPath}
+    mentionCount={(item) => guildMentionCount(readStates, item)}
+    activeGuildKey={guild ? entityKey(guild) : null}
+  />
   <aside
     bind:this={mobileNavigationDrawer}
     class:mobile-open={mobileNavigationOpen}
@@ -3318,7 +3564,12 @@
       </a>
     </div>
   </aside>
-  <section class:guild-voice-pane={channel?.type === 2} class="message-pane">
+  <section
+    class:guild-voice-pane={channel?.type === 2}
+    class:sync-paused={guild?.sync_status === 'quota_paused'}
+    class:has-status-warning={Boolean(replicaSyncWarning || historySyncWarning || timeoutGuidance)}
+    class="message-pane"
+  >
     <header class:guild-voice-header={channel?.type === 2} class="channel-header">
       <div class="channel-header-primary">
         <button
@@ -3371,6 +3622,35 @@
         </button>
       </div>
     </header>
+    {#if readStateWarning}
+      <div class="read-state-warning" role="status">
+        <span>{readStateWarning}</span>
+        <button type="button" onclick={() => void readAcknowledgements.retryNow()}>Retry now</button
+        >
+      </div>
+    {/if}
+    {#if replicaSyncWarning || historySyncWarning || timeoutGuidance}
+      <div class="status-warnings">
+        {#if replicaSyncWarning}
+          <div class="sync-warning" role={replicaSyncWarning.severity}>
+            <strong>{replicaSyncWarning.title}</strong>
+            <span>{replicaSyncWarning.message}</span>
+          </div>
+        {:else if historySyncWarning}
+          <div class="sync-warning" role={historySyncWarning.severity}>
+            <strong>{historySyncWarning.title}</strong>
+            <span>{historySyncWarning.message}</span>
+          </div>
+        {/if}
+        {#if timeoutGuidance}
+          <div class="timeout-warning" role="status">
+            <strong>{timeoutGuidance.title}</strong>
+            <span>{timeoutGuidance.message}</span>
+            {#if selfModerationWarning}<small>{selfModerationWarning}</small>{/if}
+          </div>
+        {/if}
+      </div>
+    {/if}
     {#if channel?.type === 2}
       <div class="guild-voice-content">
         {#key entityRef(channel)}
@@ -3384,7 +3664,7 @@
         role="log"
         aria-label={`Messages in ${channel?.name ?? 'channel'}`}
       >
-        {#if error}<p class="form-error message-error">{error}</p>{/if}
+        {#if error}<p class="form-error message-error" role="alert">{error}</p>{/if}
         {#snippet emptyTimeline()}
           {#if channelReady && channel}
             <section class="channel-welcome">
@@ -3429,6 +3709,7 @@
                   onEdit={startEditing}
                   onDelete={deleteMessage}
                   onMessageAuthor={item.message.author &&
+                  item.message.author.profile_resolved !== false &&
                   (item.message.author_id !== currentUser?.id ||
                     item.message.author_domain !== currentUser?.origin_domain)
                     ? messageAuthor
@@ -3454,11 +3735,7 @@
           <div class="reply-banner">
             <span>
               Replying to
-              <strong
-                >{replyingMessage.author?.display_name ??
-                  replyingMessage.author?.username ??
-                  'Unknown author'}</strong
-              >
+              <strong>{userDisplayName(replyingMessage.author)}</strong>
             </span>
             <div class="reply-banner-actions">
               {#if replyingMessage.author && (replyingMessage.author.id !== currentUser?.id || replyingMessage.author.origin_domain !== currentUser?.origin_domain)}
@@ -3548,13 +3825,16 @@
               rows="1"
               maxlength="4000"
             ></textarea>
-            {#if gifPickerEnabled && !editingMessage}
+            {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage}
               <button
                 class="gif-button"
                 class:active={gifPickerOpen}
                 type="button"
-                disabled={busy || !channelReady || !channel}
-                aria-label="Choose a GIF"
+                disabled={busy || !channelReady || !channel || !gifPickerEnabled}
+                aria-label={gifPickerEnabled
+                  ? 'Choose a GIF'
+                  : 'GIF availability could not be checked'}
+                title={gifPickerEnabled ? 'Choose a GIF' : gifConfigurationError}
                 aria-expanded={gifPickerOpen}
                 onclick={() => {
                   gifPickerOpen = !gifPickerOpen;
@@ -3601,6 +3881,18 @@
               </svg>
             </button>
           </form>
+          {#if gifConfigurationError}
+            <p class="composer-feature-warning" role="status">
+              <span>{gifConfigurationError}</span>
+              <button
+                type="button"
+                disabled={gifConfigurationLoading}
+                onclick={() => void refreshGifConfiguration()}
+              >
+                {gifConfigurationLoading ? 'Checking…' : 'Retry GIF check'}
+              </button>
+            </p>
+          {/if}
           {#if gifPickerOpen}
             <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
           {/if}
@@ -3628,6 +3920,7 @@
           error={pinsError}
           onClose={() => (pinsOpen = false)}
           onJump={jumpToPinnedMessage}
+          onRetry={() => void loadPins()}
         />
       {/if}
     {/if}
@@ -3651,7 +3944,7 @@
     y={profile.y}
     isSelf={Boolean(currentUser && entityKey(currentUser) === entityKey(profile.user))}
     onClose={() => (profile = null)}
-    onMessage={messageUser}
+    onMessage={profile.user.profile_resolved === false ? undefined : messageUser}
     moderationActions={moderationActionsFor(profile.user)}
     onModerate={requestModeration}
     roles={guild?.roles ?? []}
@@ -3695,7 +3988,7 @@
               : moderationDialog.action === 'kick'
                 ? 'Kick'
                 : 'Ban'}
-            {moderationDialog.user.display_name ?? moderationDialog.user.username}?
+            {userDisplayName(moderationDialog.user)}?
           </h2>
         </div>
       </header>
@@ -3749,7 +4042,7 @@
     class="channel-context-menu voice-member-context-menu"
     role="menu"
     tabindex="-1"
-    aria-label={`Voice actions for ${voiceMemberMenu.user.display_name ?? voiceMemberMenu.user.username}`}
+    aria-label={`Voice actions for ${userDisplayName(voiceMemberMenu.user)}`}
     oncontextmenu={(event) => {
       event.preventDefault();
       event.stopPropagation();

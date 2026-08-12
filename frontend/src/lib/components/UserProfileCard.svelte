@@ -1,8 +1,9 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { api, ApiError } from '$lib/api/client';
+  import { api, userErrorMessage } from '$lib/api/client';
   import { entityRef } from '$lib/chat/refs';
   import type { PresenceStatus, Relationship, Role, UserSummary } from '$lib/chat/types';
+  import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import { assetUrl } from '$lib/media/assets';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { portal } from '$lib/ui/portal';
@@ -86,7 +87,7 @@
       placeContextMenu(popover, x, y);
       popover.focus();
     });
-    if (!isSelf) {
+    if (!isSelf && user.profile_resolved !== false) {
       void api<Relationship[]>('/users/@me/relationships', { signal: controller.signal })
         .then((relationships) => {
           const relationship = relationships.find(
@@ -98,15 +99,22 @@
         .catch((caught: unknown) => {
           if (controller.signal.aborted) return;
           relationshipType = 'unavailable';
-          relationshipError =
-            caught instanceof ApiError ? caught.message : 'Could not load friendship status.';
+          relationshipError = userErrorMessage(
+            caught,
+            'Could not load friendship status. Try reopening this profile.'
+          );
         });
     }
     return () => controller.abort();
   });
 
   async function updateFriendship() {
-    if (isSelf || relationshipBusy || !['none', 'pending_in'].includes(relationshipType)) {
+    if (
+      isSelf ||
+      user.profile_resolved === false ||
+      relationshipBusy ||
+      !['none', 'pending_in'].includes(relationshipType)
+    ) {
       return;
     }
     relationshipBusy = true;
@@ -118,8 +126,7 @@
       });
       relationshipType = relationship.type;
     } catch (caught) {
-      relationshipError =
-        caught instanceof ApiError ? caught.message : 'Could not update friendship.';
+      relationshipError = userErrorMessage(caught, 'Could not update friendship. Try again.');
     } finally {
       relationshipBusy = false;
     }
@@ -149,12 +156,12 @@
       await navigator.clipboard.writeText(value);
       feedback = successMessage;
     } catch {
-      feedback = 'Could not access the clipboard';
+      feedback = 'Browser denied clipboard access. Allow clipboard permission and try again.';
     }
   }
 
   function actionLabel(successMessage: string, defaultLabel: string): string {
-    return feedback === successMessage || feedback === 'Could not access the clipboard'
+    return feedback === successMessage || feedback.startsWith('Browser denied clipboard access')
       ? feedback
       : defaultLabel;
   }
@@ -175,7 +182,7 @@
       await onRoleChange(user, role, enabled);
       return true;
     } catch (caught) {
-      roleError = caught instanceof ApiError ? caught.message : 'Could not update this role.';
+      roleError = userErrorMessage(caught, 'Could not update this role. Try again.');
       return false;
     } finally {
       roleBusy = null;
@@ -216,7 +223,7 @@
     class="user-popover"
     role="dialog"
     aria-modal="true"
-    aria-label={`${user.display_name ?? user.username}'s profile`}
+    aria-label={`${userDisplayName(user)}'s profile`}
     tabindex="-1"
     oncontextmenu={(event) => {
       event.preventDefault();
@@ -247,15 +254,19 @@
           {#if user.avatar_hash}
             <img src={assetUrl(user.avatar_hash, 'thumbnail_128', user)} alt="" />
           {:else}
-            {user.username.slice(0, 1).toUpperCase()}
+            {user.profile_resolved === false ? '•' : user.username.slice(0, 1).toUpperCase()}
           {/if}
         </span>
         <i class={`user-popover-presence presence-${presence}`} title={statusLabel}></i>
       </div>
 
       <div class="user-popover-identity">
-        <h2>{user.display_name ?? user.username}</h2>
-        <p>@{user.handle}</p>
+        <h2>{userDisplayName(user)}</h2>
+        {#if userPublicHandle(user)}
+          <p>@{userPublicHandle(user)}</p>
+        {:else}
+          <p>Profile unavailable; Kaede will refresh it automatically.</p>
+        {/if}
       </div>
 
       <div class="user-popover-status">
@@ -359,13 +370,13 @@
             <Icon name="edit" size={17} />
             <span>Edit profile</span>
           </a>
-        {:else if onMessage}
+        {:else if onMessage && user.profile_resolved !== false}
           <button type="button" class="user-popover-primary" onclick={() => onMessage?.(user)}>
             <Icon name="message" size={17} />
             <span>Message</span>
           </button>
         {/if}
-        {#if !isSelf}
+        {#if !isSelf && user.profile_resolved !== false}
           <button
             type="button"
             class:relationship-friend={relationshipType === 'friend'}
@@ -378,10 +389,15 @@
             <span>{relationshipBusy ? 'Updating…' : friendshipLabel()}</span>
           </button>
         {/if}
-        <button type="button" onclick={() => copyValue(`@${user.handle}`, 'Username copied')}>
-          <Icon name={feedback === 'Username copied' ? 'check' : 'copy'} size={17} />
-          <span>{actionLabel('Username copied', 'Copy username')}</span>
-        </button>
+        {#if userPublicHandle(user)}
+          <button
+            type="button"
+            onclick={() => copyValue(`@${userPublicHandle(user)}`, 'Username copied')}
+          >
+            <Icon name={feedback === 'Username copied' ? 'check' : 'copy'} size={17} />
+            <span>{actionLabel('Username copied', 'Copy username')}</span>
+          </button>
+        {/if}
         {#if developerMode.enabled}
           <button type="button" onclick={() => copyValue(entityRef(user), 'User ID copied')}>
             <Icon name={feedback === 'User ID copied' ? 'check' : 'hash'} size={17} />

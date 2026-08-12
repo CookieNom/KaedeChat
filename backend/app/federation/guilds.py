@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import secrets
+import time
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, select, tuple_, update
+from sqlalchemy import delete, exists, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.chat.e2ee import validate_e2ee_envelope
 from app.chat.payloads import member_payload
@@ -31,16 +35,31 @@ from app.db.models import (
     Pin,
     Reaction,
     ReadState,
+    RemoteGuildMembershipIntent,
     RemoteMediaCache,
     Role,
     User,
 )
 from app.federation.client import signed_request
-from app.federation.network import FederationNetworkError, normalize_domain
+from app.federation.identity_storage import FederationIdentityQuotaExceeded
+from app.federation.network import (
+    FederationInstanceQuotaExceeded,
+    FederationNetworkError,
+    decode_federation_response_json,
+    normalize_domain,
+)
+from app.federation.replica_storage import (
+    FederationReplicaQuotaExceeded,
+    admit_replica_storage,
+    mark_replica_capacity_paused,
+    mark_replica_quota_paused,
+    reconcile_replica_storage,
+)
 from app.federation.replication import (
     advance_channel_cursor,
     database_snowflake,
     replicate_message_attachments,
+    replicated_message_create_fingerprint,
     resolve_delegated_profile,
     validate_snowflake_timestamp,
 )
@@ -105,11 +124,351 @@ HISTORY_ACCESS_MUTATION_EVENT_TYPES = frozenset(
     }
 )
 
+SNAPSHOT_NEUTRAL_GUILD_EVENTS = frozenset(
+    {
+        "guild.message.create",
+        "guild.message.committed",
+        "guild.message.update",
+        "guild.message.delete",
+        "guild.message.purge",
+        "guild.reaction.add",
+        "guild.reaction.remove",
+        "guild.pin.add",
+        "guild.pin.remove",
+    }
+)
+
 MAX_SNAPSHOT_PAGES = 100
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 MAX_SNAPSHOT_MEMBERS = 100_000
 MAX_SNAPSHOT_MEMBER_ROLES = 500_000
 MAX_SNAPSHOT_OVERWRITES = 100_000
+MAX_ORPHANED_REPLICA_PURGE = 100
+MAX_GUILD_SYNC_PAGES = 100
+MAX_GUILD_SYNC_EVENTS = 100_000
+MAX_GUILD_SYNC_BYTES = 64 * 1024 * 1024
+MAX_GUILD_SYNC_SECONDS = 25.0
+REMOTE_GUILD_DEPARTED = "departed"
+REMOTE_GUILD_JOINING = "joining"
+REMOTE_GUILD_JOIN_INTENT_LIMIT_PER_USER = 1_000
+REMOTE_GUILD_JOIN_INTENT_TTL_HOURS = 24
+REMOTE_GUILD_JOIN_INTENT_GC_BATCH_SIZE = 10_000
+
+
+def local_guild_membership_exists(local_domain: str) -> ColumnElement[bool]:
+    """Return a correlated predicate proving this instance can access a guild."""
+
+    return exists().where(
+        GuildMember.guild_id == Guild.id,
+        GuildMember.guild_domain == Guild.origin_domain,
+        GuildMember.user_domain == local_domain,
+    )
+
+
+def _remote_membership_intent_key(
+    settings: Settings,
+    guild_id: int,
+    guild_domain: str,
+    user_id: int,
+    user_domain: str,
+) -> tuple[int, str, int, str]:
+    normalized_guild_domain = normalize_domain(guild_domain)
+    normalized_user_domain = normalize_domain(user_domain)
+    if normalized_guild_domain == settings.domain:
+        raise ValueError("remote guild membership intent references a local guild")
+    if normalized_user_domain != settings.domain:
+        raise ValueError("remote guild membership intent must target a local user")
+    return guild_id, normalized_guild_domain, user_id, normalized_user_domain
+
+
+async def mark_remote_guild_departed(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    guild_id: int,
+    guild_domain: str,
+    user_id: int,
+    user_domain: str,
+) -> None:
+    """Persist a local departure before removing the replicated membership."""
+
+    key = _remote_membership_intent_key(settings, guild_id, guild_domain, user_id, user_domain)
+    existing = await session.get(RemoteGuildMembershipIntent, key)
+    if existing is not None:
+        existing.state = REMOTE_GUILD_DEPARTED
+        await session.flush()
+        return
+    await session.execute(
+        pg_insert(RemoteGuildMembershipIntent)
+        .values(
+            guild_id=key[0],
+            guild_domain=key[1],
+            user_id=key[2],
+            user_domain=key[3],
+            user_is_local=True,
+            state=REMOTE_GUILD_DEPARTED,
+        )
+        .on_conflict_do_update(
+            index_elements=(
+                RemoteGuildMembershipIntent.guild_id,
+                RemoteGuildMembershipIntent.guild_domain,
+                RemoteGuildMembershipIntent.user_id,
+                RemoteGuildMembershipIntent.user_domain,
+            ),
+            set_={
+                "state": REMOTE_GUILD_DEPARTED,
+                "updated_at": func.now(),
+            },
+        )
+    )
+
+
+async def begin_remote_guild_join(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    guild_id: int,
+    guild_domain: str,
+    user_id: int,
+    user_domain: str,
+) -> bool:
+    """Record an explicit local join before asking the remote authority.
+
+    Existing memberships do not need an intent.  New joins and rejoins do, so
+    an unrelated background snapshot cannot be mistaken for user consent.
+    The caller commits this marker before making the remote request.
+    """
+
+    key = _remote_membership_intent_key(settings, guild_id, guild_domain, user_id, user_domain)
+    member = await session.get(GuildMember, key)
+    intent = await session.get(RemoteGuildMembershipIntent, key)
+    if member is not None and intent is None:
+        return False
+    if intent is None or intent.state != REMOTE_GUILD_JOINING:
+        # A local account can deliberately join many remote guilds, but a
+        # broken/malicious invite authority must not turn failed attempts into
+        # unbounded no-Guild-FK state. Serialize the per-user admission check;
+        # the caller commits this short transaction before peer I/O.
+        await session.scalar(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(
+                        f"kaede-remote-guild-join-intents:{key[3]}:{key[2]}",
+                        0,
+                    )
+                )
+            )
+        )
+        active_join_intents = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(RemoteGuildMembershipIntent)
+                .where(
+                    RemoteGuildMembershipIntent.user_id == key[2],
+                    RemoteGuildMembershipIntent.user_domain == key[3],
+                    RemoteGuildMembershipIntent.state == REMOTE_GUILD_JOINING,
+                )
+            )
+            or 0
+        )
+        if active_join_intents >= REMOTE_GUILD_JOIN_INTENT_LIMIT_PER_USER:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "KAED_FED_REMOTE_GUILD_JOIN_LIMIT",
+                    "message": (
+                        "Too many remote guild joins are still pending. "
+                        "Wait for an earlier attempt to finish, then retry."
+                    ),
+                },
+            )
+    if intent is not None:
+        intent.state = REMOTE_GUILD_JOINING
+        await session.flush()
+        return True
+    await session.execute(
+        pg_insert(RemoteGuildMembershipIntent)
+        .values(
+            guild_id=key[0],
+            guild_domain=key[1],
+            user_id=key[2],
+            user_domain=key[3],
+            user_is_local=True,
+            state=REMOTE_GUILD_JOINING,
+        )
+        .on_conflict_do_update(
+            index_elements=(
+                RemoteGuildMembershipIntent.guild_id,
+                RemoteGuildMembershipIntent.guild_domain,
+                RemoteGuildMembershipIntent.user_id,
+                RemoteGuildMembershipIntent.user_domain,
+            ),
+            set_={
+                "state": REMOTE_GUILD_JOINING,
+                "updated_at": func.now(),
+            },
+        )
+    )
+    return True
+
+
+async def _locked_remote_membership_intents(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    guild_id: int,
+    guild_domain: str,
+) -> dict[tuple[int, str], RemoteGuildMembershipIntent]:
+    if normalize_domain(guild_domain) == settings.domain:
+        raise ValueError("membership intents do not apply to local guilds")
+    rows = list(
+        await session.scalars(
+            select(RemoteGuildMembershipIntent)
+            .where(
+                RemoteGuildMembershipIntent.guild_id == guild_id,
+                RemoteGuildMembershipIntent.guild_domain == guild_domain,
+                RemoteGuildMembershipIntent.user_domain == settings.domain,
+            )
+            .with_for_update()
+        )
+    )
+    return {(row.user_id, row.user_domain): row for row in rows}
+
+
+def filter_remote_snapshot_memberships(
+    snapshot: dict[str, Any],
+    intents: dict[tuple[int, str], RemoteGuildMembershipIntent],
+    *,
+    local_domain: str,
+    required_member: tuple[int, str] | None,
+    existing_required_member: bool,
+    existing_local_members: set[tuple[int, str]] | None = None,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    RemoteGuildMembershipIntent | None,
+]:
+    """Apply local membership intent to a validated remote snapshot."""
+
+    required_intent: RemoteGuildMembershipIntent | None = None
+    if required_member is not None:
+        if normalize_domain(required_member[1]) != local_domain:
+            raise ValueError("joining member does not belong to this local instance")
+        required_member = (required_member[0], local_domain)
+        required_intent = intents.get(required_member)
+        if required_intent is None and not existing_required_member:
+            raise ValueError("guild snapshot join lacks an explicit local join intent")
+        if required_intent is not None and required_intent.state != REMOTE_GUILD_JOINING:
+            raise ValueError("departed remote guild membership requires an explicit rejoin")
+
+    existing_local_members = existing_local_members or set()
+    permitted_local_refs = set(existing_local_members)
+    permitted_local_refs.update(
+        ref for ref, intent in intents.items() if intent.state == REMOTE_GUILD_JOINING
+    )
+    blocked_member_refs = {
+        (int(raw["user"]["id"]), str(raw["user"]["origin_domain"]))
+        for raw in snapshot["members"]
+        if str(raw["user"]["origin_domain"]) == local_domain
+        and (int(raw["user"]["id"]), str(raw["user"]["origin_domain"])) not in permitted_local_refs
+    }
+    blocked_member_refs.update(
+        ref for ref, intent in intents.items() if intent.state == REMOTE_GUILD_DEPARTED
+    )
+    members = [
+        raw
+        for raw in snapshot["members"]
+        if (int(raw["user"]["id"]), str(raw["user"]["origin_domain"])) not in blocked_member_refs
+    ]
+    member_roles = [
+        raw
+        for raw in snapshot["member_roles"]
+        if (int(raw["user_id"]), str(raw["user_domain"])) not in blocked_member_refs
+    ]
+    overwrites = [
+        raw
+        for raw in snapshot["overwrites"]
+        if raw["target_type"] != "member"
+        or (int(raw["target_id"]), str(raw["target_domain"])) not in blocked_member_refs
+    ]
+    return members, member_roles, overwrites, required_intent
+
+
+async def complete_remote_guild_join(
+    session: AsyncSession,
+    intent: RemoteGuildMembershipIntent,
+) -> None:
+    """Clear a pending rejoin only after its authoritative snapshot applied."""
+
+    await session.delete(intent)
+
+
+def stale_remote_guild_membership_intent_candidates(
+    *,
+    now: datetime | None = None,
+    limit: int = REMOTE_GUILD_JOIN_INTENT_GC_BATCH_SIZE,
+) -> Select[tuple[RemoteGuildMembershipIntent]]:
+    """Select bounded, expired local consent markers for deletion.
+
+    Missing intent is fail-closed for every new local membership, so neither a
+    departed marker nor a failed join attempt needs to live indefinitely.
+    """
+
+    if limit < 1 or limit > REMOTE_GUILD_JOIN_INTENT_GC_BATCH_SIZE:
+        raise ValueError("remote guild membership intent cleanup limit is invalid")
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise ValueError("remote guild membership intent cleanup time must be timezone-aware")
+    cutoff = current - timedelta(hours=REMOTE_GUILD_JOIN_INTENT_TTL_HOURS)
+    return (
+        select(RemoteGuildMembershipIntent)
+        .where(RemoteGuildMembershipIntent.updated_at < cutoff)
+        .order_by(
+            RemoteGuildMembershipIntent.updated_at,
+            RemoteGuildMembershipIntent.user_domain,
+            RemoteGuildMembershipIntent.user_id,
+            RemoteGuildMembershipIntent.guild_domain,
+            RemoteGuildMembershipIntent.guild_id,
+        )
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+
+
+async def purge_stale_remote_guild_membership_intents(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    limit: int = REMOTE_GUILD_JOIN_INTENT_GC_BATCH_SIZE,
+) -> int:
+    """Remove one bounded batch of expired join/departure decisions."""
+
+    intents = list(
+        await session.scalars(stale_remote_guild_membership_intent_candidates(now=now, limit=limit))
+    )
+    for intent in intents:
+        await session.delete(intent)
+    return len(intents)
+
+
+def replicated_guild_sync_candidates(
+    local_domain: str,
+    *,
+    limit: int = 100,
+) -> Select[tuple[str, int]]:
+    """Select stale replicas that still serve at least one local account."""
+
+    return (
+        select(Guild.origin_domain, Guild.id)
+        .where(
+            Guild.origin_domain != local_domain,
+            Guild.sync_status.in_(("stale", "failed")),
+            local_guild_membership_exists(local_domain),
+        )
+        .order_by(Guild.origin_domain, Guild.id)
+        .limit(limit)
+    )
 
 
 def guild_event_requires_snapshot(event: dict[str, Any]) -> bool:
@@ -117,11 +476,38 @@ def guild_event_requires_snapshot(event: dict[str, Any]) -> bool:
     return isinstance(context, dict) and context.get("snapshot_required") is True
 
 
-def guild_snapshot_rate_scope(guild_id: int, snapshot_seq: int, *, paginated: bool) -> str:
+def _advance_snapshot_generation(
+    guild: Guild,
+    event: dict[str, Any],
+    *,
+    event_type: str,
+) -> None:
+    """Advance the structural watermark carried by an ordered guild event.
+
+    Older peers do not send this watermark, so a receiver derives one locally.
+    Newer peers bind it into the signed event context. Message-only mutations do
+    not alter snapshot structure and therefore must not invalidate a member page.
+    """
+
+    if event_type in SNAPSHOT_NEUTRAL_GUILD_EVENTS:
+        return
+    context = event.get("context")
+    raw_generation = context.get("snapshot_generation") if isinstance(context, dict) else None
+    current_generation = int(getattr(guild, "snapshot_generation", 1) or 1)
+    if raw_generation is None:
+        guild.snapshot_generation = current_generation + 1
+        return
+    generation = database_snowflake(raw_generation, "snapshot generation")
+    if generation != current_generation + 1:
+        raise ValueError("snapshot generation is not the next structural revision")
+    guild.snapshot_generation = generation
+
+
+def guild_snapshot_rate_scope(guild_id: int, snapshot_generation: int, *, paginated: bool) -> str:
     """Limit repeated reads without throttling a newly-required revision."""
 
     mode = "page" if paginated else "start"
-    return f"guild-snapshot-{mode}:{guild_id}:{snapshot_seq}"
+    return f"guild-snapshot-{mode}:{guild_id}:{snapshot_generation}"
 
 
 async def mark_guild_replica_stale(
@@ -453,36 +839,38 @@ async def apply_guild_message_event(
     guild.sync_status = "ready"
     if inserted is None:
         existing = await session.get(Message, (message_id, message_origin))
-        if existing is None or (
-            existing.channel_id,
-            existing.channel_domain,
-            existing.author_id,
-            existing.author_domain,
-            existing.content,
-            existing.message_type,
-            existing.flags,
-            existing.client_nonce,
-            existing.referenced_message_id,
-            existing.referenced_message_domain,
-            existing.mention_user_refs,
-            existing.webhook_name,
-            existing.webhook_avatar_hash,
-            existing.created_at,
-        ) != (
-            channel.id,
-            channel.origin_domain,
-            author.id,
-            author.origin_domain,
-            content,
-            message_type,
-            flags,
-            client_nonce,
-            referenced_id,
-            referenced_domain,
-            mention_refs,
-            webhook_name,
-            webhook_avatar_hash,
-            created_at,
+        if existing is None or replicated_message_create_fingerprint(
+            channel_id=existing.channel_id,
+            channel_domain=existing.channel_domain,
+            author_id=existing.author_id,
+            author_domain=existing.author_domain,
+            content=existing.content,
+            e2ee=existing.e2ee,
+            message_type=existing.message_type,
+            flags=existing.flags,
+            client_nonce=existing.client_nonce,
+            referenced_message_id=existing.referenced_message_id,
+            referenced_message_domain=existing.referenced_message_domain,
+            mention_user_refs=existing.mention_user_refs,
+            webhook_name=existing.webhook_name,
+            webhook_avatar_hash=existing.webhook_avatar_hash,
+            created_at=existing.created_at,
+        ) != replicated_message_create_fingerprint(
+            channel_id=channel.id,
+            channel_domain=channel.origin_domain,
+            author_id=author.id,
+            author_domain=author.origin_domain,
+            content=content,
+            e2ee=e2ee,
+            message_type=message_type,
+            flags=flags,
+            client_nonce=client_nonce,
+            referenced_message_id=referenced_id,
+            referenced_message_domain=referenced_domain,
+            mention_user_refs=mention_refs,
+            webhook_name=webhook_name,
+            webhook_avatar_hash=webhook_avatar_hash,
+            created_at=created_at,
         ):
             raise ValueError("guild message snowflake conflicts with another message")
         await replicate_message_attachments(session, settings, existing, author, raw_attachments)
@@ -536,18 +924,43 @@ async def apply_guild_member_event(
         str(event_actor.get("domain")),
     ) != (locked.owner_id, locked.owner_domain):
         raise ValueError("guild member event actor does not match its owner")
+    joined_at = datetime.fromisoformat(str(content.get("joined_at")))
+    if joined_at.tzinfo is None:
+        raise ValueError("guild member join timestamp must include a timezone")
+    member_ref = (int(profile.id), profile.origin_domain)
+    member = await session.get(
+        GuildMember,
+        (locked.id, locked.origin_domain, member_ref[0], member_ref[1]),
+    )
+    joining_intent: RemoteGuildMembershipIntent | None = None
+    if member_ref[1] == settings.domain:
+        intent = await session.scalar(
+            select(RemoteGuildMembershipIntent)
+            .where(
+                RemoteGuildMembershipIntent.guild_id == locked.id,
+                RemoteGuildMembershipIntent.guild_domain == locked.origin_domain,
+                RemoteGuildMembershipIntent.user_id == member_ref[0],
+                RemoteGuildMembershipIntent.user_domain == member_ref[1],
+            )
+            .with_for_update()
+        )
+        if member is None and (intent is None or intent.state != REMOTE_GUILD_JOINING):
+            # This is still a valid ordered home event. Consume its sequence so
+            # an unsolicited add cannot wedge subsequent guild replication,
+            # while the authority can never invent local-user consent. Absence
+            # is already fail-closed, so do not create attacker-chosen rows.
+            _advance_snapshot_generation(locked, event, event_type="guild.member.add")
+            locked.last_event_seq = seq
+            locked.next_event_seq = seq + 1
+            locked.sync_status = "ready"
+            return None
+        if member is None:
+            joining_intent = intent
     user = await resolve_delegated_profile(
         session,
         settings,
         profile,
         authority_origin=locked.origin_domain,
-    )
-    joined_at = datetime.fromisoformat(str(content.get("joined_at")))
-    if joined_at.tzinfo is None:
-        raise ValueError("guild member join timestamp must include a timezone")
-    member = await session.get(
-        GuildMember,
-        (locked.id, locked.origin_domain, user.id, user.origin_domain),
     )
     created = member is None
     if member is None:
@@ -560,6 +973,9 @@ async def apply_guild_member_event(
                 joined_at=joined_at,
             )
         )
+    if joining_intent is not None:
+        await complete_remote_guild_join(session, joining_intent)
+    _advance_snapshot_generation(locked, event, event_type="guild.member.add")
     locked.last_event_seq = seq
     locked.next_event_seq = seq + 1
     locked.sync_status = "ready"
@@ -603,6 +1019,11 @@ async def apply_guild_redaction_event(
     content = event.get("content")
     if not isinstance(content, dict) or not isinstance(content.get("original_type"), str):
         raise ValueError("guild redaction content is invalid")
+    _advance_snapshot_generation(
+        locked,
+        event,
+        event_type=str(content["original_type"]),
+    )
     locked.last_event_seq = seq
     locked.next_event_seq = seq + 1
     locked.sync_status = "ready"
@@ -1076,6 +1497,9 @@ async def apply_guild_mutation_event(
         if timeout_indefinite and member.timeout_until is not None:
             raise ValueError("member timeout modes conflict")
         member.timeout_indefinite = timeout_indefinite
+        # Moderation reasons and persistent voice moderation flags are private
+        # authority state. Older peers may still include them, but replicas do
+        # not retain or fan them out to every participating instance.
         timeout_reason = raw.get("timeout_reason")
         if timeout_reason is not None and (
             not isinstance(timeout_reason, str) or len(timeout_reason) > 512
@@ -1083,18 +1507,27 @@ async def apply_guild_mutation_event(
             raise ValueError("member timeout reason is invalid")
         if timeout_reason is not None and not (timeout_indefinite or member.timeout_until):
             raise ValueError("member timeout reason exists without an active timeout")
-        member.timeout_reason = timeout_reason
+        member.timeout_reason = None
         voice_flags = raw.get("voice_flags")
-        if voice_flags is not None:
-            if isinstance(voice_flags, bool) or not isinstance(voice_flags, int) or voice_flags < 0:
-                raise ValueError("member voice flags are invalid")
-            member.voice_flags = voice_flags
+        if voice_flags is not None and (
+            isinstance(voice_flags, bool) or not isinstance(voice_flags, int) or voice_flags < 0
+        ):
+            raise ValueError("member voice flags are invalid")
+        member.voice_flags = 0
         member_version = database_snowflake(raw.get("member_version"), "member version")
         if member_version < member.member_version:
             raise ValueError("member version regressed")
         member.member_version = member_version
         dispatch_type = "GUILD_MEMBER_UPDATE"
-        dispatch = dict(raw)
+        dispatch = {
+            "user": {"id": str(user_ref[0]), "origin_domain": user_ref[1]},
+            "nickname": member.nickname,
+            "timeout_until": (
+                member.timeout_until.isoformat() if member.timeout_until is not None else None
+            ),
+            "timeout_indefinite": member.timeout_indefinite,
+            "member_version": str(member.member_version),
+        }
     elif event_type == "guild.member.remove":
         user_ref = _event_ref(content.get("user"), "member user")
         member = await session.get(
@@ -1104,12 +1537,32 @@ async def apply_guild_mutation_event(
             if (member.user_id, member.user_domain) == (locked.owner_id, locked.owner_domain):
                 raise ValueError("guild owner cannot be removed")
             await session.delete(member)
+        if member is not None and user_ref[1] == settings.domain:
+            await mark_remote_guild_departed(
+                session,
+                settings,
+                guild_id=locked.id,
+                guild_domain=locked.origin_domain,
+                user_id=user_ref[0],
+                user_domain=user_ref[1],
+            )
         dispatch_type = "GUILD_MEMBER_REMOVE"
         dispatch = {**dispatch, "user_id": str(user_ref[0]), "user_domain": user_ref[1]}
     elif event_type == "guild.members.origin.remove":
         origin_domain = normalize_domain(str(content.get("origin_domain", "")))
         if origin_domain == locked.owner_domain:
             raise ValueError("guild owner origin cannot be removed")
+        local_user_ids: list[int] = []
+        if origin_domain == settings.domain:
+            local_user_ids = list(
+                await session.scalars(
+                    select(GuildMember.user_id).where(
+                        GuildMember.guild_id == locked.id,
+                        GuildMember.guild_domain == locked.origin_domain,
+                        GuildMember.user_domain == settings.domain,
+                    )
+                )
+            )
         await session.execute(
             delete(GuildMember).where(
                 GuildMember.guild_id == locked.id,
@@ -1117,6 +1570,16 @@ async def apply_guild_mutation_event(
                 GuildMember.user_domain == origin_domain,
             )
         )
+        if origin_domain == settings.domain:
+            for local_user_id in local_user_ids:
+                await mark_remote_guild_departed(
+                    session,
+                    settings,
+                    guild_id=locked.id,
+                    guild_domain=locked.origin_domain,
+                    user_id=local_user_id,
+                    user_domain=settings.domain,
+                )
         dispatch_type = "GUILD_UPDATE"
         dispatch = {**dispatch, "members_removed_origin": origin_domain}
     elif event_type in {"guild.member.role.add", "guild.member.role.remove"}:
@@ -1178,7 +1641,12 @@ async def apply_guild_mutation_event(
             )
         )
         dispatch_type = "GUILD_MEMBER_UPDATE"
-        dispatch = member_payload(member, user, role_ids)
+        dispatch = member_payload(
+            member,
+            user,
+            role_ids,
+            include_private_authority_state=False,
+        )
     elif event_type in {"guild.ban.add", "guild.ban.remove"}:
         user_ref = _event_ref(content.get("user"), "banned user")
         user = await session.get(User, user_ref)
@@ -1390,6 +1858,7 @@ async def apply_guild_mutation_event(
         if permission_generation < locked.permission_generation:
             raise ValueError("permission generation regressed")
         locked.permission_generation = permission_generation
+    _advance_snapshot_generation(locked, event, event_type=event_type)
     locked.last_event_seq = seq
     locked.next_event_seq = seq + 1
     locked.sync_status = "ready"
@@ -1444,13 +1913,23 @@ async def fetch_guild_snapshot(
     settings: Settings,
     origin: str,
     guild_id: int,
+    *,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
+    stop_at = deadline or (time.monotonic() + MAX_GUILD_SYNC_SECONDS)
     combined: dict[str, Any] | None = None
     member_cursor: tuple[str, int] | None = None
     member_snapshot_at: str | None = None
     snapshot_seq: str | None = None
+    snapshot_generation: str | None = None
     total_bytes = 0
     for _page in range(MAX_SNAPSHOT_PAGES):
+        remaining_time = stop_at - time.monotonic()
+        remaining_bytes = MAX_SNAPSHOT_BYTES - total_bytes
+        if remaining_time <= 0:
+            raise RuntimeError("guild snapshot exceeded its duration limit")
+        if remaining_bytes <= 0:
+            raise RuntimeError("guild snapshot exceeded its aggregate byte limit")
         query: dict[str, str] = {}
         if member_cursor is not None:
             if member_snapshot_at is None or snapshot_seq is None:
@@ -1461,6 +1940,8 @@ async def fetch_guild_snapshot(
                 "member_snapshot_at": member_snapshot_at,
                 "member_snapshot_seq": snapshot_seq,
             }
+            if snapshot_generation is not None:
+                query["member_snapshot_generation"] = snapshot_generation
         response = await signed_request(
             session,
             settings,
@@ -1468,10 +1949,14 @@ async def fetch_guild_snapshot(
             origin,
             f"/_kaede/v1/guilds/{guild_id}/snapshot",
             query=query,
+            request_timeout=min(10.0, remaining_time),
+            max_response_bytes=remaining_bytes,
         )
+        if time.monotonic() >= stop_at:
+            raise RuntimeError("guild snapshot exceeded its duration limit")
         if response.status_code != 200:
             raise RuntimeError("guild full resynchronization failed")
-        payload = response.json()
+        payload = decode_federation_response_json(response)
         if not isinstance(payload, dict):
             raise RuntimeError("guild snapshot payload is invalid")
         total_bytes += len(response.content)
@@ -1492,6 +1977,12 @@ async def fetch_guild_snapshot(
         try:
             parsed_snapshot_at = datetime.fromisoformat(page_snapshot_at)
             database_snowflake(raw_snapshot_seq, "snapshot sequence")
+            raw_snapshot_generation = payload.get("snapshot_generation")
+            if (
+                raw_snapshot_generation is not None
+                and database_snowflake(raw_snapshot_generation, "snapshot generation") < 1
+            ):
+                raise ValueError("snapshot generation must be positive")
         except ValueError:
             raise RuntimeError("guild snapshot watermark or sequence is invalid") from None
         if parsed_snapshot_at.tzinfo is None:
@@ -1502,12 +1993,19 @@ async def fetch_guild_snapshot(
             combined["member_roles"] = list(member_roles)
             member_snapshot_at = page_snapshot_at
             snapshot_seq = raw_snapshot_seq
+            snapshot_generation = (
+                raw_snapshot_generation if isinstance(raw_snapshot_generation, str) else None
+            )
         else:
             if payload.get("snapshot_seq") != combined.get("snapshot_seq"):
                 raise RuntimeError("guild changed while its snapshot was paged")
             if page_snapshot_at != member_snapshot_at:
                 raise RuntimeError(
                     "guild membership watermark changed while its snapshot was paged"
+                )
+            if payload.get("snapshot_generation") != snapshot_generation:
+                raise RuntimeError(
+                    "guild structural generation changed while its snapshot was paged"
                 )
             for field in ("guild", "roles", "channels", "overwrites", "emojis"):
                 if payload.get(field) != combined.get(field):
@@ -1544,85 +2042,210 @@ async def fetch_guild_snapshot(
 async def synchronize_guild(
     session: AsyncSession, settings: Settings, guild: Guild
 ) -> list[Message]:
+    """Bring a replica current within one bounded background work quantum.
+
+    A signed but semantically invalid retained event cannot be skipped safely.
+    Quarantine the incremental stream and recover from a fresh signed snapshot
+    instead of retrying the same poison event forever.
+    """
+
+    deadline = time.monotonic() + MAX_GUILD_SYNC_SECONDS
+    guild_id = guild.id
+    guild_origin = guild.origin_domain
     applied: list[Message] = []
-    for _page in range(100):
+
+    async def pause_for_quota(exc: FederationReplicaQuotaExceeded) -> list[Message]:
+        await session.rollback()
+        await mark_replica_quota_paused(
+            session,
+            settings,
+            guild_id,
+            guild_origin,
+            exc,
+        )
+        await session.commit()
+        return []
+
+    async def pause_for_identity_capacity(
+        exc: FederationIdentityQuotaExceeded | FederationInstanceQuotaExceeded,
+    ) -> list[Message]:
+        await session.rollback()
+        await mark_replica_capacity_paused(
+            session,
+            settings,
+            guild_id,
+            guild_origin,
+            error_code=exc.code,
+            internal_error=str(exc),
+        )
+        await session.commit()
+        return []
+
+    async def recover_from_snapshot() -> list[Message]:
+        snapshot = await fetch_guild_snapshot(
+            session,
+            settings,
+            guild_origin,
+            guild_id,
+            deadline=deadline,
+        )
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            async with asyncio.timeout(remaining):
+                await apply_guild_snapshot(
+                    session,
+                    settings,
+                    snapshot,
+                    expected_origin=guild_origin,
+                    expected_guild_id=guild_id,
+                )
+        except FederationReplicaQuotaExceeded as exc:
+            return await pause_for_quota(exc)
+        except (FederationIdentityQuotaExceeded, FederationInstanceQuotaExceeded) as exc:
+            return await pause_for_identity_capacity(exc)
+        except TimeoutError:
+            await session.rollback()
+            timed_out = await session.get(Guild, (guild_id, guild_origin))
+            if timed_out is not None:
+                timed_out.sync_status = "failed"
+                timed_out.unavailable = True
+                timed_out.sync_error_code = "KAED_FED_SNAPSHOT_WORK_LIMIT"
+                timed_out.sync_error = "snapshot application exceeded its work deadline"
+                await session.commit()
+            return []
+        return []
+
+    async def quarantine_and_recover() -> list[Message]:
+        # An event applier may have changed several rows before rejecting the
+        # event. Roll the page back completely, persist the quarantine marker,
+        # then start the independently verifiable snapshot transaction.
+        await session.rollback()
+        quarantined = await session.get(Guild, (guild_id, guild_origin))
+        if quarantined is None:
+            raise RuntimeError("replicated guild disappeared during recovery")
+        quarantined.sync_status = "failed"
+        quarantined.unavailable = True
+        quarantined.sync_error_code = None
+        quarantined.sync_error = None
+        await session.commit()
+        try:
+            return await recover_from_snapshot()
+        except Exception:
+            await session.rollback()
+            quarantined = await session.get(Guild, (guild_id, guild_origin))
+            if quarantined is not None:
+                quarantined.sync_status = "failed"
+                quarantined.unavailable = True
+                quarantined.sync_error_code = None
+                quarantined.sync_error = None
+                await session.commit()
+            raise
+
+    if guild.sync_status == "quota_paused":
+        return []
+    if guild.sync_status == "failed":
+        return await recover_from_snapshot()
+
+    total_events = 0
+    total_bytes = 0
+    advertised_latest = guild.last_event_seq
+    for _page in range(MAX_GUILD_SYNC_PAGES):
+        remaining_time = deadline - time.monotonic()
+        remaining_bytes = MAX_GUILD_SYNC_BYTES - total_bytes
+        if remaining_time <= 0:
+            return await quarantine_and_recover()
+        if remaining_bytes <= 0:
+            return await quarantine_and_recover()
+        page_start_seq = guild.last_event_seq
         response = await signed_request(
             session,
             settings,
             "GET",
-            guild.origin_domain,
-            f"/_kaede/v1/guilds/{guild.id}/events",
+            guild_origin,
+            f"/_kaede/v1/guilds/{guild_id}/events",
             query={"after_seq": str(guild.last_event_seq)},
+            request_timeout=min(10.0, remaining_time),
+            max_response_bytes=remaining_bytes,
         )
+        if time.monotonic() >= deadline:
+            return await quarantine_and_recover()
+        total_bytes += len(response.content)
+        if total_bytes > MAX_GUILD_SYNC_BYTES:
+            return await quarantine_and_recover()
         if response.status_code == 410:
-            snapshot = await fetch_guild_snapshot(session, settings, guild.origin_domain, guild.id)
-            await apply_guild_snapshot(
-                session,
-                settings,
-                snapshot,
-                expected_origin=guild.origin_domain,
-                expected_guild_id=guild.id,
-            )
-            return []
+            return await quarantine_and_recover()
         if response.status_code != 200:
             raise RuntimeError("guild gap fill failed")
-        payload = response.json()
-        if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
-            raise RuntimeError("guild gap fill returned an invalid payload")
-        events = payload["events"]
-        for raw_event in events:
-            envelope = await validated_event_envelope(
-                session, settings, guild.origin_domain, raw_event
-            )
-            event = envelope.model_dump(mode="json")
-            if event.get("type") in {"guild.message.create", "guild.message.committed"}:
-                message = await apply_guild_message_event(session, settings, guild, event)
-                if message is not None:
-                    applied.append(message)
-            elif event.get("type") == "guild.member.add":
-                await apply_guild_member_event(session, settings, guild, event)
-            elif event.get("type") == "guild.event.redacted":
-                if guild_event_requires_snapshot(event):
-                    snapshot = await fetch_guild_snapshot(
-                        session, settings, guild.origin_domain, guild.id
-                    )
-                    await apply_guild_snapshot(
-                        session,
-                        settings,
-                        snapshot,
-                        expected_origin=guild.origin_domain,
-                        expected_guild_id=guild.id,
-                    )
-                    return applied
-                await apply_guild_redaction_event(session, guild, event)
-            elif event.get("type") in GUILD_MUTATION_EVENT_TYPES:
-                if guild_event_requires_snapshot(event):
-                    snapshot = await fetch_guild_snapshot(
-                        session, settings, guild.origin_domain, guild.id
-                    )
-                    await apply_guild_snapshot(
-                        session,
-                        settings,
-                        snapshot,
-                        expected_origin=guild.origin_domain,
-                        expected_guild_id=guild.id,
-                    )
-                    return applied
-                await apply_guild_mutation_event(session, settings, guild, event)
-            else:
-                raise RuntimeError("guild gap fill returned an unsupported event type")
-        latest_seq = database_snowflake(payload.get("latest_seq"), "latest guild sequence")
+        requires_snapshot = False
+        try:
+            payload = decode_federation_response_json(response)
+            if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
+                raise ValueError("guild gap fill returned an invalid payload")
+            events = payload["events"]
+            if len(events) > 1_000:
+                raise ValueError("guild gap fill page exceeds its protocol event limit")
+            total_events += len(events)
+            if total_events > MAX_GUILD_SYNC_EVENTS:
+                raise ValueError("guild synchronization exceeded its aggregate event limit")
+            latest_seq = database_snowflake(payload.get("latest_seq"), "latest guild sequence")
+            if latest_seq < advertised_latest or latest_seq < page_start_seq:
+                raise ValueError("guild gap fill latest sequence regressed")
+            advertised_latest = latest_seq
+            for raw_event in events:
+                envelope = await validated_event_envelope(
+                    session, settings, guild_origin, raw_event
+                )
+                event = envelope.model_dump(mode="json")
+                if event.get("type") in {"guild.message.create", "guild.message.committed"}:
+                    message = await apply_guild_message_event(session, settings, guild, event)
+                    if message is not None:
+                        applied.append(message)
+                elif event.get("type") == "guild.member.add":
+                    await apply_guild_member_event(session, settings, guild, event)
+                elif event.get("type") == "guild.event.redacted":
+                    if guild_event_requires_snapshot(event):
+                        requires_snapshot = True
+                        break
+                    await apply_guild_redaction_event(session, guild, event)
+                elif event.get("type") in GUILD_MUTATION_EVENT_TYPES:
+                    if guild_event_requires_snapshot(event):
+                        requires_snapshot = True
+                        break
+                    await apply_guild_mutation_event(session, settings, guild, event)
+                else:
+                    raise ValueError("guild gap fill returned an unsupported event type")
+        except (
+            HTTPException,
+            FederationNetworkError,
+            KeyError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            return await quarantine_and_recover()
+        if requires_snapshot:
+            return await quarantine_and_recover()
         if guild.last_event_seq >= latest_seq:
+            try:
+                await admit_replica_storage(session, settings, guild)
+            except FederationReplicaQuotaExceeded as exc:
+                return await pause_for_quota(exc)
             guild.sync_status = "ready"
             guild.unavailable = False
             return applied
-        if not events:
-            raise RuntimeError("guild gap fill made no progress")
-    raise RuntimeError("guild gap fill exceeded the synchronization page limit")
+        if not events or guild.last_event_seq <= page_start_seq:
+            return await quarantine_and_recover()
+    return await quarantine_and_recover()
 
 
 def validate_guild_snapshot(
-    snapshot: dict[str, Any], *, expected_origin: str, expected_guild_id: int
+    snapshot: dict[str, Any],
+    *,
+    expected_origin: str,
+    expected_guild_id: int,
+    required_member: tuple[int, str] | None = None,
 ) -> None:
     raw_guild = snapshot.get("guild")
     if not isinstance(raw_guild, dict):
@@ -1639,6 +2262,8 @@ def validate_guild_snapshot(
         if value is not None and (not isinstance(value, str) or len(value) > maximum):
             raise ValueError(f"guild snapshot {field} is invalid")
     database_snowflake(raw_guild.get("permission_generation"), "permission generation")
+    if database_snowflake(snapshot.get("snapshot_generation", "1"), "snapshot generation") < 1:
+        raise ValueError("guild snapshot generation must be positive")
     history_policy = raw_guild.get("federated_history_policy", "disabled")
     if history_policy not in {"disabled", "full_retained"}:
         raise ValueError("guild snapshot history policy is invalid")
@@ -1779,7 +2404,9 @@ def validate_guild_snapshot(
                 "guild snapshot member timeout reason exists without an active timeout"
             )
         voice_flags = raw.get("voice_flags")
-        if isinstance(voice_flags, bool) or not isinstance(voice_flags, int) or voice_flags < 0:
+        if voice_flags is not None and (
+            isinstance(voice_flags, bool) or not isinstance(voice_flags, int) or voice_flags < 0
+        ):
             raise ValueError("guild snapshot member voice flags are invalid")
         database_snowflake(raw.get("member_version"), "member version")
         member_refs.add(ref)
@@ -1789,6 +2416,8 @@ def validate_guild_snapshot(
     )
     if owner_ref not in member_refs or owner_ref[1] != origin:
         raise ValueError("guild snapshot does not contain its owner")
+    if required_member is not None and required_member not in member_refs:
+        raise ValueError("guild snapshot does not contain the joining local member")
     member_role_refs: set[tuple[tuple[int, str], tuple[int, str]]] = set()
     for raw in member_roles:
         if not isinstance(raw, dict):
@@ -1879,6 +2508,8 @@ def tombstone_omitted_replicated_channel(channel: Channel) -> None:
 async def purge_replicated_channel_cache(
     session: AsyncSession,
     channel: Channel,
+    *,
+    reconcile: bool = True,
 ) -> None:
     """Logically and physically evict inaccessible replicated channel data.
 
@@ -1887,7 +2518,11 @@ async def purge_replicated_channel_cache(
     transaction; the storage GC performs retryable physical deletion.
     """
 
-    if channel.guild_domain is None or channel.origin_domain != channel.guild_domain:
+    if (
+        channel.guild_id is None
+        or channel.guild_domain is None
+        or channel.origin_domain != channel.guild_domain
+    ):
         raise ValueError("only replicated guild channels may be purged")
     message_refs = select(Message.id, Message.origin_domain).where(
         Message.channel_id == channel.id,
@@ -1935,6 +2570,67 @@ async def purge_replicated_channel_cache(
         )
     )
     tombstone_omitted_replicated_channel(channel)
+    await session.flush()
+    if reconcile:
+        await reconcile_replica_storage(
+            session,
+            channel.guild_id,
+            channel.guild_domain,
+        )
+
+
+async def purge_orphaned_replicated_guilds(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    limit: int = MAX_ORPHANED_REPLICA_PURGE,
+) -> int:
+    """Evict remote guild replicas that no local account can access.
+
+    Candidate guild rows are locked before a second membership check. The lock
+    prevents a concurrent membership insert from racing the deletion, while
+    ``SKIP LOCKED`` keeps the retention job from waiting on an active join or
+    reconciliation transaction. The caller owns the transaction and commit.
+    """
+
+    candidates = list(
+        await session.scalars(
+            select(Guild)
+            .where(
+                Guild.origin_domain != settings.domain,
+                ~local_guild_membership_exists(settings.domain),
+            )
+            .order_by(Guild.origin_domain, Guild.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    removed = 0
+    for guild in candidates:
+        # Recheck after acquiring the guild lock. A membership could have been
+        # committed after the candidate snapshot but before this transaction
+        # acquired its lock.
+        has_local_member = await session.scalar(
+            select(local_guild_membership_exists(settings.domain)).where(
+                Guild.id == guild.id,
+                Guild.origin_domain == guild.origin_domain,
+            )
+        )
+        if bool(has_local_member):
+            continue
+        channels = list(
+            await session.scalars(
+                select(Channel).where(
+                    Channel.guild_id == guild.id,
+                    Channel.guild_domain == guild.origin_domain,
+                )
+            )
+        )
+        for channel in channels:
+            await purge_replicated_channel_cache(session, channel, reconcile=False)
+        await session.delete(guild)
+        removed += 1
+    return removed
 
 
 async def apply_guild_access_revocation(
@@ -1985,7 +2681,7 @@ async def apply_guild_access_revocation(
             )
         )
         for channel in channels:
-            await purge_replicated_channel_cache(session, channel)
+            await purge_replicated_channel_cache(session, channel, reconcile=False)
         await session.execute(
             delete(ChannelOverwrite).where(
                 ChannelOverwrite.channel_id.in_([channel.id for channel in channels]),
@@ -1995,6 +2691,7 @@ async def apply_guild_access_revocation(
     from app.federation.history import purge_ineligible_federated_history
 
     await purge_ineligible_federated_history(session, settings, locked)
+    await reconcile_replica_storage(session, locked.id, locked.origin_domain)
     return removed
 
 
@@ -2038,7 +2735,7 @@ async def apply_guild_instance_access_revocation(
         )
     )
     for channel in channels:
-        await purge_replicated_channel_cache(session, channel)
+        await purge_replicated_channel_cache(session, channel, reconcile=False)
     if channels:
         await session.execute(
             delete(ChannelOverwrite).where(
@@ -2049,6 +2746,7 @@ async def apply_guild_instance_access_revocation(
     from app.federation.history import purge_ineligible_federated_history
 
     await purge_ineligible_federated_history(session, settings, locked)
+    await reconcile_replica_storage(session, locked.id, locked.origin_domain)
     return removed
 
 
@@ -2063,10 +2761,12 @@ def guild_snapshot_payload(
     emojis: list[Emoji] | None = None,
     member_snapshot_at: datetime,
     next_member_cursor: tuple[str, int] | None = None,
+    snapshot_seq: int | None = None,
 ) -> dict[str, Any]:
     visible_channel_refs = {(channel.id, channel.origin_domain) for channel in channels}
     return {
-        "snapshot_seq": str(guild.next_event_seq - 1),
+        "snapshot_seq": str(guild.next_event_seq - 1 if snapshot_seq is None else snapshot_seq),
+        "snapshot_generation": str(getattr(guild, "snapshot_generation", 1) or 1),
         "member_snapshot_at": member_snapshot_at.isoformat(),
         "next_member_cursor": (
             {
@@ -2151,8 +2851,6 @@ def guild_snapshot_payload(
                     member.timeout_until.isoformat() if member.timeout_until else None
                 ),
                 "timeout_indefinite": member.timeout_indefinite,
-                "timeout_reason": member.timeout_reason,
-                "voice_flags": member.voice_flags,
                 "member_version": str(member.member_version),
             }
             for member, user in members
@@ -2201,26 +2899,18 @@ async def apply_guild_snapshot(
     *,
     expected_origin: str,
     expected_guild_id: int,
+    required_member: tuple[int, str] | None = None,
 ) -> Guild:
     validate_guild_snapshot(
-        snapshot, expected_origin=expected_origin, expected_guild_id=expected_guild_id
+        snapshot,
+        expected_origin=expected_origin,
+        expected_guild_id=expected_guild_id,
+        required_member=required_member,
     )
     raw_guild = snapshot["guild"]
     origin = str(raw_guild["origin_domain"])
     if origin == settings.domain:
         raise HTTPException(status_code=409, detail={"code": "GUILD_IS_LOCAL"})
-    users = {
-        (
-            int(raw["user"]["id"]),
-            str(raw["user"]["origin_domain"]),
-        ): await resolve_delegated_profile(
-            session,
-            settings,
-            RemoteUserProfile.model_validate(raw["user"]),
-            authority_origin=origin,
-        )
-        for raw in snapshot["members"]
-    }
     guild_id = int(raw_guild["id"])
     guild = await session.get(Guild, (guild_id, origin))
     if guild is None:
@@ -2241,6 +2931,56 @@ async def apply_guild_snapshot(
         )
         if guild is None:
             raise RuntimeError("replicated guild disappeared during snapshot application")
+    intents = await _locked_remote_membership_intents(
+        session,
+        settings,
+        guild_id=guild_id,
+        guild_domain=origin,
+    )
+    existing_local_members = set(
+        (
+            await session.execute(
+                select(GuildMember.user_id, GuildMember.user_domain).where(
+                    GuildMember.guild_id == guild_id,
+                    GuildMember.guild_domain == origin,
+                    GuildMember.user_domain == settings.domain,
+                )
+            )
+        ).tuples()
+    )
+    existing_required_member = False
+    if required_member is not None:
+        required_member = (required_member[0], normalize_domain(required_member[1]))
+        loaded_required_member = await session.get(
+            GuildMember,
+            (guild_id, origin, required_member[0], required_member[1]),
+        )
+        existing_required_member = loaded_required_member is not None
+    (
+        snapshot_members,
+        snapshot_member_roles,
+        snapshot_overwrites,
+        required_intent,
+    ) = filter_remote_snapshot_memberships(
+        snapshot,
+        intents,
+        local_domain=settings.domain,
+        required_member=required_member,
+        existing_required_member=existing_required_member,
+        existing_local_members=existing_local_members,
+    )
+    users = {
+        (
+            int(raw["user"]["id"]),
+            str(raw["user"]["origin_domain"]),
+        ): await resolve_delegated_profile(
+            session,
+            settings,
+            RemoteUserProfile.model_validate(raw["user"]),
+            authority_origin=origin,
+        )
+        for raw in snapshot_members
+    }
     guild.name = str(raw_guild["name"])
     guild.owner_id = int(raw_guild["owner_id"])
     guild.owner_domain = str(raw_guild["owner_domain"])
@@ -2248,6 +2988,7 @@ async def apply_guild_snapshot(
     guild.icon_hash = raw_guild.get("icon_hash")
     guild.banner_hash = raw_guild.get("banner_hash")
     guild.permission_generation = int(raw_guild.get("permission_generation", 1))
+    guild.snapshot_generation = int(snapshot.get("snapshot_generation", 1))
     guild.federated_history_policy = str(raw_guild.get("federated_history_policy", "disabled"))
     guild.history_policy_generation = int(raw_guild.get("history_policy_generation", 1))
     guild.last_event_seq = int(snapshot["snapshot_seq"])
@@ -2257,7 +2998,7 @@ async def apply_guild_snapshot(
     role_refs = {(int(raw["id"]), str(raw["origin_domain"])) for raw in snapshot["roles"]}
     channel_refs = {(int(raw["id"]), str(raw["origin_domain"])) for raw in snapshot["channels"]}
     member_refs = {
-        (int(raw["user"]["id"]), str(raw["user"]["origin_domain"])) for raw in snapshot["members"]
+        (int(raw["user"]["id"]), str(raw["user"]["origin_domain"])) for raw in snapshot_members
     }
     existing_roles = list(
         await session.scalars(
@@ -2276,7 +3017,7 @@ async def apply_guild_snapshot(
     for channel in existing_channels:
         if (channel.id, channel.origin_domain) not in channel_refs:
             omitted_channel_ids.append(channel.id)
-            await purge_replicated_channel_cache(session, channel)
+            await purge_replicated_channel_cache(session, channel, reconcile=False)
     if omitted_channel_ids:
         await session.execute(
             delete(ChannelOverwrite).where(
@@ -2293,6 +3034,15 @@ async def apply_guild_snapshot(
     )
     for member in existing_members:
         if (member.user_id, member.user_domain) not in member_refs:
+            if member.user_domain == settings.domain:
+                await mark_remote_guild_departed(
+                    session,
+                    settings,
+                    guild_id=guild.id,
+                    guild_domain=origin,
+                    user_id=member.user_id,
+                    user_domain=member.user_domain,
+                )
             await session.delete(member)
     emoji_refs = {(int(raw["id"]), str(raw["origin_domain"])) for raw in snapshot.get("emojis", [])}
     existing_emojis = list(
@@ -2380,7 +3130,7 @@ async def apply_guild_snapshot(
                 ChannelOverwrite.channel_domain == origin,
             )
         )
-    for raw in snapshot["overwrites"]:
+    for raw in snapshot_overwrites:
         session.add(
             ChannelOverwrite(
                 channel_id=int(raw["channel_id"]),
@@ -2394,7 +3144,7 @@ async def apply_guild_snapshot(
                 deny=int(raw["deny"]),
             )
         )
-    for raw in snapshot["members"]:
+    for raw in snapshot_members:
         user_ref = (int(raw["user"]["id"]), str(raw["user"]["origin_domain"]))
         user = users[user_ref]
         loaded_member = await session.get(
@@ -2414,14 +3164,14 @@ async def apply_guild_snapshot(
             datetime.fromisoformat(str(raw["timeout_until"])) if raw.get("timeout_until") else None
         )
         loaded_member.timeout_indefinite = bool(raw.get("timeout_indefinite", False))
-        loaded_member.timeout_reason = raw.get("timeout_reason")
-        loaded_member.voice_flags = int(raw.get("voice_flags", 0))
+        loaded_member.timeout_reason = None
+        loaded_member.voice_flags = 0
         loaded_member.member_version = int(raw.get("member_version", 1))
     await session.flush()
     await session.execute(
         delete(MemberRole).where(MemberRole.guild_id == guild.id, MemberRole.guild_domain == origin)
     )
-    for raw in snapshot["member_roles"]:
+    for raw in snapshot_member_roles:
         session.add(
             MemberRole(
                 guild_id=guild.id,
@@ -2433,7 +3183,11 @@ async def apply_guild_snapshot(
             )
         )
     await session.flush()
+    if required_intent is not None:
+        await complete_remote_guild_join(session, required_intent)
     from app.federation.history import purge_ineligible_federated_history
 
     await purge_ineligible_federated_history(session, settings, guild)
+    await reconcile_replica_storage(session, guild.id, guild.origin_domain)
+    await admit_replica_storage(session, settings, guild)
     return guild

@@ -102,6 +102,41 @@ export class ChatEntityStore {
     this.users.upsert(user);
   }
 
+  applyUserProfile(user: UserSummary): void {
+    const key = entityKey(user);
+    this.users.upsert(user);
+    this.messages.replace(
+      this.messages.values.map((message) =>
+        message.author_id === user.id && message.author_domain === user.origin_domain
+          ? { ...message, author: { ...(message.author ?? user), ...user } }
+          : message
+      )
+    );
+    this.members.replace(
+      this.members.values.map((member) =>
+        entityKey(member.user) === key ? { ...member, user: { ...member.user, ...user } } : member
+      )
+    );
+    this.channels.replace(
+      this.channels.values.map((channel) => ({
+        ...channel,
+        recipients: channel.recipients?.map((recipient) =>
+          entityKey(recipient) === key ? { ...recipient, ...user } : recipient
+        )
+      }))
+    );
+    this.relationships.replace(
+      this.relationships.values.map((relationship) =>
+        entityKey(relationship.user) === key
+          ? { ...relationship, user: { ...relationship.user, ...user } }
+          : relationship
+      )
+    );
+    if (this.currentUser && entityKey(this.currentUser) === key) {
+      this.currentUser = { ...this.currentUser, ...user };
+    }
+  }
+
   setPresence(user: Pick<UserSummary, 'id' | 'origin_domain'>, status: PresenceStatus): void {
     this.presences = { ...this.presences, [entityKey(user)]: status };
   }

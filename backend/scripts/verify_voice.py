@@ -21,11 +21,7 @@ from app.voice.state import (
     room_state_key,
     transition_call,
 )
-
-
-def require(condition: object, message: str) -> None:
-    if not condition:
-        raise RuntimeError(message)
+from scripts.verification import VerificationFailure, failure_message, require
 
 
 async def main() -> None:
@@ -98,7 +94,11 @@ async def main() -> None:
             settings,
         )
         if caller_reaccepted or changed or rejected != "accepted":
-            raise RuntimeError("call initiator could activate its own ringing call")
+            raise VerificationFailure(
+                "call initiator acceptance should be idempotent with result "
+                f"(accepted=True, changed=False, reason='accepted'); received "
+                f"({caller_reaccepted=}, {changed=}, reason={rejected!r})"
+            )
         accepted, changed, active = await transition_call(
             redis,
             settings.domain,
@@ -119,7 +119,9 @@ async def main() -> None:
             "call termination failed",
         )
         if not isinstance(terminal, dict):
-            raise RuntimeError("call termination returned no record")
+            raise VerificationFailure(
+                f"call termination expected a record dictionary; received {terminal!r}"
+            )
         replayed, changed, replay = await transition_call(
             redis, settings.domain, call_id, identity, "end", settings
         )
@@ -221,4 +223,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except VerificationFailure as error:
+        raise SystemExit(failure_message("voice", error, "make voice-check")) from None

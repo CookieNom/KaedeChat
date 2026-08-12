@@ -17,15 +17,11 @@ from app.db.session import create_engine_and_sessionmaker
 from app.federation.delivery import MAX_BATCH_EVENTS
 from app.federation.events import build_envelope, queue_event
 from app.gateway import USER_SESSION_LIMIT, claim_user_gateway_session, session_key
+from scripts.verification import VerificationFailure, failure_message, require
 
 SUBSCRIBERS = 20
 EVENTS = 200
 DESTINATIONS = 20
-
-
-def require(condition: bool, message: str) -> None:
-    if not condition:
-        raise RuntimeError(message)
 
 
 async def verify_rate_limit(redis: Redis) -> None:
@@ -44,10 +40,17 @@ async def verify_rate_limit(redis: Redis) -> None:
             )
             accepted += 1
         except HTTPException as exc:
-            require(exc.status_code == 429, "client limiter returned the wrong status")
+            require(
+                exc.status_code == 429,
+                f"client limiter expected HTTP 429; received HTTP {exc.status_code}",
+            )
             rejected += 1
-    require(accepted == CLIENT_RATE_LIMITS["upload_ticket"].limit, "bucket capacity drifted")
-    require(rejected == 1, "bucket did not reject excess traffic")
+    require(
+        accepted == CLIENT_RATE_LIMITS["upload_ticket"].limit,
+        "rate-limit bucket accepted an unexpected number of requests: expected "
+        f"{CLIENT_RATE_LIMITS['upload_ticket'].limit}, received {accepted}",
+    )
+    require(rejected == 1, f"rate-limit bucket expected 1 rejection; received {rejected}")
 
 
 async def verify_shared_fanout(redis: Redis) -> None:
@@ -73,9 +76,20 @@ async def verify_shared_fanout(redis: Redis) -> None:
             )
             received += sum(message is not None for message in messages)
         elapsed = time.monotonic() - started
-        require(received == SUBSCRIBERS * EVENTS, "shared fanout lost an event")
-        require(int(await redis.xlen(stream)) == EVENTS, "fanout wrote per-subscriber streams")
-        require(elapsed < 15, "shared fanout exceeded the smoke-test deadline")
+        expected_received = SUBSCRIBERS * EVENTS
+        require(
+            received == expected_received,
+            f"shared fanout expected {expected_received} deliveries; received {received}",
+        )
+        stream_length = int(await redis.xlen(stream))
+        require(
+            stream_length == EVENTS,
+            f"shared fanout stream expected {EVENTS} events; received {stream_length}",
+        )
+        require(
+            elapsed < 15,
+            f"shared fanout deadline is 15 seconds; elapsed {elapsed:.2f} seconds",
+        )
     finally:
         await asyncio.gather(
             *(subscriber.aclose() for subscriber in subscribers)  # type: ignore[no-untyped-call]
@@ -148,9 +162,19 @@ async def verify_federation_amplification() -> None:
                     FederationOutbox.event_id == envelope["event_id"],
                 )
             )
-            require(int(event_count or 0) == 1, "federation copied an envelope per peer")
-            require(int(outbox_count or 0) == DESTINATIONS, "federation destination fanout drifted")
-            require(MAX_BATCH_EVENTS == 100, "federation batch bound drifted")
+            require(
+                int(event_count or 0) == 1,
+                f"federation expected 1 stored envelope; received {int(event_count or 0)}",
+            )
+            require(
+                int(outbox_count or 0) == DESTINATIONS,
+                f"federation expected {DESTINATIONS} outbox destinations; "
+                f"received {int(outbox_count or 0)}",
+            )
+            require(
+                MAX_BATCH_EVENTS == 100,
+                f"federation batch bound expected 100; received {MAX_BATCH_EVENTS}",
+            )
     finally:
         await engine.dispose()
 
@@ -175,4 +199,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except VerificationFailure as error:
+        raise SystemExit(failure_message("release", error, "make release-check")) from None

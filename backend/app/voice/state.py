@@ -9,7 +9,7 @@ from typing import Any, cast
 from redis.asyncio import Redis
 
 from app.core.settings import Settings
-from app.federation.network import normalize_domain
+from app.federation.network import FederationNetworkError, normalize_domain
 
 CALL_TRANSITION_LUA = """
 local raw = redis.call('GET', KEYS[1])
@@ -164,6 +164,85 @@ if redis.call('GET', KEYS[2]) == ARGV[2] then
 end
 return 1
 """
+ACTIVATE_FEDERATED_VOICE_SESSION_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+local current = {
+  authority_domain = ARGV[2],
+  guild_id = ARGV[3],
+  room = ARGV[4],
+  generation = tonumber(ARGV[5]),
+  move_session_id = ARGV[1],
+  ready = true,
+  active = false
+}
+redis.call('SET', KEYS[2], cjson.encode(current), 'EX', tonumber(ARGV[6]))
+redis.call('DEL', KEYS[1])
+return 1
+"""
+ADVANCE_FEDERATED_VOICE_SESSION_LUA = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {0, 'missing'} end
+local current = cjson.decode(raw)
+if current['ready'] ~= true then return {0, 'pending'} end
+-- The first request may have advanced state and then lost a Redis publish or
+-- its HTTP response. Treat an exact retry as accepted so the endpoint can
+-- replay both idempotent client dispatches instead of permanently wedging the
+-- authority and member home on opposite rooms.
+if current['move_session_id'] == ARGV[1]
+    and current['authority_domain'] == ARGV[2]
+    and tostring(current['guild_id']) == ARGV[3]
+    and current['room'] == ARGV[6]
+    and tonumber(current['generation']) == tonumber(ARGV[7])
+    and current['active'] ~= true then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[8]))
+  return {1, 'replay'}
+end
+if current['move_session_id'] ~= ARGV[1]
+    or current['authority_domain'] ~= ARGV[2]
+    or tostring(current['guild_id']) ~= ARGV[3]
+    or current['room'] ~= ARGV[4]
+    or tonumber(current['generation']) ~= tonumber(ARGV[5]) then
+  return {0, 'mismatch'}
+end
+if current['active'] ~= true then return {0, 'inactive'} end
+current['room'] = ARGV[6]
+current['generation'] = tonumber(ARGV[7])
+current['active'] = false
+redis.call('SET', KEYS[1], cjson.encode(current), 'EX', tonumber(ARGV[8]))
+return {1, cjson.encode(current)}
+"""
+CONFIRM_FEDERATED_VOICE_SESSION_LUA = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local current = cjson.decode(raw)
+if current['ready'] ~= true
+    or current['authority_domain'] ~= ARGV[1]
+    or current['room'] ~= ARGV[2] then
+  return 0
+end
+current['active'] = true
+redis.call('SET', KEYS[1], cjson.encode(current), 'EX', tonumber(ARGV[3]))
+return 1
+"""
+DELETE_FEDERATED_VOICE_SESSION_LUA = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local current = cjson.decode(raw)
+if ARGV[1] ~= '' and current['move_session_id'] ~= ARGV[1] then return 0 end
+if ARGV[2] ~= '' and current['room'] ~= ARGV[2] then return 0 end
+if ARGV[3] == '1' and current['active'] ~= true then return 0 end
+if ARGV[4] ~= '' and current['authority_domain'] ~= ARGV[4] then return 0 end
+return redis.call('DEL', KEYS[1])
+"""
+DELETE_VALUE_IF_EQUAL_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+FEDERATED_VOICE_PENDING_TTL_SECONDS = 15 * 60
+FEDERATED_VOICE_ACTIVE_TTL_SECONDS = 24 * 60 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +262,19 @@ class Occupant:
     can_stream: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class FederatedVoiceSession:
+    """Move correlation retained independently by a member home and guild home."""
+
+    authority_domain: str
+    guild_id: str
+    room: str
+    generation: int
+    move_session_id: str
+    ready: bool = False
+    active: bool = False
+
+
 def _authority(value: str) -> str:
     return normalize_domain(value)
 
@@ -193,6 +285,205 @@ def room_state_key(kind: str, authority_domain: str, room: str) -> str:
 
 def generation_key(authority_domain: str, room: str, identity: str) -> str:
     return f"{room_state_key('generation', authority_domain, room)}:{identity}"
+
+
+def federated_voice_session_key(role: str, identity: str) -> str:
+    if role not in {"home", "authority"}:
+        raise ValueError("invalid federated voice session role")
+    return f"voice:v2:federated-session:{role}:{identity}"
+
+
+def federated_voice_pending_key(identity: str) -> str:
+    return f"voice:v2:federated-session:home-pending:{identity}"
+
+
+def _decode_federated_voice_session(raw: object) -> FederatedVoiceSession | None:
+    try:
+        parsed = json.loads(cast(str | bytes | bytearray, raw))
+        if not isinstance(parsed, dict):
+            return None
+        session = FederatedVoiceSession(**parsed)
+        authority_domain = _authority(session.authority_domain)
+    except (FederationNetworkError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        session.authority_domain != authority_domain
+        or not session.guild_id.isascii()
+        or not session.guild_id.isdecimal()
+        or not session.move_session_id
+        or session.generation < 0
+    ):
+        return None
+    return session
+
+
+async def get_federated_voice_session(
+    redis: Redis, role: str, identity: str
+) -> FederatedVoiceSession | None:
+    raw = await redis.get(federated_voice_session_key(role, identity))
+    return _decode_federated_voice_session(raw) if raw is not None else None
+
+
+async def begin_federated_voice_home_session(
+    redis: Redis,
+    identity: str,
+    session: FederatedVoiceSession,
+) -> None:
+    await redis.set(
+        federated_voice_pending_key(identity),
+        session.move_session_id,
+        ex=FEDERATED_VOICE_PENDING_TTL_SECONDS,
+    )
+
+
+async def activate_federated_voice_home_session(
+    redis: Redis,
+    identity: str,
+    *,
+    move_session_id: str,
+    authority_domain: str,
+    guild_id: str,
+    room: str,
+    generation: int,
+) -> bool:
+    result = await cast(
+        Awaitable[object],
+        redis.eval(
+            ACTIVATE_FEDERATED_VOICE_SESSION_LUA,
+            2,
+            federated_voice_pending_key(identity),
+            federated_voice_session_key("home", identity),
+            move_session_id,
+            _authority(authority_domain),
+            guild_id,
+            room,
+            str(generation),
+            str(FEDERATED_VOICE_PENDING_TTL_SECONDS),
+        ),
+    )
+    return bool(result)
+
+
+async def discard_pending_federated_voice_home_session(
+    redis: Redis, identity: str, move_session_id: str
+) -> bool:
+    result = await cast(
+        Awaitable[object],
+        redis.eval(
+            DELETE_VALUE_IF_EQUAL_LUA,
+            1,
+            federated_voice_pending_key(identity),
+            move_session_id,
+        ),
+    )
+    return bool(result)
+
+
+async def discard_all_federated_voice_home_sessions(redis: Redis, identity: str) -> bool:
+    """Atomically revoke both an active capability and any in-flight broker."""
+
+    removed = await redis.delete(
+        federated_voice_session_key("home", identity),
+        federated_voice_pending_key(identity),
+    )
+    return bool(removed)
+
+
+async def set_federated_voice_authority_session(
+    redis: Redis,
+    identity: str,
+    session: FederatedVoiceSession,
+) -> None:
+    encoded = json.dumps(asdict(session), separators=(",", ":"), sort_keys=True)
+    await redis.set(
+        federated_voice_session_key("authority", identity),
+        encoded,
+        ex=FEDERATED_VOICE_ACTIVE_TTL_SECONDS,
+    )
+
+
+async def advance_federated_voice_home_session(
+    redis: Redis,
+    identity: str,
+    *,
+    move_session_id: str,
+    authority_domain: str,
+    guild_id: str,
+    source_room: str,
+    source_generation: int,
+    target_room: str,
+    target_generation: int,
+) -> str | None:
+    """Atomically validate and advance a remote move, returning a rejection reason."""
+
+    result = await cast(
+        Awaitable[object],
+        redis.eval(
+            ADVANCE_FEDERATED_VOICE_SESSION_LUA,
+            1,
+            federated_voice_session_key("home", identity),
+            move_session_id,
+            _authority(authority_domain),
+            guild_id,
+            source_room,
+            str(source_generation),
+            target_room,
+            str(target_generation),
+            str(FEDERATED_VOICE_PENDING_TTL_SECONDS),
+        ),
+    )
+    if not isinstance(result, (list, tuple)) or len(result) != 2:
+        raise RuntimeError("Dragonfly returned an invalid federated voice move result")
+    accepted = int(cast(int | bytes | str, result[0])) == 1
+    reason_raw = result[1]
+    reason = reason_raw.decode() if isinstance(reason_raw, bytes) else str(reason_raw)
+    return None if accepted else reason
+
+
+async def confirm_federated_voice_home_session(
+    redis: Redis,
+    identity: str,
+    *,
+    authority_domain: str,
+    room: str,
+) -> bool:
+    result = await cast(
+        Awaitable[object],
+        redis.eval(
+            CONFIRM_FEDERATED_VOICE_SESSION_LUA,
+            1,
+            federated_voice_session_key("home", identity),
+            _authority(authority_domain),
+            room,
+            str(FEDERATED_VOICE_ACTIVE_TTL_SECONDS),
+        ),
+    )
+    return bool(result)
+
+
+async def discard_federated_voice_session(
+    redis: Redis,
+    role: str,
+    identity: str,
+    *,
+    move_session_id: str | None = None,
+    room: str | None = None,
+    active_only: bool = False,
+    authority_domain: str | None = None,
+) -> bool:
+    result = await cast(
+        Awaitable[object],
+        redis.eval(
+            DELETE_FEDERATED_VOICE_SESSION_LUA,
+            1,
+            federated_voice_session_key(role, identity),
+            move_session_id or "",
+            room or "",
+            "1" if active_only else "0",
+            _authority(authority_domain) if authority_domain is not None else "",
+        ),
+    )
+    return bool(result)
 
 
 async def current_generation(redis: Redis, authority_domain: str, room: str, identity: str) -> int:

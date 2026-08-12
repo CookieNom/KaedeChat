@@ -60,13 +60,19 @@ done
   exit 2
 }
 command -v openssl >/dev/null || {
-  printf 'OpenSSL is required to generate deployment secrets.\n' >&2
+  printf 'OpenSSL is required to generate deployment secrets. Install OpenSSL, then rerun make setup.\n' >&2
   exit 2
 }
 [[ -f "$ROOT/deploy/compose.yml" ]] || {
-  printf 'Run this script from an intact Kaede Chat repository.\n' >&2
+  printf 'deploy/compose.yml is missing. Restore the repository checkout, then rerun make setup.\n' >&2
   exit 2
 }
+[[ -f "$ROOT/deploy/setup-inputs.sh" && ! -L "$ROOT/deploy/setup-inputs.sh" ]] || {
+  printf 'deploy/setup-inputs.sh is missing or unsafe. Restore the repository checkout, then rerun make setup.\n' >&2
+  exit 2
+}
+# shellcheck source=deploy/setup-inputs.sh
+source "$ROOT/deploy/setup-inputs.sh"
 
 if command -v gum >/dev/null 2>&1 && [[ $PLAIN != true ]]; then
   USE_GUM=true
@@ -247,19 +253,26 @@ confirm() {
 declare -A OLD=()
 read_existing_env() {
   [[ -e $ENV_FILE || -L $ENV_FILE ]] || return 0
-  [[ -f $ENV_FILE && ! -L $ENV_FILE ]] || die ".env must be a regular, non-symlink file"
+  [[ -f $ENV_FILE && ! -L $ENV_FILE ]] || \
+    die "$ENV_FILE must be a regular, non-symlink file; replace the unsafe path before rerunning setup"
   local links
   links=$(stat -c '%h' "$ENV_FILE")
-  [[ $links == 1 ]] || die ".env must not be hard-linked"
-  local line key value
+  [[ $links == 1 ]] || \
+    die "$ENV_FILE must not be hard-linked; replace it with a private regular file before rerunning setup"
+  local line key value line_number=0
   while IFS= read -r line || [[ -n $line ]]; do
+    ((line_number += 1))
     [[ -z $line || $line == \#* ]] && continue
-    [[ $line == *=* ]] || die "invalid line in existing .env"
+    [[ $line == *=* ]] || \
+      die "$ENV_FILE:$line_number must be a KEY=value assignment; fix the line, then rerun setup"
     key=${line%%=*}
     value=${line#*=}
-    [[ $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid key in existing .env: $key"
-    [[ -v "OLD[$key]" ]] && die "duplicate key in existing .env: $key"
-    [[ $value != \"* && $value != \'* ]] || die 'quoted existing .env values are not supported'
+    [[ $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || \
+      die "$ENV_FILE:$line_number has invalid key '$key'; use letters, digits, and underscores, beginning with a letter or underscore"
+    [[ -v "OLD[$key]" ]] && \
+      die "$ENV_FILE:$line_number duplicates '$key'; keep exactly one assignment"
+    [[ $value != \"* && $value != \'* ]] || \
+      die "$ENV_FILE:$line_number uses a quoted value for '$key'; remove the quotes before rerunning setup"
     OLD[$key]=$value
   done < "$ENV_FILE"
 }
@@ -274,6 +287,109 @@ old_uint() {
   value=$(old "$key" "$default")
   [[ $value =~ ^[0-9]+$ ]] || die "existing $key must be an unsigned integer"
   printf '%s' "$value"
+}
+
+old_uint_upgrade_default() {
+  local key=$1 legacy_default=$2 default=$3 value
+  value=$(old_uint "$key" "$default")
+  if [[ -v "OLD[$key]" && $value == "$legacy_default" ]]; then
+    note "Updating $key from the former setup default ($legacy_default) to $default."
+    printf '%s' "$default"
+    return
+  fi
+  printf '%s' "$value"
+}
+
+declare -A QUOTA=()
+
+quota_load() {
+  local key=$1 default=$2 value parsed
+  value=$(old_uint "$key" "$default")
+  parsed=$(kaede_parse_count "$value") || die "existing $key exceeds the supported signed 64-bit setup range"
+  QUOTA[$key]=$parsed
+}
+
+quota_load_upgrade_default() {
+  local key=$1 legacy_default=$2 default=$3 value parsed
+  value=$(old_uint_upgrade_default "$key" "$legacy_default" "$default")
+  parsed=$(kaede_parse_count "$value") || die "existing $key exceeds the supported signed 64-bit setup range"
+  QUOTA[$key]=$parsed
+}
+
+quota_count_prompt() {
+  local key=$1 prompt=$2 minimum=$3 maximum=$4 raw parsed
+  while :; do
+    raw=$(prompt_text "$prompt" "$(kaede_format_count "${QUOTA[$key]}")")
+    if parsed=$(kaede_parse_count "$raw") &&
+      ((parsed >= minimum && parsed <= maximum)); then
+      QUOTA[$key]=$parsed
+      note "$prompt: $(kaede_format_count "$parsed") ($parsed)."
+      return
+    fi
+    warn "Enter a count from $(kaede_format_count "$minimum") through $(kaede_format_count "$maximum"); K, M, and B suffixes are accepted (for example 250K or 2.5M)."
+  done
+}
+
+quota_bytes_prompt() {
+  local key=$1 prompt=$2 minimum=$3 maximum=$4 raw parsed
+  while :; do
+    raw=$(prompt_text "$prompt" "$(kaede_format_bytes "${QUOTA[$key]}")")
+    if parsed=$(kaede_parse_bytes "$raw") &&
+      ((parsed >= minimum && parsed <= maximum)); then
+      QUOTA[$key]=$parsed
+      note "$prompt: $(kaede_format_bytes "$parsed") ($parsed bytes)."
+      return
+    fi
+    warn "Enter a size from $(kaede_format_bytes "$minimum") through $(kaede_format_bytes "$maximum"); KB/MB/GB/TB are decimal and K/M/G/T or KiB/MiB/GiB/TiB are binary."
+  done
+}
+
+quota_require_le() {
+  local lower=$1 upper=$2
+  ((${QUOTA[$lower]} <= ${QUOTA[$upper]})) || \
+    die "$lower (${QUOTA[$lower]}) cannot exceed $upper (${QUOTA[$upper]}); rerun quota tuning and raise the aggregate/hard limit or lower the scoped/cache limit"
+}
+
+quota_require_lt() {
+  local lower=$1 upper=$2
+  ((${QUOTA[$lower]} < ${QUOTA[$upper]})) || \
+    die "$lower (${QUOTA[$lower]}) must stay below $upper (${QUOTA[$upper]}); rerun quota tuning and leave capacity for other remote origins"
+}
+
+validate_quota_relationships() {
+  quota_require_le KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN KAEDE_FEDERATION_INBOX_MAX_EVENTS_TOTAL
+  quota_require_le KAEDE_FEDERATION_INBOX_MAX_BYTES_PER_ORIGIN KAEDE_FEDERATION_INBOX_MAX_BYTES_TOTAL
+  quota_require_le KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT_ORIGIN KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT
+  quota_require_le KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT_ORIGIN KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_ORIGIN
+  quota_require_lt KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_REMOTE_ORIGIN KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_AUTHORITY
+  quota_require_le KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_CONVERSATION KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_REMOTE_ORIGIN
+  quota_require_lt KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_REMOTE_ORIGIN KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_AUTHORITY
+  quota_require_le KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION KAEDE_FEDERATION_DM_MAX_BYTES_PER_REMOTE_ORIGIN
+  quota_require_lt KAEDE_FEDERATION_DM_MAX_BYTES_PER_REMOTE_ORIGIN KAEDE_FEDERATION_DM_MAX_BYTES_PER_AUTHORITY
+  quota_require_le KAEDE_FEDERATION_DM_REPLICA_CACHE_MESSAGES_PER_CONVERSATION KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_CONVERSATION
+  quota_require_le KAEDE_FEDERATION_DM_REPLICA_CACHE_BYTES_PER_CONVERSATION KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION
+  quota_require_le KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_GUILD KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_ORIGIN
+  quota_require_le KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN
+  quota_require_le KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_TOTAL
+  quota_require_le KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_TOTAL
+  quota_require_le KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_TOTAL
+  quota_require_le KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN
+  quota_require_le KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_TOTAL KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_TOTAL
+  quota_require_le KAEDE_FEDERATION_HISTORY_PAGE_BYTES KAEDE_FEDERATION_HISTORY_MAX_BYTES
+  ((ATTACHMENT_BYTES <= QUOTA[KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES])) || \
+    die 'KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES cannot be below one maximum attachment; raise it or lower the attachment size'
+  ((ATTACHMENT_BYTES <= QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN])) || \
+    die 'KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN cannot be below one maximum attachment; raise it in Advanced quota tuning or lower the attachment size'
+}
+
+old_bool() {
+  local key=$1 default=$2 value
+  value=$(old "$key" "$default")
+  value=${value,,}
+  case "$value" in
+    true|false) printf '%s' "$value" ;;
+    *) die "existing $key must be true or false" ;;
+  esac
 }
 
 random_hex() {
@@ -298,7 +414,7 @@ preserve_or_generate() {
     hex32) random_hex 32 ;;
     garage_access) printf 'GK%s' "$(random_hex 16)" ;;
     livekit) printf 'LK%s' "$(random_hex 8)" ;;
-    *) die "internal secret generator error" ;;
+    *) die "setup cannot generate the unknown secret type '$kind'; restore setup.sh from the repository and retry" ;;
   esac
 }
 
@@ -465,13 +581,14 @@ read_existing_env
 if command -v flock >/dev/null 2>&1; then
   [[ ! -L $LOCK_FILE ]] || die '.kaede-setup.lock must not be a symlink'
   if [[ -e $LOCK_FILE ]]; then
-    [[ -f $LOCK_FILE && $(stat -c '%h' "$LOCK_FILE") == 1 ]] || die 'unsafe setup lock file'
+    [[ -f $LOCK_FILE && $(stat -c '%h' "$LOCK_FILE") == 1 ]] || \
+      die "unsafe setup lock file at $LOCK_FILE; verify no setup process is running, remove the unsafe file, and retry"
   else
     LOCK_CREATED=true
   fi
   exec 9>"$LOCK_FILE"
   chmod 600 "$LOCK_FILE"
-  flock -n 9 || die 'another setup wizard is already running'
+  flock -n 9 || die 'another setup wizard is already running; finish or stop it before retrying'
 else
   warn 'flock is unavailable; do not run another setup wizard concurrently.'
 fi
@@ -484,7 +601,7 @@ section 'Kaede Chat setup' \
 
 DOMAIN=$(ask_domain)
 if [[ -n ${OLD[KAEDE_DOMAIN]-} && ${OLD[KAEDE_DOMAIN]%.} != "$DOMAIN" && ${OLD[KAEDE_DOMAIN]} != *.example.com ]]; then
-  die 'an established instance domain cannot be changed safely by this script'
+  die "KAEDE_DOMAIN is already '${OLD[KAEDE_DOMAIN]%.}' and cannot be changed to '$DOMAIN' safely by setup; rerun with the established domain or follow a documented migration procedure"
 fi
 
 FEDERATION_DEFAULT=$(old KAEDE_FEDERATION_MODE open)
@@ -951,6 +1068,149 @@ fi
 [[ $ATTACHMENT_MIB =~ ^[0-9]+$ ]] && ((ATTACHMENT_MIB >= 1 && ATTACHMENT_MIB <= 10240)) || die 'attachment size must be 1-10240 MiB'
 [[ $USER_QUOTA_MIB =~ ^[0-9]+$ ]] && ((USER_QUOTA_MIB >= ATTACHMENT_MIB)) || die 'user quota must be at least one maximum attachment'
 
+# Load every adjustable federation/storage budget before presenting the
+# optional tuning menu. Skipping the menu therefore preserves existing custom
+# values, while only exact setup-generated legacy defaults receive migrations.
+quota_load KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN 5000000
+quota_load KAEDE_FEDERATION_INBOX_MAX_BYTES_PER_ORIGIN 17179869184
+quota_load KAEDE_FEDERATION_INBOX_MAX_EVENTS_TOTAL 50000000
+quota_load KAEDE_FEDERATION_INBOX_MAX_BYTES_TOTAL 171798691840
+quota_load KAEDE_FEDERATION_MAX_REMOTE_INSTANCES 10000
+quota_load KAEDE_FEDERATION_PEER_KEY_HISTORY_LIMIT 512
+quota_load KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT 1000
+quota_load KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT_ORIGIN 100
+quota_load KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_ORIGIN 10000
+quota_load KAEDE_FEDERATION_REMOTE_USERS_PER_INTRODUCER 100000
+quota_load KAEDE_FEDERATION_THIRD_PARTY_INSTANCES_PER_INTRODUCER 1000
+quota_load KAEDE_FEDERATION_REMOTE_MEDIA_TOMBSTONES_PER_ORIGIN 100000
+quota_load KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_AUTHORITY 1000000
+quota_load KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_REMOTE_ORIGIN 100000
+quota_load KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_CONVERSATION 5000000
+quota_load KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_AUTHORITY 50000000
+quota_load KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_REMOTE_ORIGIN 10000000
+quota_load KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION 34359738368
+quota_load KAEDE_FEDERATION_DM_MAX_BYTES_PER_AUTHORITY 343597383680
+quota_load KAEDE_FEDERATION_DM_MAX_BYTES_PER_REMOTE_ORIGIN 68719476736
+quota_load KAEDE_FEDERATION_DM_REPLICA_CACHE_MESSAGES_PER_CONVERSATION 250000
+quota_load KAEDE_FEDERATION_DM_REPLICA_CACHE_BYTES_PER_CONVERSATION 2147483648
+quota_load KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_GUILD 20000000
+quota_load KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD 68719476736
+quota_load KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_ORIGIN 100000000
+quota_load KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN 343597383680
+quota_load KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN 268435456
+quota_load KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_TOTAL 536870912
+quota_load KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN 1000
+quota_load KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_TOTAL 10000
+quota_load KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN 100000
+quota_load KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_TOTAL 1000000
+quota_load KAEDE_FEDERATION_HISTORY_PAGE_MESSAGES 100
+quota_load KAEDE_FEDERATION_HISTORY_PAGE_BYTES 524288
+quota_load_upgrade_default KAEDE_FEDERATION_HISTORY_MAX_MESSAGES 250000 2000000
+quota_load KAEDE_FEDERATION_HISTORY_MAX_BYTES 34359738368
+quota_load KAEDE_FEDERATION_HISTORY_MAX_PAGES 250000
+quota_load KAEDE_FEDERATION_HISTORY_MAX_REACTIONS 10000000
+quota_load KAEDE_FEDERATION_HISTORY_MAX_DURATION_SECONDS 7200
+quota_load_upgrade_default KAEDE_MEDIA_REMOTE_CACHE_BYTES 21474836480 107374182400
+quota_load KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES 524288000
+
+ATTACHMENT_BYTES=$((ATTACHMENT_MIB * 1048576))
+if ((QUOTA[KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES] < ATTACHMENT_BYTES)); then
+  note "Raising local upload in-flight capacity to $(kaede_format_bytes "$ATTACHMENT_BYTES") so one configured maximum-size attachment can be received."
+  QUOTA[KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES]=$ATTACHMENT_BYTES
+fi
+if ((QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN] < ATTACHMENT_BYTES)); then
+  note "Raising remote media in-flight capacity per origin to $(kaede_format_bytes "$ATTACHMENT_BYTES") so one configured maximum-size attachment can be received."
+  QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN]=$ATTACHMENT_BYTES
+fi
+if ((QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_TOTAL] < QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN])); then
+  note "Raising instance-wide remote media in-flight capacity to $(kaede_format_bytes "${QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN]}") so it is not below the per-origin limit."
+  QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_TOTAL]=${QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN]}
+fi
+
+section 'Federation storage limits' \
+  'The recommended limits are high-water marks and do not reserve disk. Keep current/recommended settings for the shortest setup, tune common retained caches, or expose every federation abuse and aggregate ceiling.'
+if [[ -e $ENV_FILE ]]; then
+  QUOTA_KEEP_LABEL='Keep existing limits (recommended)'
+else
+  QUOTA_KEEP_LABEL='Keep recommended defaults'
+fi
+QUOTA_MODE=$(choose 'Federation and remote-cache quota tuning' "$QUOTA_KEEP_LABEL" \
+  'Customize common storage limits' 'Advanced: customize every quota')
+
+if [[ $QUOTA_MODE != "$QUOTA_KEEP_LABEL" ]]; then
+  note 'Counts accept K/M/B suffixes. Sizes accept KB/MB/GB/TB (decimal) or K/M/G/T and KiB/MiB/GiB/TiB (binary). Parsed base values are shown after every answer.'
+
+  if [[ $QUOTA_MODE == 'Advanced: customize every quota' ]]; then
+    section 'Advanced federation admission limits' \
+      'These protect the database from unbounded remote peers. Aggregate limits must remain at or above their corresponding per-origin limits.'
+    quota_count_prompt KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN 'Retained federation events per origin' 1000 1000000000
+    quota_count_prompt KAEDE_FEDERATION_INBOX_MAX_EVENTS_TOTAL 'Retained federation events instance-wide' "${QUOTA[KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN]}" 1000000000
+  fi
+  quota_bytes_prompt KAEDE_FEDERATION_INBOX_MAX_BYTES_PER_ORIGIN 'Retained federation event bytes per origin' 1048576 1099511627776
+  quota_bytes_prompt KAEDE_FEDERATION_INBOX_MAX_BYTES_TOTAL 'Retained federation event bytes instance-wide' "${QUOTA[KAEDE_FEDERATION_INBOX_MAX_BYTES_PER_ORIGIN]}" 1099511627776
+
+  if [[ $QUOTA_MODE == 'Advanced: customize every quota' ]]; then
+    quota_count_prompt KAEDE_FEDERATION_MAX_REMOTE_INSTANCES 'Known remote instance records' 100 1000000
+    quota_count_prompt KAEDE_FEDERATION_PEER_KEY_HISTORY_LIMIT 'Verification keys retained per peer' 128 10000
+    quota_count_prompt KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT 'Pending remote friend requests per recipient' 10 100000
+    quota_count_prompt KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT_ORIGIN 'Pending remote friend requests per recipient and origin' 1 "${QUOTA[KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT]}"
+    quota_count_prompt KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_ORIGIN 'Pending remote friend requests per origin' "${QUOTA[KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT_ORIGIN]}" 1000000
+    quota_count_prompt KAEDE_FEDERATION_REMOTE_USERS_PER_INTRODUCER 'Remote users retained per introducing origin' 100 10000000
+    quota_count_prompt KAEDE_FEDERATION_THIRD_PARTY_INSTANCES_PER_INTRODUCER 'Third-party instance namespaces per introducer' 10 100000
+    quota_count_prompt KAEDE_FEDERATION_REMOTE_MEDIA_TOMBSTONES_PER_ORIGIN 'Remote media deletion markers per origin' 1000 10000000
+
+    section 'Advanced DM hard ceilings' \
+      'Rolling replica targets below are replaceable cache; these hard ceilings protect authoritative and locally authored data and should remain larger.'
+    quota_count_prompt KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_AUTHORITY 'DM conversations per authority' 100 10000000
+    quota_count_prompt KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_REMOTE_ORIGIN 'DM conversations per remote origin' 10 "$((QUOTA[KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_AUTHORITY] - 1))"
+    quota_count_prompt KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_CONVERSATION 'Hard DM messages per conversation' 100 100000000
+    quota_count_prompt KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_REMOTE_ORIGIN 'Hard DM messages per remote origin' "${QUOTA[KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_CONVERSATION]}" 999999999
+    quota_count_prompt KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_AUTHORITY 'Hard DM messages per authority' "$((QUOTA[KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_REMOTE_ORIGIN] + 1))" 1000000000
+    quota_bytes_prompt KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION 'Hard DM bytes per conversation' 1048576 1099511627776
+    quota_bytes_prompt KAEDE_FEDERATION_DM_MAX_BYTES_PER_REMOTE_ORIGIN 'Hard DM bytes per remote origin' "${QUOTA[KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION]}" 10995116277759
+    quota_bytes_prompt KAEDE_FEDERATION_DM_MAX_BYTES_PER_AUTHORITY 'Hard DM bytes per authority' "$((QUOTA[KAEDE_FEDERATION_DM_MAX_BYTES_PER_REMOTE_ORIGIN] + 1))" 10995116277760
+  fi
+  quota_count_prompt KAEDE_FEDERATION_DM_REPLICA_CACHE_MESSAGES_PER_CONVERSATION 'Rolling remote DM messages cached per conversation' 100 "${QUOTA[KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_CONVERSATION]}"
+  quota_bytes_prompt KAEDE_FEDERATION_DM_REPLICA_CACHE_BYTES_PER_CONVERSATION 'Rolling remote DM bytes cached per conversation' 1048576 "${QUOTA[KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION]}"
+
+  if [[ $QUOTA_MODE == 'Advanced: customize every quota' ]]; then
+    section 'Advanced remote-guild replica limits' \
+      'Rows and estimated SQL bytes include messages, projections, members, reactions, attachment metadata, and history staging.'
+    quota_count_prompt KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_GUILD 'Remote replica rows per guild' 10000 1000000000
+    quota_count_prompt KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_ORIGIN 'Remote replica rows per origin' "${QUOTA[KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_GUILD]}" 1000000000
+  fi
+  quota_bytes_prompt KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD 'Remote replica bytes per guild' 16777216 10995116277760
+  quota_bytes_prompt KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN 'Remote replica bytes per origin' "${QUOTA[KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD]}" 10995116277760
+
+  if [[ $QUOTA_MODE == 'Advanced: customize every quota' ]]; then
+    section 'Advanced transfer and history limits' \
+      'Live media transfer limits bound concurrent spool use. History page/grant ceilings bound one synchronization job and active signed grants.'
+    quota_bytes_prompt KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN 'Remote media bytes in flight per origin' "$ATTACHMENT_BYTES" 17179869184
+    quota_bytes_prompt KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_TOTAL 'Remote media bytes in flight instance-wide' "${QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN]}" 68719476736
+    quota_count_prompt KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN 'Active history exports per origin' 1 1000000
+    quota_count_prompt KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_TOTAL 'Active history exports instance-wide' "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN]}" 10000000
+    quota_count_prompt KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN 'Active history channel grants per origin' "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN]}" 100000000
+    HISTORY_GRANT_TOTAL_MIN=${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_TOTAL]}
+    if ((QUOTA[KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN] > HISTORY_GRANT_TOTAL_MIN)); then
+      HISTORY_GRANT_TOTAL_MIN=${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN]}
+    fi
+    quota_count_prompt KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_TOTAL 'Active history channel grants instance-wide' "$HISTORY_GRANT_TOTAL_MIN" 1000000000
+    quota_count_prompt KAEDE_FEDERATION_HISTORY_PAGE_MESSAGES 'Messages per history page' 10 500
+    quota_bytes_prompt KAEDE_FEDERATION_HISTORY_PAGE_BYTES 'Bytes per history page' 65536 8388608
+  fi
+  quota_count_prompt KAEDE_FEDERATION_HISTORY_MAX_MESSAGES 'Messages per retained-history import' 100 10000000
+  quota_bytes_prompt KAEDE_FEDERATION_HISTORY_MAX_BYTES 'Bytes per retained-history import' "${QUOTA[KAEDE_FEDERATION_HISTORY_PAGE_BYTES]}" 107374182400
+  if [[ $QUOTA_MODE == 'Advanced: customize every quota' ]]; then
+    quota_count_prompt KAEDE_FEDERATION_HISTORY_MAX_PAGES 'Pages per retained-history import' 10 1000000
+    quota_count_prompt KAEDE_FEDERATION_HISTORY_MAX_REACTIONS 'Reactions per retained-history import' 100 100000000
+    quota_count_prompt KAEDE_FEDERATION_HISTORY_MAX_DURATION_SECONDS 'Maximum retained-history import duration in seconds' 60 86400
+  fi
+  quota_bytes_prompt KAEDE_MEDIA_REMOTE_CACHE_BYTES 'Downloaded remote-media rolling cache' 1 9223372036854775807
+fi
+
+validate_quota_relationships
+note "Quota summary: DM rolling cache $(kaede_format_count "${QUOTA[KAEDE_FEDERATION_DM_REPLICA_CACHE_MESSAGES_PER_CONVERSATION]}") / $(kaede_format_bytes "${QUOTA[KAEDE_FEDERATION_DM_REPLICA_CACHE_BYTES_PER_CONVERSATION]}") per conversation; remote guild $(kaede_format_bytes "${QUOTA[KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD]}") per guild and $(kaede_format_bytes "${QUOTA[KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN]}") per origin; history import $(kaede_format_count "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_MESSAGES]}") / $(kaede_format_bytes "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_BYTES]}"); remote media cache $(kaede_format_bytes "${QUOTA[KAEDE_MEDIA_REMOTE_CACHE_BYTES]}")."
+
 MASTER_KEY=$(preserve_or_generate KAEDE_SECRET_KEY b64)
 GATEWAY_KEY=$(preserve_or_generate KAEDE_GATEWAY_SECRET_KEY b64)
 [[ $MASTER_KEY != "$GATEWAY_KEY" ]] || GATEWAY_KEY=$(random_base64url)
@@ -974,7 +1234,7 @@ else
 fi
 LOG_LEVEL=${OLD[KAEDE_LOG_LEVEL]-INFO}
 LOG_LEVEL=${LOG_LEVEL^^}
-case "$LOG_LEVEL" in DEBUG|INFO|WARNING|ERROR) ;; *) die 'existing KAEDE_LOG_LEVEL is invalid' ;; esac
+case "$LOG_LEVEL" in DEBUG|INFO|WARNING|ERROR) ;; *) die "existing KAEDE_LOG_LEVEL must be DEBUG, INFO, WARNING, or ERROR; received '$LOG_LEVEL'" ;; esac
 
 PROFILES=()
 [[ $VOICE == true ]] && PROFILES+=(voice)
@@ -1019,10 +1279,52 @@ emit() {
   [[ -z $ADMIN_TOKEN ]] || emit KAEDE_ADMIN_TOKEN "$ADMIN_TOKEN"
   emit KAEDE_LOG_LEVEL "$LOG_LEVEL"
   emit KAEDE_FEDERATION_MODE "$FEDERATION"
-  emit KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED true
-  emit KAEDE_FEDERATION_HISTORY_EXPORT_TTL_MINUTES 1440
-  emit KAEDE_FEDERATION_HISTORY_PAGE_MESSAGES 100
-  emit KAEDE_FEDERATION_HISTORY_MAX_MESSAGES 250000
+  emit KAEDE_FEDERATION_CLOCK_SKEW_SECONDS "$(old_uint KAEDE_FEDERATION_CLOCK_SKEW_SECONDS 300)"
+  emit KAEDE_FEDERATION_EVENT_RETENTION_DAYS "$(old_uint KAEDE_FEDERATION_EVENT_RETENTION_DAYS 30)"
+  emit KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN "${QUOTA[KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN]}"
+  emit KAEDE_FEDERATION_INBOX_MAX_BYTES_PER_ORIGIN "${QUOTA[KAEDE_FEDERATION_INBOX_MAX_BYTES_PER_ORIGIN]}"
+  emit KAEDE_FEDERATION_INBOX_MAX_EVENTS_TOTAL "${QUOTA[KAEDE_FEDERATION_INBOX_MAX_EVENTS_TOTAL]}"
+  emit KAEDE_FEDERATION_INBOX_MAX_BYTES_TOTAL "${QUOTA[KAEDE_FEDERATION_INBOX_MAX_BYTES_TOTAL]}"
+  emit KAEDE_FEDERATION_MAX_REMOTE_INSTANCES "${QUOTA[KAEDE_FEDERATION_MAX_REMOTE_INSTANCES]}"
+  emit KAEDE_FEDERATION_PEER_KEY_HISTORY_LIMIT "${QUOTA[KAEDE_FEDERATION_PEER_KEY_HISTORY_LIMIT]}"
+  emit KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT "${QUOTA[KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT]}"
+  emit KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT_ORIGIN "${QUOTA[KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_RECIPIENT_ORIGIN]}"
+  emit KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_ORIGIN "${QUOTA[KAEDE_FEDERATION_PENDING_RELATIONSHIPS_PER_ORIGIN]}"
+  emit KAEDE_FEDERATION_REMOTE_USERS_PER_INTRODUCER "${QUOTA[KAEDE_FEDERATION_REMOTE_USERS_PER_INTRODUCER]}"
+  emit KAEDE_FEDERATION_THIRD_PARTY_INSTANCES_PER_INTRODUCER "${QUOTA[KAEDE_FEDERATION_THIRD_PARTY_INSTANCES_PER_INTRODUCER]}"
+  emit KAEDE_FEDERATION_REMOTE_MEDIA_TOMBSTONES_PER_ORIGIN "${QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_TOMBSTONES_PER_ORIGIN]}"
+  emit KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_AUTHORITY "${QUOTA[KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_AUTHORITY]}"
+  emit KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_REMOTE_ORIGIN "${QUOTA[KAEDE_FEDERATION_DM_MAX_CONVERSATIONS_PER_REMOTE_ORIGIN]}"
+  emit KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_CONVERSATION "${QUOTA[KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_CONVERSATION]}"
+  emit KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_AUTHORITY "${QUOTA[KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_AUTHORITY]}"
+  emit KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_REMOTE_ORIGIN "${QUOTA[KAEDE_FEDERATION_DM_MAX_MESSAGES_PER_REMOTE_ORIGIN]}"
+  emit KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION "${QUOTA[KAEDE_FEDERATION_DM_MAX_BYTES_PER_CONVERSATION]}"
+  emit KAEDE_FEDERATION_DM_MAX_BYTES_PER_AUTHORITY "${QUOTA[KAEDE_FEDERATION_DM_MAX_BYTES_PER_AUTHORITY]}"
+  emit KAEDE_FEDERATION_DM_MAX_BYTES_PER_REMOTE_ORIGIN "${QUOTA[KAEDE_FEDERATION_DM_MAX_BYTES_PER_REMOTE_ORIGIN]}"
+  emit KAEDE_FEDERATION_DM_REPLICA_CACHE_MESSAGES_PER_CONVERSATION "${QUOTA[KAEDE_FEDERATION_DM_REPLICA_CACHE_MESSAGES_PER_CONVERSATION]}"
+  emit KAEDE_FEDERATION_DM_REPLICA_CACHE_BYTES_PER_CONVERSATION "${QUOTA[KAEDE_FEDERATION_DM_REPLICA_CACHE_BYTES_PER_CONVERSATION]}"
+  emit KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_GUILD "${QUOTA[KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_GUILD]}"
+  emit KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD "${QUOTA[KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD]}"
+  emit KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_ORIGIN "${QUOTA[KAEDE_FEDERATION_REPLICA_MAX_ROWS_PER_ORIGIN]}"
+  emit KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN "${QUOTA[KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN]}"
+  emit KAEDE_FEDERATION_REMOTE_IDENTITY_RETENTION_DAYS "$(old_uint KAEDE_FEDERATION_REMOTE_IDENTITY_RETENTION_DAYS 30)"
+  emit KAEDE_FEDERATION_REMOTE_IDENTITY_GC_BATCH_SIZE "$(old_uint KAEDE_FEDERATION_REMOTE_IDENTITY_GC_BATCH_SIZE 5000)"
+  emit KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN "${QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_PER_ORIGIN]}"
+  emit KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_TOTAL "${QUOTA[KAEDE_FEDERATION_REMOTE_MEDIA_INFLIGHT_BYTES_TOTAL]}"
+  emit KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED "$(old_bool KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED true)"
+  emit KAEDE_FEDERATION_HISTORY_EXPORT_TTL_MINUTES "$(old_uint KAEDE_FEDERATION_HISTORY_EXPORT_TTL_MINUTES 1440)"
+  emit KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_PER_ORIGIN]}"
+  emit KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_TOTAL "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_EXPORTS_TOTAL]}"
+  emit KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_PER_ORIGIN]}"
+  emit KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_TOTAL "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_ACTIVE_CHANNEL_GRANTS_TOTAL]}"
+  emit KAEDE_FEDERATION_HISTORY_PAGE_MESSAGES "${QUOTA[KAEDE_FEDERATION_HISTORY_PAGE_MESSAGES]}"
+  emit KAEDE_FEDERATION_HISTORY_PAGE_BYTES "${QUOTA[KAEDE_FEDERATION_HISTORY_PAGE_BYTES]}"
+  emit KAEDE_FEDERATION_HISTORY_MAX_MESSAGES "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_MESSAGES]}"
+  emit KAEDE_FEDERATION_HISTORY_MAX_BYTES "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_BYTES]}"
+  emit KAEDE_FEDERATION_HISTORY_MAX_PAGES "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_PAGES]}"
+  emit KAEDE_FEDERATION_HISTORY_MAX_REACTIONS "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_REACTIONS]}"
+  emit KAEDE_FEDERATION_HISTORY_MAX_DURATION_SECONDS "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_DURATION_SECONDS]}"
+  emit KAEDE_FEDERATION_HISTORY_MERGE_CHUNK_SIZE "$(old_uint KAEDE_FEDERATION_HISTORY_MERGE_CHUNK_SIZE 500)"
   emit POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
   emit KAEDE_DATABASE_URL "postgresql+asyncpg://kaede:$POSTGRES_PASSWORD@postgres:5432/kaede"
   emit DRAGONFLY_PASSWORD "$DRAGONFLY_PASSWORD"
@@ -1046,9 +1348,9 @@ emit() {
   emit KAEDE_MEDIA_USER_QUOTA_BYTES "$((USER_QUOTA_MIB * 1048576))"
   emit KAEDE_MEDIA_SCAN_ENABLED true
   emit KAEDE_MEDIA_INFLIGHT_LIMIT "$(old_uint KAEDE_MEDIA_INFLIGHT_LIMIT 10)"
-  emit KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES "$(old_uint KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES 524288000)"
+  emit KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES "${QUOTA[KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES]}"
   emit KAEDE_MEDIA_UPLOAD_TTL_SECONDS "$(old_uint KAEDE_MEDIA_UPLOAD_TTL_SECONDS 900)"
-  emit KAEDE_MEDIA_REMOTE_CACHE_BYTES "$(old_uint KAEDE_MEDIA_REMOTE_CACHE_BYTES 21474836480)"
+  emit KAEDE_MEDIA_REMOTE_CACHE_BYTES "${QUOTA[KAEDE_MEDIA_REMOTE_CACHE_BYTES]}"
   emit KAEDE_MEDIA_REMOTE_CACHE_TTL_DAYS "$(old_uint KAEDE_MEDIA_REMOTE_CACHE_TTL_DAYS 30)"
   emit KAEDE_MEDIA_EMOJI_LIMIT "$(old_uint KAEDE_MEDIA_EMOJI_LIMIT 100)"
   emit KAEDE_MEDIA_MAX_EMOJI_BYTES "$(old_uint KAEDE_MEDIA_MAX_EMOJI_BYTES 524288)"
@@ -1135,7 +1437,8 @@ sed_escape() {
 }
 
 if [[ $HOST_NGINX == true ]]; then
-  [[ -f $ROOT/deploy/nginx/kaede.conf.example ]] || die 'missing deploy/nginx/kaede.conf.example'
+  [[ -f $ROOT/deploy/nginx/kaede.conf.example ]] || \
+    die 'deploy/nginx/kaede.conf.example is missing; restore it from the repository before generating nginx configuration'
   HOST_STAGE="$STAGE_DIR/generated/kaede.nginx.conf.raw"
   if [[ $STORAGE == garage ]]; then
     awk '$0 !~ /^# KAEDE_SETUP_/' "$ROOT/deploy/nginx/kaede.conf.example" > "$HOST_STAGE"

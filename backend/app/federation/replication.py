@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import secrets
 from datetime import datetime
 from typing import Any
 
 from fastapi import HTTPException
 from redis.asyncio import Redis
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.e2ee import validate_e2ee_envelope
 from app.chat.events import publish_dispatch, user_topic
-from app.chat.payloads import render_message_payload
+from app.chat.payloads import dm_channel_payload, render_message_payload
 from app.chat.privacy import require_can_direct_message
 from app.core.settings import Settings
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
@@ -25,7 +27,18 @@ from app.db.models import (
     MessageProjection,
     User,
 )
-from app.federation.network import normalize_domain
+from app.federation.dm_storage import (
+    admit_federated_dm_conversation,
+    admit_federated_dm_message,
+    dm_authority_history_available,
+    dm_history_metadata,
+    dm_message_storage_delta,
+    lock_federated_dm_authority,
+    opaque_dm_history_ref_allowed,
+    register_federated_dm_conversation,
+)
+from app.federation.identity_storage import admit_remote_user_identity
+from app.federation.network import ensure_remote_instance_record, normalize_domain
 from app.federation.schemas import MAX_DATABASE_SNOWFLAKE, RemoteUserProfile
 from app.media.processing import normalize_declared_type, sanitize_filename
 
@@ -45,6 +58,45 @@ def database_snowflake(value: object, field: str) -> int:
     if parsed > MAX_DATABASE_SNOWFLAKE:
         raise ValueError(f"{field} is outside the database range")
     return parsed
+
+
+def replicated_message_create_fingerprint(
+    *,
+    channel_id: int,
+    channel_domain: str,
+    author_id: int,
+    author_domain: str,
+    content: str | None,
+    e2ee: dict[str, Any] | None,
+    message_type: int,
+    flags: int,
+    client_nonce: str | None,
+    referenced_message_id: int | None,
+    referenced_message_domain: str | None,
+    mention_user_refs: list[dict[str, Any]],
+    created_at: datetime,
+    webhook_name: str | None = None,
+    webhook_avatar_hash: str | None = None,
+) -> tuple[object, ...]:
+    """Bind immutable create fields, including opaque E2EE ciphertext."""
+
+    return (
+        channel_id,
+        channel_domain,
+        author_id,
+        author_domain,
+        content,
+        e2ee,
+        message_type,
+        flags,
+        client_nonce,
+        referenced_message_id,
+        referenced_message_domain,
+        mention_user_refs,
+        webhook_name,
+        webhook_avatar_hash,
+        created_at,
+    )
 
 
 def validate_snowflake_timestamp(
@@ -102,6 +154,106 @@ async def advance_channel_cursor(
     )
 
 
+UNRESOLVED_REMOTE_USERNAME_ATTEMPTS = 8
+
+
+def unresolved_remote_username(_user_id: int | None = None, _origin: str | None = None) -> str:
+    """Return an opaque, random local-only handle within the 32-byte schema bound.
+
+    The arguments remain accepted for rolling compatibility with older callers,
+    but deliberately do not influence the alias. A deterministic alias lets a
+    malicious peer predict and reserve another identity's placeholder handle.
+    ``profile_resolved`` is the only marker clients may use to identify these
+    rows; the alias is an internal database implementation detail.
+    """
+
+    return f"history_{secrets.token_hex(12)}"
+
+
+async def insert_unresolved_remote_user(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    origin_domain: str,
+    introduced_by_domain: str,
+) -> User:
+    """Insert an opaque remote identity without letting alias collisions abort work.
+
+    ``ON CONFLICT DO NOTHING`` intentionally has no conflict target, so both a
+    concurrent composite-ID insert and an unlucky username collision remain
+    recoverable. The latter generates a fresh random alias and retries within a
+    fixed bound rather than poisoning the surrounding snapshot transaction.
+    """
+
+    identity = (user_id, origin_domain)
+    existing = await session.get(User, identity)
+    if existing is not None:
+        return existing
+    for _attempt in range(UNRESOLVED_REMOTE_USERNAME_ATTEMPTS):
+        await session.execute(
+            pg_insert(User)
+            .values(
+                id=user_id,
+                origin_domain=origin_domain,
+                is_local=False,
+                username=unresolved_remote_username(),
+                profile_version=1,
+                profile_resolved=False,
+                federation_introduced_by_domain=introduced_by_domain,
+            )
+            .on_conflict_do_nothing()
+        )
+        inserted = await session.get(User, identity)
+        if inserted is not None:
+            return inserted
+    raise RuntimeError("unresolved remote identity insert did not converge")
+
+
+async def _resolve_unresolved_remote_profile(
+    session: AsyncSession,
+    user: User,
+    profile: RemoteUserProfile,
+) -> bool:
+    """Apply an authoritative profile without sacrificing snapshot availability.
+
+    A user's home is authoritative for the composite identity, but a duplicate
+    case-insensitive handle from that home must not violate our local uniqueness
+    invariant and roll back an otherwise valid guild snapshot. Preflight the
+    known conflict and retain the placeholder. The savepoint also contains the
+    narrow concurrent-insert race so the caller can continue safely.
+    """
+
+    conflicting_id = await session.scalar(
+        select(User.id)
+        .where(
+            User.origin_domain == user.origin_domain,
+            func.lower(User.username) == profile.username.lower(),
+            User.id != user.id,
+        )
+        .limit(1)
+    )
+    if conflicting_id is not None:
+        return False
+    try:
+        async with session.begin_nested():
+            user.username = profile.username
+            user.profile_resolved = True
+            user.profile_version = profile.profile_version
+            user.display_name = profile.display_name
+            user.avatar_hash = profile.avatar_hash
+            user.banner_hash = profile.banner_hash
+            user.bio = profile.bio
+            user.custom_status = profile.custom_status
+            await session.flush()
+    except IntegrityError:
+        # The savepoint keeps the outer import/refresh transaction usable. The
+        # row is expired by the rollback; refresh it before returning it to a
+        # caller that may render or account for the still-opaque identity.
+        await session.refresh(user)
+        return False
+    return True
+
+
 async def upsert_remote_user(
     session: AsyncSession, settings: Settings, profile: RemoteUserProfile
 ) -> User:
@@ -112,21 +264,19 @@ async def upsert_remote_user(
         if user.username != profile.username:
             raise ValueError("local user profile does not match the stored immutable handle")
         return user
-    instance = await session.get(Instance, profile.origin_domain)
-    if instance is None:
-        await session.execute(
-            pg_insert(Instance)
-            .values(domain=profile.origin_domain, is_self=False)
-            .on_conflict_do_nothing(index_elements=["domain"])
-        )
-    user = await session.get(
-        User, (database_snowflake(profile.id, "user id"), profile.origin_domain)
+    user_id = database_snowflake(profile.id, "user id")
+    user, introducer = await admit_remote_user_identity(
+        session,
+        settings,
+        user_id,
+        profile.origin_domain,
+        introduced_by_domain=profile.origin_domain,
     )
     if user is None:
         await session.execute(
             pg_insert(User)
             .values(
-                id=int(profile.id),
+                id=user_id,
                 origin_domain=profile.origin_domain,
                 is_local=False,
                 username=profile.username,
@@ -136,23 +286,25 @@ async def upsert_remote_user(
                 bio=profile.bio,
                 custom_status=profile.custom_status,
                 profile_version=profile.profile_version,
+                federation_introduced_by_domain=introducer,
             )
-            .on_conflict_do_nothing(index_elements=["id", "origin_domain"])
+            .on_conflict_do_nothing()
         )
-        user = await session.get(User, (int(profile.id), profile.origin_domain))
+        user = await session.get(User, (user_id, profile.origin_domain))
     if user is None:
-        raise RuntimeError("remote user insert did not converge")
+        # The home may have supplied a case-insensitive username already bound
+        # to another composite ID. Preserve the identity as opaque rather than
+        # allowing that conflict to abort an otherwise valid snapshot/event.
+        user = await insert_unresolved_remote_user(
+            session,
+            user_id=user_id,
+            origin_domain=profile.origin_domain,
+            introduced_by_domain=introducer,
+        )
     if user.is_local:
         raise ValueError("remote user profile changed an immutable identity")
     if not user.profile_resolved:
-        user.username = profile.username
-        user.profile_resolved = True
-        user.profile_version = profile.profile_version
-        user.display_name = profile.display_name
-        user.avatar_hash = profile.avatar_hash
-        user.banner_hash = profile.banner_hash
-        user.bio = profile.bio
-        user.custom_status = profile.custom_status
+        await _resolve_unresolved_remote_profile(session, user, profile)
         return user
     if user.username != profile.username:
         raise ValueError("remote user profile changed an immutable identity")
@@ -195,28 +347,122 @@ async def resolve_delegated_profile(
     A guild home is authoritative for its guild, but it is not authoritative for
     mutable profiles homed on a third instance.  Profiles belonging to the guild
     home can be upserted normally, and local profiles are resolved against the
-    local database without accepting remote mutations.  Every other profile must
-    already have been learned from its own origin; the delegated copy may identify
-    that cached user but cannot create or update it.
-
-    Until nested user-signed profile proofs are part of the protocol, rejecting an
-    unknown third-party identity is preferable to letting one authenticated peer
-    populate another origin's namespace.
+    local database without accepting remote mutations. Every other profile may
+    identify an existing authoritative cache entry. If it has not been learned
+    from its own origin yet, retain only an opaque composite reference with a
+    locally derived placeholder handle; never accept the guild home's mutable
+    third-party profile fields.
     """
 
     authority = normalize_domain(authority_origin)
     if profile.origin_domain in {authority, settings.domain}:
         return await upsert_remote_user(session, settings, profile)
 
-    user = await session.get(
-        User,
-        (database_snowflake(profile.id, "user id"), profile.origin_domain),
-    )
+    user_id = database_snowflake(profile.id, "user id")
+    user = await session.get(User, (user_id, profile.origin_domain))
     if user is None:
-        raise ValueError("third-party profile must be resolved from its authoritative origin first")
-    if user.is_local or user.username != profile.username:
+        # Preserve the guild membership as an opaque composite identity. The
+        # guild home is not allowed to choose this user's handle/profile; a
+        # later direct response from the user's own home upgrades the row.
+        existing, introducer = await admit_remote_user_identity(
+            session,
+            settings,
+            user_id,
+            profile.origin_domain,
+            introduced_by_domain=authority,
+        )
+        user = existing or await insert_unresolved_remote_user(
+            session,
+            user_id=user_id,
+            origin_domain=profile.origin_domain,
+            introduced_by_domain=introducer,
+        )
+    if user is None:
+        raise RuntimeError("unresolved third-party identity insert did not converge")
+    if user.is_local:
+        raise ValueError("third-party profile does not match its authoritative identity")
+    if user.profile_resolved and user.username != profile.username:
         raise ValueError("third-party profile does not match its authoritative identity")
     return user
+
+
+MAX_REMOTE_MEDIA_DIMENSION = 100_000
+MAX_REMOTE_MEDIA_PIXELS = 100_000_000
+REMOTE_MEDIA_VARIANTS = {
+    "thumbnail_128",
+    "thumbnail_512",
+    "thumbnail_1024",
+    "poster",
+}
+
+
+def remote_media_dimensions(raw: dict[str, Any]) -> tuple[int | None, int | None]:
+    width = raw.get("width")
+    height = raw.get("height")
+    if (width is None) != (height is None):
+        raise ValueError("attachment dimensions must either both be present or both be absent")
+    if width is None:
+        return None, None
+    if (
+        isinstance(width, bool)
+        or isinstance(height, bool)
+        or not isinstance(width, int)
+        or not isinstance(height, int)
+        or not 1 <= width <= MAX_REMOTE_MEDIA_DIMENSION
+        or not 1 <= height <= MAX_REMOTE_MEDIA_DIMENSION
+        or width * height > MAX_REMOTE_MEDIA_PIXELS
+    ):
+        raise ValueError("attachment dimensions are invalid")
+    return width, height
+
+
+def sanitized_remote_variants(raw: object, *, max_bytes: int) -> dict[str, Any]:
+    if not isinstance(raw, dict) or len(raw) > 16:
+        raise ValueError("attachment variants are invalid")
+    rendered: dict[str, Any] = {}
+    for name, metadata in raw.items():
+        if name not in REMOTE_MEDIA_VARIANTS:
+            continue
+        if not isinstance(metadata, dict) or len(metadata) > 16:
+            raise ValueError("attachment variant metadata is invalid")
+        content_type_raw = metadata.get("content_type")
+        size = metadata.get("size")
+        if not isinstance(content_type_raw, str):
+            raise ValueError("attachment variant content type is invalid")
+        content_type = normalize_declared_type(content_type_raw)
+        if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= max_bytes:
+            raise ValueError("attachment variant size is invalid")
+        width, height = remote_media_dimensions(metadata)
+        processing_version = metadata.get("processing_version")
+        if processing_version is not None and (
+            isinstance(processing_version, bool)
+            or not isinstance(processing_version, int)
+            or not 1 <= processing_version <= 2_147_483_647
+        ):
+            raise ValueError("attachment variant processing version is invalid")
+        rendered[name] = {
+            "content_type": content_type,
+            "size": size,
+            "width": width,
+            "height": height,
+            **(
+                {"processing_version": processing_version} if processing_version is not None else {}
+            ),
+        }
+    return rendered
+
+
+def sanitized_remote_blurhash(raw: object) -> str | None:
+    if raw is None:
+        return None
+    if (
+        not isinstance(raw, str)
+        or not 6 <= len(raw) <= 128
+        or not raw.isascii()
+        or any(not 33 <= ord(character) <= 126 for character in raw)
+    ):
+        raise ValueError("attachment blurhash is invalid")
+    return raw
 
 
 def profile_from_user(user: User) -> dict[str, object]:
@@ -271,6 +517,12 @@ async def replicate_message_attachments(
             or not 1 <= size <= settings.media_max_attachment_bytes
         ):
             raise ValueError("attachment size is invalid")
+        width, height = remote_media_dimensions(raw)
+        blurhash = sanitized_remote_blurhash(raw.get("blurhash"))
+        variants = sanitized_remote_variants(
+            raw.get("variants", {}),
+            max_bytes=settings.media_max_attachment_bytes,
+        )
         existing = await session.get(Attachment, ref)
         if existing is None:
             existing = Attachment(
@@ -284,13 +536,13 @@ async def replicate_message_attachments(
                 content_type=content_type,
                 size=size,
                 object_key=f"remote/{origin}/{attachment_id}/original",
-                width=raw.get("width") if isinstance(raw.get("width"), int) else None,
-                height=raw.get("height") if isinstance(raw.get("height"), int) else None,
-                blurhash=raw.get("blurhash") if isinstance(raw.get("blurhash"), str) else None,
+                width=width,
+                height=height,
+                blurhash=blurhash,
                 scan_status="clean",
                 purpose="attachment",
                 finalized_at=message.created_at,
-                variants=(raw.get("variants") if isinstance(raw.get("variants"), dict) else {}),
+                variants=variants,
             )
             session.add(existing)
         else:
@@ -320,20 +572,24 @@ async def replicate_conversation(
     participant_profiles: list[RemoteUserProfile],
 ) -> Channel:
     origin = str(conversation["origin_domain"])
+    pair_key = str(conversation["pair_key"])
+    authority_domain = str(conversation["authority_domain"])
+    participant_domains = {profile.origin_domain for profile in participant_profiles}
+    federated = await admit_federated_dm_conversation(
+        session,
+        settings,
+        authority_domain=authority_domain,
+        pair_key=pair_key,
+        participant_domains=participant_domains,
+    )
     if await session.get(Instance, origin) is None:
         if origin == settings.domain:
             raise RuntimeError("self instance is not bootstrapped")
-        await session.execute(
-            pg_insert(Instance)
-            .values(domain=origin, is_self=False)
-            .on_conflict_do_nothing(index_elements=["domain"])
-        )
+        await ensure_remote_instance_record(session, settings, origin)
     participants = [
         await upsert_remote_user(session, settings, profile) for profile in participant_profiles
     ]
     conversation_id = database_snowflake(conversation.get("id"), "conversation id")
-    pair_key = str(conversation["pair_key"])
-    authority_domain = str(conversation["authority_domain"])
     await session.scalar(
         pg_insert(DMConversation)
         .values(
@@ -358,6 +614,13 @@ async def replicate_conversation(
         or existing.type != "direct"
     ):
         raise ValueError("DM conversation identity conflicts with an existing conversation")
+    if federated:
+        await register_federated_dm_conversation(
+            session,
+            settings,
+            existing,
+            participant_domains=participant_domains,
+        )
     channel = await session.get(Channel, (conversation_id, origin))
     if channel is None:
         channel = Channel(
@@ -482,6 +745,7 @@ async def replicate_dm_message(
     conversation = await session.get(DMConversation, (channel.id, channel.origin_domain))
     if conversation is None or conversation.type != "direct":
         raise ValueError("DM conversation is not replicated")
+    await lock_federated_dm_authority(session, conversation.authority_domain)
     author_participates = await session.get(
         DMParticipant,
         (channel.id, channel.origin_domain, author.id, author.origin_domain),
@@ -513,11 +777,25 @@ async def replicate_dm_message(
     if referenced_id_raw is not None:
         referenced_id = database_snowflake(referenced_id_raw, "referenced message id")
         referenced_domain = normalize_domain(str(referenced_domain_raw))
+        if (referenced_id, referenced_domain) >= (message_id, origin_domain):
+            raise ValueError("DM message reference must precede the message")
         referenced = await session.get(Message, (referenced_id, referenced_domain))
-        if referenced is None or (
+        if referenced is not None and (
             referenced.channel_id,
             referenced.channel_domain,
         ) != (channel.id, channel.origin_domain):
+            raise ValueError("DM message reference is not in the conversation")
+        if referenced is None and not opaque_dm_history_ref_allowed(
+            conversation,
+            (referenced_id, referenced_domain),
+            participant_domains={domain for _identifier, domain in participant_refs},
+            local_domain=settings.domain,
+            remote_available=await dm_authority_history_available(
+                session,
+                conversation,
+                local_domain=settings.domain,
+            ),
+        ):
             raise ValueError("DM message reference is not in the conversation")
     local_recipients = list(
         await session.scalars(
@@ -537,6 +815,25 @@ async def replicate_dm_message(
     )
     for recipient in local_recipients:
         await require_can_direct_message(session, author, recipient)
+    await admit_federated_dm_message(
+        session,
+        settings,
+        conversation,
+        message_id=message_id,
+        message_domain=origin_domain,
+        delta=dm_message_storage_delta(
+            content=message_content,
+            e2ee=e2ee,
+            mention_user_refs=mention_refs,
+            attachments=raw_attachments,
+            client_nonce=client_nonce,
+        ),
+        protected_refs=(
+            {(referenced_id, referenced_domain)}
+            if referenced_id is not None and referenced_domain is not None
+            else None
+        ),
+    )
     inserted = await session.scalar(
         pg_insert(Message)
         .values(
@@ -561,32 +858,34 @@ async def replicate_dm_message(
     )
     if inserted is None:
         existing = await session.get(Message, (message_id, origin_domain))
-        if existing is None or (
-            existing.channel_id,
-            existing.channel_domain,
-            existing.author_id,
-            existing.author_domain,
-            existing.content,
-            existing.message_type,
-            existing.flags,
-            existing.client_nonce,
-            existing.referenced_message_id,
-            existing.referenced_message_domain,
-            existing.mention_user_refs,
-            existing.created_at,
-        ) != (
-            channel.id,
-            channel.origin_domain,
-            author.id,
-            author.origin_domain,
-            message_content,
-            message_type,
-            flags,
-            client_nonce,
-            referenced_id,
-            referenced_domain,
-            mention_refs,
-            created_at,
+        if existing is None or replicated_message_create_fingerprint(
+            channel_id=existing.channel_id,
+            channel_domain=existing.channel_domain,
+            author_id=existing.author_id,
+            author_domain=existing.author_domain,
+            content=existing.content,
+            e2ee=existing.e2ee,
+            message_type=existing.message_type,
+            flags=existing.flags,
+            client_nonce=existing.client_nonce,
+            referenced_message_id=existing.referenced_message_id,
+            referenced_message_domain=existing.referenced_message_domain,
+            mention_user_refs=existing.mention_user_refs,
+            created_at=existing.created_at,
+        ) != replicated_message_create_fingerprint(
+            channel_id=channel.id,
+            channel_domain=channel.origin_domain,
+            author_id=author.id,
+            author_domain=author.origin_domain,
+            content=message_content,
+            e2ee=e2ee,
+            message_type=message_type,
+            flags=flags,
+            client_nonce=client_nonce,
+            referenced_message_id=referenced_id,
+            referenced_message_domain=referenced_domain,
+            mention_user_refs=mention_refs,
+            created_at=created_at,
         ):
             raise ValueError("DM message snowflake conflicts with another message")
         await replicate_message_attachments(session, settings, existing, author, raw_attachments)
@@ -642,3 +941,42 @@ async def publish_replicated_dm_message(
             "MESSAGE_CREATE",
             rendered,
         )
+    conversation = await session.get(DMConversation, (channel.id, channel.origin_domain))
+    if conversation is not None and conversation.history_truncated:
+        all_participants = list(
+            await session.scalars(
+                select(User)
+                .join(
+                    DMParticipant,
+                    (DMParticipant.user_id == User.id)
+                    & (DMParticipant.user_domain == User.origin_domain),
+                )
+                .where(
+                    DMParticipant.conversation_id == channel.id,
+                    DMParticipant.conversation_domain == channel.origin_domain,
+                )
+            )
+        )
+        history = dm_history_metadata(
+            conversation,
+            local_domain=settings.domain,
+            remote_available=await dm_authority_history_available(
+                session, conversation, local_domain=settings.domain
+            ),
+        )
+        for participant in local_participants:
+            await publish_dispatch(
+                redis,
+                user_topic(settings.domain, participant.id),
+                "CHANNEL_UPDATE",
+                dm_channel_payload(
+                    channel,
+                    [
+                        user
+                        for user in all_participants
+                        if (user.id, user.origin_domain)
+                        != (participant.id, participant.origin_domain)
+                    ],
+                    history=history,
+                ),
+            )

@@ -18,7 +18,7 @@ from taskiq_redis import RedisStreamBroker
 
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
-from app.chat.payloads import guild_payload, render_message_payload
+from app.chat.payloads import dm_channel_payload, guild_payload, render_message_payload
 from app.chat.permissions import get_permissions
 from app.core.cache_warmup import warm_identify_cache
 from app.core.logging import configure_logging
@@ -32,6 +32,7 @@ from app.db.models import (
     AuthEvent,
     Ban,
     Channel,
+    DMConversation,
     DMParticipant,
     FederatedHistoryMessage,
     Guild,
@@ -58,15 +59,36 @@ from app.federation.delivery import (
     due_destinations,
     expire_stale_outbox,
 )
-from app.federation.guilds import synchronize_guild
+from app.federation.dm_storage import (
+    dm_authority_history_available,
+    dm_history_metadata,
+    sweep_federated_dm_replica_cache,
+)
+from app.federation.guilds import (
+    purge_orphaned_replicated_guilds,
+    purge_stale_remote_guild_membership_intents,
+    replicated_guild_sync_candidates,
+    synchronize_guild,
+)
 from app.federation.history import (
     cleanup_history_transfers,
     purge_ineligible_federated_history,
     request_and_import_history,
+    user_facing_history_error,
 )
-from app.federation.network import normalize_domain
+from app.federation.network import FederationNetworkError, ensure_peer, normalize_domain
 from app.federation.presence import fanout_presence
-from app.federation.users import refresh_remote_user
+from app.federation.replica_storage import (
+    purge_orphaned_remote_instances,
+    purge_orphaned_remote_users,
+)
+from app.federation.users import (
+    discover_profile_by_ref_capability,
+    refresh_remote_user,
+    refresh_remote_user_by_ref,
+    unresolved_profile_peer_candidates,
+    unresolved_profile_refresh_candidates,
+)
 from app.media.jobs import (
     enforce_remote_cache_limit,
     process_attachment_record,
@@ -110,6 +132,19 @@ local rendered = ARGV[1] .. '@' .. ARGV[2]
 redis.call('SET', KEYS[1], rendered)
 return rendered
 """
+
+HISTORY_RETRY_KEY = "federation:history:retry"
+HISTORY_STATUS_KEY_PREFIX = "federation:history:status"
+# A terminal safety-policy result must not create a hot retry loop. Rechecking
+# after a long interval lets an operator's later configuration change recover
+# even if no new guild event happens to wake this member-specific import.
+HISTORY_TERMINAL_RECHECK_MS = 30 * 24 * 60 * 60 * 1_000
+HISTORY_STATUS_TTL_SECONDS = 35 * 24 * 60 * 60
+HISTORY_ENQUEUED_RETRY_MS = 5 * 60 * 1_000
+
+
+def history_status_key(user_domain: str, user_id: int) -> str:
+    return f"{HISTORY_STATUS_KEY_PREFIX}:{user_domain}:{user_id}"
 
 
 @broker.task(task_name="voice.call_room_gc", schedule=[{"cron": "*/5 * * * *"}])
@@ -650,6 +685,78 @@ async def message_projection_sweep() -> int:
         await engine.dispose()
 
 
+@broker.task(task_name="federation.dm_cache_sweep", schedule=[{"cron": "*/5 * * * *"}])
+@observed_job("federation.dm_cache_sweep")
+async def federation_dm_cache_sweep() -> int:
+    """Converge reduced rolling-cache targets and notify connected clients."""
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        dispatches: list[tuple[int, dict[str, object]]] = []
+        async with sessionmaker() as session:
+            changed = await sweep_federated_dm_replica_cache(session, settings)
+            for conversation_id, conversation_domain in changed:
+                conversation = await session.get(
+                    DMConversation, (conversation_id, conversation_domain)
+                )
+                channel = await session.get(Channel, (conversation_id, conversation_domain))
+                if conversation is None or channel is None:
+                    continue
+                users = list(
+                    await session.scalars(
+                        select(User)
+                        .join(
+                            DMParticipant,
+                            (DMParticipant.user_id == User.id)
+                            & (DMParticipant.user_domain == User.origin_domain),
+                        )
+                        .where(
+                            DMParticipant.conversation_id == conversation_id,
+                            DMParticipant.conversation_domain == conversation_domain,
+                        )
+                    )
+                )
+                history = dm_history_metadata(
+                    conversation,
+                    local_domain=settings.domain,
+                    remote_available=await dm_authority_history_available(
+                        session, conversation, local_domain=settings.domain
+                    ),
+                )
+                for local_user in users:
+                    if local_user.origin_domain != settings.domain or not local_user.is_local:
+                        continue
+                    dispatches.append(
+                        (
+                            local_user.id,
+                            dm_channel_payload(
+                                channel,
+                                [
+                                    user
+                                    for user in users
+                                    if (user.id, user.origin_domain)
+                                    != (local_user.id, local_user.origin_domain)
+                                ],
+                                history=history,
+                            ),
+                        )
+                    )
+            await session.commit()
+        for user_id, payload in dispatches:
+            await publish_dispatch(
+                redis,
+                user_topic(settings.domain, user_id),
+                "CHANNEL_UPDATE",
+                payload,
+            )
+        return len(changed)
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
 @broker.task(task_name="federation.history_sync", retry_on_error=True, max_retries=5)
 @observed_job("federation.history_sync")
 async def federation_history_sync(guild_id: int, guild_domain: str, user_id: int) -> int:
@@ -668,8 +775,106 @@ async def federation_history_sync(guild_id: int, guild_domain: str, user_id: int
                 (guild_id, guild_domain, user_id, settings.domain),
             )
             if guild is None or user is None or membership is None or guild.unavailable:
+                # A delayed task may outlive the membership that created it.
+                # Remove both projections so departed guilds cannot retain
+                # retry/status entries indefinitely.
+                await redis.zrem(
+                    HISTORY_RETRY_KEY,
+                    f"{guild_id}@{guild_domain}:{user_id}",
+                )
+                await redis.hdel(
+                    history_status_key(settings.domain, user_id),
+                    f"{guild_id}@{guild_domain}",
+                )
                 return 0
-            imported = await request_and_import_history(session, settings, guild, user)
+            previous_sync_state = (guild.sync_status, guild.sync_error_code)
+            await publish_dispatch(
+                redis,
+                user_topic(settings.domain, user_id),
+                "GUILD_HISTORY_SYNC_UPDATE",
+                {
+                    "guild_id": str(guild.id),
+                    "guild_domain": guild.origin_domain,
+                    "status": "syncing",
+                },
+            )
+            try:
+                imported = await request_and_import_history(session, settings, guild, user)
+            except Exception as caught:
+                exc = user_facing_history_error(caught)
+                await session.refresh(guild)
+                if (guild.sync_status, guild.sync_error_code) != previous_sync_state:
+                    await publish_dispatch(
+                        redis,
+                        guild_topic(guild.origin_domain, guild.id),
+                        "GUILD_UPDATE",
+                        guild_payload(guild),
+                    )
+                status = "retrying" if exc.retryable else "failed"
+                payload = {
+                    "guild_id": str(guild.id),
+                    "guild_domain": guild.origin_domain,
+                    "status": status,
+                    **exc.dispatch_payload(),
+                }
+                await publish_dispatch(
+                    redis,
+                    user_topic(settings.domain, user_id),
+                    "GUILD_HISTORY_SYNC_UPDATE",
+                    payload,
+                )
+                retry_member = f"{guild.id}@{guild.origin_domain}:{user_id}"
+                await redis.hset(
+                    history_status_key(settings.domain, user_id),
+                    f"{guild.id}@{guild.origin_domain}",
+                    json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                )
+                await redis.expire(
+                    history_status_key(settings.domain, user_id),
+                    HISTORY_STATUS_TTL_SECONDS,
+                )
+                if exc.retryable:
+                    retry_after_ms = max(1_000, int(exc.retry_after_ms or 2_000))
+                    retry_at_ms = int(datetime.now(UTC).timestamp() * 1_000) + retry_after_ms
+                    await redis.zadd(HISTORY_RETRY_KEY, {retry_member: retry_at_ms})
+                else:
+                    await redis.zadd(
+                        HISTORY_RETRY_KEY,
+                        {
+                            retry_member: int(datetime.now(UTC).timestamp() * 1_000)
+                            + HISTORY_TERMINAL_RECHECK_MS
+                        },
+                    )
+                return 0
+            await session.refresh(guild)
+            if (guild.sync_status, guild.sync_error_code) != previous_sync_state:
+                # Replica admission may clear a previous quota pause. Publish
+                # that recovery immediately so already-online clients remove
+                # their persistent cache-capacity banner without reconnecting.
+                await publish_dispatch(
+                    redis,
+                    guild_topic(guild.origin_domain, guild.id),
+                    "GUILD_UPDATE",
+                    guild_payload(guild),
+                )
+            await redis.zrem(
+                HISTORY_RETRY_KEY,
+                f"{guild.id}@{guild.origin_domain}:{user_id}",
+            )
+            await redis.hdel(
+                history_status_key(settings.domain, user_id),
+                f"{guild.id}@{guild.origin_domain}",
+            )
+            await publish_dispatch(
+                redis,
+                user_topic(settings.domain, user_id),
+                "GUILD_HISTORY_SYNC_UPDATE",
+                {
+                    "guild_id": str(guild.id),
+                    "guild_domain": guild.origin_domain,
+                    "status": "ready",
+                },
+            )
             if imported:
                 await publish_dispatch(
                     redis,
@@ -736,13 +941,14 @@ async def federation_history_sync_guild(
         await engine.dispose()
 
 
-@broker.task(task_name="federation.history_sweep", schedule=[{"cron": "*/5 * * * *"}])
+@broker.task(task_name="federation.history_sweep", schedule=[{"cron": "* * * * *"}])
 @observed_job("federation.history_sweep")
 async def federation_history_sweep() -> int:
     settings = get_settings()
     if not settings.federation_history_import_enabled:
         return 0
     engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
     try:
         async with sessionmaker() as session:
             candidates = (
@@ -783,15 +989,30 @@ async def federation_history_sweep() -> int:
                     .limit(100)
                 )
             ).all()
+        now_ms = int(datetime.now(UTC).timestamp() * 1_000)
         for guild_id, guild_domain, user_id in candidates:
-            await enqueue_best_effort(
+            retry_member = f"{guild_id}@{guild_domain}:{user_id}"
+            retry_at = await redis.zscore(HISTORY_RETRY_KEY, retry_member)
+            if retry_at is not None and retry_at > now_ms:
+                continue
+            enqueued = await enqueue_best_effort(
                 federation_history_sync,
                 guild_id,
                 guild_domain,
                 user_id,
             )
+            if enqueued:
+                # Hold a short claim while the worker starts. The worker
+                # replaces this with the authority's Retry-After on failure or
+                # removes it on success, preventing duplicate minute-sweep
+                # jobs when an import takes longer than one sweep interval.
+                await redis.zadd(
+                    HISTORY_RETRY_KEY,
+                    {retry_member: now_ms + HISTORY_ENQUEUED_RETRY_MS},
+                )
         return len(candidates)
     finally:
+        await redis.aclose()
         await engine.dispose()
 
 
@@ -1069,14 +1290,13 @@ async def moderation_expiry_sweep_in_session(
                     "nickname": member.nickname,
                     "timeout_until": None,
                     "timeout_indefinite": False,
-                    "timeout_reason": None,
-                    "voice_flags": member.voice_flags,
                     "member_version": str(member.member_version),
                 }
             },
             snapshot_required=True,
         )
         touched.append((guild, member))
+    purged_replica_private_state = await purge_remote_member_private_state(session, settings)
     await session.commit()
     for guild, member in touched:
         await wake_queued_guild_federation(guild)
@@ -1098,7 +1318,41 @@ async def moderation_expiry_sweep_in_session(
         "bans": expired_bans,
         "instance_bans": expired_instance_bans,
         "timeouts": len(touched),
+        "replica_private_state": purged_replica_private_state,
     }
+
+
+async def purge_remote_member_private_state(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    limit: int = 500,
+) -> int:
+    """Boundedly erase private authority state retained by older replicas."""
+
+    members = list(
+        await session.scalars(
+            select(GuildMember)
+            .join(
+                Guild,
+                (Guild.id == GuildMember.guild_id)
+                & (Guild.origin_domain == GuildMember.guild_domain),
+            )
+            .where(
+                Guild.origin_domain != settings.domain,
+                or_(GuildMember.timeout_reason.is_not(None), GuildMember.voice_flags != 0),
+            )
+            .order_by(GuildMember.guild_domain, GuildMember.guild_id, GuildMember.user_id)
+            .limit(max(1, min(limit, 500)))
+            .with_for_update(skip_locked=True)
+        )
+    )
+    for member in members:
+        member.timeout_reason = None
+        member.voice_flags = 0
+    if members:
+        await session.flush()
+    return len(members)
 
 
 @broker.task(task_name="moderation.expiry_sweep", schedule=[{"cron": "* * * * *"}])
@@ -1199,13 +1453,18 @@ async def federation_guild_sync(origin: str, guild_id: int) -> int:
         async with sessionmaker() as session:
             # Coalesce duplicate sender retries for the same replica and bound a
             # malicious/slow home across all history and snapshot pages.
-            await session.scalar(
+            admitted = await session.scalar(
                 select(
-                    func.pg_advisory_xact_lock(
+                    func.pg_try_advisory_xact_lock(
                         func.hashtextextended(f"kaede-guild-sync:{origin}:{guild_id}", 0)
                     )
                 )
             )
+            if admitted is not True:
+                # Duplicate gap/sweep wakeups coalesce without pinning a DB
+                # connection behind a slow peer. The active sync or next sweep
+                # retains responsibility for convergence.
+                return 0
             guild = await session.get(Guild, (guild_id, origin))
             if guild is None:
                 return 0
@@ -1273,17 +1532,7 @@ async def federation_guild_sync_sweep() -> int:
     try:
         async with sessionmaker() as session:
             replicas = (
-                (
-                    await session.execute(
-                        select(Guild.origin_domain, Guild.id)
-                        .where(
-                            Guild.origin_domain != settings.domain,
-                            Guild.sync_status.in_(("stale", "failed")),
-                        )
-                        .order_by(Guild.origin_domain, Guild.id)
-                        .limit(100)
-                    )
-                )
+                (await session.execute(replicated_guild_sync_candidates(settings.domain)))
                 .tuples()
                 .all()
             )
@@ -1315,6 +1564,127 @@ async def federation_user_refresh(username: str, domain: str) -> bool:
         await engine.dispose()
 
 
+@broker.task(task_name="federation.user_ref_refresh")
+@observed_job("federation.user_ref_refresh")
+async def federation_user_ref_refresh(user_id: int, domain: str) -> bool:
+    """Resolve an opaque history identity directly from its authoritative home."""
+
+    settings = get_settings()
+    domain = normalize_domain(domain)
+    if domain == settings.domain or not 0 <= user_id < 1 << 63:
+        raise ValueError("invalid remote profile reference refresh target")
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    refresh_key = f"federation:user-ref-refresh:{domain}:{user_id}"
+    try:
+        async with sessionmaker() as session:
+            return (
+                await refresh_remote_user_by_ref(session, settings, redis, user_id, domain)
+                is not None
+            )
+    finally:
+        await redis.delete(refresh_key)
+        await redis.aclose()
+        await engine.dispose()
+
+
+@broker.task(task_name="federation.user_ref_refresh_sweep", schedule=[{"cron": "* * * * *"}])
+@observed_job("federation.user_ref_refresh_sweep")
+async def federation_user_ref_refresh_sweep() -> int:
+    """Queue a bounded, deduplicated batch of unresolved profile proofs."""
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    queued = 0
+    try:
+        async with sessionmaker() as session:
+            candidates = await unresolved_profile_refresh_candidates(session, settings)
+            peer_candidates = await unresolved_profile_peer_candidates(session, settings)
+        for user_id, domain in candidates:
+            key = f"federation:user-ref-refresh:{domain}:{user_id}"
+            if not await redis.set(key, "1", ex=15 * 60, nx=True):
+                continue
+            if await enqueue_best_effort(federation_user_ref_refresh, user_id, domain):
+                queued += 1
+            else:
+                await redis.delete(key)
+        for domain in peer_candidates:
+            key = f"federation:profile-capability-refresh:{domain}"
+            if not await redis.set(key, "1", ex=60 * 60, nx=True):
+                continue
+            if not await enqueue_best_effort(federation_profile_capability_refresh, domain):
+                await redis.delete(key)
+        return queued
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
+@broker.task(task_name="federation.profile_capability_refresh")
+@observed_job("federation.profile_capability_refresh")
+async def federation_profile_capability_refresh(domain: str) -> bool:
+    """Slowly rediscover legacy peers that may have upgraded profile lookup."""
+
+    settings = get_settings()
+    domain = normalize_domain(domain)
+    if domain == settings.domain:
+        raise ValueError("invalid remote profile capability refresh target")
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    try:
+        async with sessionmaker() as session:
+            supported = await discover_profile_by_ref_capability(session, settings, domain)
+            await session.commit()
+            return supported
+    finally:
+        await engine.dispose()
+
+
+@broker.task(task_name="federation.self_moderation_capability_refresh")
+@observed_job("federation.self_moderation_capability_refresh")
+async def federation_self_moderation_capability_refresh(domain: str) -> bool:
+    """Rediscover one active-timeout peer after a rolling upgrade.
+
+    The queued argument is only the peer domain. It deliberately carries no
+    affected user, guild, timeout, or reason metadata.
+    """
+
+    settings = get_settings()
+    domain = normalize_domain(domain)
+    if domain == settings.domain:
+        raise ValueError("invalid remote self-moderation capability refresh target")
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    try:
+        async with sessionmaker() as session:
+            try:
+                peer = await ensure_peer(session, settings, domain, force=True)
+                supported = "member-self-moderation/1" in (peer.capabilities or [])
+            except (FederationNetworkError, RuntimeError):
+                supported = False
+            await session.commit()
+            return supported
+    finally:
+        await engine.dispose()
+
+
+async def cleanup_federation_retention_cycle(
+    session: AsyncSession,
+    settings: Settings,
+) -> int:
+    """Clean protocol records and inaccessible replica data in one job cycle."""
+
+    cleaned = await cleanup_federation_retention(session, settings)
+    cleaned += await purge_orphaned_replicated_guilds(session, settings)
+    cleaned += await purge_orphaned_remote_users(session, settings)
+    # User deletes autoflush before the namespace anti-reference query, so a
+    # third-party Instance whose final identity disappeared this cycle can be
+    # collected without waiting another day.
+    cleaned += await purge_orphaned_remote_instances(session, settings)
+    cleaned += await purge_stale_remote_guild_membership_intents(session)
+    await session.commit()
+    return cleaned
+
+
 @broker.task(task_name="federation.retention", schedule=[{"cron": "17 3 * * *"}])
 @observed_job("federation.retention")
 async def federation_retention() -> int:
@@ -1322,7 +1692,7 @@ async def federation_retention() -> int:
     engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
     try:
         async with sessionmaker() as session:
-            return await cleanup_federation_retention(session, settings)
+            return await cleanup_federation_retention_cycle(session, settings)
     finally:
         await engine.dispose()
 

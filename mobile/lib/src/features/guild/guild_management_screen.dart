@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
@@ -66,7 +67,8 @@ final class _GuildManagementScreenState
 
   @override
   Widget build(BuildContext context) {
-    final actorRef = ref.watch(mobileControllerProvider).user?.ref;
+    final mobile = ref.watch(mobileControllerProvider);
+    final actorRef = mobile.user?.ref;
     final isOwner = actorRef != null && actorRef == _guild.ownerRef;
     final canManageGuild = isOwner || _guild.allows(Permission.manageGuild);
     final canManageChannels =
@@ -118,6 +120,7 @@ final class _GuildManagementScreenState
           page: _MembersTab(
               guild: _guild,
               actorRef: actorRef,
+              userProfiles: mobile.userProfiles,
               repository: _repository,
               changed: _changed)
         ),
@@ -257,7 +260,11 @@ final class _GuildManagementScreenState
   void _error(Object error) {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('$error'), backgroundColor: KaedeColors.danger));
+          content: Text(userFacingError(
+            error,
+            summary: 'Could not load the guild settings',
+          )),
+          backgroundColor: KaedeColors.danger));
     }
   }
 }
@@ -287,16 +294,13 @@ final class _OverviewTabState extends State<_OverviewTab> {
       TextEditingController(text: widget.guild.description ?? '');
   var _history = 'disabled';
   var _notification = 'mentions';
+  String? _notificationError;
   var _busy = false;
 
   @override
   void initState() {
     super.initState();
-    widget.repository.guildNotificationSettings(widget.guild.ref).then((value) {
-      if (mounted) {
-        setState(() => _notification = '${value['level'] ?? 'mentions'}');
-      }
-    }).catchError((Object _) {});
+    _loadNotificationSettings();
   }
 
   @override
@@ -307,6 +311,32 @@ final class _OverviewTabState extends State<_OverviewTab> {
       _guild = widget.guild;
       _name.text = widget.guild.name;
       _description.text = widget.guild.description ?? '';
+      if (oldWidget.guild.ref != widget.guild.ref) {
+        _notification = 'mentions';
+        _notificationError = null;
+        _loadNotificationSettings();
+      }
+    }
+  }
+
+  Future<void> _loadNotificationSettings() async {
+    try {
+      final value =
+          await widget.repository.guildNotificationSettings(widget.guild.ref);
+      if (!mounted) return;
+      setState(() {
+        _notification = '${value['level'] ?? 'mentions'}';
+        _notificationError = null;
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _notificationError = userFacingError(
+          error,
+          summary:
+              'This guild’s notification preference could not be loaded. Mentions is shown as a temporary default.',
+        );
+      });
     }
   }
 
@@ -384,24 +414,46 @@ final class _OverviewTabState extends State<_OverviewTab> {
         ),
         _Panel(
           title: 'Notifications',
-          child: SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(value: 'all', label: Text('All messages')),
-              ButtonSegment(value: 'mentions', label: Text('Mentions')),
-              ButtonSegment(value: 'none', label: Text('Nothing')),
+          child: Column(children: [
+            if (_notificationError case final warning?) ...[
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.warning_amber_rounded,
+                    color: KaedeColors.warning),
+                title: Text(warning),
+                trailing: TextButton(
+                  onPressed: _loadNotificationSettings,
+                  child: const Text('Retry'),
+                ),
+              ),
+              const SizedBox(height: 8),
             ],
-            selected: {_notification},
-            onSelectionChanged: (value) async {
-              final previous = _notification;
-              setState(() => _notification = value.first);
-              try {
-                await widget.repository.updateGuildNotificationSettings(
-                    widget.guild.ref, value.first);
-              } on Object {
-                if (mounted) setState(() => _notification = previous);
-              }
-            },
-          ),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'all', label: Text('All messages')),
+                ButtonSegment(value: 'mentions', label: Text('Mentions')),
+                ButtonSegment(value: 'none', label: Text('Nothing')),
+              ],
+              selected: {_notification},
+              onSelectionChanged: (value) async {
+                final previous = _notification;
+                setState(() => _notification = value.first);
+                try {
+                  await widget.repository.updateGuildNotificationSettings(
+                      widget.guild.ref, value.first);
+                  if (mounted) setState(() => _notificationError = null);
+                } on Object catch (error) {
+                  if (!mounted) return;
+                  setState(() => _notification = previous);
+                  _tabError(
+                    this.context,
+                    'Could not update guild notifications',
+                    error,
+                  );
+                }
+              },
+            ),
+          ]),
         ),
         _Panel(
           title: 'Ownership',
@@ -479,9 +531,17 @@ final class _OverviewTabState extends State<_OverviewTab> {
             'Ownership can only be transferred to a member on this guild’s home instance.');
     if (value == null) return;
     try {
+      late final EntityRef member;
+      try {
+        member = EntityRef.parse(value, localDomain: _guild.ref.domain);
+      } on FormatException {
+        throw const UserInputException(
+          'Enter a valid member ID or full member reference.',
+        );
+      }
       await widget.repository.transferGuild(
         _guild.ref,
-        EntityRef.parse(value, localDomain: _guild.ref.domain),
+        member,
         _guild.version ?? '*',
       );
       final updated = await widget.changed('Ownership transferred');
@@ -638,7 +698,10 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
       if (!mounted) return;
       setState(() => _channels = previous);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Could not reorder channels: $error'),
+        content: Text(userFacingError(
+          error,
+          summary: 'Could not reorder the channels',
+        )),
         backgroundColor: KaedeColors.danger,
       ));
     }
@@ -783,7 +846,10 @@ final class _RolesTabState extends State<_RolesTab> {
               if (!context.mounted) return;
               setState(() => _roles = previous);
               ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Text('Could not reorder roles: $error'),
+                content: Text(userFacingError(
+                  error,
+                  summary: 'Could not reorder the roles',
+                )),
                 backgroundColor: KaedeColors.danger,
               ));
             }
@@ -861,10 +927,12 @@ final class _MembersTab extends StatefulWidget {
   const _MembersTab(
       {required this.guild,
       required this.actorRef,
+      required this.userProfiles,
       required this.repository,
       required this.changed});
   final KaedeGuild guild;
   final EntityRef? actorRef;
+  final Map<EntityRef, KaedeUser> userProfiles;
   final KaedeRepository repository;
   final Future<KaedeGuild> Function([String?]) changed;
   @override
@@ -959,7 +1027,10 @@ final class _MembersTabState extends State<_MembersTab> {
       if (mounted && generation == _requestGeneration) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Could not load members: $error'),
+            content: Text(userFacingError(
+              error,
+              summary: 'Could not load the members',
+            )),
             backgroundColor: KaedeColors.danger,
           ),
         );
@@ -1006,12 +1077,17 @@ final class _MembersTabState extends State<_MembersTab> {
                             child: Center(child: CircularProgressIndicator()),
                           );
                         }
-                        final member = _members[index];
+                        final member = overlayGuildMemberProfile(
+                          _members[index],
+                          widget.userProfiles,
+                        );
                         final actions = _actionsFor(member);
                         return ListTile(
                           leading: UserAvatar(user: member.user),
                           title: Text(member.nickname ?? member.user.name),
-                          subtitle: Text(member.user.handle),
+                          subtitle: Text(member.user.profileResolved
+                              ? member.user.handle
+                              : 'Profile unavailable · refreshes automatically'),
                           trailing: actions.isEmpty
                               ? null
                               : PopupMenuButton<String>(
@@ -1111,7 +1187,12 @@ final class _MembersTabState extends State<_MembersTab> {
               warning:
                   'Timed-out members can read history but cannot interact.');
           if (minutes == null) return;
-          final value = int.tryParse(minutes) ?? 0;
+          final value = int.tryParse(minutes);
+          if (value == null || value < 0) {
+            throw const UserInputException(
+              'Enter a whole number of minutes, or 0 to remove the timeout.',
+            );
+          }
           await widget.repository
               .updateMember(widget.guild.ref, member.user.ref, {
             'timeout_until': value <= 0
@@ -1144,7 +1225,10 @@ final class _MembersTabState extends State<_MembersTab> {
     } on Object catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Could not apply member action: $error'),
+        content: Text(userFacingError(
+          error,
+          summary: 'Could not apply the member action',
+        )),
         backgroundColor: KaedeColors.danger,
       ));
     }
@@ -1292,7 +1376,15 @@ final class _BansTabState extends State<_BansTab> {
             'All users from this domain will be unable to join. Use this only for severe, instance-wide abuse.');
     if (value == null) return;
     try {
-      await widget.repository.banInstance(widget.guild.ref, Domain(value));
+      late final Domain domain;
+      try {
+        domain = Domain(value);
+      } on FormatException {
+        throw const UserInputException(
+          'Enter a valid instance hostname, such as chat.example.',
+        );
+      }
+      await widget.repository.banInstance(widget.guild.ref, domain);
       await _load();
     } on Object catch (error) {
       if (mounted) _tabError(context, 'Could not ban instance', error);
@@ -1400,7 +1492,16 @@ final class _InvitesTabState extends State<_InvitesTab> {
     final channel = widget.guild.channels
         .where((item) => item.type == ChannelType.text)
         .firstOrNull;
-    if (channel == null) return;
+    if (channel == null) {
+      _tabError(
+        context,
+        'Could not create the invite',
+        const UserInputException(
+          'Create a text channel before creating an invite.',
+        ),
+      );
+      return;
+    }
     try {
       await widget.repository.createInvite(widget.guild.ref,
           {'channel_id': channel.ref.wire, 'max_age': 604800, 'max_uses': 100});
@@ -1649,11 +1750,20 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
           label: const Text('Webhook')));
   Future<void> _create() async {
     final name = await _prompt(context, 'Create webhook', 'Webhook name');
-    if (name == null) return;
+    if (name == null || !mounted) return;
     final channel = widget.guild.channels
         .where((item) => item.type == ChannelType.text)
         .firstOrNull;
-    if (channel == null) return;
+    if (channel == null) {
+      _tabError(
+        context,
+        'Could not create the webhook',
+        const UserInputException(
+          'Create a text channel before creating a webhook.',
+        ),
+      );
+      return;
+    }
     try {
       final created = await widget.repository
           .createWebhook(widget.guild.ref, channel.ref, name);
@@ -1868,7 +1978,10 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
           query == _search.text.trim()) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Could not search members: $error'),
+            content: Text(userFacingError(
+              error,
+              summary: 'Could not search the members',
+            )),
             backgroundColor: KaedeColors.danger,
           ),
         );
@@ -1919,7 +2032,10 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
       if (mounted && generation == _memberRequestGeneration) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Could not load more members: $error'),
+            content: Text(userFacingError(
+              error,
+              summary: 'Could not load more members',
+            )),
             backgroundColor: KaedeColors.danger,
           ),
         );
@@ -2168,7 +2284,7 @@ final class _PermissionScreenState extends State<_PermissionScreen> {
   void _showMutationError(String message, Object error) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('$message: $error'),
+        content: Text(userFacingError(error, summary: message)),
         backgroundColor: KaedeColors.danger,
       ),
     );
@@ -2522,7 +2638,7 @@ Future<bool> _confirm(BuildContext context, String title, String body,
 void _tabError(BuildContext context, String title, Object error) {
   if (!context.mounted) return;
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-    content: Text('$title: $error'),
+    content: Text(userFacingError(error, summary: title)),
     backgroundColor: KaedeColors.danger,
   ));
 }

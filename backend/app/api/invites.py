@@ -5,6 +5,7 @@ import secrets
 import string
 from datetime import UTC, datetime, timedelta
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from redis.asyncio import Redis
 from sqlalchemy import or_, select
@@ -41,14 +42,60 @@ from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef, EntityReference, validate_snowflake
 from app.db.models import Ban, Channel, Guild, GuildInstanceBan, GuildMember, Invite, User
 from app.federation.client import signed_request
-from app.federation.guilds import apply_guild_snapshot, fetch_guild_snapshot
-from app.federation.network import FederationNetworkError, normalize_domain
+from app.federation.guilds import (
+    apply_guild_snapshot,
+    begin_remote_guild_join,
+    fetch_guild_snapshot,
+)
+from app.federation.identity_storage import FederationIdentityQuotaExceeded
+from app.federation.network import (
+    FederationInstanceQuotaExceeded,
+    FederationNetworkError,
+    decode_federation_response_json,
+    normalize_domain,
+)
+from app.federation.replica_storage import (
+    REPLICA_QUOTA_ERROR_CODE,
+    FederationReplicaQuotaExceeded,
+    mark_replica_capacity_paused,
+    mark_replica_quota_paused,
+)
 from app.federation.replication import profile_from_user
 
 router = APIRouter(prefix="/api/v1", tags=["invites"])
 ALPHABET = string.ascii_letters + string.digits
 REMOTE_INVITE_PREVIEW_CONCURRENCY = 16
 remote_invite_preview_slots = asyncio.Semaphore(REMOTE_INVITE_PREVIEW_CONCURRENCY)
+log = structlog.get_logger()
+
+
+async def publish_existing_replica_status(
+    session: AsyncSession,
+    redis: Redis,
+    guild_id: int,
+    guild_domain: str,
+) -> None:
+    """Project a committed replica pause without hiding the API's 507 response."""
+
+    guild = await session.get(Guild, (guild_id, guild_domain), populate_existing=True)
+    if guild is None:
+        # A first-time join rolls the snapshot back completely. There is no
+        # navigation entry to update; the initiating request carries the
+        # actionable capacity response instead.
+        return
+    try:
+        await publish_dispatch(
+            redis,
+            guild_topic(guild.origin_domain, guild.id),
+            "GUILD_UPDATE",
+            guild_payload(guild),
+        )
+    except Exception:
+        log.exception(
+            "remote_guild_capacity_status_publish_failed",
+            guild_id=str(guild.id),
+            guild_domain=guild.origin_domain,
+        )
 
 
 async def new_invite_code(session: AsyncSession) -> str:
@@ -265,14 +312,20 @@ async def get_invite(
                     headers={"Retry-After": "1"},
                 ) from None
             try:
-                resolved = await signed_request(
-                    session,
-                    settings,
-                    "POST",
-                    domain,
-                    "/_kaede/v1/invites/resolve",
-                    payload={"code": remote_code},
-                )
+                try:
+                    resolved = await signed_request(
+                        session,
+                        settings,
+                        "POST",
+                        domain,
+                        "/_kaede/v1/invites/resolve",
+                        payload={"code": remote_code},
+                    )
+                except FederationInstanceQuotaExceeded as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                        detail=exc.detail(),
+                    ) from exc
             finally:
                 remote_invite_preview_slots.release()
             if resolved.status_code == 404:
@@ -283,10 +336,10 @@ async def get_invite(
                     detail={"code": "FEDERATION_INVITE_RESOLVE_FAILED"},
                 )
             try:
-                payload = resolved.json()
+                payload = decode_federation_response_json(resolved)
                 if not isinstance(payload, dict) or not isinstance(payload.get("guild"), dict):
                     raise TypeError
-            except (TypeError, ValueError):
+            except (FederationNetworkError, TypeError, ValueError):
                 raise HTTPException(
                     status_code=502,
                     detail={"code": "FEDERATION_INVITE_RESOLVE_FAILED"},
@@ -336,14 +389,20 @@ async def accept_invite(
         if domain == settings.domain:
             code = remote_code
         else:
-            resolved = await signed_request(
-                session,
-                settings,
-                "POST",
-                domain,
-                "/_kaede/v1/invites/resolve",
-                payload={"code": remote_code},
-            )
+            try:
+                resolved = await signed_request(
+                    session,
+                    settings,
+                    "POST",
+                    domain,
+                    "/_kaede/v1/invites/resolve",
+                    payload={"code": remote_code},
+                )
+            except FederationInstanceQuotaExceeded as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                    detail=exc.detail(),
+                ) from exc
             if resolved.status_code == 404:
                 raise HTTPException(status_code=404, detail={"code": "INVITE_NOT_FOUND"})
             if resolved.status_code != 200:
@@ -351,33 +410,71 @@ async def accept_invite(
                     status_code=502, detail={"code": "FEDERATION_INVITE_RESOLVE_FAILED"}
                 )
             try:
-                resolved_guild_id = validate_snowflake(resolved.json()["guild"]["id"])
-            except (KeyError, TypeError, ValueError):
+                resolved_payload = decode_federation_response_json(resolved)
+                if not isinstance(resolved_payload, dict) or not isinstance(
+                    resolved_payload.get("guild"), dict
+                ):
+                    raise TypeError
+                resolved_guild_id = validate_snowflake(resolved_payload["guild"]["id"])
+            except (FederationNetworkError, KeyError, TypeError, ValueError):
                 raise HTTPException(
                     status_code=502, detail={"code": "FEDERATION_INVITE_RESOLVE_FAILED"}
                 ) from None
-            joined = await signed_request(
+            join_intent_started = await begin_remote_guild_join(
                 session,
                 settings,
-                "POST",
-                domain,
-                f"/_kaede/v1/guilds/{resolved_guild_id}/join",
-                payload={"code": remote_code, "user": profile_from_user(auth.user)},
+                guild_id=resolved_guild_id,
+                guild_domain=domain,
+                user_id=auth.user.id,
+                user_domain=auth.user.origin_domain,
             )
+            if join_intent_started:
+                # Make the explicit local intent visible before the remote
+                # authority can emit an add event. It remains as a fail-closed
+                # pending marker if the network request or snapshot fails.
+                await session.commit()
+            try:
+                joined = await signed_request(
+                    session,
+                    settings,
+                    "POST",
+                    domain,
+                    f"/_kaede/v1/guilds/{resolved_guild_id}/join",
+                    payload={"code": remote_code, "user": profile_from_user(auth.user)},
+                )
+            except FederationInstanceQuotaExceeded as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                    detail=exc.detail(),
+                ) from exc
             if joined.status_code in {403, 404}:
                 try:
-                    error_body = joined.json()
-                except ValueError:
+                    error_body = decode_federation_response_json(joined)
+                except FederationNetworkError:
                     error_body = None
                 detail = parse_upstream_error(error_body, "INVITE_NOT_FOUND")
                 raise HTTPException(status_code=joined.status_code, detail=detail)
+            if joined.status_code == status.HTTP_507_INSUFFICIENT_STORAGE:
+                try:
+                    error_body = decode_federation_response_json(joined)
+                except FederationNetworkError:
+                    error_body = None
+                raise HTTPException(
+                    status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                    detail=parse_upstream_error(error_body, "FEDERATION_GUILD_JOIN_FAILED"),
+                )
             if joined.status_code != 200:
                 raise HTTPException(
                     status_code=502, detail={"code": "FEDERATION_GUILD_JOIN_FAILED"}
                 )
             try:
-                guild_id = validate_snowflake(joined.json()["guild"]["id"])
-            except (KeyError, TypeError, ValueError):
+                joined_payload = decode_federation_response_json(joined)
+                if not isinstance(joined_payload, dict) or not isinstance(
+                    joined_payload.get("guild"), dict
+                ):
+                    raise TypeError
+                guild_id = validate_snowflake(joined_payload["guild"]["id"])
+            except (FederationNetworkError, KeyError, TypeError, ValueError):
                 raise HTTPException(
                     status_code=502, detail={"code": "FEDERATION_GUILD_JOIN_FAILED"}
                 ) from None
@@ -388,16 +485,65 @@ async def accept_invite(
             try:
                 async with asyncio.timeout(45):
                     snapshot = await fetch_guild_snapshot(session, settings, domain, guild_id)
-                guild = await apply_guild_snapshot(
-                    session,
-                    settings,
-                    snapshot,
-                    expected_origin=domain,
-                    expected_guild_id=guild_id,
-                )
+                    guild = await apply_guild_snapshot(
+                        session,
+                        settings,
+                        snapshot,
+                        expected_origin=domain,
+                        expected_guild_id=guild_id,
+                        required_member=(auth.user.id, auth.user.origin_domain),
+                    )
             except TimeoutError:
                 raise HTTPException(
                     status_code=504, detail={"code": "FEDERATION_GUILD_JOIN_TIMEOUT"}
+                ) from None
+            except FederationReplicaQuotaExceeded as exc:
+                # Snapshot application is atomic. Roll back its over-limit
+                # rows, then preserve a clear pause marker when this was a
+                # refresh of an existing replica. A first-time join has no
+                # replica left after rollback, but still receives the precise
+                # operator-actionable error instead of a generic 502.
+                await session.rollback()
+                paused_existing_replica = await mark_replica_quota_paused(
+                    session,
+                    settings,
+                    guild_id,
+                    domain,
+                    exc,
+                )
+                await session.commit()
+                if paused_existing_replica:
+                    await publish_existing_replica_status(
+                        session,
+                        redis,
+                        guild_id,
+                        domain,
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                    detail={"code": REPLICA_QUOTA_ERROR_CODE},
+                ) from None
+            except (FederationIdentityQuotaExceeded, FederationInstanceQuotaExceeded) as exc:
+                await session.rollback()
+                paused_existing_replica = await mark_replica_capacity_paused(
+                    session,
+                    settings,
+                    guild_id,
+                    domain,
+                    error_code=exc.code,
+                    internal_error=str(exc),
+                )
+                await session.commit()
+                if paused_existing_replica:
+                    await publish_existing_replica_status(
+                        session,
+                        redis,
+                        guild_id,
+                        domain,
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                    detail=exc.detail(),
                 ) from None
             except (ValueError, RuntimeError):
                 raise HTTPException(

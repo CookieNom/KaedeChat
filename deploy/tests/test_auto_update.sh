@@ -35,6 +35,21 @@ TEST_ENV=(
   "HOME=$TEST_ROOT/home"
   "PATH=$TEST_ROOT/bin:$PATH"
 )
+
+sed -i 's#AUTO_UPDATE_REMOTE=origin#AUTO_UPDATE_REMOTE=https://operator:do-not-display@example.invalid/repository#' \
+  "$TEST_ROOT/repo/.env"
+if invalid_remote_output=$("${TEST_ENV[@]}" "$TEST_ROOT/repo/deploy/auto-update.sh" status 2>&1); then
+  printf 'credential-bearing update remote was unexpectedly accepted\n' >&2
+  exit 1
+fi
+grep -q 'AUTO_UPDATE_REMOTE must be a Git remote name' <<< "$invalid_remote_output"
+if grep -q 'do-not-display' <<< "$invalid_remote_output"; then
+  printf 'invalid update remote leaked credentials in its error message\n' >&2
+  exit 1
+fi
+sed -i 's#AUTO_UPDATE_REMOTE=https://operator:do-not-display@example.invalid/repository#AUTO_UPDATE_REMOTE=origin#' \
+  "$TEST_ROOT/repo/.env"
+
 "${TEST_ENV[@]}" "$TEST_ROOT/repo/deploy/install-auto-update.sh" enable >/dev/null
 grep -qx 'AUTO_UPDATE_ENABLED=true' "$TEST_ROOT/repo/.env"
 grep -q '^OnCalendar=\*-\*-\* 00/12:00:00$' \
@@ -54,10 +69,12 @@ test ! -e "$TEST_ROOT/home/.config/systemd/user/kaede-auto-update.timer"
 test ! -e "$TEST_ROOT/home/.config/systemd/user/kaede-auto-update.service"
 
 sed -i 's/AUTO_UPDATE_BRANCH=main/AUTO_UPDATE_BRANCH=other/' "$TEST_ROOT/repo/.env"
-if "${TEST_ENV[@]}" "$TEST_ROOT/repo/deploy/install-auto-update.sh" enable >/dev/null 2>&1; then
+if branch_output=$("${TEST_ENV[@]}" "$TEST_ROOT/repo/deploy/install-auto-update.sh" enable 2>&1); then
   printf 'wrong checked-out branch was unexpectedly accepted\n' >&2
   exit 1
 fi
+grep -q "check out the configured branch 'other'" <<< "$branch_output"
+grep -q 'or change AUTO_UPDATE_BRANCH' <<< "$branch_output"
 grep -qx 'AUTO_UPDATE_ENABLED=false' "$TEST_ROOT/repo/.env"
 test ! -e "$TEST_ROOT/home/.config/systemd/user/kaede-auto-update.timer"
 sed -i 's/AUTO_UPDATE_BRANCH=other/AUTO_UPDATE_BRANCH=main/' "$TEST_ROOT/repo/.env"

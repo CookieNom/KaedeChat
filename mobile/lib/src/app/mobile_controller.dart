@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
@@ -10,6 +11,7 @@ import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/platform/notification_policy.dart';
@@ -21,6 +23,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 enum SessionPhase { restoring, locked, signedOut, authenticating, ready }
+
+enum DegradedFeature {
+  accountSettings,
+  guildNavigation,
+  guildNotifications,
+  readStates,
+  acknowledgements,
+}
 
 String _lastConversationKey(String accountKey) =>
     'last_conversation:${Uri.encodeComponent(accountKey)}';
@@ -104,6 +114,64 @@ ReadBadgeSnapshot decodeReadBadgeSnapshot(
   );
 }
 
+ReadBadgeSnapshot reconcileAuthoritativeChannelBadge({
+  required Map<EntityRef, int> currentUnread,
+  required Map<EntityRef, int> currentMentions,
+  required ReadBadgeSnapshot authoritative,
+  required EntityRef channel,
+}) {
+  final unread = Map<EntityRef, int>.of(currentUnread);
+  final mentions = Map<EntityRef, int>.of(currentMentions);
+  if (authoritative.unread[channel] case final count?) {
+    unread[channel] = count;
+  } else {
+    unread.remove(channel);
+  }
+  if (authoritative.mentions[channel] case final count?) {
+    mentions[channel] = count;
+  } else {
+    mentions.remove(channel);
+  }
+  return ReadBadgeSnapshot(
+    unread: Map.unmodifiable(unread),
+    mentions: Map.unmodifiable(mentions),
+  );
+}
+
+List<KaedeGuild> preserveGuildHistorySync(
+  List<KaedeGuild> current,
+  List<KaedeGuild> incoming,
+) {
+  final currentByRef = {for (final guild in current) guild.ref: guild};
+  return incoming.map((guild) {
+    final previous = currentByRef[guild.ref];
+    if (guild.historySyncStatus != null ||
+        previous?.historySyncStatus == null) {
+      return guild;
+    }
+    return KaedeGuild.fromJson(<String, Object?>{
+      ...guild.toJson(),
+      'history_sync_status': previous?.historySyncStatus,
+      'history_sync_error_code': previous?.historySyncErrorCode,
+      'history_sync_retry_after_ms': previous?.historySyncRetryAfterMs,
+      'history_sync_resource': previous?.historySyncResource,
+    });
+  }).toList(growable: false);
+}
+
+Map<String, String> decodeGuildNotificationLevels(
+  Iterable<Map<String, Object?>> settings,
+) {
+  final levels = <String, String>{};
+  for (final item in settings) {
+    final id = item['guild_id'];
+    final domain = item['guild_domain'];
+    if (id == null || domain == null) continue;
+    levels['$id@$domain'] = '${item['level'] ?? 'mentions'}';
+  }
+  return Map.unmodifiable(levels);
+}
+
 bool shouldAcknowledgeVisibleChannel({
   required bool appActive,
   required bool conversationPaneVisible,
@@ -124,11 +192,43 @@ final class TypingParticipant {
   final DateTime expiresAt;
 }
 
+final class _PendingAcknowledgement {
+  const _PendingAcknowledgement({
+    required this.message,
+    required this.unread,
+    required this.mentions,
+    this.attempt = 0,
+    this.restored = false,
+  });
+
+  final EntityRef message;
+  final int unread;
+  final int mentions;
+  final int attempt;
+  final bool restored;
+
+  _PendingAcknowledgement copyWith({
+    EntityRef? message,
+    int? unread,
+    int? mentions,
+    int? attempt,
+    bool? restored,
+  }) =>
+      _PendingAcknowledgement(
+        message: message ?? this.message,
+        unread: unread ?? this.unread,
+        mentions: mentions ?? this.mentions,
+        attempt: attempt ?? this.attempt,
+        restored: restored ?? this.restored,
+      );
+}
+
 final class MobileState {
   const MobileState({
     this.phase = SessionPhase.restoring,
     this.user,
     this.guilds = const <KaedeGuild>[],
+    this.guildNavigation = const GuildNavigation(),
     this.dms = const <KaedeChannel>[],
     this.relationships = const <Map<String, Object?>>[],
     this.selectedGuild,
@@ -145,6 +245,15 @@ final class MobileState {
     this.mentionCounts = const <EntityRef, int>{},
     this.typingByChannel = const <EntityRef, List<TypingParticipant>>{},
     this.presenceByUser = const <EntityRef, PresenceStatus>{},
+    this.userProfiles = const <EntityRef, KaedeUser>{},
+    this.selfModerationByGuild = const <EntityRef, GuildSelfModerationStatus>{},
+    this.gatewayHealth = const GatewayHealth(
+      GatewayConnectionPhase.offline,
+      message: 'Realtime updates are not connected.',
+    ),
+    this.degradedWarnings = const <DegradedFeature, String>{},
+    this.gatewayProtocolWarning,
+    this.pushWarning,
     this.offline = false,
     this.error,
   });
@@ -152,6 +261,7 @@ final class MobileState {
   final SessionPhase phase;
   final KaedeUser? user;
   final List<KaedeGuild> guilds;
+  final GuildNavigation guildNavigation;
   final List<KaedeChannel> dms;
   final List<Map<String, Object?>> relationships;
   final EntityRef? selectedGuild;
@@ -168,6 +278,12 @@ final class MobileState {
   final Map<EntityRef, int> mentionCounts;
   final Map<EntityRef, List<TypingParticipant>> typingByChannel;
   final Map<EntityRef, PresenceStatus> presenceByUser;
+  final Map<EntityRef, KaedeUser> userProfiles;
+  final Map<EntityRef, GuildSelfModerationStatus> selfModerationByGuild;
+  final GatewayHealth gatewayHealth;
+  final Map<DegradedFeature, String> degradedWarnings;
+  final String? gatewayProtocolWarning;
+  final String? pushWarning;
   final bool offline;
   final String? error;
 
@@ -183,6 +299,13 @@ final class MobileState {
       if (channel.ref == selectedChannel) return channel;
     }
     return null;
+  }
+
+  GuildSelfModerationStatus? get activeModerationStatus {
+    final guild = selectedGuild;
+    if (guild == null) return null;
+    final status = selfModerationByGuild[guild];
+    return status?.activeAt() == true ? status : null;
   }
 
   List<KaedeMessage> get messages => selectedChannel == null
@@ -203,6 +326,7 @@ final class MobileState {
     KaedeUser? user,
     bool clearUser = false,
     List<KaedeGuild>? guilds,
+    GuildNavigation? guildNavigation,
     List<KaedeChannel>? dms,
     List<Map<String, Object?>>? relationships,
     EntityRef? selectedGuild,
@@ -221,6 +345,14 @@ final class MobileState {
     Map<EntityRef, int>? mentionCounts,
     Map<EntityRef, List<TypingParticipant>>? typingByChannel,
     Map<EntityRef, PresenceStatus>? presenceByUser,
+    Map<EntityRef, KaedeUser>? userProfiles,
+    Map<EntityRef, GuildSelfModerationStatus>? selfModerationByGuild,
+    GatewayHealth? gatewayHealth,
+    Map<DegradedFeature, String>? degradedWarnings,
+    String? gatewayProtocolWarning,
+    bool clearGatewayProtocolWarning = false,
+    String? pushWarning,
+    bool clearPushWarning = false,
     bool? offline,
     String? error,
     bool clearError = false,
@@ -229,6 +361,7 @@ final class MobileState {
         phase: phase ?? this.phase,
         user: clearUser ? null : user ?? this.user,
         guilds: guilds ?? this.guilds,
+        guildNavigation: guildNavigation ?? this.guildNavigation,
         dms: dms ?? this.dms,
         relationships: relationships ?? this.relationships,
         selectedGuild: clearGuild ? null : selectedGuild ?? this.selectedGuild,
@@ -248,6 +381,15 @@ final class MobileState {
         mentionCounts: mentionCounts ?? this.mentionCounts,
         typingByChannel: typingByChannel ?? this.typingByChannel,
         presenceByUser: presenceByUser ?? this.presenceByUser,
+        userProfiles: userProfiles ?? this.userProfiles,
+        selfModerationByGuild:
+            selfModerationByGuild ?? this.selfModerationByGuild,
+        gatewayHealth: gatewayHealth ?? this.gatewayHealth,
+        degradedWarnings: degradedWarnings ?? this.degradedWarnings,
+        gatewayProtocolWarning: clearGatewayProtocolWarning
+            ? null
+            : gatewayProtocolWarning ?? this.gatewayProtocolWarning,
+        pushWarning: clearPushWarning ? null : pushWarning ?? this.pushWarning,
         offline: offline ?? this.offline,
         error: clearError ? null : error ?? this.error,
       );
@@ -282,15 +424,23 @@ final class MobileController extends StateNotifier<MobileState> {
   final PushService push;
   bool get remotePushAvailable => push.remotePushAvailable;
   StreamSubscription<GatewayEvent>? _gatewaySubscription;
+  StreamSubscription<GatewayHealth>? _gatewayHealthSubscription;
   StreamSubscription<String>? _pushTokenSubscription;
   StreamSubscription<PushDestination>? _pushDestinationSubscription;
+  StreamSubscription<String?>? _pushHealthSubscription;
   StreamSubscription<void>? _sessionExpiredSubscription;
   Timer? _outboxTimer;
   Timer? _appLockTimer;
   Timer? _typingExpiryTimer;
   Timer? _navigationRefreshTimer;
   Timer? _metadataCacheTimer;
+  Timer? _acknowledgementRetryTimer;
+  Timer? _selfModerationExpiryTimer;
+  Timer? _selfModerationRetryTimer;
   String? _pushDeviceId;
+  String? _pushRegistrationWarning;
+  String? _pushRemoteDeliveryWarning;
+  String? _pushLocalDisplayWarning;
   var _appActive = true;
   var _conversationPaneVisible = false;
   DateTime? _backgroundedAt;
@@ -298,10 +448,16 @@ final class MobileController extends StateNotifier<MobileState> {
   var _flushingOutbox = false;
   var _sessionLoadGeneration = 0;
   var _authenticationGeneration = 0;
+  var _selfModerationRequestGeneration = 0;
   Future<void>? _navigationRefresh;
   Future<void>? _notificationActivation;
   Future<void> _cacheWriteTail = Future<void>.value();
   String? _activeAccountKey;
+  final Map<EntityRef, _PendingAcknowledgement> _pendingAcknowledgements =
+      <EntityRef, _PendingAcknowledgement>{};
+  final Set<EntityRef> _acknowledgementsInFlight = <EntityRef>{};
+  var _malformedGatewayEvents = 0;
+  var _validGatewayEventsAfterWarning = 0;
 
   void setAppActive(bool active) {
     _appActive = active;
@@ -317,8 +473,15 @@ final class MobileController extends StateNotifier<MobileState> {
       unawaited(_flushOutbox());
       unawaited(_refreshReadBadges());
       unawaited(_activateNotifications());
+      if (_conversationPaneVisible) {
+        if (state.selectedGuild case final guild?) {
+          unawaited(refreshSelfModeration(guild));
+        }
+      }
       _acknowledgeVisibleConversation();
     } else {
+      _selfModerationRetryTimer?.cancel();
+      _selfModerationRetryTimer = null;
       _backgroundedAt ??= DateTime.now();
       unawaited(_scheduleAppLock());
     }
@@ -330,7 +493,15 @@ final class MobileController extends StateNotifier<MobileState> {
       active: _appActive,
       visibleChannel: _appActive && visible ? state.selectedChannel : null,
     );
-    if (visible) _acknowledgeVisibleConversation();
+    if (visible) {
+      _acknowledgeVisibleConversation();
+      if (state.selectedGuild case final guild?) {
+        unawaited(refreshSelfModeration(guild));
+      }
+    } else {
+      _selfModerationRetryTimer?.cancel();
+      _selfModerationRetryTimer = null;
+    }
   }
 
   bool _isChannelVisible(EntityRef channel) => shouldAcknowledgeVisibleChannel(
@@ -340,12 +511,62 @@ final class MobileController extends StateNotifier<MobileState> {
         channel: channel,
       );
 
+  void _setDegradedWarning(DegradedFeature feature, String? warning) {
+    final warnings = Map<DegradedFeature, String>.of(state.degradedWarnings);
+    if (warning == null) {
+      warnings.remove(feature);
+    } else {
+      warnings[feature] = warning;
+    }
+    state = state.copyWith(degradedWarnings: Map.unmodifiable(warnings));
+  }
+
+  void _applyGatewayHealth(GatewayHealth health) {
+    if (state.phase != SessionPhase.ready) return;
+    state = state.copyWith(gatewayHealth: health);
+  }
+
+  void _setPushRegistrationWarning(String? warning) {
+    _pushRegistrationWarning = warning;
+    _publishPushWarning();
+  }
+
+  void _setPushRemoteDeliveryWarning(String? warning) {
+    _pushRemoteDeliveryWarning = warning;
+    _publishPushWarning();
+  }
+
+  void _setPushLocalDisplayWarning(String? warning) {
+    _pushLocalDisplayWarning = warning;
+    _publishPushWarning();
+  }
+
+  void _publishPushWarning() {
+    if (state.phase != SessionPhase.ready) return;
+    final warnings = <String>[
+      if (_pushRegistrationWarning != null) _pushRegistrationWarning!,
+      if (_pushRemoteDeliveryWarning != null) _pushRemoteDeliveryWarning!,
+      if (_pushLocalDisplayWarning != null) _pushLocalDisplayWarning!,
+    ];
+    final warning = warnings.isEmpty ? null : warnings.join(' ');
+    state = warning == null
+        ? state.copyWith(clearPushWarning: true)
+        : state.copyWith(pushWarning: warning);
+  }
+
+  Future<void> retryRealtime() async {
+    final tokens = api.tokens;
+    if (tokens == null || state.phase != SessionPhase.ready) return;
+    try {
+      await gateway.connect(tokens);
+    } on Object {
+      // GatewayClient keeps retrying and publishes the actionable state.
+    }
+  }
+
   void _acknowledgeVisibleConversation() {
     final channel = state.selectedChannel;
     if (channel == null || !_isChannelVisible(channel)) return;
-    // Opening the pane is the local read intent. Clear its marker immediately;
-    // the API acknowledgement below makes that intent durable across clients.
-    _clearUnread(channel);
     final messages = state.messageStore[channel];
     if (messages == null || messages.isEmpty) {
       unawaited(loadMessages());
@@ -506,6 +727,9 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<void> _loadSession(SessionTokens tokens) async {
     final generation = ++_sessionLoadGeneration;
     _messageRequestGenerations.clear();
+    _pushRegistrationWarning = null;
+    _pushRemoteDeliveryWarning = null;
+    _pushLocalDisplayWarning = null;
     final user = await repository.me();
     if (generation != _sessionLoadGeneration) return;
     final resolved = api.tokens ?? tokens.copyWith(userRef: user.ref);
@@ -520,32 +744,40 @@ final class MobileController extends StateNotifier<MobileState> {
       repository.relationships,
       const <Map<String, Object?>>[],
     );
-    final settings = await _optional(
+    final settingsLoad = await _optionalWithWarning(
       repository.settings,
       const <String, Object?>{},
+      summary:
+          'Account settings could not be loaded. Some preferences may show defaults.',
     );
-    final guildSettings = await _optional(
+    final guildNavigationLoad = await _optionalWithWarning(
+      repository.guildNavigation,
+      const GuildNavigation(),
+      summary:
+          'Your guild order could not be loaded. Kaede is showing the default order until sync recovers.',
+    );
+    final guildSettingsLoad = await _optionalWithWarning(
       repository.guildNotificationSettingsList,
       const <Map<String, Object?>>[],
+      summary:
+          'Guild notification preferences could not be loaded. Mention-only defaults may be shown.',
     );
-    final readStates = await _optional(
+    final readStatesLoad = await _optionalWithWarning(
       repository.readStates,
       const <Map<String, Object?>>[],
+      summary:
+          'Unread markers could not be loaded. Counts may be incomplete until sync recovers.',
     );
     if (generation != _sessionLoadGeneration) return;
+    final settings = settingsLoad.value;
+    final guildSettings = guildSettingsLoad.value;
+    final readStates = readStatesLoad.value;
     final rawNotifications = settings['notification_settings'];
     final notifications = rawNotifications is Map<Object?, Object?>
         ? rawNotifications.map((key, value) => MapEntry('$key', value == true))
         : const <String, bool>{};
-    final guildNotificationLevels = <String, String>{};
-    for (final item in guildSettings) {
-      final id = item['guild_id'];
-      final domain = item['guild_domain'];
-      if (id != null && domain != null) {
-        guildNotificationLevels['$id@$domain'] =
-            '${item['level'] ?? 'mentions'}';
-      }
-    }
+    final guildNotificationLevels =
+        decodeGuildNotificationLevels(guildSettings);
     final presence = PresenceStatus.values.firstWhere(
       (value) => value.name == '${settings['presence_preference'] ?? 'online'}',
       orElse: () => PresenceStatus.online,
@@ -558,16 +790,31 @@ final class MobileController extends StateNotifier<MobileState> {
     if (generation != _sessionLoadGeneration) return;
     final guilds = critical[0] as List<KaedeGuild>;
     final dms = critical[1] as List<KaedeChannel>;
+    final guildNavigation = reconcileGuildNavigation(
+      guildNavigationLoad.value,
+      guilds,
+    );
     final preferences = await SharedPreferences.getInstance();
     final initial = resolveInitialConversation(
       saved: preferences.getString(_lastConversationKey(resolved.accountKey)),
       dms: dms,
       guilds: guilds,
     );
+    final degradedWarnings = <DegradedFeature, String>{
+      if (settingsLoad.warning case final warning?)
+        DegradedFeature.accountSettings: warning,
+      if (guildNavigationLoad.warning case final warning?)
+        DegradedFeature.guildNavigation: warning,
+      if (guildSettingsLoad.warning case final warning?)
+        DegradedFeature.guildNotifications: warning,
+      if (readStatesLoad.warning case final warning?)
+        DegradedFeature.readStates: warning,
+    };
     state = MobileState(
       phase: SessionPhase.ready,
       user: user,
       guilds: guilds,
+      guildNavigation: guildNavigation,
       dms: dms,
       selectedGuild: initial?.guildRef,
       selectedChannel: initial?.ref,
@@ -579,6 +826,8 @@ final class MobileController extends StateNotifier<MobileState> {
       mentionCounts: badges.mentions,
       outbox: outbox,
       drafts: Map.unmodifiable(drafts),
+      gatewayHealth: gateway.currentHealth,
+      degradedWarnings: Map.unmodifiable(degradedWarnings),
       offline: false,
     );
     push.setAppVisibility(
@@ -586,7 +835,12 @@ final class MobileController extends StateNotifier<MobileState> {
       visibleChannel:
           _appActive && _conversationPaneVisible ? initial?.ref : null,
     );
-    if (initial != null) unawaited(loadMessages());
+    if (initial != null) {
+      unawaited(loadMessages());
+      if (initial.guildRef case final guild?) {
+        unawaited(refreshSelfModeration(guild));
+      }
+    }
     await _cacheLists();
     await _startSessionServices(resolved.accountKey, generation);
   }
@@ -597,7 +851,10 @@ final class MobileController extends StateNotifier<MobileState> {
   ) async {
     if (!_sessionReadyIsCurrent(accountKey, generation)) return;
     await _gatewaySubscription?.cancel();
+    await _gatewayHealthSubscription?.cancel();
     if (!_sessionReadyIsCurrent(accountKey, generation)) return;
+    _gatewayHealthSubscription = gateway.health.listen(_applyGatewayHealth);
+    state = state.copyWith(gatewayHealth: gateway.currentHealth);
     _gatewaySubscription = gateway.events.listen(_reduceGateway);
     try {
       final tokens = api.tokens;
@@ -623,6 +880,9 @@ final class MobileController extends StateNotifier<MobileState> {
     _pushDestinationSubscription = push.destinations.listen(
       (destination) => unawaited(openPushDestination(destination)),
     );
+    await _pushHealthSubscription?.cancel();
+    if (!_sessionReadyIsCurrent(accountKey, generation)) return;
+    _pushHealthSubscription = push.health.listen(_setPushRemoteDeliveryWarning);
     if (push.consumeInitialDestination() case final destination?) {
       unawaited(openPushDestination(destination));
     }
@@ -672,17 +932,27 @@ final class MobileController extends StateNotifier<MobileState> {
       final badges = decodeReadBadgeSnapshot(
         results[3] as List<Map<String, Object?>>,
       );
+      final refreshedGuilds = preserveGuildHistorySync(
+        state.guilds,
+        results[1] as List<KaedeGuild>,
+      );
       state = state.copyWith(
         user: results[0] as KaedeUser,
-        guilds: results[1] as List<KaedeGuild>,
+        guilds: refreshedGuilds,
+        guildNavigation: reconcileGuildNavigation(
+          state.guildNavigation,
+          refreshedGuilds,
+        ),
         dms: results[2] as List<KaedeChannel>,
         unreadCounts: badges.unread,
         mentionCounts: badges.mentions,
         offline: false,
         clearError: true,
       );
+      _setDegradedWarning(DegradedFeature.readStates, null);
       await _cacheLists();
       unawaited(_refreshRelationships());
+      unawaited(_retryGuildNavigation());
     } on Object catch (error) {
       if (_sessionIsCurrent(accountKey, generation)) {
         state = state.copyWith(error: _message(error));
@@ -724,6 +994,101 @@ final class MobileController extends StateNotifier<MobileState> {
       notificationSettings: notifications,
       presencePreference: presence,
     );
+    _setDegradedWarning(DegradedFeature.accountSettings, null);
+  }
+
+  Future<void> retryDegradedData() async {
+    if (state.phase != SessionPhase.ready) return;
+    final pending = Set<DegradedFeature>.of(state.degradedWarnings.keys);
+    await Future.wait<void>([
+      if (pending.contains(DegradedFeature.accountSettings))
+        _retryAccountSettings(),
+      if (pending.contains(DegradedFeature.guildNavigation))
+        _retryGuildNavigation(),
+      if (pending.contains(DegradedFeature.guildNotifications))
+        _retryGuildNotificationSettings(),
+      if (pending.contains(DegradedFeature.readStates)) _refreshReadBadges(),
+      if (pending.contains(DegradedFeature.acknowledgements))
+        _retryPendingAcknowledgements(),
+    ]);
+  }
+
+  Future<void> _retryAccountSettings() async {
+    try {
+      applySettings(await repository.settings());
+      _scheduleMetadataCache();
+    } on Object catch (error) {
+      _setDegradedWarning(
+        DegradedFeature.accountSettings,
+        userFacingError(
+          error,
+          summary:
+              'Account settings still could not be loaded. Some preferences may show defaults.',
+        ),
+      );
+    }
+  }
+
+  Future<void> _retryGuildNavigation() async {
+    try {
+      final navigation = reconcileGuildNavigation(
+        await repository.guildNavigation(),
+        state.guilds,
+      );
+      state = state.copyWith(guildNavigation: navigation);
+      _setDegradedWarning(DegradedFeature.guildNavigation, null);
+    } on Object catch (error) {
+      _setDegradedWarning(
+        DegradedFeature.guildNavigation,
+        userFacingError(
+          error,
+          summary:
+              'Your guild order still could not be loaded. Kaede is showing the default order.',
+        ),
+      );
+    }
+  }
+
+  Future<void> saveGuildNavigation(GuildNavigation navigation) async {
+    if (state.phase != SessionPhase.ready) return;
+    final previous = state.guildNavigation;
+    final optimistic = reconcileGuildNavigation(navigation, state.guilds);
+    state = state.copyWith(guildNavigation: optimistic, clearError: true);
+    try {
+      final saved = await repository.updateGuildNavigation(optimistic);
+      state = state.copyWith(
+        guildNavigation: reconcileGuildNavigation(saved, state.guilds),
+      );
+      _setDegradedWarning(DegradedFeature.guildNavigation, null);
+    } on Object catch (error) {
+      state = state.copyWith(
+        guildNavigation: previous,
+        error: userFacingError(
+          error,
+          summary:
+              'Could not save your guild order. The previous layout was restored.',
+        ),
+      );
+    }
+  }
+
+  Future<void> _retryGuildNotificationSettings() async {
+    try {
+      final levels = decodeGuildNotificationLevels(
+        await repository.guildNotificationSettingsList(),
+      );
+      state = state.copyWith(guildNotificationLevels: levels);
+      _setDegradedWarning(DegradedFeature.guildNotifications, null);
+      _scheduleMetadataCache();
+    } on Object catch (error) {
+      _setDegradedWarning(
+        DegradedFeature.guildNotifications,
+        userFacingError(
+          error,
+          summary: 'Guild notification preferences still could not be loaded.',
+        ),
+      );
+    }
   }
 
   Future<void> setPresence(PresenceStatus presence) async {
@@ -748,6 +1113,7 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<void> selectGuild(KaedeGuild guild) {
     state = state.copyWith(selectedGuild: guild.ref, clearChannel: true);
     push.setAppVisibility(active: _appActive);
+    unawaited(refreshSelfModeration(guild.ref));
     return Future<void>.value();
   }
 
@@ -779,12 +1145,97 @@ final class MobileController extends StateNotifier<MobileState> {
           _appActive && _conversationPaneVisible ? channel.ref : null,
     );
     unawaited(_rememberConversation(channel.ref));
+    if (channel.guildRef case final guild?) {
+      unawaited(refreshSelfModeration(guild));
+    }
     _acknowledgeVisibleConversation();
     if (channel.type == ChannelType.text ||
         channel.type == ChannelType.announcement ||
         channel.type == ChannelType.dm) {
       await loadMessages();
     }
+  }
+
+  Future<void> refreshSelfModeration(EntityRef guild) async {
+    final request = ++_selfModerationRequestGeneration;
+    final accountKey = api.tokens?.accountKey;
+    final sessionGeneration = _sessionLoadGeneration;
+    if (accountKey == null ||
+        !_sessionIsCurrent(accountKey, sessionGeneration)) {
+      return;
+    }
+    try {
+      final status = await repository.selfModerationStatus(guild);
+      if (request != _selfModerationRequestGeneration ||
+          !_sessionIsCurrent(accountKey, sessionGeneration) ||
+          status.guildRef != guild) {
+        return;
+      }
+      final statuses = Map<EntityRef, GuildSelfModerationStatus>.of(
+          state.selfModerationByGuild);
+      if (status.activeAt()) {
+        statuses[guild] = status;
+      } else {
+        statuses.remove(guild);
+      }
+      state = state.copyWith(selfModerationByGuild: Map.unmodifiable(statuses));
+      _scheduleSelfModerationExpiry(status);
+      _scheduleSelfModerationRetry(status);
+    } on Object {
+      // This is an informational private projection. Authoritative permission
+      // checks still happen at the guild home, so a transient refresh failure
+      // must not obscure chat or invent a moderation state.
+      final cached = state.selfModerationByGuild[guild];
+      if (cached != null) _scheduleSelfModerationRetry(cached);
+    }
+  }
+
+  void _scheduleSelfModerationRetry(GuildSelfModerationStatus status) {
+    _selfModerationRetryTimer?.cancel();
+    _selfModerationRetryTimer = null;
+    if (!shouldRetrySelfModerationStatus(
+      status,
+      appActive: _appActive,
+      conversationPaneVisible: _conversationPaneVisible,
+      selectedGuild: state.selectedGuild,
+    )) {
+      return;
+    }
+    _selfModerationRetryTimer = Timer(const Duration(seconds: 15), () {
+      _selfModerationRetryTimer = null;
+      unawaited(refreshSelfModeration(status.guildRef));
+    });
+  }
+
+  void _scheduleSelfModerationExpiry(GuildSelfModerationStatus status) {
+    _selfModerationExpiryTimer?.cancel();
+    _selfModerationExpiryTimer = null;
+    _selfModerationRetryTimer?.cancel();
+    _selfModerationRetryTimer = null;
+    if (!status.activeAt() || status.timeoutIndefinite) return;
+    final until = status.timeoutUntil;
+    if (until == null) return;
+    final delay = until.difference(DateTime.now().toUtc());
+    if (delay <= Duration.zero) {
+      _clearSelfModeration(status.guildRef);
+      return;
+    }
+    _selfModerationExpiryTimer =
+        Timer(delay + const Duration(milliseconds: 250), () {
+      _selfModerationExpiryTimer = null;
+      _selfModerationRetryTimer?.cancel();
+      _selfModerationRetryTimer = null;
+      _clearSelfModeration(status.guildRef);
+      unawaited(refreshSelfModeration(status.guildRef));
+    });
+  }
+
+  void _clearSelfModeration(EntityRef guild) {
+    if (!state.selfModerationByGuild.containsKey(guild)) return;
+    final statuses = Map<EntityRef, GuildSelfModerationStatus>.of(
+        state.selfModerationByGuild)
+      ..remove(guild);
+    state = state.copyWith(selfModerationByGuild: Map.unmodifiable(statuses));
   }
 
   Future<void> _rememberConversation(EntityRef channel) async {
@@ -870,19 +1321,48 @@ final class MobileController extends StateNotifier<MobileState> {
       }
       final ordered = page.reversed.toList();
       final withOlder = Set<EntityRef>.of(state.channelsWithOlderMessages);
-      if (page.length >= 50) {
+      final reachedRetainedStart = channel.historyTruncated &&
+          !channel.historyRemoteAvailable &&
+          channel.oldestAvailableMessageRef != null &&
+          page.isNotEmpty &&
+          page.last.ref == channel.oldestAvailableMessageRef;
+      final authorityHistoryComplete =
+          page.isEmpty || page.last.historyPageComplete;
+      final authorityHistoryUnavailable = page.isNotEmpty &&
+          page.last.historyPageErrorCode == 'FEDERATED_DM_HISTORY_UNAVAILABLE';
+      if ((page.length >= 50 || authorityHistoryUnavailable) &&
+          !authorityHistoryComplete &&
+          !reachedRetainedStart) {
         withOlder.add(channelRef);
       } else {
         withOlder.remove(channelRef);
       }
       final current = state.messageStore[channelRef] ?? existing;
+      var nextMessages = older
+          ? mergeMessages(<KaedeMessage>[...ordered, ...current])
+          : ordered;
+      // An empty successful older page cannot carry the per-page terminal
+      // marker. Preserve that state on the oldest retained row so ordinary
+      // rebuilds show a real conversation start instead of a cache boundary.
+      if (older && page.isEmpty && nextMessages.isNotEmpty) {
+        final mutable = nextMessages.toList();
+        mutable[0] = mutable[0].copyWith(
+          historyPageComplete: true,
+          clearHistoryPageErrorCode: true,
+        );
+        nextMessages = List<KaedeMessage>.unmodifiable(mutable);
+      }
       _setChannelMessages(
         channelRef,
-        older ? mergeMessages(<KaedeMessage>[...ordered, ...current]) : ordered,
+        nextMessages,
       );
       state = state.copyWith(
         offline: false,
         channelsWithOlderMessages: Set.unmodifiable(withOlder),
+        error: authorityHistoryUnavailable
+            ? 'Older messages are temporarily unavailable from this conversation’s home instance. Recent cached messages remain visible; retry in a moment.'
+            : null,
+        clearError: !authorityHistoryUnavailable,
       );
       await _cacheMessages(channelRef);
       if (!older && ordered.isNotEmpty && _isChannelVisible(channelRef)) {
@@ -1129,10 +1609,15 @@ final class MobileController extends StateNotifier<MobileState> {
       }
     }
     _pushDeviceId = null;
+    _pushRegistrationWarning = null;
+    _pushRemoteDeliveryWarning = null;
+    _pushLocalDisplayWarning = null;
     await _pushTokenSubscription?.cancel();
     _pushTokenSubscription = null;
     await _pushDestinationSubscription?.cancel();
     _pushDestinationSubscription = null;
+    await _pushHealthSubscription?.cancel();
+    _pushHealthSubscription = null;
     await _sessionExpiredSubscription?.cancel();
     _sessionExpiredSubscription = null;
     _outboxTimer?.cancel();
@@ -1145,7 +1630,16 @@ final class MobileController extends StateNotifier<MobileState> {
     _navigationRefreshTimer = null;
     _metadataCacheTimer?.cancel();
     _metadataCacheTimer = null;
+    _acknowledgementRetryTimer?.cancel();
+    _acknowledgementRetryTimer = null;
+    _selfModerationExpiryTimer?.cancel();
+    _selfModerationRetryTimer?.cancel();
+    _selfModerationExpiryTimer = null;
+    _pendingAcknowledgements.clear();
+    _acknowledgementsInFlight.clear();
     await _gatewaySubscription?.cancel();
+    await _gatewayHealthSubscription?.cancel();
+    _gatewayHealthSubscription = null;
     await gateway.disconnect();
     await repository.logout();
     if (accountKey != null) {
@@ -1387,8 +1881,24 @@ final class MobileController extends StateNotifier<MobileState> {
   void _reduceGateway(GatewayEvent event) {
     try {
       _applyGateway(event);
+      _malformedGatewayEvents = 0;
+      if (state.gatewayProtocolWarning != null) {
+        _validGatewayEventsAfterWarning += 1;
+        if (_validGatewayEventsAfterWarning >= 5) {
+          _validGatewayEventsAfterWarning = 0;
+          state = state.copyWith(clearGatewayProtocolWarning: true);
+        }
+      }
     } on Object {
       // A newer or malformed event must not terminate the gateway stream.
+      _validGatewayEventsAfterWarning = 0;
+      _malformedGatewayEvents += 1;
+      if (_malformedGatewayEvents >= 3) {
+        state = state.copyWith(
+          gatewayProtocolWarning:
+              'Kaede received repeated invalid realtime updates. Some live information may be incomplete while it refreshes safely.',
+        );
+      }
       _scheduleNavigationRefresh();
     }
   }
@@ -1396,6 +1906,9 @@ final class MobileController extends StateNotifier<MobileState> {
   void _applyGateway(GatewayEvent event) {
     switch (event.name) {
       case 'READY':
+        state = state.copyWith(clearGatewayProtocolWarning: true);
+        _malformedGatewayEvents = 0;
+        _validGatewayEventsAfterWarning = 0;
         final counts = Map<EntityRef, int>.of(state.mentionCounts);
         final unread = Map<EntityRef, int>.of(state.unreadCounts);
         final rawStates = event.data['read_states'];
@@ -1459,7 +1972,6 @@ final class MobileController extends StateNotifier<MobileState> {
           );
         }
         if (_isChannelVisible(message.channelRef)) {
-          _clearUnread(message.channelRef);
           unawaited(_acknowledge(message.channelRef, message.ref));
         } else if (message.authorRef != state.user?.ref) {
           _incrementUnread(
@@ -1485,8 +1997,10 @@ final class MobileController extends StateNotifier<MobileState> {
       case 'MESSAGE_SEND_REJECTED':
         final nonce = '${event.data['client_nonce'] ?? ''}';
         if (nonce.isNotEmpty) {
-          final reason =
-              '${event.data['reason'] ?? event.data['code'] ?? 'Message could not be sent.'}';
+          final reason = userFacingGatewayError(
+            event.data,
+            fallback: 'The message could not be sent.',
+          );
           unawaited(
             database.failOutbox(nonce, reason).then((_) => _syncOutbox()),
           );
@@ -1495,18 +2009,30 @@ final class MobileController extends StateNotifier<MobileState> {
       case 'MESSAGE_DELIVERY_UPDATE':
         final target = _messageRef(event.data);
         if (target != null) {
+          final status = '${event.data['status'] ?? 'pending'}';
           _patchStoredMessage(
             target,
             (message) => message.copyWith(
-              deliveryStatus: '${event.data['status'] ?? 'pending'}',
+              deliveryStatus: status,
+              failureReason: status == 'failed'
+                  ? userFacingGatewayError(
+                      event.data,
+                      fallback: 'The message was not delivered.',
+                    )
+                  : status == 'retrying'
+                      ? 'The receiving instance is at capacity. Kaede is retrying automatically.'
+                      : null,
+              clearFailureReason: status != 'failed' && status != 'retrying',
             ),
           );
         }
         break;
       case 'DM_OPEN_REJECTED':
         state = state.copyWith(
-          error:
-              '${event.data['reason'] ?? 'This direct message could not be opened.'}',
+          error: userFacingGatewayError(
+            event.data,
+            fallback: 'This direct message could not be opened.',
+          ),
         );
         _scheduleNavigationRefresh();
         break;
@@ -1567,8 +2093,62 @@ final class MobileController extends StateNotifier<MobileState> {
             'CHANNEL_DELETE':
         _scheduleNavigationRefresh();
         break;
+      case 'GUILD_NAVIGATION_UPDATE':
+        state = state.copyWith(
+          guildNavigation: reconcileGuildNavigation(
+            GuildNavigation.fromJson(event.data),
+            state.guilds,
+          ),
+        );
+        _setDegradedWarning(DegradedFeature.guildNavigation, null);
+        break;
+      case 'GUILD_HISTORY_SYNC_UPDATE':
+        try {
+          final guildRef = EntityRef(
+            Snowflake('${event.data['guild_id']}'),
+            Domain('${event.data['guild_domain']}'),
+          );
+          final status = '${event.data['status'] ?? ''}';
+          if (const {'syncing', 'retrying', 'ready', 'failed'}
+              .contains(status)) {
+            final guilds = state.guilds
+                .map(
+                  (guild) => guild.ref != guildRef
+                      ? guild
+                      : KaedeGuild.fromJson(<String, Object?>{
+                          ...guild.toJson(),
+                          'history_sync_status': status,
+                          'history_sync_error_code':
+                              status == 'ready' ? null : event.data['code'],
+                          'history_sync_retry_after_ms': status == 'retrying'
+                              ? event.data['retry_after_ms']
+                              : null,
+                          'history_sync_resource': status == 'failed'
+                              ? event.data['resource']
+                              : null,
+                        }),
+                )
+                .toList(growable: false);
+            state = state.copyWith(guilds: List.unmodifiable(guilds));
+            _scheduleMetadataCache();
+          }
+        } on FormatException {
+          // Ignore a malformed projection without disrupting other events.
+        }
+        break;
       case 'CHANNEL_ACCESS_REVOKED':
         unawaited(_revokeChannelAccess(event.data));
+        break;
+      case 'GUILD_MEMBER_UPDATE':
+        _scheduleNavigationRefresh();
+        final nestedUser = event.data['user'];
+        final user = nestedUser is Map
+            ? _entityRef(nestedUser['id'], nestedUser['origin_domain'])
+            : _userRef(event.data);
+        if (user == state.user?.ref) {
+          final guild = state.selectedGuild;
+          if (guild != null) unawaited(refreshSelfModeration(guild));
+        }
         break;
       case 'CHANNEL_ACCESS_GRANTED' ||
             'CHANNEL_PERMISSION_UPDATE' ||
@@ -1576,7 +2156,6 @@ final class MobileController extends StateNotifier<MobileState> {
             'GUILD_ROLE_UPDATE' ||
             'GUILD_ROLE_DELETE' ||
             'GUILD_MEMBER_ADD' ||
-            'GUILD_MEMBER_UPDATE' ||
             'GUILD_MEMBER_REMOVE' ||
             'GUILD_MEMBERS_CHUNK' ||
             'GUILD_MEMBER_LIST_UPDATE' ||
@@ -1585,16 +2164,49 @@ final class MobileController extends StateNotifier<MobileState> {
             'GUILD_EMOJI_DELETE' ||
             'VOICE_STATE_UPDATE' ||
             'VOICE_CHANNEL_MOVE' ||
-            'VOICE_TOKEN' ||
             'CALL_CREATE' ||
             'CALL_RING' ||
             'CALL_ACCEPT' ||
             'CALL_DECLINE' ||
             'CALL_END' ||
-            'USER_UPDATE' ||
             'RESUMED' ||
             'INVALID_SESSION':
         _scheduleNavigationRefresh();
+        break;
+      case 'USER_UPDATE':
+        final relationship = event.data['relationship'];
+        if (relationship is Map) {
+          final detail = Map<String, Object?>.from(relationship);
+          final errorCode = detail['error_code'];
+          if (errorCode is String && errorCode.isNotEmpty) {
+            state = state.copyWith(
+              error: userFacingGatewayError(
+                <String, Object?>{'code': errorCode},
+                fallback: 'The friend request could not be delivered.',
+              ),
+            );
+          }
+        } else if (event.data['id'] != null &&
+            event.data['origin_domain'] != null &&
+            event.data['username'] != null) {
+          _applyUserProfileUpdate(KaedeUser.fromJson(event.data));
+        }
+        _scheduleNavigationRefresh();
+        break;
+      case 'VOICE_TOKEN':
+        final correlation = event.data['move_session_id'];
+        final grant = event.data['grant'];
+        final grantCorrelation =
+            grant is Map<String, Object?> ? grant['move_session_id'] : null;
+        final localMove = grant is Map<String, Object?> &&
+            correlation == null &&
+            grantCorrelation == null;
+        final correlatedMove = correlation is String &&
+            RegExp(r'^[A-Za-z0-9_-]{32,64}$').hasMatch(correlation) &&
+            grantCorrelation == correlation;
+        if (localMove || correlatedMove) {
+          _scheduleNavigationRefresh();
+        }
         break;
       case 'PRESENCE_UPDATE':
         final user = _userRef(event.data);
@@ -1652,7 +2264,17 @@ final class MobileController extends StateNotifier<MobileState> {
         next = next.copyWith(reactionCounts: Map.unmodifiable(counts));
       }
       if (data.containsKey('delivery_status')) {
-        next = next.copyWith(deliveryStatus: '${data['delivery_status']}');
+        final status = '${data['delivery_status']}';
+        next = next.copyWith(
+          deliveryStatus: status,
+          failureReason: status == 'failed'
+              ? userFacingGatewayError(
+                  data,
+                  fallback: 'The message was not delivered.',
+                )
+              : null,
+          clearFailureReason: status != 'failed',
+        );
       }
       return next;
     });
@@ -1692,6 +2314,61 @@ final class MobileController extends StateNotifier<MobileState> {
       unawaited(_cacheMessage(messages[index]));
       return;
     }
+  }
+
+  void _applyUserProfileUpdate(KaedeUser user) {
+    final store = <EntityRef, List<KaedeMessage>>{};
+    final changedChannels = <EntityRef>[];
+    for (final entry in state.messageStore.entries) {
+      var changed = false;
+      final messages = entry.value.map((message) {
+        if (message.authorRef != user.ref) return message;
+        changed = true;
+        return message.copyWith(author: user);
+      }).toList(growable: false);
+      store[entry.key] =
+          changed ? List<KaedeMessage>.unmodifiable(messages) : entry.value;
+      if (changed) changedChannels.add(entry.key);
+    }
+    final dms = state.dms
+        .map(
+          (channel) => KaedeChannel.fromJson(<String, Object?>{
+            ...channel.toJson(),
+            'recipients': channel.recipients
+                .map((recipient) => recipient.ref == user.ref
+                    ? user.toJson()
+                    : recipient.toJson())
+                .toList(growable: false),
+          }),
+        )
+        .toList(growable: false);
+    final relationships = state.relationships.map((relationship) {
+      final raw = Map<String, Object?>.from(relationship);
+      final related = raw['user'];
+      if (related is Map) {
+        try {
+          if (KaedeUser.fromJson(Map<String, Object?>.from(related)).ref ==
+              user.ref) {
+            raw['user'] = user.toJson();
+          }
+        } on Object {
+          // Ignore a malformed unrelated relationship projection.
+        }
+      }
+      return Map<String, Object?>.unmodifiable(raw);
+    }).toList(growable: false);
+    state = state.copyWith(
+      dms: List<KaedeChannel>.unmodifiable(dms),
+      relationships: List<Map<String, Object?>>.unmodifiable(relationships),
+      messageStore: Map<EntityRef, List<KaedeMessage>>.unmodifiable(store),
+      userProfiles: Map<EntityRef, KaedeUser>.unmodifiable(
+        <EntityRef, KaedeUser>{...state.userProfiles, user.ref: user},
+      ),
+    );
+    for (final channel in changedChannels) {
+      unawaited(_cacheMessages(channel));
+    }
+    _scheduleMetadataCache();
   }
 
   void _tombstoneMessage(EntityRef target) {
@@ -1776,12 +2453,161 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _acknowledge(EntityRef channel, EntityRef message) async {
+    final existing = _pendingAcknowledgements[channel];
+    final currentUnread = state.unreadCounts[channel] ?? 0;
+    final currentMentions = state.mentionCounts[channel] ?? 0;
+    _pendingAcknowledgements[channel] = existing == null
+        ? _PendingAcknowledgement(
+            message: message,
+            unread: currentUnread,
+            mentions: currentMentions,
+          )
+        : existing.copyWith(
+            message: message,
+            unread: existing.restored
+                ? max(existing.unread, currentUnread)
+                : existing.unread + currentUnread,
+            mentions: existing.restored
+                ? max(existing.mentions, currentMentions)
+                : existing.mentions + currentMentions,
+            restored: false,
+          );
     _clearUnread(channel);
+    await _drainAcknowledgement(channel);
+  }
+
+  Future<void> _drainAcknowledgement(EntityRef channel) async {
+    if (!_acknowledgementsInFlight.add(channel)) return;
     try {
-      await repository.acknowledge(channel, message);
-    } on Object {
-      // The next visible message or channel load retries this ephemeral ack.
+      while (true) {
+        final pending = _pendingAcknowledgements[channel];
+        if (pending == null) break;
+        try {
+          await repository.acknowledge(channel, pending.message);
+          if (identical(_pendingAcknowledgements[channel], pending)) {
+            if (pending.restored) {
+              await _reconcileAcknowledgedChannel(channel, pending);
+            }
+            if (identical(_pendingAcknowledgements[channel], pending)) {
+              _pendingAcknowledgements.remove(channel);
+            }
+          }
+          if (_pendingAcknowledgements.isEmpty) {
+            _setDegradedWarning(DegradedFeature.acknowledgements, null);
+          }
+        } on Object catch (error) {
+          if (state.phase != SessionPhase.ready || api.tokens == null) return;
+          final latest = _pendingAcknowledgements[channel] ?? pending;
+          final retry = latest.copyWith(
+            attempt: latest.attempt + 1,
+            restored: true,
+          );
+          _pendingAcknowledgements[channel] = retry;
+          _restoreUnreadAfterFailedAcknowledgement(channel, retry);
+          _setDegradedWarning(
+            DegradedFeature.acknowledgements,
+            userFacingError(
+              error,
+              summary:
+                  'Messages could not be marked as read. The unread marker was restored and Kaede will retry.',
+            ),
+          );
+          _scheduleAcknowledgementRetry();
+          break;
+        }
+      }
+    } finally {
+      _acknowledgementsInFlight.remove(channel);
     }
+  }
+
+  void _restoreUnreadAfterFailedAcknowledgement(
+    EntityRef channel,
+    _PendingAcknowledgement pending,
+  ) {
+    final unread = Map<EntityRef, int>.of(state.unreadCounts);
+    final mentions = Map<EntityRef, int>.of(state.mentionCounts);
+    if (pending.unread > 0) {
+      unread[channel] = max(unread[channel] ?? 0, pending.unread);
+    }
+    if (pending.mentions > 0) {
+      mentions[channel] = max(mentions[channel] ?? 0, pending.mentions);
+    }
+    state = state.copyWith(
+      unreadCounts: Map.unmodifiable(unread),
+      mentionCounts: Map.unmodifiable(mentions),
+    );
+    _scheduleMetadataCache();
+  }
+
+  Future<void> _reconcileAcknowledgedChannel(
+    EntityRef channel,
+    _PendingAcknowledgement pending,
+  ) async {
+    final accountKey = api.tokens?.accountKey;
+    final generation = _sessionLoadGeneration;
+    if (accountKey == null || !_sessionIsCurrent(accountKey, generation)) {
+      return;
+    }
+    try {
+      final badges = decodeReadBadgeSnapshot(await repository.readStates());
+      if (!_sessionIsCurrent(accountKey, generation) ||
+          !identical(_pendingAcknowledgements[channel], pending)) {
+        return;
+      }
+      final reconciled = reconcileAuthoritativeChannelBadge(
+        currentUnread: state.unreadCounts,
+        currentMentions: state.mentionCounts,
+        authoritative: badges,
+        channel: channel,
+      );
+      state = state.copyWith(
+        unreadCounts: reconciled.unread,
+        mentionCounts: reconciled.mentions,
+      );
+      _setDegradedWarning(DegradedFeature.readStates, null);
+      _scheduleMetadataCache();
+    } on Object catch (error) {
+      if (!_sessionIsCurrent(accountKey, generation) ||
+          !identical(_pendingAcknowledgements[channel], pending)) {
+        return;
+      }
+      _setDegradedWarning(
+        DegradedFeature.readStates,
+        userFacingError(
+          error,
+          summary:
+              'The message was marked as read, but its unread marker could not be refreshed. Use Retry to sync the marker.',
+        ),
+      );
+    }
+  }
+
+  void _scheduleAcknowledgementRetry() {
+    if (_acknowledgementRetryTimer?.isActive == true ||
+        _pendingAcknowledgements.isEmpty) {
+      return;
+    }
+    final attempt = _pendingAcknowledgements.values.fold<int>(
+      1,
+      (current, pending) => max(current, pending.attempt),
+    );
+    final seconds = min(30, 1 << min(attempt, 4));
+    _acknowledgementRetryTimer = Timer(
+      Duration(seconds: seconds),
+      () => unawaited(_retryPendingAcknowledgements()),
+    );
+  }
+
+  Future<void> _retryPendingAcknowledgements() async {
+    _acknowledgementRetryTimer?.cancel();
+    _acknowledgementRetryTimer = null;
+    if (state.phase != SessionPhase.ready) return;
+    await Future.wait<void>(
+      _pendingAcknowledgements.keys
+          .toList(growable: false)
+          .map(_drainAcknowledgement),
+    );
   }
 
   void _setTyping(EntityRef channel, EntityRef user) {
@@ -1967,47 +2793,64 @@ final class MobileController extends StateNotifier<MobileState> {
       NotificationKind.guildMessage => 'New guild message',
       _ => 'Open Kaede to view this update.',
     };
-    await push.show(
-      id: stableNotificationId(message.ref.wire),
-      kind: kind,
-      title: showPreview
-          ? message.author?.name ?? message.authorRef.wire
-          : 'Kaede Chat',
-      body: showPreview
-          ? (message.content?.trim().isNotEmpty == true
-              ? message.content!.trim()
-              : 'Sent an attachment')
-          : privateBody,
-      payload: PushDestination(
-        channel: message.channelRef,
-        message: message.ref,
-      ).encode(),
-      senderName:
-          showPreview ? message.author?.name ?? message.authorRef.wire : null,
-      senderRef: showPreview ? message.authorRef : null,
-      senderAvatarUri: showPreview
-          ? publicAssetUri(
-              message.authorRef.domain,
-              message.author?.avatarHash,
-              variant: 'thumbnail_128',
-            )
-          : null,
-      sentAt: message.createdAt,
-    );
+    try {
+      await push.show(
+        id: stableNotificationId(message.ref.wire),
+        kind: kind,
+        title: showPreview
+            ? message.author?.name ?? message.authorRef.wire
+            : 'Kaede Chat',
+        body: showPreview
+            ? (message.content?.trim().isNotEmpty == true
+                ? message.content!.trim()
+                : 'Sent an attachment')
+            : privateBody,
+        payload: PushDestination(
+          channel: message.channelRef,
+          message: message.ref,
+        ).encode(),
+        senderName:
+            showPreview ? message.author?.name ?? message.authorRef.wire : null,
+        senderRef: showPreview ? message.authorRef : null,
+        senderAvatarUri: showPreview
+            ? publicAssetUri(
+                message.authorRef.domain,
+                message.author?.avatarHash,
+                variant: 'thumbnail_128',
+              )
+            : null,
+        sentAt: message.createdAt,
+      );
+      _setPushLocalDisplayWarning(null);
+    } on Object catch (error) {
+      _setPushLocalDisplayWarning(userFacingError(
+        error,
+        summary:
+            'A notification could not be shown. Messages are still available in Kaede.',
+      ));
+    }
   }
 
-  Future<void> _registerPushDevice({String? token}) async {
+  Future<bool> _registerPushDevice({
+    String? token,
+    bool surfaceErrors = false,
+  }) async {
     final accountKey = api.tokens?.accountKey;
     final generation = _sessionLoadGeneration;
     if (accountKey == null || !_sessionIsCurrent(accountKey, generation)) {
-      return;
+      return false;
     }
     try {
       final resolvedToken = token ?? await push.pushToken();
       if (resolvedToken == null ||
           resolvedToken.isEmpty ||
           !_sessionIsCurrent(accountKey, generation)) {
-        return;
+        if (_sessionIsCurrent(accountKey, generation)) {
+          _setPushRegistrationWarning(push.remoteDeliveryAvailable
+              ? 'Background notifications are enabled, but this device did not provide a push token. Check notification permissions and the device push service, then retry.'
+              : 'This build is not configured for closed-app notifications. Foreground alerts still work.');
+        }
+        return false;
       }
       final response = await repository.registerPushDevice(
         installationId: await api.installationId(),
@@ -2019,15 +2862,25 @@ final class MobileController extends StateNotifier<MobileState> {
       );
       if (_sessionIsCurrent(accountKey, generation)) {
         _pushDeviceId = '${response['id']}';
+        _setPushRegistrationWarning(null);
+        return true;
       }
     } on KaedeException catch (error) {
-      if (error.code != 'PUSH_DISABLED' && error.status != 503) {
-        // Push is supplemental. Login and foreground gateway delivery must
-        // remain usable when registration is temporarily unavailable.
-      }
-    } on Object {
-      // Firebase is optional for self-hosted and development builds.
+      if (surfaceErrors) rethrow;
+      _setPushRegistrationWarning(userFacingError(
+        error,
+        summary:
+            'Background notifications could not be registered. In-app messaging still works.',
+      ));
+    } on Object catch (error) {
+      if (surfaceErrors) rethrow;
+      _setPushRegistrationWarning(userFacingError(
+        error,
+        summary:
+            'Background notifications could not be registered. In-app messaging still works.',
+      ));
     }
+    return false;
   }
 
   Future<void> _activateNotifications() {
@@ -2044,10 +2897,19 @@ final class MobileController extends StateNotifier<MobileState> {
 
   Future<void> _requestNotificationDelivery() async {
     try {
-      if (!await push.requestPermission()) return;
+      if (!await push.requestPermission()) {
+        _setPushRegistrationWarning(
+          'System notifications are turned off. Enable them in Android settings to receive alerts.',
+        );
+        return;
+      }
       await _registerPushDevice();
-    } on Object {
-      // Notification availability must never block session restoration.
+    } on Object catch (error) {
+      _setPushRegistrationWarning(userFacingError(
+        error,
+        summary:
+            'Notification delivery could not be started. Login and messaging still work.',
+      ));
     }
   }
 
@@ -2062,34 +2924,98 @@ final class MobileController extends StateNotifier<MobileState> {
       if (!_sessionIsCurrent(accountKey, generation)) return;
       final unread = Map<EntityRef, int>.of(badges.unread);
       final mentions = Map<EntityRef, int>.of(badges.mentions);
-      if (state.selectedChannel case final selected?
-          when _isChannelVisible(selected)) {
-        unread.remove(selected);
-        mentions.remove(selected);
+      for (final entry in _pendingAcknowledgements.entries) {
+        final pending = entry.value;
+        if (pending.restored) {
+          if (pending.unread > 0) {
+            unread[entry.key] = max(
+              max(unread[entry.key] ?? 0, state.unreadCounts[entry.key] ?? 0),
+              pending.unread,
+            );
+          }
+          if (pending.mentions > 0) {
+            mentions[entry.key] = max(
+              max(
+                mentions[entry.key] ?? 0,
+                state.mentionCounts[entry.key] ?? 0,
+              ),
+              pending.mentions,
+            );
+          }
+        } else {
+          // This acknowledgement is still in its initial optimistic attempt.
+          // Its snapshot is restored if the request fails.
+          unread.remove(entry.key);
+          mentions.remove(entry.key);
+        }
       }
       state = state.copyWith(
         unreadCounts: Map.unmodifiable(unread),
         mentionCounts: Map.unmodifiable(mentions),
       );
+      _setDegradedWarning(DegradedFeature.readStates, null);
       _scheduleMetadataCache();
-    } on Object {
-      // Gateway-maintained counters remain usable while REST is unavailable.
+    } on Object catch (error) {
+      _setDegradedWarning(
+        DegradedFeature.readStates,
+        userFacingError(
+          error,
+          summary:
+              'Unread markers could not be refreshed. Existing counts may be incomplete.',
+        ),
+      );
     }
   }
 
   /// Requests notification permission as a direct result of a user action and
   /// registers this installation only after consent is granted.
   Future<bool> enablePushNotifications() async {
-    if (!await push.requestPermission()) return false;
-    final token = await push.pushToken();
-    if (token != null && token.isNotEmpty) {
-      await _registerPushDevice(token: token);
+    if (!await push.requestPermission()) {
+      _setPushRegistrationWarning(
+        'System notifications are turned off. Allow them in Android settings, then retry.',
+      );
+      return false;
     }
-    return true;
+    if (!push.remoteDeliveryAvailable) {
+      _setPushRegistrationWarning(
+        'This build is not configured for closed-app notifications. Foreground alerts still work.',
+      );
+      throw const KaedeException(
+        code: 'PUSH_PROVIDER_UNAVAILABLE',
+        message:
+            'This app build is not configured for background notifications. Ask your instance operator for a push-enabled build.',
+        status: 503,
+      );
+    }
+    final token = await push.pushToken();
+    if (token == null || token.isEmpty) {
+      _setPushRegistrationWarning(
+        'The device did not provide a notification token. Check notification permissions and its push service, then retry.',
+      );
+      throw const KaedeException(
+        code: 'PUSH_TOKEN_UNAVAILABLE',
+        message:
+            'The device did not provide a notification token. Check notification permissions and its push service, then retry.',
+        status: 503,
+      );
+    }
+    try {
+      final registered = await _registerPushDevice(
+        token: token,
+        surfaceErrors: true,
+      );
+      if (registered) _setPushRegistrationWarning(null);
+      return registered;
+    } on Object catch (error) {
+      _setPushRegistrationWarning(userFacingError(
+        error,
+        summary: 'Background notifications could not be enabled.',
+      ));
+      rethrow;
+    }
   }
 
-  String _message(Object error) =>
-      error is KaedeException ? error.message : error.toString();
+  String _message(Object error) => userFacingError(error);
 
   bool _isOffline(Object error) => error is KaedeException && error.status == 0;
 
@@ -2186,13 +3112,14 @@ final class MobileController extends StateNotifier<MobileState> {
           error.status < 500 &&
           error.status != 408 &&
           error.status != 429;
+      final message = userFacingError(error);
       if (permanent) {
-        await database.failOutbox(item.nonce, error.message);
+        await database.failOutbox(item.nonce, message);
       } else {
         await database.retryOutbox(
           item.nonce,
           item.attempts + 1,
-          error.message,
+          message,
         );
       }
       await _syncOutbox();
@@ -2201,7 +3128,7 @@ final class MobileController extends StateNotifier<MobileState> {
       await database.retryOutbox(
         item.nonce,
         item.attempts + 1,
-        '$error',
+        userFacingError(error),
       );
       await _syncOutbox();
     }
@@ -2255,12 +3182,19 @@ final class MobileController extends StateNotifier<MobileState> {
     _gatewaySubscription?.cancel();
     _pushTokenSubscription?.cancel();
     _pushDestinationSubscription?.cancel();
+    _pushHealthSubscription?.cancel();
     _sessionExpiredSubscription?.cancel();
     _outboxTimer?.cancel();
     _appLockTimer?.cancel();
     _typingExpiryTimer?.cancel();
     _navigationRefreshTimer?.cancel();
     _metadataCacheTimer?.cancel();
+    _acknowledgementRetryTimer?.cancel();
+    _selfModerationExpiryTimer?.cancel();
+    _selfModerationRetryTimer?.cancel();
+    _pendingAcknowledgements.clear();
+    _acknowledgementsInFlight.clear();
+    _gatewayHealthSubscription?.cancel();
     super.dispose();
   }
 
@@ -2269,6 +3203,21 @@ final class MobileController extends StateNotifier<MobileState> {
       return await operation();
     } on Object {
       return fallback;
+    }
+  }
+
+  Future<({T value, String? warning})> _optionalWithWarning<T>(
+    Future<T> Function() operation,
+    T fallback, {
+    required String summary,
+  }) async {
+    try {
+      return (value: await operation(), warning: null);
+    } on Object catch (error) {
+      return (
+        value: fallback,
+        warning: userFacingError(error, summary: summary),
+      );
     }
   }
 
@@ -2287,16 +3236,31 @@ final class MobileController extends StateNotifier<MobileState> {
     _navigationRefreshTimer = null;
     _metadataCacheTimer?.cancel();
     _metadataCacheTimer = null;
+    _acknowledgementRetryTimer?.cancel();
+    _acknowledgementRetryTimer = null;
+    _selfModerationExpiryTimer?.cancel();
+    _selfModerationExpiryTimer = null;
+    _selfModerationRetryTimer?.cancel();
+    _selfModerationRetryTimer = null;
+    _pendingAcknowledgements.clear();
+    _acknowledgementsInFlight.clear();
     await _pushTokenSubscription?.cancel();
     _pushTokenSubscription = null;
     await _pushDestinationSubscription?.cancel();
     _pushDestinationSubscription = null;
+    await _pushHealthSubscription?.cancel();
+    _pushHealthSubscription = null;
     await _gatewaySubscription?.cancel();
+    await _gatewayHealthSubscription?.cancel();
+    _gatewayHealthSubscription = null;
     await gateway.disconnect();
     if (accountKey != null) {
       await _queueCacheWrite(() => database.purgeAccount(accountKey));
     }
     _activeAccountKey = null;
+    _pushRegistrationWarning = null;
+    _pushRemoteDeliveryWarning = null;
+    _pushLocalDisplayWarning = null;
     state = const MobileState(
       phase: SessionPhase.signedOut,
       error: 'Your session expired. Sign in again.',

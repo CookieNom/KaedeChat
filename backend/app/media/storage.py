@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 from urllib.parse import quote, urlsplit
 
@@ -32,6 +35,30 @@ class ObjectMetadata:
     size: int
     content_type: str
     etag: str | None
+
+
+@dataclass
+class ObjectStream:
+    """One bounded object-store response closed when iteration is cancelled."""
+
+    client: httpx.AsyncClient
+    response: httpx.Response
+    max_bytes: int
+    size: int | None
+
+    async def chunks(self) -> AsyncIterator[bytes]:
+        received = 0
+        try:
+            async for chunk in self.response.aiter_raw():
+                received += len(chunk)
+                if received > self.max_bytes:
+                    raise StorageError("object exceeds the configured size limit")
+                yield chunk
+            if self.size is not None and received != self.size:
+                raise StorageError("object store returned an incomplete object")
+        finally:
+            await self.response.aclose()
+            await self.client.aclose()
 
 
 @dataclass(frozen=True)
@@ -165,12 +192,11 @@ class S3Storage:
         ).hexdigest()
         return f"{target.url}?{_query(values)}"
 
-    def _headers(self, method: str, target: _Target, body: bytes) -> dict[str, str]:
+    def _headers_for_hash(self, method: str, target: _Target, payload_hash: str) -> dict[str, str]:
         current = datetime.now(UTC)
         timestamp = current.strftime("%Y%m%dT%H%M%SZ")
         date = current.strftime("%Y%m%d")
         scope = f"{date}/{self.region}/{S3_SERVICE}/aws4_request"
-        payload_hash = hashlib.sha256(body).hexdigest()
         signed_header_values = {
             "host": target.host,
             "x-amz-content-sha256": payload_hash,
@@ -209,6 +235,9 @@ class S3Storage:
         if self.session_token is not None:
             headers["X-Amz-Security-Token"] = self.session_token
         return headers
+
+    def _headers(self, method: str, target: _Target, body: bytes) -> dict[str, str]:
+        return self._headers_for_hash(method, target, hashlib.sha256(body).hexdigest())
 
     async def head(self, bucket: str, key: str) -> ObjectMetadata:
         target = _target(self.endpoint, bucket, key, self.addressing_style)
@@ -316,6 +345,45 @@ class S3Storage:
             raise StorageError("object GET request failed") from exc
         return b"".join(chunks)
 
+    async def open_get(self, bucket: str, key: str, *, max_bytes: int) -> ObjectStream:
+        """Open a bounded streaming GET without retaining the object in memory."""
+
+        target = _target(self.endpoint, bucket, key, self.addressing_style)
+        client = httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False)
+        response: httpx.Response | None = None
+        try:
+            request = client.build_request(
+                "GET",
+                target.url,
+                headers={
+                    **self._headers("GET", target, b""),
+                    "Accept-Encoding": "identity",
+                },
+            )
+            response = await client.send(request, stream=True)
+            if response.status_code != 200:
+                raise StorageError(f"object GET failed with status {response.status_code}")
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise StorageError("object store returned an encoded object")
+            declared = response.headers.get("Content-Length")
+            size: int | None = None
+            if declared is not None:
+                try:
+                    size = int(declared)
+                except ValueError as exc:
+                    raise StorageError("object store returned invalid metadata") from exc
+                if size < 0:
+                    raise StorageError("object store returned invalid metadata")
+                if size > max_bytes:
+                    raise StorageError("object exceeds the configured size limit")
+            return ObjectStream(client, response, max_bytes, size)
+        except BaseException:
+            with suppress(Exception):
+                if response is not None:
+                    await response.aclose()
+            await client.aclose()
+            raise
+
     async def put(self, bucket: str, key: str, body: bytes, content_type: str) -> None:
         target = _target(self.endpoint, bucket, key, self.addressing_style)
         headers = self._headers("PUT", target, body)
@@ -325,6 +393,41 @@ class S3Storage:
                 timeout=30, follow_redirects=False, trust_env=False
             ) as client:
                 response = await client.put(target.url, headers=headers, content=body)
+        except httpx.HTTPError as exc:
+            raise StorageError("object PUT request failed") from exc
+        if response.status_code not in {200, 201, 204}:
+            raise StorageError(f"object PUT failed with status {response.status_code}")
+
+    async def put_file(
+        self,
+        bucket: str,
+        key: str,
+        path: Path,
+        *,
+        size: int,
+        sha256: str,
+        content_type: str,
+    ) -> None:
+        """Upload a previously hashed spool file without loading it into memory."""
+
+        if size < 0 or len(sha256) != 64:
+            raise StorageError("invalid file upload metadata")
+        target = _target(self.endpoint, bucket, key, self.addressing_style)
+        headers = self._headers_for_hash("PUT", target, sha256)
+        headers.update({"Content-Type": content_type, "Content-Length": str(size)})
+
+        async def body() -> AsyncIterator[bytes]:
+            import anyio
+
+            async with await anyio.open_file(path, "rb") as source:
+                while chunk := await source.read(64 * 1024):
+                    yield chunk
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=30, follow_redirects=False, trust_env=False
+            ) as client:
+                response = await client.put(target.url, headers=headers, content=body())
         except httpx.HTTPError as exc:
             raise StorageError("object PUT request failed") from exc
         if response.status_code not in {200, 201, 204}:

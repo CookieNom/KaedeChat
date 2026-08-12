@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 from redis.asyncio import Redis
@@ -41,11 +41,15 @@ from app.core.errors import (
     http_exception_response,
     validation_exception_response,
 )
+from app.core.json_limits import strict_json_loads
 from app.core.logging import configure_logging
 from app.core.metrics import render_metrics
 from app.core.settings import get_settings
 from app.core.snowflake import SnowflakeGenerator, WorkerLease
 from app.db.session import create_engine_and_sessionmaker
+from app.federation.delivery import FederationOutboxCapacityExceeded
+from app.federation.identity_storage import FederationIdentityQuotaExceeded
+from app.federation.network import FederationInstanceQuotaExceeded
 from app.federation.security import bounded_request_body
 from app.voice.background import voice_coordinator
 
@@ -132,6 +136,26 @@ async def handle_validation_exception(
     return validation_exception_response(request, exc)
 
 
+@app.exception_handler(FederationIdentityQuotaExceeded)
+@app.exception_handler(FederationInstanceQuotaExceeded)
+@app.exception_handler(FederationOutboxCapacityExceeded)
+async def handle_federation_capacity_exception(
+    request: Request,
+    exc: (
+        FederationIdentityQuotaExceeded
+        | FederationInstanceQuotaExceeded
+        | FederationOutboxCapacityExceeded
+    ),
+) -> JSONResponse:
+    return http_exception_response(
+        request,
+        HTTPException(
+            status_code=507,
+            detail=exc.detail(federation=request.url.path.startswith("/_kaede/")),
+        ),
+    )
+
+
 @app.exception_handler(Exception)
 async def handle_unexpected_exception(request: Request, exc: Exception) -> JSONResponse:
     log.exception("unhandled_request_error", error_type=type(exc).__name__)
@@ -139,7 +163,10 @@ async def handle_unexpected_exception(request: Request, exc: Exception) -> JSONR
         request,
         status_code=500,
         code="INTERNAL_SERVER_ERROR",
-        message="Internal server error",
+        message=(
+            "Kaede could not complete this request because of a server error. "
+            "Try again; if it continues, provide the error reference to support."
+        ),
     )
 
 
@@ -163,12 +190,21 @@ async def trace_request(
         response: Response
         if mutation and (is_federation or is_api):
             try:
-                await bounded_request_body(
+                body = await bounded_request_body(
                     request,
                     max_bytes=1024 * 1024 if is_federation else 2 * 1024 * 1024,
                     too_large_code=(
                         "KAED_FED_BATCH_TOO_LARGE" if is_federation else "REQUEST_BODY_TOO_LARGE"
                     ),
+                )
+                if is_federation and body:
+                    request.state.federation_json = strict_json_loads(body)
+            except ValueError:
+                response = error_response(
+                    request,
+                    status_code=400,
+                    code="KAED_FED_INVALID_JSON",
+                    message="The federated request is not valid, unambiguous JSON.",
                 )
             except StarletteHTTPException as exc:
                 response = http_exception_response(request, exc)
@@ -207,14 +243,19 @@ async def ready(request: Request) -> JSONResponse:
             raise RuntimeError("snowflake worker lease is unavailable")
     except Exception:
         log.exception("readiness_failed")
-        return JSONResponse({"status": "unavailable"}, status_code=503)
+        return error_response(
+            request,
+            status_code=503,
+            code="SERVICE_NOT_READY",
+            message="Kaede is still starting or one of its required services is unavailable.",
+        )
     return JSONResponse({"status": "ready"})
 
 
 @app.get("/metrics", include_in_schema=False)
 async def metrics(request: Request) -> PlainTextResponse:
     if not settings.metrics_enabled:
-        return PlainTextResponse("metrics disabled\n", status_code=404)
+        return PlainTextResponse("Metrics are disabled on this server.\n", status_code=404)
     return PlainTextResponse(
         await render_metrics(request.app.state.redis, request.app.state.sessionmaker),
         media_type="text/plain; version=0.0.4",

@@ -195,6 +195,114 @@ describe('API session recovery', () => {
     });
   });
 
+  it('turns a malformed successful response into a safe API error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response('<html>token=do-not-display</html>', {
+          status: 200,
+          headers: { 'X-Kaede-Trace-Id': 'proxy.17' }
+        })
+      )
+    );
+    const { api } = await import('./client');
+
+    await expect(api('/users/@me')).rejects.toMatchObject({
+      code: 'INVALID_SERVER_RESPONSE',
+      status: 502,
+      traceId: 'proxy.17',
+      message:
+        'Kaede received a server response it could not understand. Reload and try again; if it continues, update Kaede or contact your administrator. Error reference: proxy.17.'
+    });
+  });
+
+  it('preserves retry timing and the trace reference from a current error envelope', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse(
+          {
+            code: 'MEDIA_STORAGE_UNAVAILABLE',
+            message: 'Service Unavailable',
+            trace_id: '00112233445566778899aabbccddeeff',
+            retry_after_ms: 2_500
+          },
+          503
+        )
+      )
+    );
+    const { api } = await import('./client');
+
+    await expect(api('/attachments')).rejects.toMatchObject({
+      code: 'MEDIA_STORAGE_UNAVAILABLE',
+      retryAfterMs: 2_500,
+      traceId: '00112233445566778899aabbccddeeff',
+      message:
+        'Media storage is temporarily unavailable. Try again in 3 seconds. Error reference: 00112233445566778899aabbccddeeff.'
+    });
+  });
+
+  it('uses retry and trace headers when an intermediary replaces the error body', async () => {
+    const response = jsonResponse({}, 502);
+    response.headers.set('Retry-After', '4');
+    response.headers.set('X-Kaede-Trace-Id', 'ffeeddccbbaa99887766554433221100');
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(response));
+    const { api } = await import('./client');
+
+    await expect(api('/guilds/remote')).rejects.toMatchObject({
+      retryAfterMs: 4_000,
+      traceId: 'ffeeddccbbaa99887766554433221100',
+      message:
+        'A remote server returned an invalid response. Try again in 4 seconds. Error reference: ffeeddccbbaa99887766554433221100.'
+    });
+  });
+
+  it('keeps trusted native recovery guidance for synthetic transport failures', async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'native_restore_session') return { instance: null, authenticated: true };
+      if (command === 'native_api_request') {
+        throw {
+          code: 'NATIVE_CREDENTIALS_LOCKED',
+          message: 'Secure credential storage is locked. Unlock your keyring and try again.',
+          status: 0,
+          detail: null
+        };
+      }
+      throw new Error('Unexpected native command');
+    });
+    vi.stubGlobal('window', {
+      __TAURI__: { core: { invoke } },
+      dispatchEvent: vi.fn()
+    });
+    const { api } = await import('./client');
+
+    await expect(api('/guilds/1')).rejects.toMatchObject({
+      code: 'NATIVE_CREDENTIALS_LOCKED',
+      status: 503,
+      message: 'Secure credential storage is locked. Unlock your keyring and try again.'
+    });
+  });
+
+  it('filters unstructured native rejection text instead of trusting it as user copy', async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'native_restore_session') return { instance: null, authenticated: true };
+      if (command === 'native_api_request') {
+        throw 'thread panicked at src/client.rs:42; token=do-not-display';
+      }
+      throw new Error('Unexpected native command');
+    });
+    vi.stubGlobal('window', {
+      __TAURI__: { core: { invoke } },
+      dispatchEvent: vi.fn()
+    });
+    const { api } = await import('./client');
+
+    await expect(api('/guilds/1')).rejects.toMatchObject({
+      code: 'NATIVE_TRANSPORT_ERROR',
+      message: 'The service is temporarily unavailable. Try again shortly.'
+    });
+  });
+
   it('does not discard credentials when refresh is rate limited', async () => {
     storage.setItem('kaede.gateway.session', 'session');
     const expired = vi.fn();

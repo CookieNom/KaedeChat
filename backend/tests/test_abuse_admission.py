@@ -24,6 +24,14 @@ class FakeRedis:
         return self.results.pop(0)
 
 
+def remote_media_settings() -> SimpleNamespace:
+    return SimpleNamespace(
+        media_max_attachment_bytes=1024,
+        federation_remote_media_inflight_bytes_per_origin=2048,
+        federation_remote_media_inflight_bytes_total=4096,
+    )
+
+
 async def test_typing_limit_runs_before_channel_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[object, dict[str, object]]] = []
 
@@ -102,6 +110,8 @@ async def test_remote_media_rate_rejection_precedes_process_admission(
             Response(),
             user_id=42,
             user_domain="alpha.localhost",
+            origin_domain="beta.localhost",
+            settings=cast(Any, remote_media_settings()),
         ):
             raise AssertionError("rate-limited work was admitted")
 
@@ -125,6 +135,8 @@ async def test_remote_media_capacity_rejection_is_stable(
                 Response(),
                 user_id=42,
                 user_domain="alpha.localhost",
+                origin_domain="beta.localhost",
+                settings=cast(Any, remote_media_settings()),
             ):
                 raise AssertionError("work was admitted beyond process capacity")
     finally:
@@ -143,18 +155,46 @@ async def test_remote_media_admission_releases_its_permit(
 ) -> None:
     limiter = CapacityLimiter(1)
     monkeypatch.setattr(media_api, "remote_media_fetch_limiter", limiter)
-    redis = FakeRedis([[1, 9, 0, 1_000]])
+    redis = FakeRedis([[1, 9, 0, 1_000], [1, 1024, 1024], [1]])
 
     async with media_api.remote_media_fetch_admission(
         cast(Any, redis),
         Response(),
         user_id=42,
         user_domain="alpha.localhost",
+        origin_domain="beta.localhost",
+        settings=cast(Any, remote_media_settings()),
     ):
         assert limiter.borrowed_tokens == 1
 
     assert limiter.borrowed_tokens == 0
     assert redis.calls[0][2] == "rate:client:remote-media-fetch:alpha.localhost:42"
+    assert redis.calls[1][2] == "federation:remote-media:inflight:leases"
+    assert redis.calls[1][5] == "federation:remote-media:inflight:beta.localhost:leases"
+
+
+async def test_remote_media_distributed_byte_rejection_releases_process_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limiter = CapacityLimiter(1)
+    monkeypatch.setattr(media_api, "remote_media_fetch_limiter", limiter)
+    redis = FakeRedis([[1, 9, 0, 1_000], [0, 4096, 2048]])
+
+    with pytest.raises(HTTPException) as raised:
+        async with media_api.remote_media_fetch_admission(
+            cast(Any, redis),
+            Response(),
+            user_id=42,
+            user_domain="alpha.localhost",
+            origin_domain="beta.localhost",
+            settings=cast(Any, remote_media_settings()),
+        ):
+            raise AssertionError("work was admitted beyond distributed byte capacity")
+
+    assert raised.value.status_code == 503
+    assert cast(dict[str, object], raised.value.detail)["code"] == "REMOTE_MEDIA_BUSY"
+    assert limiter.borrowed_tokens == 0
+    assert len(redis.calls) == 2
 
 
 async def test_remote_media_cache_hit_skips_fetch_admission(

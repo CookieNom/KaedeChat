@@ -11,6 +11,8 @@ from urllib.parse import parse_qsl, urlencode
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
+from app.core.json_limits import FEDERATION_JSON_LIMITS, validate_json_tree
+
 POLICY_HELD_OUTBOX_PREFIX = "held by local federation block:"
 POLICY_HELD_OUTBOX_DELAY = timedelta(days=36_500)
 BLOCK_POLICY_ADVISORY_NAME = "kaede-instance-blocks"
@@ -18,11 +20,21 @@ SECURITY_CRITICAL_GUILD_EVENTS = frozenset(
     {
         "guild.access.revoked",
         "guild.instance_access.revoked",
+        "guild.leave.request",
         "guild.resync.required",
         "relationship.remove",
     }
 )
-FEDERATION_CAPABILITIES = ("guild-history-sync/1", "guild-history-sync/2", "presence/1")
+FEDERATION_CAPABILITIES = (
+    "dm-history-page/1",
+    "e2ee-transport/1",
+    "guild-history-sync/1",
+    "guild-history-sync/2",
+    "member-self-moderation/1",
+    "presence/1",
+    "profile-by-ref/1",
+    "request-nonce/1",
+)
 
 
 def block_covers_domain(block_domain: str, include_subdomains: bool, destination: str) -> bool:
@@ -58,6 +70,7 @@ def content_sha256(content: bytes) -> str:
 
 
 def canonical_json(value: dict[str, Any]) -> bytes:
+    validate_json_tree(value, limits=FEDERATION_JSON_LIMITS, label="federation JSON")
     return json.dumps(
         value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -71,18 +84,20 @@ class SigningInput:
     destination: str
     timestamp: int
     content_hash: str
+    nonce: str | None = None
 
     def canonical_bytes(self) -> bytes:
-        return canonical_json(
-            {
-                "content_sha256": self.content_hash,
-                "destination": self.destination,
-                "method": self.method.upper(),
-                "origin": self.origin,
-                "request_target": self.request_target,
-                "ts": self.timestamp,
-            }
-        )
+        value: dict[str, Any] = {
+            "content_sha256": self.content_hash,
+            "destination": self.destination,
+            "method": self.method.upper(),
+            "origin": self.origin,
+            "request_target": self.request_target,
+            "ts": self.timestamp,
+        }
+        if self.nonce is not None:
+            value["nonce"] = self.nonce
+        return canonical_json(value)
 
 
 def sign_request(signing_input: SigningInput, private_key: Ed25519PrivateKey) -> bytes:

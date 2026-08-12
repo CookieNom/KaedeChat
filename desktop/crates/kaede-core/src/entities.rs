@@ -3,6 +3,10 @@ use kaede_protocol::{Domain, EntityRef, PermissionBits, ResourceVersion, Snowfla
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+const fn profile_resolved_by_default() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct User {
     pub id: Snowflake,
@@ -15,7 +19,7 @@ pub struct User {
     pub custom_status: Option<String>,
     #[serde(default)]
     pub profile_version: ResourceVersion,
-    #[serde(default)]
+    #[serde(default = "profile_resolved_by_default")]
     pub profile_resolved: bool,
     #[serde(default)]
     pub handle: String,
@@ -35,7 +39,11 @@ impl User {
 
     #[must_use]
     pub fn label(&self) -> &str {
-        self.display_name.as_deref().unwrap_or(&self.username)
+        if self.profile_resolved {
+            self.display_name.as_deref().unwrap_or(&self.username)
+        } else {
+            "Remote user"
+        }
     }
 }
 
@@ -59,6 +67,20 @@ pub struct Guild {
     pub federated_history_policy: String,
     #[serde(default)]
     pub unavailable: bool,
+    /// Health of a remote guild replica. Older servers omit these fields, so
+    /// clients must treat a missing value as an ordinary healthy snapshot.
+    #[serde(default)]
+    pub sync_status: Option<String>,
+    #[serde(default)]
+    pub sync_error_code: Option<String>,
+    #[serde(default)]
+    pub history_sync_status: Option<String>,
+    #[serde(default)]
+    pub history_sync_error_code: Option<String>,
+    #[serde(default)]
+    pub history_sync_retry_after_ms: Option<u64>,
+    #[serde(default)]
+    pub history_sync_resource: Option<String>,
     #[serde(default)]
     pub version: Option<ResourceVersion>,
     #[serde(default)]
@@ -133,6 +155,21 @@ pub struct Channel {
     pub rate_limit_per_user: u32,
     #[serde(default)]
     pub federated_history_policy: Option<String>,
+    /// Remote DM replicas retain a bounded recent window. These optional
+    /// fields let clients stop pagination at that window without mistaking it
+    /// for the authoritative beginning of the conversation.
+    #[serde(default)]
+    pub history_truncated: bool,
+    #[serde(default)]
+    pub history_retention: Option<String>,
+    #[serde(default)]
+    pub history_source: Option<Domain>,
+    #[serde(default)]
+    pub history_remote_available: bool,
+    #[serde(default)]
+    pub oldest_available_message_ref: Option<EntityRef>,
+    #[serde(default)]
+    pub history_degraded_code: Option<String>,
     pub last_message_id: Option<Snowflake>,
     pub last_message_domain: Option<Domain>,
     #[serde(default)]
@@ -211,6 +248,11 @@ pub struct Attachment {
     pub blurhash: Option<String>,
     #[serde(default)]
     pub variants: Value,
+    /// Short-lived same-origin capability for media attached to an on-demand
+    /// DM history page. It is intentionally a relative path, never a remote
+    /// URL, so Kaede credentials remain scoped to the signed-in home instance.
+    #[serde(default)]
+    pub history_media_url: Option<String>,
     /// Private native cache path. It is never accepted from or serialized to
     /// the server and is purged when channel access is revoked.
     #[serde(skip)]
@@ -252,6 +294,20 @@ pub struct Message {
     pub referenced_message_domain: Option<Domain>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub delivery_status: Option<String>,
+    /// Stable, safe machine-readable reason for a failed or automatically
+    /// retrying federated delivery. Cleared when delivery succeeds.
+    #[serde(default)]
+    pub delivery_error_code: Option<String>,
+    /// Set only on the oldest item of an on-demand authority page when there
+    /// are no earlier messages. Missing on ordinary/local message payloads.
+    #[serde(default)]
+    pub history_page_complete: bool,
+    /// Non-terminal authority paging failure projected onto the oldest cached
+    /// item. Keep the page and let the user retry without losing recent rows.
+    #[serde(default)]
+    pub history_page_error_code: Option<String>,
+    #[serde(default)]
+    pub history_page_retry_after_ms: Option<u64>,
 }
 
 /// Sanitized metadata returned by the home instance's SSRF-protected preview
@@ -439,6 +495,12 @@ mod tests {
             "federated_history_policy": "disabled",
             "history_policy_generation": "2",
             "unavailable": false,
+            "sync_status": "quota_paused",
+            "sync_error_code": "KAED_FED_REPLICA_QUOTA_EXCEEDED",
+            "history_sync_status": "retrying",
+            "history_sync_error_code": "KAED_FED_HISTORY_CAPACITY",
+            "history_sync_retry_after_ms": 60000,
+            "history_sync_resource": null,
             "version": "2026-08-07T12:00:00+00:00",
             "channels": [{
                 "id": "43", "origin_domain": "chat.example",
@@ -456,6 +518,52 @@ mod tests {
         };
         assert_eq!(guild.icon_hash.as_deref(), Some("abc"));
         assert_eq!(guild.channels.len(), 1);
+        assert_eq!(guild.sync_status.as_deref(), Some("quota_paused"));
+        assert_eq!(
+            guild.sync_error_code.as_deref(),
+            Some("KAED_FED_REPLICA_QUOTA_EXCEEDED")
+        );
+        assert_eq!(guild.history_sync_status.as_deref(), Some("retrying"));
+        assert_eq!(guild.history_sync_retry_after_ms, Some(60_000));
+    }
+
+    #[test]
+    fn dm_history_boundary_accepts_composite_object_reference() {
+        let payload = serde_json::json!({
+            "id": "43", "origin_domain": "home.example",
+            "guild_id": null, "guild_domain": null,
+            "type": 1, "name": null, "topic": null, "position": 0,
+            "parent_id": null, "parent_domain": null, "permissions": "0",
+            "permissions_synced": false, "rate_limit_per_user": 0,
+            "history_truncated": true,
+            "history_retention": "rolling_replica_cache",
+            "history_source": "authority.example",
+            "history_remote_available": true,
+            "oldest_available_message_ref": {
+                "id": "99", "origin_domain": "remote.example"
+            },
+            "history_degraded_code": "FEDERATED_DM_HISTORY_TRUNCATED",
+            "last_message_id": "101", "last_message_domain": "remote.example",
+            "version": null,
+            "recipients": []
+        });
+        let Ok(channel) = serde_json::from_value::<Channel>(payload) else {
+            panic!("backend DM history metadata should deserialize");
+        };
+        assert!(channel.history_truncated);
+        assert_eq!(
+            channel.history_retention.as_deref(),
+            Some("rolling_replica_cache")
+        );
+        assert!(channel.history_remote_available);
+        assert_eq!(
+            channel
+                .oldest_available_message_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("99@remote.example")
+        );
     }
 
     #[test]
@@ -469,6 +577,9 @@ mod tests {
             "referenced_message_domain": null,
             "mention_user_refs": ["8@remote.example"], "attachments": [],
             "edited_at": null, "deleted_at": null,
+            "history_page_complete": true,
+            "history_page_error_code": "FEDERATED_DM_HISTORY_UNAVAILABLE",
+            "history_page_retry_after_ms": 2000,
             "created_at": "2026-08-07T12:00:00+00:00"
         });
         let Ok(message) = serde_json::from_value::<Message>(payload) else {
@@ -476,6 +587,32 @@ mod tests {
         };
         assert_eq!(message.client_nonce.as_deref(), Some("n-1"));
         assert_eq!(message.mention_user_refs[0].to_string(), "8@remote.example");
+        assert!(message.history_page_complete);
+        assert_eq!(
+            message.history_page_error_code.as_deref(),
+            Some("FEDERATED_DM_HISTORY_UNAVAILABLE")
+        );
+        assert_eq!(message.history_page_retry_after_ms, Some(2_000));
+    }
+
+    #[test]
+    fn history_attachment_keeps_its_same_origin_media_capability() {
+        let payload = serde_json::json!({
+            "id": "60", "origin_domain": "remote.example",
+            "filename": "photo.png", "content_type": "image/png",
+            "size": 1024, "scan_status": "clean", "width": 64, "height": 64,
+            "blurhash": null, "variants": {},
+            "history_media_url": "/api/v1/dms/43@home.example/history-media/50@remote.example/60@remote.example/original?expires=2000000000&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO"
+        });
+        let Ok(attachment) = serde_json::from_value::<Attachment>(payload) else {
+            panic!("history attachment should deserialize");
+        };
+        assert!(
+            attachment
+                .history_media_url
+                .as_deref()
+                .is_some_and(|path| path.starts_with("/api/v1/dms/"))
+        );
     }
 
     #[test]

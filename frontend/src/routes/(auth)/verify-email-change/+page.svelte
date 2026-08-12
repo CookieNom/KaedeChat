@@ -1,15 +1,17 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { api } from '$lib/api/client';
+  import { api, userErrorMessage } from '$lib/api/client';
   import { consumeUrlToken } from '$lib/auth/url-token';
   import { onMount } from 'svelte';
 
-  let state = $state<'working' | 'done' | 'failed'>('working');
+  let confirmationState = $state<'working' | 'done' | 'failed'>('working');
+  let error = $state('');
 
   onMount(async () => {
     const token = consumeUrlToken();
     if (!token) {
-      state = 'failed';
+      confirmationState = 'failed';
+      error = 'This confirmation link is missing its token. Request another email change.';
       return;
     }
     try {
@@ -17,9 +19,13 @@
         method: 'POST',
         body: JSON.stringify({ token })
       });
-      state = 'done';
-    } catch {
-      state = 'failed';
+      confirmationState = 'done';
+    } catch (caught) {
+      confirmationState = 'failed';
+      error = userErrorMessage(
+        caught,
+        'This confirmation link may be invalid, expired, or already used. Request another email change.'
+      );
     }
   });
 </script>
@@ -27,14 +33,14 @@
 <svelte:head><title>Confirm email · Kaede Chat</title></svelte:head>
 <div aria-live="polite">
   <p class="eyebrow">Email change</p>
-  {#if state === 'working'}
+  {#if confirmationState === 'working'}
     <h1 class="auth-title">Confirming your new address…</h1>
-  {:else if state === 'done'}
+  {:else if confirmationState === 'done'}
     <h1 class="auth-title">Your address is updated.</h1>
     <p><a class="primary-button" href={resolve('/settings')}>Return to settings</a></p>
   {:else}
     <h1 class="auth-title">This link has faded.</h1>
-    <p class="lede">It may be invalid, expired, or already used.</p>
+    <p class="lede form-error" role="alert">{error}</p>
     <p class="form-foot"><a href={resolve('/settings')}>Return to settings</a></p>
   {/if}
 </div>

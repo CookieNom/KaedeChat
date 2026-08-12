@@ -44,16 +44,30 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
     setState(() => _submitting = true);
     FocusScope.of(context).unfocus();
     try {
-      final domain = Domain(instance.text);
+      final domain = _domain();
+      if (password.text.isEmpty) {
+        throw const UserInputException('Enter your password.');
+      }
+      if (register) {
+        if (password.text != confirmation.text) {
+          throw const UserInputException('Passwords do not match.');
+        }
+        if (username.text.trim().isEmpty) {
+          throw const UserInputException('Choose a username.');
+        }
+      } else if (identifier.text.trim().isEmpty) {
+        throw const UserInputException(
+          'Enter your username or email address.',
+        );
+      }
       final serverConfig = await _config(domain);
       if (!mounted) return;
       if (register) {
-        if (password.text != confirmation.text) {
-          throw const FormatException('Passwords do not match.');
-        }
         if (serverConfig['email_required'] == true &&
             email.text.trim().isEmpty) {
-          throw const FormatException('This server requires an email address.');
+          throw const UserInputException(
+            'This server requires an email address.',
+          );
         }
         String? challenge;
         final turnstile = serverConfig['turnstile'];
@@ -114,18 +128,27 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
         try {
           await ref
               .read(mobileControllerProvider.notifier)
-              .finishMfa(Domain(instance.text), mfa.ticket, code);
+              .finishMfa(_domain(), mfa.ticket, code);
         } on Object catch (error) {
           if (mounted) {
-            ScaffoldMessenger.of(context)
-                .showSnackBar(SnackBar(content: Text('$error')));
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(userFacingError(
+                error,
+                summary: 'Could not verify the authentication code',
+              )),
+            ));
           }
         }
       }
     } on Object catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$error')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(userFacingError(
+            error,
+            summary:
+                register ? 'Could not create the account' : 'Could not sign in',
+          )),
+        ));
       }
     } finally {
       if (mounted) setState(() => _submitting = false);
@@ -137,6 +160,16 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
     final loaded = await ref.read(repositoryProvider).authConfig(domain);
     if (mounted) setState(() => _configs[domain] = loaded);
     return loaded;
+  }
+
+  Domain _domain() {
+    try {
+      return Domain(instance.text);
+    } on FormatException {
+      throw const UserInputException(
+        'Enter a valid server hostname, such as kaede.chat.',
+      );
+    }
   }
 
   Future<void> _verificationDialog(Domain domain) async {
@@ -158,10 +191,10 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
 
   Future<void> _forgotPassword() async {
     try {
-      final domain = Domain(instance.text);
+      final domain = _domain();
       final serverConfig = await _config(domain);
       if (serverConfig['password_recovery_enabled'] != true) {
-        throw const FormatException(
+        throw const UserInputException(
             'Password recovery is not enabled on this server.');
       }
       if (!mounted) return;
@@ -184,8 +217,12 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
       }
     } on Object catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$error')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(userFacingError(
+            error,
+            summary: 'Could not reset the password',
+          )),
+        ));
       }
     }
   }
@@ -208,7 +245,16 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
               onPressed: () => Navigator.pop(context),
               child: const Text('Cancel')),
           FilledButton(
-              onPressed: () => Navigator.pop(context, controller.text.trim()),
+              onPressed: () {
+                final value = controller.text.trim();
+                if (value.isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Enter $hint.')),
+                  );
+                  return;
+                }
+                Navigator.pop(context, value);
+              },
               child: const Text('Continue')),
         ],
       ),
@@ -387,7 +433,12 @@ final class _EmailVerificationDialogState
     try {
       await operation();
     } on Object catch (error) {
-      if (mounted) setState(() => _error = '$error');
+      if (mounted) {
+        setState(() => _error = userFacingError(
+              error,
+              summary: 'Could not verify the email address',
+            ));
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -405,7 +456,7 @@ final class _EmailVerificationDialogState
   Future<void> _verify() => _run(() async {
         final value = widget.token.text.trim();
         if (value.isEmpty) {
-          throw const FormatException('Enter the verification token.');
+          throw const UserInputException('Enter the verification token.');
         }
         await widget.repository.verifyEmail(value);
         if (mounted) Navigator.pop(context);
@@ -493,7 +544,20 @@ final class _MfaDialogState extends State<_MfaDialog> {
               onPressed: () => Navigator.pop(context),
               child: const Text('Cancel')),
           FilledButton(
-              onPressed: () => Navigator.pop(context, controller.text.trim()),
+              onPressed: () {
+                final value = controller.text.trim();
+                if (value.isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'Enter an authentication or recovery code.',
+                      ),
+                    ),
+                  );
+                  return;
+                }
+                Navigator.pop(context, value);
+              },
               child: const Text('Continue')),
         ],
       );

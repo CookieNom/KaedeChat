@@ -7,6 +7,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.api.push import rotated_token_fields
+from app.chat.payloads import public_user_display_name
+from app.db.models import User
 from app.push.presentation import notification_previews_enabled, push_presentation
 from app.push.schemas import (
     PushDeviceCreate,
@@ -41,6 +43,27 @@ class MemoryRedis:
 
     async def delete(self, key: str) -> int:
         return int(self.values.pop(key, None) is not None)
+
+
+def test_public_user_display_name_hides_unresolved_history_handle() -> None:
+    unresolved = User(
+        id=42,
+        origin_domain="remote.example",
+        username="history_deadbeef",
+        is_local=False,
+        profile_resolved=False,
+    )
+    resolved = User(
+        id=43,
+        origin_domain="remote.example",
+        username="maple",
+        display_name="Maple",
+        is_local=False,
+        profile_resolved=True,
+    )
+
+    assert public_user_display_name(unresolved) == "Remote user · remote.example"
+    assert public_user_display_name(resolved) == "Maple"
 
 
 def test_push_registration_accepts_native_platforms() -> None:

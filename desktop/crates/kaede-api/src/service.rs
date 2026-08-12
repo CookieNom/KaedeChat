@@ -815,9 +815,9 @@ pub struct RoleUpdate {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MessagePage<'a> {
-    pub before: Option<&'a Snowflake>,
-    pub after: Option<&'a Snowflake>,
-    pub around: Option<&'a Snowflake>,
+    pub before: Option<&'a EntityRef>,
+    pub after: Option<&'a EntityRef>,
+    pub around: Option<&'a EntityRef>,
     pub limit: u16,
 }
 

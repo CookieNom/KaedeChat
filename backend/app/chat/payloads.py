@@ -24,6 +24,14 @@ def resource_version(value: object) -> str | None:
     return updated_at.isoformat() if updated_at is not None else None
 
 
+def public_user_display_name(user: User) -> str:
+    """Return a user-facing label without exposing internal placeholders."""
+
+    if not user.profile_resolved:
+        return f"Remote user · {user.origin_domain}"
+    return user.display_name or user.username
+
+
 def user_payload(user: User) -> dict[str, object]:
     return {
         "id": str(user.id),
@@ -54,6 +62,11 @@ def guild_payload(guild: Guild) -> dict[str, object]:
         "federated_history_policy": guild.federated_history_policy,
         "history_policy_generation": str(guild.history_policy_generation),
         "unavailable": guild.unavailable,
+        # Replica health is safe client state. Expose the stable code only;
+        # ``sync_error`` can contain operator-facing diagnostics and must stay
+        # server-side.
+        "sync_status": guild.sync_status,
+        "sync_error_code": guild.sync_error_code,
         "version": resource_version(guild),
     }
 
@@ -111,7 +124,11 @@ def role_payload(role: Role) -> dict[str, object]:
 
 
 def member_payload(
-    member: GuildMember, user: User, role_ids: list[int] | None = None
+    member: GuildMember,
+    user: User,
+    role_ids: list[int] | None = None,
+    *,
+    include_private_authority_state: bool = False,
 ) -> dict[str, object]:
     return {
         "guild_id": str(member.guild_id),
@@ -121,7 +138,9 @@ def member_payload(
         "joined_at": member.joined_at.isoformat(),
         "timeout_until": member.timeout_until.isoformat() if member.timeout_until else None,
         "timeout_indefinite": member.timeout_indefinite,
-        "voice_flags": member.voice_flags,
+        # Legacy replicas may still contain authority-only voice flags. Never
+        # expose them from a remote guild; zero retains old-client shape.
+        "voice_flags": member.voice_flags if include_private_authority_state else 0,
         "member_version": str(member.member_version),
         "role_ids": [str(role_id) for role_id in (role_ids or [])],
     }
@@ -177,11 +196,19 @@ def relationship_payload(relationship: Relationship, target: User) -> dict[str, 
     }
 
 
-def dm_channel_payload(channel: Channel, recipients: list[User]) -> dict[str, object]:
-    return {
+def dm_channel_payload(
+    channel: Channel,
+    recipients: list[User],
+    *,
+    history: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         **channel_payload(channel),
         "recipients": [user_payload(user) for user in recipients],
     }
+    if history is not None:
+        payload.update(history)
+    return payload
 
 
 def attachment_payload(attachment: Attachment) -> dict[str, object]:

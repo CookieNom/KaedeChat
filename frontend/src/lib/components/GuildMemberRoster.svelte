@@ -2,6 +2,7 @@
   import { assetUrl } from '$lib/media/assets';
   import { groupGuildMembers, memberDisplayName } from '$lib/chat/members';
   import type { GuildMemberSummary, PresenceStatus, Role, UserSummary } from '$lib/chat/types';
+  import { userPublicHandle } from '$lib/chat/users';
   import Icon from './Icon.svelte';
 
   let {
@@ -28,7 +29,7 @@
     class:offline
     class="roster-member"
     type="button"
-    title={member.user.handle}
+    title={userPublicHandle(member.user) ?? displayName}
     oncontextmenu={(event) => onProfile(member.user, event)}
     onclick={(event) => onProfile(member.user, event)}
   >

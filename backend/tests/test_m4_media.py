@@ -229,6 +229,27 @@ def test_guild_payload_includes_both_public_image_hashes() -> None:
     assert payload["banner_hash"] == "banner-digest"
 
 
+def test_guild_payload_exposes_safe_replica_health_without_internal_detail() -> None:
+    guild = Guild(
+        id=10,
+        origin_domain="remote.example",
+        name="Remote guild",
+        owner_id=20,
+        owner_domain="remote.example",
+        permission_generation=1,
+        unavailable=False,
+        sync_status="quota_paused",
+        sync_error_code="KAED_FED_REPLICA_QUOTA_EXCEEDED",
+        sync_error="internal database sizing detail",
+    )
+
+    payload = guild_payload(guild)
+
+    assert payload["sync_status"] == "quota_paused"
+    assert payload["sync_error_code"] == "KAED_FED_REPLICA_QUOTA_EXCEEDED"
+    assert "sync_error" not in payload
+
+
 @pytest.mark.parametrize(
     ("kind", "purpose", "field"),
     (("icon", "guild_icon", "icon_hash"), ("banner", "guild_banner", "banner_hash")),

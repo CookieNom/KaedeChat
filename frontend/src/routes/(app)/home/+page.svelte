@@ -1,7 +1,8 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
-  import { api, ApiError } from '$lib/api/client';
+  import { api, ApiError, userErrorMessage } from '$lib/api/client';
+  import { apiErrorMessage } from '$lib/api/errors';
   import { firstNavigableChannel } from '$lib/chat/channels';
   import { invitedChannel, loadInvitePreview } from '$lib/chat/invite-preview';
   import { filterDmFriends, friendsWithoutVisibleDm } from '$lib/chat/dm-picker';
@@ -15,19 +16,21 @@
     Relationship,
     UserSummary
   } from '$lib/chat/types';
+  import {
+    applyUserProfileToHomeProjections,
+    userDisplayName,
+    userPublicHandle
+  } from '$lib/chat/users';
   import { GATEWAY_SESSION_RESET_EVENT, type Dispatch } from '$lib/gateway/client';
   import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
   import { DispatchReplayBuffer, type DispatchBatch } from '$lib/gateway/recovery';
   import { lastVisitedChannel } from '$lib/navigation/history';
   import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
   import { assetUrl } from '$lib/media/assets';
-  import {
-    compactBadgeCount,
-    directMessageUnreadCount,
-    guildMentionCount
-  } from '$lib/notifications/counts';
+  import { directMessageUnreadCount, guildMentionCount } from '$lib/notifications/counts';
   import { applyIncomingMessage, applyReadStateDispatch } from '$lib/notifications/read-state';
   import UserProfileCard from '$lib/components/UserProfileCard.svelte';
+  import GuildRail from '$lib/components/GuildRail.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import { onMount, tick } from 'svelte';
 
@@ -136,10 +139,14 @@
     } else if (dispatch.t === 'DM_OPEN_REJECTED') {
       const rejected = dispatch.d as { code?: string };
       notice = '';
-      error = `Direct-message request rejected: ${rejected.code ?? 'CANNOT_DM_USER'}`;
+      error = apiErrorMessage(rejected.code ?? 'CANNOT_DM_USER', 403, {});
     } else if (dispatch.t === 'USER_UPDATE') {
       const update = dispatch.d as {
-        relationship?: { type: Relationship['type'] | 'none'; user: UserSummary };
+        relationship?: {
+          type: Relationship['type'] | 'none';
+          user: UserSummary;
+          error_code?: string;
+        };
       } & Partial<UserSummary>;
       if (update.relationship) {
         const key = entityKey(update.relationship.user);
@@ -159,12 +166,29 @@
               : relationships.map((item, itemIndex) => (itemIndex === index ? next : item));
         }
         relationshipRevision += 1;
-      } else if (
-        currentUser &&
-        update.id === currentUser.id &&
-        update.origin_domain === currentUser.origin_domain
-      ) {
-        currentUser = { ...currentUser, ...update };
+        if (update.relationship.error_code) {
+          notice = '';
+          error = apiErrorMessage(update.relationship.error_code, 507, {});
+        }
+      }
+      const profileUser =
+        update.relationship?.user ??
+        (update.id && update.origin_domain ? (update as UserSummary) : null);
+      if (profileUser) {
+        const projected = applyUserProfileToHomeProjections(
+          directMessages,
+          relationships,
+          profilePopover?.user ?? null,
+          profileUser
+        );
+        directMessages = projected.directMessages;
+        relationships = projected.relationships;
+        if (profilePopover && projected.selectedUser) {
+          profilePopover = { ...profilePopover, user: projected.selectedUser };
+        }
+        if (currentUser && entityKey(currentUser) === entityKey(profileUser)) {
+          currentUser = { ...currentUser, ...profileUser };
+        }
       }
     }
   }
@@ -269,7 +293,7 @@
       if (caught instanceof ApiError && caught.status === 401) {
         window.location.replace(resolve('/login'));
       } else if (!recovering || !error) {
-        error = 'Could not load your home data.';
+        error = userErrorMessage(caught, 'Could not load your conversations. Try again.');
       }
       loading = false;
     }
@@ -302,7 +326,7 @@
             : 'Relationship updated.';
     } catch (caught) {
       if (generation !== loadGeneration) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not update this relationship.';
+      error = userErrorMessage(caught, 'Could not update this relationship. Try again.');
     } finally {
       if (generation === loadGeneration) relationshipBusy = false;
     }
@@ -327,7 +351,7 @@
       notice = 'Friend request sent.';
     } catch (caught) {
       if (generation !== loadGeneration) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not send the friend request.';
+      error = userErrorMessage(caught, 'Could not send the friend request. Try again.');
     } finally {
       if (generation === loadGeneration) busy = false;
     }
@@ -350,7 +374,10 @@
       }
     } catch (caught) {
       if (generation !== loadGeneration) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not create the guild.';
+      error = userErrorMessage(
+        caught,
+        'Could not create the guild. Check its details and try again.'
+      );
     } finally {
       if (generation === loadGeneration) busy = false;
     }
@@ -384,9 +411,7 @@
         caught instanceof ApiError &&
         (caught.code === 'CANNOT_DM_USER' || caught.code === 'DM_PRIVACY_REJECTED')
           ? 'This person’s privacy settings do not allow a direct message.'
-          : caught instanceof ApiError
-            ? caught.message
-            : 'Could not open the conversation.';
+          : userErrorMessage(caught, 'Could not open the conversation. Try again.');
       if (messageDialog?.open) messageDialogError = message;
       else error = message;
     } finally {
@@ -402,7 +427,9 @@
   }
 
   function selectMessageFriend(user: UserSummary) {
-    handle = user.handle;
+    const publicHandle = userPublicHandle(user);
+    if (!publicHandle) return;
+    handle = publicHandle;
     messageDialogError = '';
   }
 
@@ -437,7 +464,10 @@
       if (joined && channel) window.location.assign(guildChannelPath(joined, channel));
     } catch (caught) {
       if (generation !== loadGeneration) return;
-      error = caught instanceof ApiError ? caught.message : 'Could not join this guild.';
+      error = userErrorMessage(
+        caught,
+        'Could not join this guild. Check the invite and try again.'
+      );
     } finally {
       if (generation === loadGeneration) busy = false;
     }
@@ -456,12 +486,18 @@
           referrerpolicy="no-referrer"
         />
       {:else}
-        {relationship.user.username.slice(0, 1).toUpperCase()}
+        {relationship.user.profile_resolved === false
+          ? '•'
+          : relationship.user.username.slice(0, 1).toUpperCase()}
       {/if}
     </span>
     <span class="relationship-copy">
-      <strong>{relationship.user.display_name ?? relationship.user.username}</strong>
-      <small>{relationship.user.custom_status?.trim() || relationship.user.handle}</small>
+      <strong>{userDisplayName(relationship.user)}</strong>
+      <small
+        >{relationship.user.custom_status?.trim() ||
+          userPublicHandle(relationship.user) ||
+          'Profile unavailable'}</small
+      >
     </span>
     {#if relationship.type === 'pending_in'}
       <button
@@ -483,8 +519,11 @@
       </button>
       <button
         class="secondary-button small-button"
-        disabled={busy}
-        onclick={() => openDirectMessage(relationship.user.handle)}
+        disabled={busy || !userPublicHandle(relationship.user)}
+        onclick={() => {
+          const publicHandle = userPublicHandle(relationship.user);
+          if (publicHandle) void openDirectMessage(publicHandle);
+        }}
       >
         <Icon name="message" size={15} />Message
       </button>
@@ -513,36 +552,14 @@
 <svelte:window onkeydown={navigationKeydown} />
 
 <main class="home-app">
-  <nav class="guild-spine" aria-label="Guilds">
-    <a
-      class="spine-home active"
-      href={resolve('/home')}
-      aria-label={homeUnreadCount ? `Home, ${homeUnreadCount} unread direct messages` : 'Home'}
-      aria-current="page"
-      title="Home"
-    >
-      <Icon name="home" />
-      {#if homeUnreadCount}
-        <small class="rail-unread">{compactBadgeCount(homeUnreadCount)}</small>
-      {/if}
-    </a>
-    <div class="spine-separator" aria-hidden="true"></div>
-    {#each guilds as guild (entityKey(guild))}
-      {@const mentionCount = guildUnread(guild)}
-      <a
-        href={guildLandingPath(guild)}
-        aria-label={mentionCount ? `${guild.name}, ${mentionCount} mentions` : guild.name}
-        title={guild.name}
-      >
-        {#if guild.icon_hash}
-          <img src={assetUrl(guild.icon_hash, 'thumbnail_128', guild)} alt="" />
-        {:else}
-          {guild.name.slice(0, 2).toUpperCase()}
-        {/if}
-        {#if mentionCount}<small class="rail-unread">{compactBadgeCount(mentionCount)}</small>{/if}
-      </a>
-    {/each}
-  </nav>
+  <GuildRail
+    {guilds}
+    homeHref={resolve('/home')}
+    homeActive
+    {homeUnreadCount}
+    guildHref={guildLandingPath}
+    mentionCount={guildUnread}
+  />
 
   {#if navigationOpen}
     <button
@@ -601,10 +618,12 @@
             {#if recipient?.avatar_hash}
               <img src={assetUrl(recipient.avatar_hash, 'thumbnail_128', recipient)} alt="" />
             {:else}
-              {recipient?.username.slice(0, 1).toUpperCase() ?? '?'}
+              {recipient?.profile_resolved === false
+                ? '•'
+                : (recipient?.username.slice(0, 1).toUpperCase() ?? '?')}
             {/if}
           </span>
-          <strong>{recipient?.display_name ?? recipient?.username ?? 'Conversation'}</strong>
+          <strong>{recipient ? userDisplayName(recipient) : 'Conversation'}</strong>
           {#if unreadFor(channel)?.unread}
             <small class="unread-badge">{Math.max(1, unreadFor(channel)?.mention_count ?? 0)}</small
             >
@@ -998,9 +1017,10 @@
           <button
             type="button"
             class:selected={handle.trim().replace(/^@/, '').toLocaleLowerCase() ===
-              friend.handle.replace(/^@/, '').toLocaleLowerCase()}
+              userPublicHandle(friend)?.replace(/^@/, '').toLocaleLowerCase()}
             aria-pressed={handle.trim().replace(/^@/, '').toLocaleLowerCase() ===
-              friend.handle.replace(/^@/, '').toLocaleLowerCase()}
+              userPublicHandle(friend)?.replace(/^@/, '').toLocaleLowerCase()}
+            disabled={!userPublicHandle(friend)}
             onclick={() => selectMessageFriend(friend)}
           >
             <span class="avatar avatar-small">
@@ -1011,12 +1031,18 @@
                   referrerpolicy="no-referrer"
                 />
               {:else}
-                {friend.username.slice(0, 1).toUpperCase()}
+                {friend.profile_resolved === false
+                  ? '•'
+                  : friend.username.slice(0, 1).toUpperCase()}
               {/if}
             </span>
             <span>
-              <strong>{friend.display_name ?? friend.username}</strong>
-              <small>@{friend.handle.replace(/^@/, '')}</small>
+              <strong>{userDisplayName(friend)}</strong>
+              <small
+                >{userPublicHandle(friend)
+                  ? `@${userPublicHandle(friend)?.replace(/^@/, '')}`
+                  : 'Profile unavailable'}</small
+              >
             </span>
             <Icon name="message" size={17} />
           </button>
@@ -1054,7 +1080,8 @@
     onClose={() => (profilePopover = null)}
     onMessage={(user) => {
       profilePopover = null;
-      void openDirectMessage(user.handle);
+      const publicHandle = userPublicHandle(user);
+      if (publicHandle) void openDirectMessage(publicHandle);
     }}
   />
 {/if}

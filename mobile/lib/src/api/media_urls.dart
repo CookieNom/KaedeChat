@@ -26,9 +26,23 @@ String? imageUploadContentType(String filename, {String? reportedType}) {
 /// Authenticated attachment bytes are served by the attachment's home
 /// instance through this path. The API client deliberately builds the origin
 /// from the signed-in instance and handles any object-storage redirect.
-String attachmentMediaPath(EntityRef attachment) =>
-    '/media/${Uri.encodeComponent(attachment.domain.value)}/'
-    '${Uri.encodeComponent(attachment.id.value)}/original';
+String attachmentMediaPath(
+  EntityRef attachment, {
+  String? historyMediaUrl,
+}) {
+  if (isSafeSameOriginMediaPath(historyMediaUrl)) return historyMediaUrl!;
+  return '/media/${Uri.encodeComponent(attachment.domain.value)}/'
+      '${Uri.encodeComponent(attachment.id.value)}/original';
+}
+
+/// Only local absolute paths may override the canonical media route. This
+/// keeps credentials on the signed-in Kaede API even for hostile federation
+/// payloads that try to supply a cross-host history URL.
+bool isSafeSameOriginMediaPath(String? value) =>
+    value != null &&
+    value.startsWith('/') &&
+    !value.startsWith('//') &&
+    !value.contains(r'\');
 
 /// The upload-status endpoint is hosted by the signed-in API and accepts the
 /// attachment snowflake, not its composite federation reference.

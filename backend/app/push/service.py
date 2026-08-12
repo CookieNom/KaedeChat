@@ -5,7 +5,7 @@ import base64
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
@@ -22,13 +22,10 @@ FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
 
 
 def decrypt_device_token(device: PushDevice, settings: Settings) -> str:
-    return cast(
-        str,
-        decrypt_secret(
-            device.token_encrypted,
-            settings.secret_key_bytes,
-            context=PUSH_TOKEN_CONTEXT,
-        ),
+    return decrypt_secret(
+        device.token_encrypted,
+        settings.secret_key_bytes,
+        context=PUSH_TOKEN_CONTEXT,
     )
 
 

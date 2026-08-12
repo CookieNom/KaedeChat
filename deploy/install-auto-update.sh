@@ -14,8 +14,10 @@ TIMER_FILE="$SYSTEMD_DIR/kaede-auto-update.timer"
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 
 safe_env_file() {
-  [[ -f $ENV_FILE && ! -L $ENV_FILE ]] || die ".env must be a regular, non-symlink file: $ENV_FILE"
-  [[ $(stat -c '%h' "$ENV_FILE") == 1 ]] || die '.env must not be hard-linked'
+  [[ -f $ENV_FILE && ! -L $ENV_FILE ]] || \
+    die ".env must be a regular, non-symlink file: $ENV_FILE. Run 'make setup' if it is missing"
+  [[ $(stat -c '%h' "$ENV_FILE") == 1 ]] || \
+    die ".env must not be hard-linked: $ENV_FILE. Replace it with a private regular file"
 }
 
 read_env() {
@@ -44,7 +46,8 @@ set_env() {
 }
 
 validate_duration() {
-  [[ $1 =~ ^[1-9][0-9]*(s|m|min|h|d|w)$ ]] || die "invalid systemd duration: $1"
+  [[ $1 =~ ^[1-9][0-9]*(s|m|min|h|d|w)$ ]] || \
+    die "AUTO_UPDATE_JITTER must be a positive systemd duration such as 30m; received '$1'"
 }
 
 systemctl_user() {
@@ -60,7 +63,8 @@ rollback_enable() {
 
 enable_timer() {
   safe_env_file
-  command -v systemctl >/dev/null || die 'systemd is required; use the documented cron fallback on this host'
+  command -v systemctl >/dev/null || \
+    die 'systemd is required for the timer; use the cron fallback documented in docs/operator.md on this host'
   [[ $ROOT =~ ^/[A-Za-z0-9_./-]+$ && $ROOT != *..* ]] || die 'repository path is unsafe for a systemd unit'
   local interval jitter calendar temporary_service temporary_timer
   interval=$(read_env AUTO_UPDATE_INTERVAL 6h)
@@ -81,19 +85,19 @@ enable_timer() {
   set_env AUTO_UPDATE_ENABLED true
   if ! "$ROOT/deploy/auto-update.sh" status >/dev/null; then
     set_env AUTO_UPDATE_ENABLED false
-    die 'automatic-update configuration is invalid; configuration was left disabled'
+    die "automatic-update configuration is invalid; correct the preceding error in $ENV_FILE, then run 'make auto-update-enable' again. Configuration was left disabled"
   fi
   local remote branch checked_out
   remote=$(read_env AUTO_UPDATE_REMOTE origin)
   branch=$(read_env AUTO_UPDATE_BRANCH main)
   if ! git -C "$ROOT" remote get-url "$remote" >/dev/null 2>&1; then
     set_env AUTO_UPDATE_ENABLED false
-    die "Git remote does not exist: $remote"
+    die "Git remote '$remote' does not exist; add it with 'git remote add $remote <repository-url>' or change AUTO_UPDATE_REMOTE"
   fi
   checked_out=$(git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   if [[ $checked_out != "$branch" ]]; then
     set_env AUTO_UPDATE_ENABLED false
-    die "check out the configured branch before enabling updates (expected $branch, found ${checked_out:-detached HEAD})"
+    die "check out the configured branch '$branch' before enabling updates (found '${checked_out:-detached HEAD}'), or change AUTO_UPDATE_BRANCH"
   fi
 
   mkdir -p "$SYSTEMD_DIR"
@@ -135,7 +139,7 @@ EOF
   mv -fT "$temporary_timer" "$TIMER_FILE"
   if ! systemctl_user daemon-reload || ! systemctl_user enable --now kaede-auto-update.timer; then
     rollback_enable
-    die 'could not enable the user timer; configuration was left disabled'
+    die "could not enable the user timer; configuration was left disabled. Run 'systemctl --user status kaede-auto-update.timer' and 'journalctl --user -u kaede-auto-update.timer' for details"
   fi
   printf 'Kaede automatic updates are enabled (%s with up to %s jitter).\n' "$interval" "$jitter"
   printf 'For updates while logged out, verify user lingering as documented in docs/operator.md.\n'

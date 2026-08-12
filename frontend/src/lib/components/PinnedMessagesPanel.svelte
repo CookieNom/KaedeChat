@@ -2,19 +2,22 @@
   import type { Message } from '$lib/chat/types';
   import { entityRef } from '$lib/chat/refs';
   import { preferredLocale } from '$lib/ui/locale';
+  import { userDisplayName } from '$lib/chat/users';
 
   let {
     messages,
     loading = false,
     error = '',
     onClose,
-    onJump
+    onJump,
+    onRetry
   }: {
     messages: Message[];
     loading?: boolean;
     error?: string;
     onClose: () => void;
     onJump: (message: Message) => void;
+    onRetry?: () => void;
   } = $props();
 </script>
 
@@ -31,7 +34,10 @@
     {#if loading}
       <p>Loading pinned messages…</p>
     {:else if error}
-      <p class="form-error">{error}</p>
+      <div role="alert">
+        <p class="form-error">{error}</p>
+        {#if onRetry}<button type="button" onclick={onRetry}>Try again</button>{/if}
+      </div>
     {:else if !messages.length}
       <div class="pinned-empty">
         <span aria-hidden="true">📌</span>
@@ -42,14 +48,12 @@
       {#each messages as message (entityRef(message))}
         <button class="pinned-message-card" type="button" onclick={() => onJump(message)}>
           <span class="pinned-message-avatar" aria-hidden="true"
-            >{message.author?.username.slice(0, 1).toUpperCase() ?? '•'}</span
+            >{message.author?.profile_resolved === false
+              ? '•'
+              : (message.author?.username.slice(0, 1).toUpperCase() ?? '•')}</span
           >
           <span>
-            <strong
-              >{message.author?.display_name ??
-                message.author?.username ??
-                'Unknown author'}</strong
-            >
+            <strong>{message.author ? userDisplayName(message.author) : 'Unknown author'}</strong>
             <time datetime={message.created_at}
               >{new Date(message.created_at).toLocaleString(preferredLocale(), {
                 dateStyle: 'medium',

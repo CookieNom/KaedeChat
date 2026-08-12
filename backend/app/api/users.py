@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from redis.asyncio import Redis
 from sqlalchemy import and_, exists, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import AuthenticatedUser, get_redis, get_session, require_user
-from app.auth.schemas import SettingsPatch
+from app.auth.schemas import (
+    GuildNavigationGuildItem,
+    GuildNavigationUpdate,
+    SettingsPatch,
+)
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.payloads import user_payload
 from app.chat.permissions import get_permissions
 from app.chat.presence import broadcast_presence_preference
 from app.chat.privacy import lock_dm_privacy
 from app.chat.schemas import ProfilePatch
+from app.core.guild_navigation import normalize_guild_navigation, parse_stored_guild_navigation
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.task_wake import enqueue_best_effort
@@ -32,6 +38,7 @@ from app.federation.users import resolve_handle
 from app.tasks import federation_deliver, federation_presence_fanout
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
+log = structlog.get_logger()
 
 
 @router.get("/lookup")
@@ -130,6 +137,94 @@ def settings_payload(settings: UserSettings) -> dict[str, object]:
         "presence_preference": presence_preference,
         "notification_settings": notification_settings,
     }
+
+
+async def accessible_guild_navigation_refs(
+    session: AsyncSession, auth: AuthenticatedUser
+) -> list[tuple[int, str]]:
+    rows = (
+        await session.execute(
+            select(Guild.id, Guild.origin_domain)
+            .join(
+                GuildMember,
+                (GuildMember.guild_id == Guild.id)
+                & (GuildMember.guild_domain == Guild.origin_domain),
+            )
+            .where(
+                GuildMember.user_id == auth.user.id,
+                GuildMember.user_domain == auth.user.origin_domain,
+            )
+            .order_by(func.lower(Guild.name), Guild.id, Guild.origin_domain)
+        )
+    ).all()
+    return [(guild_id, guild_domain) for guild_id, guild_domain in rows]
+
+
+@router.get("/@me/guild-navigation")
+async def get_guild_navigation(
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    account_settings = await load_settings(session, auth)
+    accessible = await accessible_guild_navigation_refs(session, auth)
+    return normalize_guild_navigation(
+        parse_stored_guild_navigation(account_settings.guild_navigation),
+        accessible,
+        settings.domain,
+    )
+
+
+@router.put("/@me/guild-navigation")
+async def put_guild_navigation(
+    payload: GuildNavigationUpdate,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    account_settings = await session.scalar(
+        select(UserSettings)
+        .where(
+            UserSettings.user_id == auth.user.id,
+            UserSettings.user_domain == auth.user.origin_domain,
+        )
+        .with_for_update()
+    )
+    if account_settings is None:
+        raise HTTPException(status_code=500, detail={"code": "SETTINGS_MISSING"})
+    accessible = await accessible_guild_navigation_refs(session, auth)
+    accessible_set = {f"{guild_id}@{domain}" for guild_id, domain in accessible}
+    requested: list[str] = []
+    for item in payload.items:
+        refs = (item.guild,) if isinstance(item, GuildNavigationGuildItem) else item.guilds
+        for raw in refs:
+            guild_id, domain = raw.resolve(settings.domain)
+            requested.append(f"{guild_id}@{domain}")
+    if len(requested) != len(set(requested)):
+        raise HTTPException(status_code=422, detail={"code": "GUILD_NAVIGATION_DUPLICATE_GUILD"})
+    if not set(requested).issubset(accessible_set):
+        raise HTTPException(status_code=409, detail={"code": "GUILD_NAVIGATION_GUILD_UNAVAILABLE"})
+    rendered = normalize_guild_navigation(payload, accessible, settings.domain)
+    account_settings.guild_navigation = rendered
+    await session.commit()
+    try:
+        await publish_dispatch(
+            redis,
+            user_topic(auth.user.origin_domain, auth.user.id),
+            "GUILD_NAVIGATION_UPDATE",
+            rendered,
+        )
+    except Exception:
+        # The durable account layout is already committed. Other clients can
+        # recover it on their next navigation refresh even if realtime fanout
+        # is temporarily unavailable.
+        log.exception(
+            "guild_navigation_dispatch_failed",
+            user_id=str(auth.user.id),
+            user_domain=auth.user.origin_domain,
+        )
+    return rendered
 
 
 @router.get("/@me/settings")

@@ -5,11 +5,15 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from pydantic import ValidationError
 from redis.asyncio import Redis
-from sqlalchemy import delete, func, or_, select, tuple_, update
+from sqlalchemy import delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.chat.events import publish_dispatch, user_topic
+from app.chat.payloads import user_payload
+from app.chat.privacy import lock_relationship_pair, relationship
+from app.core.dm import dm_pair_key
 from app.core.federation import (
     POLICY_HELD_OUTBOX_PREFIX,
     canonical_json,
@@ -25,12 +29,17 @@ from app.db.models import (
     Guild,
     GuildMember,
     Instance,
+    PeerKey,
+    RemoteMediaCache,
+    RemoteMediaTombstone,
     User,
 )
 from app.federation.client import signed_request
 from app.federation.link import FederationLinkError, send_link_batch
-from app.federation.network import ensure_peer
+from app.federation.network import decode_federation_response_json, ensure_peer
+from app.federation.schemas import DMOpenFederationRequest, RelationshipEventContent
 from app.federation.security import lock_block_policy_shared, matching_block
+from app.federation.storage import reconcile_federation_storage_usage
 
 BACKOFF_SECONDS = (5, 30, 120, 600, 1_800, 3_600)
 MAX_BATCH_EVENTS = 100
@@ -38,6 +47,30 @@ MAX_QUEUE_EVENTS = 50_000
 MAX_QUEUE_AGE = timedelta(days=7)
 MAX_EXPIRY_DESTINATIONS = 100
 _JITTER = secrets.SystemRandom()
+TERMINAL_RELATIONSHIP_CAPACITY_CODES = frozenset(
+    {
+        "KAED_FED_RELATIONSHIP_REQUEST_QUOTA_EXCEEDED",
+        "KAED_FED_IDENTITY_STORAGE_QUOTA_EXCEEDED",
+        "KAED_FED_INSTANCE_STORAGE_QUOTA_EXCEEDED",
+    }
+)
+TERMINAL_LOCAL_DELIVERY_CODES = frozenset(
+    {
+        "KAED_FED_DELIVERY_EXPIRED",
+        "KAED_FED_EVENT_TOO_LARGE",
+    }
+)
+
+
+class FederationOutboxCapacityExceeded(RuntimeError):
+    """A destination's bounded durable delivery queue is full."""
+
+    code = "FEDERATION_OUTBOX_CAPACITY_EXCEEDED"
+    federation_code = "KAED_FED_OUTBOX_CAPACITY_EXCEEDED"
+
+    def detail(self, *, federation: bool = False) -> dict[str, object]:
+        # Queue depth is operator-only data and must not become a peer oracle.
+        return {"code": self.federation_code if federation else self.code}
 
 
 def expired_guild_context(event: FederationEvent, local_domain: str) -> tuple[int, str] | None:
@@ -75,7 +108,7 @@ async def enforce_queue_limits(session: AsyncSession, destination: str) -> None:
         )
     )
     if int(pending or 0) >= MAX_QUEUE_EVENTS:
-        raise RuntimeError("federation outbox destination cap reached")
+        raise FederationOutboxCapacityExceeded("federation outbox destination cap reached")
 
 
 async def lock_outbox_destinations(session: AsyncSession, destinations: Iterable[str]) -> None:
@@ -86,6 +119,151 @@ async def lock_outbox_destinations(session: AsyncSession, destinations: Iterable
             select(
                 func.pg_advisory_xact_lock(func.hashtextextended(f"kaede-outbox:{destination}", 0))
             )
+        )
+
+
+async def reconcile_relationship_capacity_rejection(
+    session: AsyncSession,
+    settings: Settings,
+    event: FederationEvent,
+    code: str,
+) -> tuple[User, User] | None:
+    """Remove only the exact pending request that terminally failed delivery.
+
+    A late rejection must never erase a newer request, an accepted friendship,
+    or a block. The relationship-pair lock serializes this comparison with all
+    user actions that can replace that state.
+    """
+
+    # relationships imports events (which imports this module), so keep this
+    # small pure matcher import local to avoid an import cycle at startup.
+    from app.federation.relationships import acceptance_matches
+
+    if (
+        event.event_type != "relationship.request"
+        or code not in TERMINAL_RELATIONSHIP_CAPACITY_CODES | TERMINAL_LOCAL_DELIVERY_CODES
+    ):
+        return None
+    envelope = event.envelope
+    raw_actor = envelope.get("actor")
+    try:
+        content = RelationshipEventContent.model_validate(envelope.get("content"))
+        if not isinstance(raw_actor, dict):
+            return None
+        actor_id = int(content.actor.id)
+        target_id = int(content.target.id)
+    except (TypeError, ValueError):
+        return None
+    if (
+        content.request_id is None
+        or content.actor.origin_domain != settings.domain
+        or raw_actor.get("id") != content.actor.id
+        or raw_actor.get("domain") != content.actor.origin_domain
+    ):
+        return None
+    actor = await session.get(User, (actor_id, content.actor.origin_domain))
+    target = await session.get(User, (target_id, content.target.domain))
+    if actor is None or not actor.is_local or target is None:
+        return None
+    await lock_relationship_pair(session, actor, target)
+    current = await relationship(session, actor, target)
+    if current is None or not acceptance_matches(
+        current.type,
+        current.request_id,
+        content.request_id,
+    ):
+        return None
+    await session.delete(current)
+    return actor, target
+
+
+def dm_open_failure_target(
+    settings: Settings,
+    event: FederationEvent,
+    code: str,
+) -> tuple[int, str, dict[str, object]] | None:
+    """Return the local initiator and safe payload for a failed queued DM open."""
+
+    if event.event_type != "dm.open.request":
+        return None
+    envelope = event.envelope
+    raw_actor = envelope.get("actor")
+    raw_content = envelope.get("content")
+    if not isinstance(raw_actor, dict) or not isinstance(raw_content, dict):
+        return None
+    raw_actor_id = raw_actor.get("id")
+    raw_actor_domain = raw_actor.get("domain")
+    if (
+        isinstance(raw_actor_id, bool)
+        or not isinstance(raw_actor_id, (str, int))
+        or not isinstance(raw_actor_domain, str)
+    ):
+        return None
+    try:
+        actor_id = int(raw_actor_id)
+        actor_domain = raw_actor_domain
+        request = DMOpenFederationRequest.model_validate(
+            {"participants": raw_content.get("participants")}
+        )
+        expected_pair_key = dm_pair_key(
+            *(f"{profile.username}@{profile.origin_domain}" for profile in request.participants)
+        )
+    except (TypeError, ValidationError, ValueError):
+        return None
+    if actor_domain != settings.domain or not any(
+        int(profile.id) == actor_id and profile.origin_domain == actor_domain
+        for profile in request.participants
+    ):
+        return None
+    if raw_content.get("pair_key") != expected_pair_key:
+        return None
+    return (
+        actor_id,
+        actor_domain,
+        {"pair_key": expected_pair_key, "code": code},
+    )
+
+
+async def publish_terminal_outbox_failure(
+    redis: Redis,
+    settings: Settings,
+    event: FederationEvent,
+    destination: str,
+    code: str,
+    relationship_result: tuple[User, User] | None,
+) -> None:
+    """Resolve optimistic client state after a durable terminal failure."""
+
+    await publish_dm_delivery_update(
+        redis,
+        settings,
+        event,
+        destination,
+        "failed",
+        code,
+    )
+    if relationship_result is not None:
+        actor, target = relationship_result
+        await publish_dispatch(
+            redis,
+            user_topic(actor.origin_domain, actor.id),
+            "USER_UPDATE",
+            {
+                "relationship": {
+                    "type": "none",
+                    "user": user_payload(target),
+                    "error_code": code,
+                }
+            },
+        )
+    dm_open = dm_open_failure_target(settings, event, code)
+    if dm_open is not None:
+        actor_id, actor_domain, payload = dm_open
+        await publish_dispatch(
+            redis,
+            user_topic(actor_domain, actor_id),
+            "DM_OPEN_REJECTED",
+            payload,
         )
 
 
@@ -102,13 +280,18 @@ async def drain_destination(
         # concurrent Taskiq jobs claim later batches and deliver them before an
         # earlier batch. Serialize drains per peer so DM references and guild
         # sequence events cannot overtake one another.
-        await session.scalar(
+        admitted = await session.scalar(
             select(
-                func.pg_advisory_xact_lock(
+                func.pg_try_advisory_xact_lock(
                     func.hashtextextended(f"kaede-outbox-drain:{destination}", 0)
                 )
             )
         )
+        if admitted is not True:
+            # Duplicate wakeups are normal. Never let them queue while holding
+            # separate DB connections behind a slow destination; the active
+            # drainer or periodic sweep will process the ordered stream.
+            return 0
         rows = list(
             await session.scalars(
                 select(FederationOutbox)
@@ -175,11 +358,32 @@ async def drain_destination(
         if not rows:
             oversized = claimed_rows[0]
             oversized.status = "failed"
-            oversized.last_error = "event exceeds the 1 MiB federation transport limit"
+            oversized.last_error = "KAED_FED_EVENT_TOO_LARGE"
+            oversized_event = by_ref.get((oversized.event_origin_domain, oversized.event_id))
+            relationship_result = (
+                await reconcile_relationship_capacity_rejection(
+                    session,
+                    settings,
+                    oversized_event,
+                    oversized.last_error,
+                )
+                if oversized_event is not None
+                else None
+            )
             await session.commit()
+            if redis is not None and oversized_event is not None:
+                await publish_terminal_outbox_failure(
+                    redis,
+                    settings,
+                    oversized_event,
+                    oversized.destination,
+                    oversized.last_error,
+                    relationship_result,
+                )
             return 0
         payload = {"events": bounded_events}
         retry_override: timedelta | None = None
+        response_payload: object
         try:
             if any(row.status == "circuit" for row in rows):
                 await ensure_peer(session, settings, destination, force=True)
@@ -201,7 +405,7 @@ async def drain_destination(
                     request_timeout=15,
                 )
                 response.raise_for_status()
-                response_payload = response.json()
+                response_payload = decode_federation_response_json(response)
             if not isinstance(response_payload, dict):
                 raise ValueError("peer returned an invalid inbox response")
             raw_results = response_payload.get("results")
@@ -238,6 +442,7 @@ async def drain_destination(
             return 0
         delivered = 0
         delivery_updates: list[tuple[FederationEvent, str, str | None]] = []
+        relationship_rejections: dict[tuple[int, str, int, str], tuple[User, User, str]] = {}
         for row in rows:
             result = results.get(row.event_id)
             status = result.get("status") if result else None
@@ -255,12 +460,26 @@ async def drain_destination(
                 event = by_ref.get((row.event_origin_domain, row.event_id))
                 if event is not None:
                     delivery_updates.append((event, "failed", row.last_error))
+                    reconciled = await reconcile_relationship_capacity_rejection(
+                        session,
+                        settings,
+                        event,
+                        row.last_error,
+                    )
+                    if reconciled is not None:
+                        actor, target = reconciled
+                        relationship_rejections[
+                            (actor.id, actor.origin_domain, target.id, target.origin_domain)
+                        ] = (actor, target, row.last_error)
             else:
                 await increment_metric(redis, "federation_delivery_failures")
                 row.attempts += 1
                 row.status = "retry"
                 row.next_retry_at = now + retry_delay(row.attempts)
                 row.last_error = str((result or {}).get("code") or "missing result")[:500]
+                event = by_ref.get((row.event_origin_domain, row.event_id))
+                if event is not None:
+                    delivery_updates.append((event, "retrying", row.last_error))
         instance = await session.get(Instance, destination)
         if instance is not None:
             instance.last_seen_at = now
@@ -277,6 +496,19 @@ async def drain_destination(
                     destination,
                     delivery_status,
                     code,
+                )
+            for actor, target, code in relationship_rejections.values():
+                await publish_dispatch(
+                    redis,
+                    user_topic(actor.origin_domain, actor.id),
+                    "USER_UPDATE",
+                    {
+                        "relationship": {
+                            "type": "none",
+                            "user": user_payload(target),
+                            "error_code": code,
+                        }
+                    },
                 )
         return delivered
 
@@ -394,13 +626,25 @@ async def expire_stale_outbox(
         )
     }
     resync_targets: set[tuple[str, int, str]] = set()
+    relationship_failures: dict[tuple[str, str, str], tuple[User, User]] = {}
     for row in stale_rows:
         row.status = "expired"
-        row.last_error = "delivery window expired; guild destinations must gap-fill"
+        row.last_error = "KAED_FED_DELIVERY_EXPIRED"
         event = stale_events.get((row.event_origin_domain, row.event_id))
         context = expired_guild_context(event, settings.domain) if event and settings else None
         if context is not None:
             resync_targets.add((row.destination, context[0], context[1]))
+        if event is not None and settings is not None:
+            reconciled = await reconcile_relationship_capacity_rejection(
+                session,
+                settings,
+                event,
+                row.last_error,
+            )
+            if reconciled is not None:
+                relationship_failures[(row.event_origin_domain, row.event_id, row.destination)] = (
+                    reconciled
+                )
 
     if settings is not None:
         # Import lazily: events imports this module's queue-limit helper.
@@ -450,23 +694,74 @@ async def expire_stale_outbox(
         for row in stale_rows:
             event = stale_events.get((row.event_origin_domain, row.event_id))
             if event is not None:
-                await publish_dm_delivery_update(
+                await publish_terminal_outbox_failure(
                     redis,
                     settings,
                     event,
                     row.destination,
-                    "failed",
                     "KAED_FED_DELIVERY_EXPIRED",
+                    relationship_failures.get(
+                        (row.event_origin_domain, row.event_id, row.destination)
+                    ),
                 )
     return len(stale_rows)
 
 
 async def cleanup_federation_retention(session: AsyncSession, settings: Settings) -> int:
+    # Only one retention sweep may delete and reconcile quota accounting at a
+    # time. Event admission serializes per peer, while this daily repair also
+    # corrects counters after interrupted migrations or operator maintenance.
+    await session.scalar(
+        select(func.pg_advisory_xact_lock(func.hashtextextended("kaede-federation-retention", 0)))
+    )
+    # Admission takes the self/global ledger before an origin row. Keep that
+    # order while retention rebuilds both counters so the sweep cannot deadlock
+    # a concurrent accepted event or omit it from its database snapshot.
+    await session.execute(
+        select(Instance.domain).where(Instance.is_self.is_(True)).with_for_update()
+    )
+    await session.execute(
+        select(Instance.domain)
+        .where(Instance.is_self.is_(False))
+        .order_by(Instance.domain)
+        .with_for_update()
+    )
     now = datetime.now(UTC)
     inbox_cutoff = now - timedelta(days=settings.federation_event_retention_days)
     events = await session.execute(delete(FederationEvent).where(FederationEvent.expires_at < now))
     inbox = await session.execute(
-        delete(FederationInbox).where(FederationInbox.received_at < inbox_cutoff)
+        delete(FederationInbox).where(
+            FederationInbox.received_at < inbox_cutoff,
+            ~exists(
+                select(FederationEvent.event_id).where(
+                    FederationEvent.origin_domain == FederationInbox.origin_domain,
+                    FederationEvent.event_id == FederationInbox.event_id,
+                )
+            ),
+        )
     )
+    keys = await session.execute(
+        delete(PeerKey).where(
+            PeerKey.expired_at.is_not(None),
+            PeerKey.expired_at < inbox_cutoff,
+        )
+    )
+    tombstones = await session.execute(
+        delete(RemoteMediaTombstone).where(
+            RemoteMediaTombstone.expires_at < now,
+            ~exists(
+                select(RemoteMediaCache.attachment_id).where(
+                    RemoteMediaCache.origin_domain == RemoteMediaTombstone.origin_domain,
+                    RemoteMediaCache.attachment_id == RemoteMediaTombstone.attachment_id,
+                )
+            ),
+        )
+    )
+    await reconcile_federation_storage_usage(session)
     await session.commit()
-    return int(events.rowcount or 0) + int(inbox.rowcount or 0)  # type: ignore[attr-defined]
+    return (
+        int(getattr(events, "rowcount", 0) or 0)
+        + int(getattr(inbox, "rowcount", 0) or 0)
+        + int(getattr(keys, "rowcount", 0) or 0)
+        + int(getattr(tombstones, "rowcount", 0) or 0)
+    )

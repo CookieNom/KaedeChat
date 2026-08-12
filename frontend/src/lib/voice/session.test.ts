@@ -25,6 +25,11 @@ describe('voice grant validation', () => {
     expect(isUsableVoiceToken(grant(), Date.parse('2026-07-19T12:15:00Z'))).toBe(false);
     expect(isUsableVoiceToken(grant({ url: 'https://chat.example/livekit' }), 0)).toBe(false);
     expect(isUsableVoiceToken(grant({ room: '../g.1.2' }), 0)).toBe(false);
+    expect(isUsableVoiceToken(grant({ move_session_id: 'too-short' }), 0)).toBe(false);
+    expect(isUsableVoiceToken(grant({ move_session_id: '!'.repeat(32) }), 0)).toBe(false);
+    expect(
+      isUsableVoiceToken(grant({ move_session_id: ['a'.repeat(32)] as unknown as string }), 0)
+    ).toBe(false);
   });
 });
 

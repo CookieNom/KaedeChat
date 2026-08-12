@@ -4,6 +4,7 @@ import base64
 import re
 import secrets
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -24,6 +25,7 @@ from app.core.federation import (
     verify_envelope,
     verify_request,
 )
+from app.core.json_limits import strict_json_loads
 from app.core.proxy import resolve_client_ip
 from app.core.settings import Settings, get_settings
 from app.db.models import Instance, InstanceBlock, PeerKey
@@ -38,6 +40,7 @@ from app.federation.schemas import KEY_ID_RE, EventEnvelope
 AUTHORIZATION_RE = re.compile(
     r'^Kaede origin="(?P<origin>[^"]+)",key="(?P<key>[^"]+)",sig="(?P<sig>[^"]+)"$'
 )
+REQUEST_NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{22,64}$")
 MAX_FEDERATION_REQUEST_BYTES = 1024 * 1024
 RATE_LIMIT_LUA = """
 local key = KEYS[1]
@@ -64,6 +67,25 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
 end
 return 0
 """
+LINK_FRAME_RATE_LUA = """
+local function charge(key, now, capacity, refill_per_ms, cost)
+  local values = redis.call('HMGET', key, 'tokens', 'updated')
+  local tokens = tonumber(values[1]) or capacity
+  local updated = tonumber(values[2]) or now
+  tokens = math.min(capacity, tokens + math.max(0, now - updated) * refill_per_ms)
+  if tokens < cost then
+    redis.call('HSET', key, 'tokens', tokens, 'updated', now)
+    redis.call('PEXPIRE', key, math.ceil(capacity / refill_per_ms))
+    return 0
+  end
+  redis.call('HSET', key, 'tokens', tokens - cost, 'updated', now)
+  redis.call('PEXPIRE', key, math.ceil(capacity / refill_per_ms))
+  return 1
+end
+local frames = charge(KEYS[1], tonumber(ARGV[1]), 120, 0.05, 1)
+local bytes = charge(KEYS[2], tonumber(ARGV[1]), 8388608, 2097.152, tonumber(ARGV[2]))
+return {frames, bytes}
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +93,44 @@ class FederationPrincipal:
     origin: str
     key_id: str
     silenced: bool = False
+    source_ip: str | None = None
+
+
+def federation_request_nonce(headers: Mapping[str, str]) -> str | None:
+    version = headers.get("X-Kaede-Version")
+    raw_nonce = headers.get("X-Kaede-Nonce")
+    if version == "1":
+        if raw_nonce is not None:
+            raise HTTPException(status_code=400, detail={"code": "KAED_FED_BAD_NONCE"})
+        return None
+    if version != "2":
+        raise HTTPException(status_code=400, detail={"code": "KAED_FED_UNSUPPORTED_VERSION"})
+    if raw_nonce is None or REQUEST_NONCE_RE.fullmatch(raw_nonce) is None:
+        raise HTTPException(status_code=400, detail={"code": "KAED_FED_BAD_NONCE"})
+    return raw_nonce
+
+
+def require_pinned_request_nonce(instance: Instance | None, nonce: str | None) -> None:
+    if instance is not None and "request-nonce/1" in instance.capabilities and nonce is None:
+        raise HTTPException(status_code=401, detail={"code": "KAED_FED_NONCE_REQUIRED"})
+
+
+async def consume_request_nonce(
+    redis: Redis,
+    settings: Settings,
+    origin: str,
+    nonce: str | None,
+) -> None:
+    if nonce is None:
+        return
+    accepted = await redis.set(
+        f"federation:request-nonce:{origin}:{nonce}",
+        "1",
+        ex=settings.federation_clock_skew_seconds * 2 + 60,
+        nx=True,
+    )
+    if not accepted:
+        raise HTTPException(status_code=409, detail={"code": "KAED_FED_REPLAYED_REQUEST"})
 
 
 async def lock_block_policy_shared(session: AsyncSession) -> None:
@@ -243,6 +303,37 @@ async def enforce_origin_event_rate_limit(redis: Redis, origin: str, cost: int) 
         )
 
 
+async def enforce_federation_link_frame_rate_limit(
+    redis: Redis,
+    origin: str,
+    byte_length: int,
+) -> None:
+    """Bound authenticated hot-link frames and bytes before JSON parsing."""
+
+    if not 0 <= byte_length <= MAX_FEDERATION_REQUEST_BYTES * 4:
+        raise HTTPException(status_code=429, detail={"code": "KAED_RATE_LIMITED"})
+    now_ms = int(time.time() * 1000)
+    result = await cast(Any, redis.eval)(
+        LINK_FRAME_RATE_LUA,
+        2,
+        f"federation:link-frame-rate:{origin}",
+        f"federation:link-byte-rate:{origin}",
+        str(now_ms),
+        str(byte_length),
+    )
+    if (
+        not isinstance(result, (list, tuple))
+        or len(result) != 2
+        or int(result[0]) != 1
+        or int(result[1]) != 1
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "KAED_RATE_LIMITED", "retry_after_ms": 1_000},
+            headers={"Retry-After": "1"},
+        )
+
+
 async def enforce_federation_route_rate_limit(
     redis: Redis,
     origin: str,
@@ -344,6 +435,50 @@ async def admit_unknown_key_refresh(redis: Redis, source_ip: str, origin: str) -
     return True
 
 
+async def refresh_event_signing_keys(
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+    principal: FederationPrincipal,
+    key_id: str,
+) -> bool:
+    """Refresh one unknown durable-event key without allowing discovery amplification.
+
+    ``False`` means the sender should retry later: another worker may own the
+    refresh, a recent network miss is cached, or the stricter discovery bucket
+    is exhausted. A completed refresh returns ``True`` even when the requested
+    key is absent so the caller can terminally reject that signed envelope.
+    """
+
+    if principal.source_ip is None:
+        return False
+    miss_key = f"federation:key-refresh:miss:{principal.origin}:{key_id}"
+    if await redis.exists(miss_key):
+        return False
+    try:
+        await admit_unknown_key_refresh(redis, principal.source_ip, principal.origin)
+    except HTTPException:
+        return False
+    refresh_lock = f"federation:key-refresh:lock:{principal.origin}"
+    refresh_owner = secrets.token_urlsafe(16)
+    if not await redis.set(refresh_lock, refresh_owner, ex=30, nx=True):
+        return False
+    try:
+        try:
+            await ensure_peer(session, settings, principal.origin, force=True)
+        except FederationNetworkError:
+            await redis.set(miss_key, "1", ex=300)
+            return False
+    finally:
+        await cast(Any, redis.eval)(
+            RELEASE_REFRESH_LOCK_SCRIPT,
+            1,
+            refresh_lock,
+            refresh_owner,
+        )
+    return True
+
+
 async def validated_event_envelope(
     session: AsyncSession,
     settings: Settings,
@@ -425,8 +560,7 @@ async def authenticate_federation(
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_BAD_SIGNATURE"}) from None
     if abs(int(time.time()) - timestamp) > settings.federation_clock_skew_seconds:
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_CLOCK_SKEW"})
-    if request.headers.get("X-Kaede-Version") != "1":
-        raise HTTPException(status_code=400, detail={"code": "KAED_FED_UNSUPPORTED_VERSION"})
+    nonce = federation_request_nonce(request.headers)
     source_ip = federation_client_ip(request, settings)
     await enforce_federation_source_rate_limit(redis, source_ip)
     await lock_block_policy_shared(session)
@@ -475,6 +609,8 @@ async def authenticate_federation(
     if peer_key is None or peer_key.expired_at is not None:
         await redis.set(f"federation:key-refresh:miss:{origin}:{key_id}", "1", ex=300)
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_UNKNOWN_KEY"})
+    instance = await session.get(Instance, origin, populate_existing=True)
+    require_pinned_request_nonce(instance, nonce)
     signing_input = SigningInput(
         method=request.method,
         request_target=canonical_request_target(request.url.path, request.url.query),
@@ -482,17 +618,31 @@ async def authenticate_federation(
         destination=settings.domain,
         timestamp=timestamp,
         content_hash=content_sha256(body),
+        nonce=nonce,
     )
     public_key = Ed25519PublicKey.from_public_bytes(peer_key.public_key)
     if not verify_request(signing_input, signature, public_key):
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_BAD_SIGNATURE"})
+    # Charge the authenticated peer before allocating its per-request replay
+    # key. This bounds nonce-key growth across a peer's source IPs, including
+    # signed requests that are later rejected as malformed or replayed.
+    await enforce_origin_rate_limit(redis, origin)
+    await consume_request_nonce(redis, settings, origin, nonce)
+    if body:
+        try:
+            if not hasattr(request.state, "federation_json"):
+                request.state.federation_json = strict_json_loads(body)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "KAED_FED_INVALID_JSON"},
+            ) from None
     try:
         hop = int(request.headers.get("X-Kaede-Hop", "0"))
     except ValueError:
         raise HTTPException(status_code=400, detail={"code": "KAED_FED_HOP_LIMIT"}) from None
     if not 0 <= hop <= 5:
         raise HTTPException(status_code=508, detail={"code": "KAED_FED_HOP_LIMIT"})
-    await enforce_origin_rate_limit(redis, origin)
     instance = await session.get(Instance, origin)
     if instance is not None:
         instance.last_seen_at = datetime.now(UTC)
@@ -507,9 +657,10 @@ async def authenticate_federation(
     if current_block is not None and current_block.level == "suspend":
         raise HTTPException(status_code=403, detail={"code": "KAED_FED_INSTANCE_SUSPENDED"})
     return FederationPrincipal(
-        origin,
-        key_id,
-        current_block is not None and current_block.level == "silence",
+        origin=origin,
+        key_id=key_id,
+        silenced=current_block is not None and current_block.level == "silence",
+        source_ip=source_ip,
     )
 
 
@@ -536,8 +687,7 @@ async def authenticate_federation_websocket(
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_BAD_SIGNATURE"}) from None
     if abs(int(time.time()) - timestamp) > settings.federation_clock_skew_seconds:
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_CLOCK_SKEW"})
-    if websocket.headers.get("X-Kaede-Version") != "1":
-        raise HTTPException(status_code=400, detail={"code": "KAED_FED_UNSUPPORTED_VERSION"})
+    nonce = federation_request_nonce(websocket.headers)
     source_ip = federation_websocket_client_ip(websocket, settings)
     await enforce_federation_source_rate_limit(redis, source_ip)
     await lock_block_policy_shared(session)
@@ -580,6 +730,8 @@ async def authenticate_federation_websocket(
         peer_key = await session.get(PeerKey, (origin, key_id), populate_existing=True)
     if peer_key is None or peer_key.expired_at is not None:
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_UNKNOWN_KEY"})
+    instance = await session.get(Instance, origin, populate_existing=True)
+    require_pinned_request_nonce(instance, nonce)
     signing_input = SigningInput(
         method="GET",
         request_target=canonical_request_target(websocket.url.path, websocket.url.query),
@@ -587,17 +739,21 @@ async def authenticate_federation_websocket(
         destination=settings.domain,
         timestamp=timestamp,
         content_hash=content_sha256(b""),
+        nonce=nonce,
     )
     public_key = Ed25519PublicKey.from_public_bytes(peer_key.public_key)
     if not verify_request(signing_input, signature, public_key):
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_BAD_SIGNATURE"})
+    # Keep replay-key memory bounded by the authenticated-origin bucket even
+    # when an attacker spreads signed upgrades over many source addresses.
+    await enforce_origin_rate_limit(redis, origin)
+    await consume_request_nonce(redis, settings, origin, nonce)
     try:
         hop = int(websocket.headers.get("X-Kaede-Hop", "0"))
     except ValueError:
         raise HTTPException(status_code=400, detail={"code": "KAED_FED_HOP_LIMIT"}) from None
     if not 0 <= hop <= 5:
         raise HTTPException(status_code=508, detail={"code": "KAED_FED_HOP_LIMIT"})
-    await enforce_origin_rate_limit(redis, origin)
     if instance is not None:
         instance.last_seen_at = datetime.now(UTC)
     await session.commit()
@@ -606,9 +762,10 @@ async def authenticate_federation_websocket(
     if current_block is not None and current_block.level == "suspend":
         raise HTTPException(status_code=403, detail={"code": "KAED_FED_INSTANCE_SUSPENDED"})
     return FederationPrincipal(
-        origin,
-        key_id,
-        current_block is not None and current_block.level == "silence",
+        origin=origin,
+        key_id=key_id,
+        silenced=current_block is not None and current_block.level == "silence",
+        source_ip=source_ip,
     )
 
 

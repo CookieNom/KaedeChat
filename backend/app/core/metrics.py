@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.settings import get_settings
-from app.db.models import FederationOutbox
+from app.db.models import FederationOutbox, FederationReplicaUsage, Guild, Instance
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -78,6 +78,7 @@ def _sample(name: str, value: int | float, *, labels: dict[str, str] | None = No
 
 
 async def render_metrics(redis: Redis, sessionmaker: async_sessionmaker[AsyncSession]) -> str:
+    settings = get_settings()
     connected = 0
     async for _key in redis.scan_iter(match="gateway:connection-owner:*", count=1000):
         connected += 1
@@ -92,7 +93,32 @@ async def render_metrics(redis: Redis, sessionmaker: async_sessionmaker[AsyncSes
                 )
             )
         ).one()
+        retained_events, retained_bytes = (
+            await session.execute(
+                select(
+                    func.coalesce(func.sum(Instance.federation_inbox_events), 0),
+                    func.coalesce(func.sum(Instance.federation_inbox_event_bytes), 0),
+                ).where(Instance.is_self.is_(False))
+            )
+        ).one()
+        replica_rows, replica_bytes, quota_paused_guilds = (
+            await session.execute(
+                select(
+                    func.coalesce(func.sum(FederationReplicaUsage.total_rows), 0),
+                    func.coalesce(func.sum(FederationReplicaUsage.total_bytes), 0),
+                    select(func.count(Guild.id))
+                    .where(Guild.sync_status == "quota_paused")
+                    .scalar_subquery(),
+                )
+            )
+        ).one()
     failure_total = int(await redis.get("metrics:counter:federation_delivery_failures") or 0)
+    quota_rejections = int(
+        await redis.get("metrics:counter:federation_inbox_quota_rejections") or 0
+    )
+    media_cache_quota_rejections = int(
+        await redis.get("metrics:counter:federation_remote_media_cache_quota_rejections") or 0
+    )
     raw_jobs = await redis.hgetall("metrics:jobs")  # type: ignore[misc]
     jobs: dict[str, dict[str, int]] = {}
     for raw_key, raw_value in raw_jobs.items():
@@ -117,6 +143,56 @@ async def render_metrics(redis: Redis, sessionmaker: async_sessionmaker[AsyncSes
         "# HELP kaede_federation_delivery_failures_total Failed federation delivery attempts.",
         "# TYPE kaede_federation_delivery_failures_total counter",
         _sample("kaede_federation_delivery_failures_total", failure_total),
+        "# HELP kaede_federation_inbox_retained_events "
+        "Retained remote federation idempotency rows.",
+        "# TYPE kaede_federation_inbox_retained_events gauge",
+        _sample("kaede_federation_inbox_retained_events", int(retained_events or 0)),
+        "# HELP kaede_federation_inbox_retained_bytes Retained canonical remote event bytes.",
+        "# TYPE kaede_federation_inbox_retained_bytes gauge",
+        _sample("kaede_federation_inbox_retained_bytes", int(retained_bytes or 0)),
+        "# HELP kaede_federation_inbox_capacity_events Configured instance-wide inbox row limit.",
+        "# TYPE kaede_federation_inbox_capacity_events gauge",
+        _sample(
+            "kaede_federation_inbox_capacity_events",
+            settings.federation_inbox_max_events_total,
+        ),
+        "# HELP kaede_federation_inbox_capacity_bytes Configured instance-wide inbox byte limit.",
+        "# TYPE kaede_federation_inbox_capacity_bytes gauge",
+        _sample(
+            "kaede_federation_inbox_capacity_bytes",
+            settings.federation_inbox_max_bytes_total,
+        ),
+        "# HELP kaede_federation_inbox_quota_rejections_total "
+        "Events deferred by retained federation storage quotas.",
+        "# TYPE kaede_federation_inbox_quota_rejections_total counter",
+        _sample("kaede_federation_inbox_quota_rejections_total", quota_rejections),
+        "# HELP kaede_federation_replica_retained_rows Trigger-accounted remote guild rows.",
+        "# TYPE kaede_federation_replica_retained_rows gauge",
+        _sample("kaede_federation_replica_retained_rows", int(replica_rows or 0)),
+        "# HELP kaede_federation_replica_retained_bytes Estimated remote guild SQL bytes.",
+        "# TYPE kaede_federation_replica_retained_bytes gauge",
+        _sample("kaede_federation_replica_retained_bytes", int(replica_bytes or 0)),
+        "# HELP kaede_federation_replica_quota_paused_guilds "
+        "Remote guilds paused by storage limits.",
+        "# TYPE kaede_federation_replica_quota_paused_guilds gauge",
+        _sample(
+            "kaede_federation_replica_quota_paused_guilds",
+            int(quota_paused_guilds or 0),
+        ),
+        "# HELP kaede_federation_remote_media_cache_capacity_bytes "
+        "Configured retained remote-media LRU ceiling.",
+        "# TYPE kaede_federation_remote_media_cache_capacity_bytes gauge",
+        _sample(
+            "kaede_federation_remote_media_cache_capacity_bytes",
+            settings.media_remote_cache_bytes,
+        ),
+        "# HELP kaede_federation_remote_media_cache_quota_rejections_total "
+        "Remote-media cache admissions deferred at the hard ceiling.",
+        "# TYPE kaede_federation_remote_media_cache_quota_rejections_total counter",
+        _sample(
+            "kaede_federation_remote_media_cache_quota_rejections_total",
+            media_cache_quota_rejections,
+        ),
         "# HELP kaede_job_duration_seconds_total Cumulative observed task duration.",
         "# TYPE kaede_job_duration_seconds_total counter",
         "# HELP kaede_job_runs_total Observed task executions.",

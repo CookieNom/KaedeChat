@@ -5,6 +5,7 @@
     items,
     renderItem,
     empty,
+    historyStart,
     hasEarlier = false,
     loadingEarlier = false,
     hasLater = false,
@@ -18,6 +19,8 @@
     items: T[];
     renderItem: Snippet<[item: T, index: number]>;
     empty?: Snippet;
+    /** Optional explanation shown at the oldest retained history boundary. */
+    historyStart?: Snippet;
     hasEarlier?: boolean;
     loadingEarlier?: boolean;
     hasLater?: boolean;
@@ -172,6 +175,8 @@
         <button class="history-button" disabled={loadingEarlier} onclick={loadEarlierAnchored}>
           {loadingEarlier ? 'Loading…' : 'Load earlier messages'}
         </button>
+      {:else if items.length && historyStart}
+        {@render historyStart()}
       {/if}
       {#if !items.length && empty}{@render empty()}{/if}
       {#each items as item, index (item.key)}

@@ -154,4 +154,71 @@ describe('chat completion races', () => {
       retryable: false
     });
   });
+
+  it('explains a remote DM capacity rejection on the failed message', () => {
+    const applied = applyMessageDeliveryUpdate([message('12', 'a')], {
+      message_id: '12',
+      message_domain: 'chat.example',
+      channel_id: '1',
+      channel_domain: 'chat.example',
+      status: 'failed',
+      code: 'KAED_FED_DM_STORAGE_QUOTA_EXCEEDED'
+    });
+
+    expect(applied.messages[0]).toMatchObject({
+      failed: true,
+      failure_reason: expect.stringContaining('receiving instance is out of direct-message cache'),
+      retryable: true
+    });
+  });
+
+  it('resolves terminal federation delivery failures with actionable retry state', () => {
+    const expired = applyMessageDeliveryUpdate([message('12', 'a')], {
+      message_id: '12',
+      message_domain: 'chat.example',
+      channel_id: '1',
+      channel_domain: 'chat.example',
+      status: 'failed',
+      code: 'KAED_FED_DELIVERY_EXPIRED'
+    });
+    expect(expired.messages[0]).toMatchObject({
+      failed: true,
+      failure_reason: expect.stringContaining('delivery window ended'),
+      retryable: true
+    });
+
+    const oversized = applyMessageDeliveryUpdate([message('13', 'b')], {
+      message_id: '13',
+      message_domain: 'chat.example',
+      channel_id: '1',
+      channel_domain: 'chat.example',
+      status: 'failed',
+      code: 'KAED_FED_EVENT_TOO_LARGE'
+    });
+    expect(oversized.messages[0]).toMatchObject({
+      failed: true,
+      failure_reason: expect.stringContaining('too large'),
+      retryable: false
+    });
+  });
+
+  it('explains remote identity capacity and keeps automatic retries non-actionable', () => {
+    const applied = applyMessageDeliveryUpdate([message('12', 'a')], {
+      message_id: '12',
+      message_domain: 'chat.example',
+      channel_id: '1',
+      channel_domain: 'chat.example',
+      status: 'retrying',
+      code: 'KAED_FED_IDENTITY_STORAGE_QUOTA_EXCEEDED'
+    });
+
+    expect(applied.messages[0]).toMatchObject({
+      delivery_status: 'retrying',
+      failed: false,
+      failure_reason: expect.stringContaining('remote account record')
+    });
+    expect(applied.messages[0].failure_reason).toContain('retrying automatically');
+    expect(applied.messages[0].failure_reason).not.toContain('try again');
+    expect(applied.messages[0].retryable).toBeUndefined();
+  });
 });

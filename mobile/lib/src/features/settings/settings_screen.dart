@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:local_auth/local_auth.dart';
@@ -27,6 +28,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   var _saving = false;
   var _biometricLock = false;
   var _biometricLockTimeout = 30;
+  String? _loadError;
 
   @override
   void initState() {
@@ -59,17 +61,27 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         _biometricLock = preferences.getBool('biometric_lock') ?? false;
         _biometricLockTimeout =
             preferences.getInt('biometric_lock_timeout_seconds') ?? 30;
+        _loadError = null;
         _loading = false;
       });
     } on Object catch (error) {
-      _showError(error);
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _loadError = userFacingError(
+            error,
+            summary:
+                'Account settings could not be loaded. Some controls may show temporary defaults.',
+          );
+          _loading = false;
+        });
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final user = ref.watch(mobileControllerProvider).user;
+    final mobile = ref.watch(mobileControllerProvider);
+    final user = mobile.user;
     if (_loading) return const Center(child: CircularProgressIndicator());
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
@@ -78,6 +90,23 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         const SizedBox(height: 6),
         Text(user?.handle ?? '',
             style: const TextStyle(color: KaedeColors.muted)),
+        if (_loadError case final warning?) ...[
+          const SizedBox(height: 12),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.warning_amber_rounded,
+                  color: KaedeColors.warning),
+              title: Text(warning),
+              trailing: TextButton(
+                onPressed: () {
+                  setState(() => _loading = true);
+                  _load();
+                },
+                child: const Text('Retry'),
+              ),
+            ),
+          ),
+        ],
         const SizedBox(height: 18),
         _Section(
           icon: Icons.person_outline_rounded,
@@ -265,20 +294,50 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 width: double.infinity,
                 child: FilledButton.icon(
                   onPressed: () async {
-                    final enabled = await ref
-                        .read(mobileControllerProvider.notifier)
-                        .enablePushNotifications();
-                    if (!context.mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text(enabled
-                          ? 'System notifications are enabled.'
-                          : 'Allow notifications in Android settings to receive alerts.'),
-                    ));
+                    try {
+                      final enabled = await ref
+                          .read(mobileControllerProvider.notifier)
+                          .enablePushNotifications();
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: Text(enabled
+                            ? 'System notifications are enabled.'
+                            : 'Android blocked notifications. Allow them in system settings, then try again.'),
+                      ));
+                    } on Object catch (error) {
+                      _showError(
+                        error,
+                        summary: 'Could not enable system notifications',
+                      );
+                    }
                   },
                   icon: const Icon(Icons.notifications_active_outlined),
                   label: const Text('Enable system notifications'),
                 ),
               ),
+              if (mobile.pushWarning case final warning?)
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: KaedeColors.warning.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: KaedeColors.warning.withValues(alpha: 0.45),
+                      ),
+                    ),
+                    child: ListTile(
+                      dense: true,
+                      leading: const Icon(
+                        Icons.warning_amber_rounded,
+                        color: KaedeColors.warning,
+                      ),
+                      title:
+                          const Text('Notification delivery needs attention'),
+                      subtitle: Text(warning),
+                    ),
+                  ),
+                ),
               if (!ref
                   .read(mobileControllerProvider.notifier)
                   .remotePushAvailable)
@@ -426,7 +485,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await ref.read(mobileControllerProvider.notifier).refreshNavigation();
       _showSuccess('Profile saved');
     } on Object catch (error) {
-      _showError(error);
+      _showError(error, summary: 'Could not save the profile');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -456,7 +515,11 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await ref.read(mobileControllerProvider.notifier).refreshNavigation();
       _showSuccess('${kind == 'avatar' ? 'Avatar' : 'Banner'} updated');
     } on Object catch (error) {
-      _showError(error);
+      _showError(
+        error,
+        summary:
+            'Could not update the ${kind == 'avatar' ? 'avatar' : 'banner'}',
+      );
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -473,7 +536,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       action: 'Send confirmation',
     );
     if (values == null) return;
-    await _runSecurityAction(() async {
+    await _runSecurityAction('Could not start the email change', () async {
       await ref
           .read(mobileControllerProvider.notifier)
           .repository
@@ -491,7 +554,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       action: 'Confirm email',
     );
     if (values == null) return;
-    await _runSecurityAction(() async {
+    await _runSecurityAction('Could not confirm the email change', () async {
       await ref
           .read(mobileControllerProvider.notifier)
           .repository
@@ -510,7 +573,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       action: 'Continue',
     );
     if (credentials == null) return;
-    await _runSecurityAction(() async {
+    await _runSecurityAction('Could not enable two-factor authentication',
+        () async {
       final repository = ref.read(mobileControllerProvider.notifier).repository;
       final setup = await repository.setupMfa(credentials['password']!);
       if (!mounted) return;
@@ -541,7 +605,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       destructive: true,
     );
     if (values == null) return;
-    await _runSecurityAction(() async {
+    await _runSecurityAction('Could not disable two-factor authentication',
+        () async {
       await ref
           .read(mobileControllerProvider.notifier)
           .repository
@@ -551,12 +616,15 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     });
   }
 
-  Future<void> _runSecurityAction(Future<void> Function() action) async {
+  Future<void> _runSecurityAction(
+    String errorSummary,
+    Future<void> Function() action,
+  ) async {
     setState(() => _saving = true);
     try {
       await action();
     } on Object catch (error) {
-      _showError(error);
+      _showError(error, summary: errorSummary);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -608,7 +676,14 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 final values = controllers.map(
                   (key, controller) => MapEntry(key, controller.text.trim()),
                 );
-                if (values.values.any((value) => value.isEmpty)) return;
+                if (values.values.any((value) => value.isEmpty)) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(
+                    const SnackBar(
+                      content: Text('Complete every field before continuing.'),
+                    ),
+                  );
+                  return;
+                }
                 Navigator.pop(dialogContext, values);
               },
               child: Text(action),
@@ -673,7 +748,14 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             FilledButton(
               onPressed: () {
                 final code = controller.text.trim();
-                if (code.length < 6) return;
+                if (code.length < 6) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(
+                    const SnackBar(
+                      content: Text('Enter the full verification code.'),
+                    ),
+                  );
+                  return;
+                }
                 Navigator.pop(dialogContext, code);
               },
               child: const Text('Verify and enable'),
@@ -733,7 +815,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       if (mounted) setState(() => _settings = updated);
     } on Object catch (error) {
       if (mounted) setState(() => _settings[key] = previous);
-      _showError(error);
+      _showError(error, summary: 'Could not save that setting');
     }
   }
 
@@ -768,20 +850,28 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           return;
         }
       } on Object catch (error) {
-        _showError(error);
+        _showError(error, summary: 'Could not enable the app lock');
         return;
       }
     }
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setBool('biometric_lock', enabled);
-    if (mounted) setState(() => _biometricLock = enabled);
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setBool('biometric_lock', enabled);
+      if (mounted) setState(() => _biometricLock = enabled);
+    } on Object catch (error) {
+      _showError(error, summary: 'Could not save the app lock setting');
+    }
   }
 
   Future<void> _setBiometricLockTimeout(int? seconds) async {
     if (seconds == null) return;
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setInt('biometric_lock_timeout_seconds', seconds);
-    if (mounted) setState(() => _biometricLockTimeout = seconds);
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setInt('biometric_lock_timeout_seconds', seconds);
+      if (mounted) setState(() => _biometricLockTimeout = seconds);
+    } on Object catch (error) {
+      _showError(error, summary: 'Could not save the app lock timeout');
+    }
   }
 
   Future<void> _revoke(String id) async {
@@ -793,7 +883,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await _load();
       _showSuccess('Device signed out');
     } on Object catch (error) {
-      _showError(error);
+      _showError(error, summary: 'Could not sign out that device');
     }
   }
 
@@ -819,10 +909,11 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
-  void _showError(Object error) {
+  void _showError(Object error, {String? summary}) {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('$error'), backgroundColor: KaedeColors.danger));
+          content: Text(userFacingError(error, summary: summary)),
+          backgroundColor: KaedeColors.danger));
     }
   }
 }

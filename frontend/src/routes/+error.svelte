@@ -6,14 +6,28 @@
   const title = $derived(
     page.status === 404
       ? 'This thread went missing.'
-      : page.status >= 500
-        ? 'Kaede lost the thread.'
-        : 'We could not open this page.'
+      : page.status === 401
+        ? 'Your session has ended.'
+        : page.status === 403
+          ? 'You cannot open this page.'
+          : page.status === 429
+            ? 'Too many requests.'
+            : page.status >= 500
+              ? 'Kaede lost the thread.'
+              : 'We could not open this page.'
   );
   const description = $derived(
     page.status === 404
       ? 'The link may be old, private, or mistyped.'
-      : 'Nothing you entered was lost. Return home or try loading this page again.'
+      : page.status === 401
+        ? 'Sign in again to continue. Nothing you entered on this page was saved.'
+        : page.status === 403
+          ? 'Your account does not have access. Ask a guild administrator if you think this is a mistake.'
+          : page.status === 429
+            ? 'Wait a moment, then try loading this page again.'
+            : page.status >= 500
+              ? 'The server could not complete this request. Try again; if it keeps happening, contact your administrator.'
+              : 'Nothing you entered was lost. Return home or try loading this page again.'
   );
 </script>
 
@@ -26,7 +40,11 @@
     <h1>{title}</h1>
     <p>{description}</p>
     <div class="welcome-actions">
-      <a class="primary-button" href={resolve('/home')}>Return home</a>
+      {#if page.status === 401}
+        <a class="primary-button" href={resolve('/login')}>Sign in again</a>
+      {:else}
+        <a class="primary-button" href={resolve('/home')}>Return home</a>
+      {/if}
       <button class="secondary-button" type="button" onclick={() => window.location.reload()}>
         Try again
       </button>

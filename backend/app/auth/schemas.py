@@ -3,9 +3,19 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    EmailStr,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+from app.core.types import EntityRef
 
 USERNAME_RE = re.compile(r"^[a-z0-9_.]{2,32}$")
 
@@ -95,6 +105,77 @@ class SessionSummary(BaseModel):
     last_used_at: datetime
     expires_at: datetime
     current: bool
+
+
+def guild_navigation_reference(value: object) -> object:
+    if isinstance(value, dict):
+        identifier = value.get("id")
+        domain = value.get("origin_domain", value.get("domain"))
+        if identifier is None or domain is None:
+            raise ValueError("must include id and origin_domain")
+        return f"{identifier}@{domain}"
+    return value
+
+
+GuildNavigationRef = Annotated[EntityRef, BeforeValidator(guild_navigation_reference)]
+
+
+class GuildNavigationGuildItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["guild"]
+    guild: GuildNavigationRef
+
+
+class GuildNavigationGroupItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["group"]
+    id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,36}$")
+    name: str = Field(min_length=1, max_length=32)
+    guilds: list[GuildNavigationRef] = Field(min_length=1, max_length=100)
+    collapsed: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def clean_group_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("must contain a non-whitespace character")
+        return cleaned
+
+
+GuildNavigationItem = Annotated[
+    GuildNavigationGuildItem | GuildNavigationGroupItem,
+    Field(discriminator="kind"),
+]
+
+
+class GuildNavigationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[GuildNavigationItem] = Field(default_factory=list, max_length=200)
+
+    @model_validator(mode="after")
+    def require_unique_items(self) -> GuildNavigationUpdate:
+        group_ids: set[str] = set()
+        guilds: set[str] = set()
+        for item in self.items:
+            refs: tuple[str, ...]
+            if isinstance(item, GuildNavigationGuildItem):
+                refs = (str(item.guild),)
+            else:
+                if item.id in group_ids:
+                    raise ValueError("group IDs must be unique")
+                group_ids.add(item.id)
+                refs = tuple(str(guild) for guild in item.guilds)
+                if len(refs) != len(set(refs)):
+                    raise ValueError("a group cannot contain the same guild more than once")
+            for guild in refs:
+                if guild in guilds:
+                    raise ValueError("each guild can appear only once")
+                guilds.add(guild)
+        return self
 
 
 class SettingsPatch(BaseModel):

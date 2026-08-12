@@ -11,6 +11,76 @@ import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/storage/local_database.dart';
 
 void main() {
+  group('private self moderation status', () {
+    test('parses composite guild identity and expires finite timeouts', () {
+      final status = GuildSelfModerationStatus.fromJson(<String, Object?>{
+        'guild_id': '10',
+        'guild_domain': 'guild.example',
+        'timed_out': true,
+        'timeout_until': '2030-01-02T03:04:00Z',
+        'timeout_indefinite': false,
+        'reason': 'Repeated spam',
+      });
+      expect(status.guildRef.wire, '10@guild.example');
+      expect(status.reason, 'Repeated spam');
+      expect(status.detailsAvailable, isTrue);
+      expect(status.activeAt(DateTime.utc(2029)), isTrue);
+      expect(status.activeAt(DateTime.utc(2031)), isFalse);
+    });
+
+    test('marks rolling-upgrade timing fallback as non-authoritative', () {
+      final status = GuildSelfModerationStatus.fromJson(<String, Object?>{
+        'guild_id': '10',
+        'guild_domain': 'guild.example',
+        'timed_out': true,
+        'timeout_until': '2030-01-02T03:04:00Z',
+        'timeout_indefinite': false,
+        'reason': null,
+        'details_available': false,
+      });
+      expect(status.detailsAvailable, isFalse);
+      expect(
+        shouldRetrySelfModerationStatus(
+          status,
+          appActive: true,
+          conversationPaneVisible: true,
+          selectedGuild: status.guildRef,
+        ),
+        isTrue,
+      );
+      expect(
+        shouldRetrySelfModerationStatus(
+          status,
+          appActive: false,
+          conversationPaneVisible: true,
+          selectedGuild: status.guildRef,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldRetrySelfModerationStatus(
+          status,
+          appActive: true,
+          conversationPaneVisible: false,
+          selectedGuild: status.guildRef,
+        ),
+        isFalse,
+      );
+    });
+
+    test('requires the indefinite projection to omit a finite expiry', () {
+      final status = GuildSelfModerationStatus.fromJson(<String, Object?>{
+        'guild_id': '10',
+        'guild_domain': 'guild.example',
+        'timed_out': true,
+        'timeout_until': null,
+        'timeout_indefinite': true,
+        'reason': null,
+      });
+      expect(status.activeAt(DateTime.utc(2031)), isTrue);
+    });
+  });
+
   group('native security boundaries', () {
     test('bearer credentials are restricted to the home Kaede API', () {
       final instance = Domain('chat.example');
@@ -124,6 +194,48 @@ void main() {
       expect(classifyGatewaySequence(8, 8), GatewaySequenceDecision.duplicate);
       expect(classifyGatewaySequence(8, 7), GatewaySequenceDecision.duplicate);
       expect(classifyGatewaySequence(8, 10), GatewaySequenceDecision.gap);
+    });
+
+    test('turns structured close reasons into safe recovery guidance', () {
+      final limited = gatewayCloseDetails(
+        GatewayCloseCode.rateLimited.value,
+        jsonEncode(<String, Object?>{
+          'code': 'RATE_LIMITED',
+          'retry_after_ms': 2500,
+          'debug': 'token=do-not-display',
+        }),
+      );
+      expect(limited.message, contains('rate limited'));
+      expect(limited.message, contains('3 seconds'));
+      expect(limited.retryAfter, const Duration(milliseconds: 2500));
+      expect(limited.message, isNot(contains('do-not-display')));
+
+      final backendRateLimit = gatewayCloseDetails(
+        GatewayCloseCode.rateLimited.value,
+        jsonEncode(<String, Object?>{'retry_after_ms': 1250}),
+      );
+      expect(backendRateLimit.message, contains('2 seconds'));
+      expect(
+        backendRateLimit.retryAfter,
+        const Duration(milliseconds: 1250),
+      );
+
+      final sessionLimit = gatewayCloseDetails(
+        4000,
+        jsonEncode(<String, Object?>{'code': 'SESSION_LIMIT'}),
+      );
+      expect(sessionLimit.message, contains('too many active'));
+      expect(sessionLimit.message, contains('another device'));
+    });
+
+    test('never displays arbitrary websocket close text', () {
+      final details = gatewayCloseDetails(
+        4999,
+        'database password=secret at /srv/gateway',
+      );
+      expect(details.message, contains('interrupted'));
+      expect(details.message, isNot(contains('password')));
+      expect(details.message, isNot(contains('/srv')));
     });
   });
 

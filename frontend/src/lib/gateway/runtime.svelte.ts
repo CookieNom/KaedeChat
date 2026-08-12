@@ -17,7 +17,8 @@ import {
   type ReadStateDispatch
 } from '$lib/notifications/read-state';
 import { chatEntities } from '$lib/stores/entities.svelte';
-import { GatewayClient, type Dispatch } from './client';
+import { guildNavigation } from '$lib/stores/guild-navigation.svelte';
+import { GATEWAY_STATUS_EVENT, GatewayClient, type Dispatch, type GatewayStatus } from './client';
 
 type ReadyPayload = {
   user: UserSummary;
@@ -116,6 +117,25 @@ function applyEntityDispatch(dispatch: Dispatch): void {
     case 'GUILD_UPDATE':
       chatEntities.ingestGuilds([dispatch.d as Guild]);
       return;
+    case 'GUILD_HISTORY_SYNC_UPDATE': {
+      const update = dispatch.d as {
+        guild_id: string;
+        guild_domain: string;
+        status: Guild['history_sync_status'];
+        code?: string | null;
+        retry_after_ms?: number | null;
+        resource?: string | null;
+      };
+      chatEntities.guilds.update(`${update.guild_id}@${update.guild_domain}`, (guild) => ({
+        ...guild,
+        history_sync_status: update.status,
+        history_sync_error_code: update.status === 'ready' ? null : (update.code ?? null),
+        history_sync_retry_after_ms:
+          update.status === 'retrying' ? (update.retry_after_ms ?? null) : null,
+        history_sync_resource: update.status === 'failed' ? (update.resource ?? null) : null
+      }));
+      return;
+    }
     case 'GUILD_ROLE_CREATE':
     case 'GUILD_ROLE_UPDATE': {
       const role = dispatch.d as Role;
@@ -167,6 +187,9 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       chatEntities.guilds.remove(entityKey(target));
       return;
     }
+    case 'GUILD_NAVIGATION_UPDATE':
+      guildNavigation.apply(dispatch.d);
+      return;
     case 'GUILD_MEMBER_ADD':
     case 'GUILD_MEMBER_UPDATE': {
       const member = dispatch.d as Partial<GuildMemberSummary>;
@@ -217,14 +240,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
     }
     case 'USER_UPDATE': {
       const user = dispatch.d as UserSummary;
-      if (user.id && user.origin_domain) chatEntities.users.upsert(user);
-      if (
-        chatEntities.currentUser &&
-        user.id === chatEntities.currentUser.id &&
-        user.origin_domain === chatEntities.currentUser.origin_domain
-      ) {
-        chatEntities.ingestCurrentUser({ ...chatEntities.currentUser, ...user });
-      }
+      if (user.id && user.origin_domain) chatEntities.applyUserProfile(user);
       return;
     }
     default:
@@ -234,6 +250,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
 
 class AuthenticatedGatewayRuntime {
   readonly client = new GatewayClient();
+  status = $state<GatewayStatus>({ state: 'connecting', message: '' });
   #started = false;
   #readStateSync: BroadcastChannel | null = null;
   #reduce = (event: Event) => {
@@ -250,11 +267,15 @@ class AuthenticatedGatewayRuntime {
       chatEntities.readStates.upsert(value as ReadStateStatus);
     }
   };
+  #updateStatus = (event: Event) => {
+    this.status = (event as CustomEvent<GatewayStatus>).detail;
+  };
 
   start(): void {
     if (this.#started) return;
     this.#started = true;
     this.client.addEventListener('dispatch', this.#reduce);
+    this.client.addEventListener(GATEWAY_STATUS_EVENT, this.#updateStatus);
     if (typeof BroadcastChannel !== 'undefined') {
       this.#readStateSync = new BroadcastChannel('kaede-read-states');
       this.#readStateSync.addEventListener('message', this.#receiveReadState);
@@ -262,14 +283,20 @@ class AuthenticatedGatewayRuntime {
     this.client.connect();
   }
 
+  reportStartupFailure(message: string): void {
+    this.status = { state: 'offline', message };
+  }
+
   stop(): void {
     if (!this.#started) return;
     this.#started = false;
     this.client.removeEventListener('dispatch', this.#reduce);
+    this.client.removeEventListener(GATEWAY_STATUS_EVENT, this.#updateStatus);
     this.client.close();
     this.#readStateSync?.removeEventListener('message', this.#receiveReadState);
     this.#readStateSync?.close();
     this.#readStateSync = null;
+    this.status = { state: 'connecting', message: '' };
     chatEntities.clearSession();
   }
 }

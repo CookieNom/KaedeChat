@@ -16,8 +16,8 @@ use kaede_api::{
 use kaede_auth::{AuthError, LoginOutcome, RegistrationResult, SessionManager, StatusResult};
 use kaede_cache::{Cache, CacheError};
 use kaede_core::{
-    AppState, LinkPreview, Message, PendingMessage, PendingMessageState, Reduction, User,
-    UserSettings, VoiceState,
+    AppState, Attachment, LinkPreview, Message, PendingMessage, PendingMessageState, Reduction,
+    User, UserSettings, VoiceState,
 };
 use kaede_gateway::{GatewayCommand, GatewayStatus};
 use kaede_platform::{Notification, PlatformError, PlatformPaths, SystemCredentialVault};
@@ -46,7 +46,10 @@ pub enum AccountEvent {
     /// The server moved this account or replaced its voice authorization.
     /// Consumers must discard the current `LiveKit` session and obtain a fresh
     /// grant from the home instance before publishing any more media.
-    VoiceReauthorization(EntityRef),
+    VoiceReauthorization {
+        channel: EntityRef,
+        move_session_id: Option<String>,
+    },
     Error(String),
 }
 
@@ -336,8 +339,11 @@ impl AccountRuntime {
                                     &reduction.purge_channels,
                                 ).await;
                                 publish_reduction(&events, reduction);
-                                if let Some(channel) = voice_reauthorization {
-                                    let _ = events.send(AccountEvent::VoiceReauthorization(channel));
+                                if let Some((channel, move_session_id)) = voice_reauthorization {
+                                    let _ = events.send(AccountEvent::VoiceReauthorization {
+                                        channel,
+                                        move_session_id,
+                                    });
                                 }
                                 if let Some(notification) = notification {
                                     let _ = events.send(AccountEvent::Notification(notification));
@@ -358,7 +364,11 @@ impl AccountRuntime {
                                 }
                             }
                             Err(error) => {
-                                let _ = events.send(AccountEvent::Error(error.to_string()));
+                                tracing::warn!(%error, "realtime update payload was invalid");
+                                let _ = events.send(AccountEvent::Error(
+                                    "Kaede received a realtime update this app version could not understand. Your data is being refreshed; update Kaede if this keeps happening."
+                                        .to_owned(),
+                                ));
                                 let _ = events.send(AccountEvent::ReconcileRequired);
                             }
                         }
@@ -590,20 +600,17 @@ impl AccountRuntime {
         };
         let mut changed = false;
         for (attachment, variant) in candidates {
+            let media_path = match authenticated_attachment_media_path(&attachment, variant) {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::debug!(%error, id = %attachment.id, "attachment media path was invalid");
+                    continue;
+                }
+            };
             let cache_key = format!("{}:{}:{variant}", attachment.origin_domain, attachment.id);
             let digest = format!("{:x}", Sha256::digest(cache_key.as_bytes()));
             let path = self.media_dir.join(digest);
-            let bytes = match self
-                .api
-                .get_bytes(
-                    &format!(
-                        "media/{}/{}/{variant}",
-                        attachment.origin_domain, attachment.id
-                    ),
-                    5 * 1024 * 1024,
-                )
-                .await
-            {
+            let bytes = match self.api.get_root_bytes(&media_path, 5 * 1024 * 1024).await {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     tracing::debug!(%error, id = %attachment.id, "attachment preview was unavailable");
@@ -717,15 +724,10 @@ impl AccountRuntime {
         {
             return Ok(NativeMediaAsset { path, content_type });
         }
+        let media_path = authenticated_attachment_media_path(&attachment, "original")?;
         let bytes = self
             .api
-            .get_bytes(
-                &format!(
-                    "media/{}/{}/original",
-                    attachment.origin_domain, attachment.id
-                ),
-                16 * 1024 * 1024,
-            )
+            .get_root_bytes(&media_path, 16 * 1024 * 1024)
             .await?;
         let temporary = path.with_extension("tmp");
         tokio::fs::write(&temporary, &bytes).await?;
@@ -782,7 +784,7 @@ impl AccountRuntime {
             .message_order
             .get(channel)
             .and_then(|order| order.front())
-            .map(|message| message.id);
+            .cloned();
         let messages = self
             .service
             .messages(
@@ -800,7 +802,7 @@ impl AccountRuntime {
         self.state
             .write()
             .await
-            .hydrate_messages(channel, messages.clone());
+            .hydrate_older_messages(channel, messages.clone());
         let _ = self.events.send(AccountEvent::StateChanged);
         Ok(messages)
     }
@@ -808,7 +810,7 @@ impl AccountRuntime {
     pub async fn load_around_message(
         &self,
         channel: &EntityRef,
-        message: &kaede_protocol::Snowflake,
+        message: &EntityRef,
     ) -> Result<Vec<Message>, AccountError> {
         let messages = self
             .service
@@ -1338,13 +1340,36 @@ impl AccountRuntime {
     }
 }
 
-fn voice_reauthorization(event: &kaede_protocol::GatewayEnvelope) -> Option<EntityRef> {
+fn voice_reauthorization(
+    event: &kaede_protocol::GatewayEnvelope,
+) -> Option<(EntityRef, Option<String>)> {
     if event.t.as_deref() != Some("VOICE_TOKEN") {
         return None;
     }
+    let grant = event.d.get("grant")?.as_object()?;
+    let move_session_id = if let Some(correlation) = event.d.get("move_session_id") {
+        let correlation = correlation.as_str()?;
+        if !(32..=64).contains(&correlation.len())
+            || !correlation
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'_' | b'-'))
+            || grant.get("move_session_id")?.as_str()? != correlation
+        {
+            return None;
+        }
+        Some(correlation.to_owned())
+    } else if grant
+        .get("move_session_id")
+        .is_some_and(|value| !value.is_null())
+    {
+        return None;
+    } else {
+        None
+    };
     let id = event.d.get("channel_id")?.as_str()?;
     let domain = event.d.get("channel_domain")?.as_str()?;
-    format!("{id}@{domain}").parse().ok()
+    let channel = format!("{id}@{domain}").parse().ok()?;
+    Some((channel, move_session_id))
 }
 
 fn unauthenticated_session(instance: &str, purpose: &str) -> Result<NativeSession, AccountError> {
@@ -1580,6 +1605,89 @@ fn optional_value<T>(
     }
 }
 
+fn authenticated_attachment_media_path(
+    attachment: &Attachment,
+    variant: &str,
+) -> Result<String, AccountError> {
+    let Some(history_path) = attachment.history_media_url.as_deref() else {
+        return Ok(format!(
+            "/media/{}/{}/{variant}",
+            attachment.origin_domain, attachment.id
+        ));
+    };
+    if !valid_history_media_path(history_path, attachment) {
+        return Err(AccountError::MediaUnavailable);
+    }
+    Ok(history_path.to_owned())
+}
+
+fn valid_history_media_path(path: &str, attachment: &Attachment) -> bool {
+    if !path.starts_with("/api/v1/dms/") || path.starts_with("//") || path.contains(['#', '\\']) {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(&format!("https://kaede.invalid{path}")) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || url.host_str() != Some("kaede.invalid")
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    let Some(segments) = url.path_segments().map(Iterator::collect::<Vec<_>>) else {
+        return false;
+    };
+    let [
+        "api",
+        "v1",
+        "dms",
+        conversation,
+        "history-media",
+        message,
+        media,
+        variant,
+    ] = segments.as_slice()
+    else {
+        return false;
+    };
+    if conversation.parse::<EntityRef>().is_err() || message.parse::<EntityRef>().is_err() {
+        return false;
+    }
+    let Ok(media_ref) = media.parse::<EntityRef>() else {
+        return false;
+    };
+    if media_ref != EntityRef::new(attachment.id, attachment.origin_domain.clone())
+        || !matches!(
+            *variant,
+            "original" | "thumbnail_128" | "thumbnail_512" | "thumbnail_1024" | "poster"
+        )
+    {
+        return false;
+    }
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    if pairs.len() != 2 {
+        return false;
+    }
+    let expires = pairs
+        .iter()
+        .find(|(key, _)| key == "expires")
+        .map(|(_, value)| value.as_ref());
+    let token = pairs
+        .iter()
+        .find(|(key, _)| key == "token")
+        .map(|(_, value)| value.as_ref());
+    expires.is_some_and(|value| {
+        !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+            && value.parse::<u64>().is_ok_and(|timestamp| timestamp > 0)
+    }) && token.is_some_and(|value| {
+        (40..=48).contains(&value.len())
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    })
+}
+
 #[derive(Debug, Error)]
 pub enum AccountError {
     #[error(transparent)]
@@ -1619,6 +1727,57 @@ mod tests {
     use super::*;
     use kaede_protocol::GatewayEnvelope;
 
+    fn history_attachment(path: &str) -> Attachment {
+        let Ok(attachment) = serde_json::from_value(serde_json::json!({
+            "id": "60",
+            "origin_domain": "remote.example",
+            "filename": "photo.png",
+            "content_type": "image/png",
+            "size": 1024,
+            "scan_status": "clean",
+            "width": 64,
+            "height": 64,
+            "blurhash": null,
+            "variants": {},
+            "history_media_url": path
+        })) else {
+            panic!("attachment fixture should deserialize");
+        };
+        attachment
+    }
+
+    #[test]
+    fn history_media_capability_is_same_origin_and_attachment_scoped() {
+        let valid = "/api/v1/dms/43@home.example/history-media/50@remote.example/60@remote.example/original?expires=2000000000&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO";
+        let attachment = history_attachment(valid);
+        assert_eq!(
+            authenticated_attachment_media_path(&attachment, "thumbnail_512")
+                .ok()
+                .as_deref(),
+            Some(valid)
+        );
+        let expired = "/api/v1/dms/43@home.example/history-media/50@remote.example/60@remote.example/original?expires=1&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO";
+        assert_eq!(
+            authenticated_attachment_media_path(&history_attachment(expired), "original")
+                .ok()
+                .as_deref(),
+            Some(expired)
+        );
+        for invalid in [
+            "https://remote.example/media/60",
+            "//remote.example/media/60",
+            "/api/v1/dms/43@home.example/history-media/50@remote.example/61@remote.example/original?expires=2000000000&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO",
+            "/api/v1/dms/43@home.example/history-media/50@remote.example/60@remote.example/original?expires=2000000000&token=bad",
+            "/api/v1/users/@me?expires=2000000000&token=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO",
+        ] {
+            assert!(
+                authenticated_attachment_media_path(&history_attachment(invalid), "original")
+                    .is_err(),
+                "accepted unsafe history path: {invalid}"
+            );
+        }
+    }
+
     #[test]
     fn voice_token_requires_a_composite_channel_reference() {
         let event = GatewayEnvelope {
@@ -1626,15 +1785,48 @@ mod tests {
             d: serde_json::json!({
                 "channel_id": "42",
                 "channel_domain": "Remote.Example",
-                "grant": {"token": "redacted"}
+                "move_session_id": "abcdefghijklmnopqrstuvwxyz0123456789_AB",
+                "grant": {
+                    "token": "redacted",
+                    "move_session_id": "abcdefghijklmnopqrstuvwxyz0123456789_AB"
+                }
             }),
             s: Some(1),
             t: Some("VOICE_TOKEN".to_owned()),
         };
         assert_eq!(
-            voice_reauthorization(&event).map(|value| value.to_string()),
-            Some("42@remote.example".to_owned())
+            voice_reauthorization(&event)
+                .map(|(value, correlation)| { (value.to_string(), correlation) }),
+            Some((
+                "42@remote.example".to_owned(),
+                Some("abcdefghijklmnopqrstuvwxyz0123456789_AB".to_owned())
+            ))
         );
+
+        let local = GatewayEnvelope {
+            d: serde_json::json!({
+                "channel_id": "43",
+                "channel_domain": "local.example",
+                "grant": {"token": "redacted", "move_session_id": null}
+            }),
+            ..event.clone()
+        };
+        assert_eq!(
+            voice_reauthorization(&local)
+                .map(|(value, correlation)| (value.to_string(), correlation)),
+            Some(("43@local.example".to_owned(), None))
+        );
+
+        let mismatched = GatewayEnvelope {
+            d: serde_json::json!({
+                "channel_id": "42",
+                "channel_domain": "remote.example",
+                "move_session_id": "abcdefghijklmnopqrstuvwxyz0123456789_AB",
+                "grant": {"move_session_id": "z0123456789012345678901234567890"}
+            }),
+            ..event.clone()
+        };
+        assert!(voice_reauthorization(&mismatched).is_none());
 
         let malformed = GatewayEnvelope {
             d: serde_json::json!({"channel_id": "42"}),

@@ -9,7 +9,7 @@ import "fonts/Inter-ExtraBold.ttf";
 
 export struct GuildItem { id: string, initials: string, name: string, mentions: int, has-icon: bool, icon: image }
 export struct ChannelItem { id: string, name: string, kind: string, unread: bool, mentions: int, collapsed: bool, voice-count: int, has-avatar: bool, avatar: image, muted: bool, deafened: bool }
-export struct MessageItem { kind: string, id: string, author: string, author-id: string, avatar: string, has-avatar: bool, avatar-image: image, time: string, body: string, pending: bool, failed: bool, edited: bool, attachments: string, failure-reason: string, mine: bool, preview-url: string, preview-title: string, preview-description: string, preview-site: string, preview-media-type: string, has-attachment-preview: bool, attachment-preview: image, attachment-kind: string, has-reference: bool, reference-author: string, reference-body: string, gif-url: string, compact: bool }
+export struct MessageItem { kind: string, id: string, author: string, author-id: string, avatar: string, has-avatar: bool, avatar-image: image, time: string, body: string, pending: bool, retrying: bool, failed: bool, edited: bool, attachments: string, failure-reason: string, mine: bool, preview-url: string, preview-title: string, preview-description: string, preview-site: string, preview-media-type: string, has-attachment-preview: bool, attachment-preview: image, attachment-kind: string, has-reference: bool, reference-author: string, reference-body: string, gif-url: string, compact: bool }
 export struct MemberItem { id: string, initials: string, has-avatar: bool, avatar: image, name: string, status: string, online: bool, presence: string, header: bool, role-color: color }
 export struct FriendItem { id: string, initials: string, has-avatar: bool, avatar: image, name: string, handle: string, status: string, relationship: string, online: bool }
 export struct EmojiItem { value: string, label: string, header: bool }
@@ -455,6 +455,9 @@ component UserDock inherits Rectangle {
 
 component ChannelSidebar inherits Rectangle {
     in property <string> title;
+    in property <bool> sync-paused: false;
+    in property <string> sync-paused-title: "Replica cache is full";
+    in property <string> sync-paused-message: "Recent guild updates may be missing. Ask this instance's administrator to free space or raise the limit.";
     in property <[ChannelItem]> channels;
     in property <string> selected-channel;
     in property <string> current-user;
@@ -479,6 +482,17 @@ component ChannelSidebar inherits Rectangle {
                 }
                 Rectangle { horizontal-stretch: 1; }
                 VerticalLayout { alignment: center; IconButton { icon: "settings"; label: "Guild settings"; clicked => { root.guild-settings(); } } }
+            }
+        }
+        if root.sync-paused: Rectangle {
+            height: 68px;
+            background: #352d20;
+            border-width: 1px;
+            border-color: Theme.warning;
+            VerticalLayout {
+                padding-left: 12px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px; spacing: 2px;
+                Text { text: root.sync-paused-title; color: Theme.warning; font-size: 11px; font-weight: 800; }
+                Text { text: root.sync-paused-message; color: Theme.text-soft; font-size: 9.5px; wrap: word-wrap; }
             }
         }
         ScrollView {
@@ -704,7 +718,7 @@ component MessageRow inherits Rectangle {
                     Text { text: root.message.time; color: Theme.muted; font-size: 10px; vertical-alignment: center; }
                     if root.message.edited: Text { text: "(edited)"; color: Theme.muted; font-size: 9.5px; vertical-alignment: center; }
                 }
-                if root.message.body != "": Text { text: root.message.body; color: root.message.failed ? Theme.red : Theme.text; opacity: root.message.pending ? 0.52 : 1; font-size: 13.5px; wrap: word-wrap; }
+                if root.message.body != "": Text { text: root.message.body; color: root.message.failed ? Theme.red : Theme.text; opacity: root.message.pending || root.message.retrying ? 0.52 : 1; font-size: 13.5px; wrap: word-wrap; }
                 if root.message.compact && root.message.edited && root.message.body == "": Text { text: "(edited)"; color: Theme.muted; font-size: 9.5px; }
                 if root.message.has-attachment-preview: HorizontalLayout { alignment: start;
                     Rectangle {
@@ -737,6 +751,7 @@ component MessageRow inherits Rectangle {
                     }
                 }
                 if root.message.failed: Text { text: root.message.failure-reason == "" ? "Message not delivered · Right-click to retry" : root.message.failure-reason + " · Right-click to retry"; color: Theme.red; font-size: 11px; font-weight: 650; wrap: word-wrap; }
+                if root.message.retrying: Text { text: (root.message.failure-reason == "" ? "The receiving instance is temporarily unavailable" : root.message.failure-reason) + " · Retrying automatically…"; color: Theme.accent-text; font-size: 11px; font-weight: 650; wrap: word-wrap; }
                 if root.message.pending && !root.message.failed: Text { text: "Sending…"; color: Theme.muted; font-size: 10px; }
             }
         }
@@ -827,6 +842,10 @@ component ChatPane inherits Rectangle {
     in property <bool> can-send: true;
     in property <bool> history-loading: false;
     in property <bool> history-complete: false;
+    in property <bool> history-truncated: false;
+    in property <bool> history-remote-available: false;
+    in property <string> history-page-warning;
+    in property <string> guild-history-warning;
     in property <int> slow-mode-remaining: 0;
     in-out property <string> draft;
     in property <bool> attachment-busy: false;
@@ -920,6 +939,44 @@ component ChatPane inherits Rectangle {
             }
         }
         if root.direct-message && root.call-state != "": Rectangle { height: 58px; background: Theme.green-soft; HorizontalLayout { padding-left: 18px; padding-right: 18px; spacing: 9px; Text { text: root.call-incoming ? "Incoming voice call" : root.call-state == "ringing" ? "Calling…" : "Voice call in progress"; color: Theme.text; font-weight: 800; vertical-alignment: center; } Rectangle { horizontal-stretch: 1; } if root.call-incoming: PillButton { text: "Decline"; destructive: true; clicked => { root.decline-call(); } } if root.call-incoming: PillButton { text: "Join"; primary: true; clicked => { root.accept-call(); } } if !root.call-incoming: PillButton { text: "End call"; destructive: true; clicked => { root.end-call(); } } } }
+        if root.direct-message && root.history-truncated && (root.history-remote-available || root.history-complete): Rectangle {
+            height: 44px;
+            background: Theme.subtle;
+            border-width: 1px;
+            border-color: Theme.border-soft;
+            Text {
+                x: 18px; width: parent.width - 36px; height: parent.height;
+                text: root.history-remote-available
+                    ? "This replica caches recent messages. Earlier history is fetched privately from the conversation's home instance when you load it."
+                    : "Recent history starts here. Older messages are not available from this replica.";
+                color: Theme.muted; font-size: 10.5px; font-weight: 650;
+                wrap: word-wrap; vertical-alignment: center; horizontal-alignment: center;
+            }
+        }
+        if root.direct-message && root.history-page-warning != "": Rectangle {
+            height: 44px;
+            background: #352d20;
+            border-width: 1px;
+            border-color: Theme.warning;
+            Text {
+                x: 18px; width: parent.width - 36px; height: parent.height;
+                text: root.history-page-warning;
+                color: Theme.text-soft; font-size: 10.5px; font-weight: 650;
+                wrap: word-wrap; vertical-alignment: center; horizontal-alignment: center;
+            }
+        }
+        if !root.direct-message && root.guild-history-warning != "": Rectangle {
+            height: 52px;
+            background: #352d20;
+            border-width: 1px;
+            border-color: Theme.warning;
+            Text {
+                x: 18px; width: parent.width - 36px; height: parent.height;
+                text: root.guild-history-warning;
+                color: Theme.text-soft; font-size: 10.5px; font-weight: 650;
+                wrap: word-wrap; vertical-alignment: center; horizontal-alignment: center;
+            }
+        }
         if root.loading: Rectangle { vertical-stretch: 1; VerticalLayout { alignment: center; spacing: 12px;
                 HorizontalLayout { alignment: center; Rectangle { width: 52px; height: 52px; border-radius: 18px; background: Theme.accent-soft; Text { text: "···"; color: Theme.accent; font-size: 22px; font-weight: 900; horizontal-alignment: center; vertical-alignment: center; } } }
                 Text { text: "Loading conversation"; color: Theme.text; font-size: 18px; font-weight: 850; horizontal-alignment: center; }
@@ -1806,6 +1863,13 @@ export component AppWindow inherits Window {
     in-out property <string> new-marker-message;
     in-out property <bool> history-loading: false;
     in-out property <bool> history-complete: false;
+    in-out property <bool> history-truncated: false;
+    in-out property <bool> history-remote-available: false;
+    in-out property <string> history-page-warning;
+    in-out property <bool> guild-sync-paused: false;
+    in-out property <string> guild-sync-paused-title;
+    in-out property <string> guild-sync-paused-message;
+    in-out property <string> guild-history-warning;
     // Keep the signed-in account editor independent from the transient
     // profile viewer. Realtime refreshes must not replace an open remote
     // profile, and viewing somebody else must not alter the settings form.
@@ -2056,14 +2120,31 @@ export component AppWindow inherits Window {
         spacing: 0px;
         ServerRail { guilds: root.guilds; selected-guild: root.selected-guild; home-mentions: root.home-mentions; home => { root.selected-guild = ""; root.selected-channel = ""; root.channel-loading = false; } guild(id) => { root.selected-guild = id; root.selected-channel = ""; root.channel-loading = true; root.guild-selected(id); } }
         if root.selected-guild == "": HomeSidebar { direct-messages: root.direct-messages; selected-page: root.home-page; selected-channel: root.selected-channel; current-user: root.current-user; current-user-initials: root.current-user-initials; current-user-has-avatar: root.current-profile-has-avatar; current-user-avatar: root.current-profile-avatar; custom-status: root.current-profile-status; presence-status: root.presence-status; page(value) => { root.home-page = value; root.selected-channel = ""; root.channel-loading = false; root.home-page-selected(value); } channel(id) => { root.selected-channel = id; root.channel-loading = true; root.channel-selected(id); } new-message => { root.active-overlay = "new-dm"; root.new-direct-message(); } settings => { root.active-overlay = "settings"; root.open-settings(); } set-presence(value) => { root.presence-status = value; root.set-presence(value); } }
-        if root.selected-guild != "": ChannelSidebar { title: root.guild-title; channels: root.channels; selected-channel: root.selected-channel; current-user: root.current-user; current-user-initials: root.current-user-initials; current-user-has-avatar: root.current-profile-has-avatar; current-user-avatar: root.current-profile-avatar; custom-status: root.current-profile-status; presence-status: root.presence-status; channel(id) => { root.selected-channel = id; root.channel-loading = true; root.channel-selected(id); } toggle-category(id) => { root.toggle-category(id); } member-profile(id) => { root.friend-profile(id); } guild-settings => { root.active-overlay = "guild-settings"; root.open-guild-settings(); } settings => { root.active-overlay = "settings"; root.open-settings(); } set-presence(value) => { root.presence-status = value; root.set-presence(value); } }
+        if root.selected-guild != "": ChannelSidebar { title: root.guild-title; sync-paused: root.guild-sync-paused; sync-paused-title: root.guild-sync-paused-title; sync-paused-message: root.guild-sync-paused-message; channels: root.channels; selected-channel: root.selected-channel; current-user: root.current-user; current-user-initials: root.current-user-initials; current-user-has-avatar: root.current-profile-has-avatar; current-user-avatar: root.current-profile-avatar; custom-status: root.current-profile-status; presence-status: root.presence-status; channel(id) => { root.selected-channel = id; root.channel-loading = true; root.channel-selected(id); } toggle-category(id) => { root.toggle-category(id); } member-profile(id) => { root.friend-profile(id); } guild-settings => { root.active-overlay = "guild-settings"; root.open-guild-settings(); } settings => { root.active-overlay = "settings"; root.open-settings(); } set-presence(value) => { root.presence-status = value; root.set-presence(value); } }
         if root.selected-guild == "" && root.selected-channel == "" && !root.channel-loading: HomePane { horizontal-stretch: 1; page: root.home-page; friends: root.friends; guilds: root.guilds; direct-messages: root.direct-messages; add-friend(handle) => { root.friend-request(handle); } friend-profile(id) => { root.friend-profile(id); } friend-message(id) => { root.friend-message(id); } friend-accept(id) => { root.friend-accept(id); } friend-remove(id) => { root.friend-remove(id); } create-guild(name) => { root.create-guild(name); } join-guild(invite) => { root.join-guild(invite); } open-guild(id) => { root.selected-guild = id; root.selected-channel = ""; root.channel-loading = true; root.guild-selected(id); } open-channel(id) => { root.selected-channel = id; root.channel-loading = true; root.channel-selected(id); } }
         if root.channel-loading && root.selected-channel == "": ChannelLoadingPane { horizontal-stretch: 1; }
-        if root.selected-channel != "" && root.selected-channel-kind != "voice": ChatPane { horizontal-stretch: 1; channel-name: root.selected-channel-name; channel-topic: root.selected-channel-topic; direct-message: root.selected-channel-kind == "dm"; call-state: root.active-call-state; call-incoming: root.active-call-incoming; messages: root.messages; loading: root.channel-loading; history-loading: root.history-loading; history-complete: root.history-complete; completions: root.completions; typing-indicator: root.typing-indicator; replying-author: root.replying-author; editing: root.editing-message != ""; reply-notify <=> root.reply-notify; reply-can-notify: root.reply-can-notify; draft <=> root.draft; can-send: root.can-send; slow-mode-remaining: root.slow-mode-remaining; attachment-busy: root.attachment-busy; pending-attachments: root.pending-attachments; send(value) => { root.send-message(value); root.draft = ""; root.update-completions(""); } draft-edited(value) => { root.update-completions(value); } completion-selected(value) => { root.choose-completion(value); } cancel-reply => { root.cancel-reply(); } cancel-edit => { root.cancel-edit(); } edit-last => { root.edit-last-message(); } toggle-members => { root.members-visible = !root.members-visible; } open-pins => { root.open-pins(); } open-message-media(id) => { root.open-message-media(id); } member-profile(id) => { root.friend-profile(id); } load-older => { root.load-older(); } attach => { root.attach-file(); } clear-attachments => { root.clear-attachments(); } gif => { root.active-overlay = "gif"; root.search-gifs(""); } emoji => { root.search-emojis(""); root.active-overlay = "emoji"; } start-call => { root.start-call(root.selected-channel); } accept-call => { root.accept-call(root.active-call-id); } decline-call => { root.decline-call(root.active-call-id); } end-call => { root.end-call(root.active-call-id); } message-context(id, author, mine, failed, gif-url, x, y) => { root.selected-message = id; root.selected-message-author = author; root.selected-message-mine = mine; root.selected-message-failed = failed; root.selected-message-gif-url = gif-url; root.menu-x = x; root.menu-y = y; root.active-overlay = "message"; } }
+        if root.selected-channel != "" && root.selected-channel-kind != "voice": ChatPane { horizontal-stretch: 1; channel-name: root.selected-channel-name; channel-topic: root.selected-channel-topic; direct-message: root.selected-channel-kind == "dm"; guild-history-warning: root.guild-history-warning; history-page-warning: root.history-page-warning; call-state: root.active-call-state; call-incoming: root.active-call-incoming; messages: root.messages; loading: root.channel-loading; history-loading: root.history-loading; history-complete: root.history-complete; history-truncated: root.history-truncated; history-remote-available: root.history-remote-available; completions: root.completions; typing-indicator: root.typing-indicator; replying-author: root.replying-author; editing: root.editing-message != ""; reply-notify <=> root.reply-notify; reply-can-notify: root.reply-can-notify; draft <=> root.draft; can-send: root.can-send; slow-mode-remaining: root.slow-mode-remaining; attachment-busy: root.attachment-busy; pending-attachments: root.pending-attachments; send(value) => { root.send-message(value); root.draft = ""; root.update-completions(""); } draft-edited(value) => { root.update-completions(value); } completion-selected(value) => { root.choose-completion(value); } cancel-reply => { root.cancel-reply(); } cancel-edit => { root.cancel-edit(); } edit-last => { root.edit-last-message(); } toggle-members => { root.members-visible = !root.members-visible; } open-pins => { root.open-pins(); } open-message-media(id) => { root.open-message-media(id); } member-profile(id) => { root.friend-profile(id); } load-older => { root.load-older(); } attach => { root.attach-file(); } clear-attachments => { root.clear-attachments(); } gif => { root.active-overlay = "gif"; root.search-gifs(""); } emoji => { root.search-emojis(""); root.active-overlay = "emoji"; } start-call => { root.start-call(root.selected-channel); } accept-call => { root.accept-call(root.active-call-id); } decline-call => { root.decline-call(root.active-call-id); } end-call => { root.end-call(root.active-call-id); } message-context(id, author, mine, failed, gif-url, x, y) => { root.selected-message = id; root.selected-message-author = author; root.selected-message-mine = mine; root.selected-message-failed = failed; root.selected-message-gif-url = gif-url; root.menu-x = x; root.menu-y = y; root.active-overlay = "message"; } }
         if root.selected-channel != "" && root.selected-channel-kind == "voice": VoicePane { horizontal-stretch: 1; channel-name: root.selected-channel-name; status: root.voice-status; muted <=> root.voice-muted; deafened <=> root.voice-deafened; can-speak: root.voice-can-speak; can-stream: root.voice-can-stream; screen-sharing <=> root.voice-screen-sharing; camera-enabled <=> root.voice-camera-enabled; participants: root.voice-members; channels: root.channels; remote-videos: root.voice-remote-videos; can-mute-voice: root.can-mute-voice; can-deafen-voice: root.can-deafen-voice; can-move-voice: root.can-move-voice; move-user <=> root.voice-move-user; join => { root.join-voice(root.selected-channel); } leave => { root.leave-voice(); } mute(value) => { root.set-voice-muted(value); } deafen(value) => { root.set-voice-deafened(value); } push-to-talk(value) => { root.set-push-to-talk(value); } camera(value) => { root.set-camera(value); } screen-share(value) => { root.set-screen-share(value); } toggle-members => { root.members-visible = !root.members-visible; } moderate-participant(id, action) => { root.guild-voice-moderate(id, action); } }
         if root.selected-guild != "" && root.members-visible: MemberRail { members: root.members; close => { root.members-visible = false; } profile(id) => { root.friend-profile(id); } }
     }
     if root.authenticated && root.realtime-status != "connected": Rectangle { x: (parent.width - self.width) / 2; y: 12px; width: 360px; height: 38px; border-radius: 11px; background: root.realtime-status == "authentication_failed" ? #542a28 : Theme.raised; border-width: 1px; border-color: Theme.border; Text { text: root.realtime-status == "authentication_failed" ? "Realtime authentication failed. Sign in again." : root.realtime-status == "reconnecting" ? "Reconnecting to realtime updates…" : "Connecting to realtime updates…"; color: root.realtime-status == "authentication_failed" ? #ffaaa2 : Theme.muted; horizontal-alignment: center; vertical-alignment: center; font-size: 12px; font-weight: 700; } }
+    if root.authenticated && root.error-message != "": Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: root.realtime-status == "connected" ? 12px : 58px;
+        width: min(620px, parent.width - 32px);
+        height: 58px;
+        border-radius: 11px;
+        background: Theme.raised;
+        border-width: 1px;
+        border-color: Theme.border;
+        HorizontalLayout {
+            padding: 8px;
+            spacing: 10px;
+            Text { text: root.error-message; color: Theme.text; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; }
+            Text { text: "×"; color: Theme.muted; font-size: 20px; vertical-alignment: center; }
+        }
+        TouchArea { clicked => { root.error-message = ""; } }
+    }
     if root.active-overlay == "settings": SettingsPane { current-user: root.current-user; has-avatar: root.current-profile-has-avatar; avatar: root.current-profile-avatar; has-banner: root.current-profile-has-banner; banner: root.current-profile-banner; display-name <=> root.current-profile-name; custom-status <=> root.current-profile-status; presence-status <=> root.presence-status; bio <=> root.current-profile-bio; theme-name <=> root.settings-theme; dm-privacy <=> root.settings-dm-privacy; desktop-notifications <=> root.desktop-notifications; developer-mode <=> root.developer-mode; security-result: root.security-result; sessions: root.sessions; input-devices: root.input-devices; output-devices: root.output-devices; camera-devices: root.camera-devices; screen-sources: root.screen-sources; selected-input-device <=> root.selected-input-device; selected-output-device <=> root.selected-output-device; selected-camera-device <=> root.selected-camera-device; selected-screen-source <=> root.selected-screen-source; input-mode <=> root.input-mode; push-to-talk-hotkey <=> root.push-to-talk-hotkey; global-hotkey-status: root.global-hotkey-status; update-status: root.update-status; input-device-selected(value) => { root.select-input-device(value); } output-device-selected(value) => { root.select-output-device(value); } camera-device-selected(value) => { root.select-camera-device(value); } screen-source-selected(value) => { root.select-screen-source(value); } refresh-media-devices => { root.refresh-media-devices(); } input-mode-selected(value) => { root.select-input-mode(value); } push-to-talk-hotkey-selected(value) => { root.select-push-to-talk-hotkey(value); } check-for-updates => { root.check-for-updates(); } request-email-change(email, password) => { root.request-email-change(email, password); } setup-mfa(password, code) => { root.setup-mfa(password, code); } enable-mfa(code) => { root.enable-mfa(code); } disable-mfa(password, code) => { root.disable-mfa(password, code); } refresh-sessions => { root.refresh-sessions(); } revoke-session(id) => { root.revoke-session(id); } switch-account => { root.switch-account(); } close => { root.active-overlay = ""; root.security-result = ""; } save-profile(name, status, bio) => { root.save-profile(name, status, bio); } set-presence(value) => { root.set-presence(value); } upload-profile-asset(kind) => { root.upload-profile-asset(kind); } save-preferences(theme, privacy, notifications, developer) => { root.save-preferences(theme, privacy, notifications, developer); } logout => { root.logout(); } }
     if root.active-overlay == "guild-settings": GuildSettingsPane { guild-name: root.guild-title; has-guild-icon: root.guild-has-icon; guild-icon: root.guild-icon; has-guild-banner: root.guild-has-banner; guild-banner: root.guild-banner; guild-description <=> root.guild-description; guild-history-policy <=> root.guild-history-policy; page <=> root.guild-settings-page; roles: root.roles; permissions: root.role-permissions; admin-members: root.admin-members; admin-channels: root.admin-channels; overwrites: root.overwrites; overwrite-permissions: root.overwrite-permissions; audit-records: root.audit-records; webhook-records: root.webhook-records; invite-records: root.invite-records; ban-records: root.ban-records; instance-ban-records: root.instance-ban-records; emoji-records: root.emoji-records; selected-role <=> root.selected-role; selected-role-name <=> root.selected-role-name; selected-role-color <=> root.selected-role-color; selected-role-hoist <=> root.selected-role-hoist; selected-role-mentionable <=> root.selected-role-mentionable; selected-admin-channel <=> root.selected-admin-channel; selected-admin-channel-name <=> root.selected-admin-channel-name; selected-admin-channel-topic <=> root.selected-admin-channel-topic; selected-admin-channel-parent <=> root.selected-admin-channel-parent; selected-admin-channel-slow-mode <=> root.selected-admin-channel-slow-mode; selected-admin-channel-synced <=> root.selected-admin-channel-synced; selected-overwrite <=> root.selected-overwrite; selected-overwrite-kind <=> root.selected-overwrite-kind; can-manage-guild: root.can-manage-guild; can-manage-channels: root.can-manage-channels; can-manage-roles: root.can-manage-roles; can-kick: root.can-kick; can-ban: root.can-ban; can-timeout: root.can-timeout; can-invite: root.can-invite; is-owner: root.is-guild-owner; close => { root.active-overlay = ""; } role-selected(id) => { root.guild-role-selected(id); } create-role(name) => { root.guild-create-role(name); } save-role(id, name, color, hoist, mentionable) => { root.guild-save-role(id, name, color, hoist, mentionable); } delete-role(id) => { root.guild-delete-role(id); } toggle-role-permission(id, bit, enabled) => { root.guild-toggle-role-permission(id, bit, enabled); } move-role(id, delta) => { root.guild-move-role(id, delta); } create-channel(name, kind) => { root.guild-create-channel(name, kind); } select-channel(id) => { root.guild-select-channel(id); } save-channel(id, name, topic, parent, slow) => { root.guild-save-channel(id, name, topic, parent, slow); } delete-channel(id) => { root.guild-delete-channel(id); } sync-channel(id) => { root.guild-sync-channel(id); } select-overwrite(id, kind) => { root.guild-select-overwrite(id, kind); } set-overwrite-permission(id, kind, bit, state) => { root.guild-set-overwrite-permission(id, kind, bit, state); } delete-overwrite(id, kind) => { root.guild-delete-overwrite(id, kind); } move-channel(id, delta) => { root.guild-move-channel(id, delta); } moderate-member(id, action, duration, reason) => { root.guild-moderate-member(id, action, duration, reason); } create-invite => { root.guild-create-invite(); } copy-invite(code) => { root.guild-copy-invite(code); } revoke-invite(code) => { root.guild-revoke-invite(code); } upload-guild-asset(kind) => { root.guild-upload-asset(kind); } upload-emoji(name) => { root.guild-upload-emoji(name); } delete-emoji(id) => { root.guild-delete-emoji(id); } create-webhook(channel, name) => { root.guild-create-webhook(channel, name); } update-webhook(id, name) => { root.guild-update-webhook(id, name); } delete-webhook(id) => { root.guild-delete-webhook(id); } rotate-webhook(id) => { root.guild-rotate-webhook(id); } unban-member(id) => { root.guild-unban-member(id); } ban-instance(domain, duration, reason) => { root.guild-ban-instance(domain, duration, reason); } unban-instance(domain) => { root.guild-unban-instance(domain); } set-notification-level(level) => { root.guild-notification-level(level); } save-guild(name, description, history) => { root.guild-save(name, description, history); } leave-guild => { root.guild-leave(); } transfer-guild(id) => { root.guild-transfer(id); } delete-guild => { root.guild-delete(); } }
     if root.active-overlay == "profile": ProfileOverlay { user-id: root.profile-id; name: root.profile-name; handle: root.profile-handle; status: root.profile-status; bio: root.profile-bio; relationship: root.profile-relationship; has-avatar: root.profile-has-avatar; avatar: root.profile-avatar; has-banner: root.profile-has-banner; banner: root.profile-banner; roles: root.profile-roles; close => { root.active-overlay = ""; } message(id) => { root.friend-message(id); } relationship-action(id, action) => { root.profile-relationship-action(id, action); } block(id, value) => { root.profile-block(id, value); } role(user, role, assign) => { root.profile-role(user, role, assign); } }

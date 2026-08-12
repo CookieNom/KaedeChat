@@ -17,11 +17,7 @@ from app.email.outbox import drain_email_outbox
 from app.gateway import app as gateway_app
 from app.main import app as api_app
 from scripts.email_tokens import token_from_email
-
-
-def require(condition: bool, message: str) -> None:
-    if not condition:
-        raise RuntimeError(message)
+from scripts.verification import VerificationFailure, failure_message, require
 
 
 def register(
@@ -33,7 +29,9 @@ def register(
 ) -> None:
     proxy_secret = get_settings().proxy_secret
     if proxy_secret is None:
-        raise RuntimeError("validation proxy secret is not configured")
+        raise VerificationFailure(
+            "KAEDE_PROXY_SECRET is not configured for the validation environment"
+        )
     response = client.post(
         "/api/v1/auth/register",
         headers={
@@ -71,7 +69,9 @@ def bearer(token: str) -> dict[str, str]:
 def versioned_headers(auth_headers: dict[str, str], resource: dict[str, Any]) -> dict[str, str]:
     version = resource.get("version")
     if not isinstance(version, str) or not version:
-        raise RuntimeError("resource version is missing")
+        raise VerificationFailure(
+            f"API resource omitted the version required for an If-Match request: {resource!r}"
+        )
     return {**auth_headers, "If-Match": version}
 
 
@@ -108,7 +108,9 @@ def verify() -> None:
         def deliver_mail() -> None:
             portal = api.portal
             if portal is None:
-                raise RuntimeError("API test portal is unavailable")
+                raise VerificationFailure(
+                    "FastAPI's test portal is unavailable; verify the application lifespan started"
+                )
             portal.call(drain_mail)
 
         register(api, emails, "alice", "192.0.2.10", deliver_mail)
@@ -170,7 +172,11 @@ def verify() -> None:
             "channel reorder was not persisted deterministically",
         )
         guild_after_reorder = api.get(f"/api/v1/guilds/{guild_id}", headers=alice_headers)
-        require(guild_after_reorder.status_code == 200, "guild reload after reorder failed")
+        require(
+            guild_after_reorder.status_code == 200,
+            "guild reload after reorder expected HTTP 200; received "
+            f"HTTP {guild_after_reorder.status_code}: {guild_after_reorder.text}",
+        )
         require(
             bool(int(guild_after_reorder.json()["permissions"]) & (1 << 4)),
             "guild response omitted the actor's manage-channels permission",
@@ -317,7 +323,11 @@ def verify() -> None:
         )
         require(helper_assigned.status_code == 204, "moderator could not grant a lower role")
         members = api.get(f"/api/v1/guilds/{guild_id}/members", headers=bob_headers)
-        require(members.status_code == 200 and len(members.json()) == 3, "member list failed")
+        require(
+            members.status_code == 200 and len(members.json()) == 3,
+            "member list expected HTTP 200 with 3 members; received "
+            f"HTTP {members.status_code}: {members.text}",
+        )
         charlie_member = next(item for item in members.json() if item["user"]["id"] == charlie_id)
         require(helper_id in charlie_member["role_ids"], "member role was not listed")
 
@@ -451,7 +461,11 @@ def verify() -> None:
 
         history = api.get(f"/api/v1/channels/{channel_id}/messages", headers=bob_headers)
         require(history.status_code == 200, f"message history failed: {history.text}")
-        require(history.json()[0]["content"] == "The lantern is lit.", "history mismatch")
+        require(
+            history.json()[0]["content"] == "The lantern is lit.",
+            "message history newest content did not match 'The lantern is lit.'; "
+            f"received {history.json()[0]['content']!r}",
+        )
         acked = api.post(
             f"/api/v1/channels/{channel_id}/ack",
             headers=bob_headers,
@@ -462,7 +476,9 @@ def verify() -> None:
         require(
             dm_history.status_code == 200
             and dm_history.json()[0]["content"] == "A private paper lantern.",
-            "direct-message history failed",
+            "direct-message history expected HTTP 200 with newest content "
+            f"'A private paper lantern.'; received HTTP {dm_history.status_code}: "
+            f"{dm_history.text}",
         )
 
         offline_message = api.post(
@@ -528,7 +544,8 @@ def verify() -> None:
             mention_state is not None
             and mention_state["mention_count"] == 1
             and mention_state["unread"] is True,
-            "background mention accounting or unread state failed",
+            "background mention state expected mention_count=1 and unread=true; "
+            f"received {mention_state!r}",
         )
 
         reacted = api.post(
@@ -591,7 +608,8 @@ def verify() -> None:
         ]
         require(
             all(item.status_code == 201 for item in bulk_messages),
-            "bulk-delete fixtures could not be created",
+            "bulk-delete fixtures expected HTTP 201; received statuses "
+            f"{[item.status_code for item in bulk_messages]}",
         )
         bulk_ids = [item.json()["id"] for item in bulk_messages]
         bulk_deleted = api.post(
@@ -776,4 +794,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except VerificationFailure as error:
+        raise SystemExit(failure_message("chat", error, "make chat-check")) from None

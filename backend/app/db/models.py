@@ -61,6 +61,18 @@ class Instance(Base, TimestampMixin):
     private_key_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The peer whose signed state first required this cached namespace.  This
+    # is accounting provenance, not delegated trust. Operator-created rows may
+    # remain NULL until federation actually introduces an identity from them.
+    federation_introduced_by_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    # Remote rows hold per-origin quota usage; the singleton self row holds the
+    # exact instance-wide total and is the admission serialization point.
+    federation_inbox_events: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    federation_inbox_event_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
 
     __table_args__ = (
         UniqueConstraint("domain", "is_self", name="uq_instances_domain_is_self"),
@@ -80,6 +92,23 @@ class Instance(Base, TimestampMixin):
         CheckConstraint(
             "is_self OR (encrypted_private_key IS NULL AND private_key_nonce IS NULL)",
             name="remote_has_no_private_key",
+        ),
+        CheckConstraint(
+            "federation_inbox_events >= 0",
+            name="nonnegative_federation_inbox_events",
+        ),
+        CheckConstraint(
+            "federation_inbox_event_bytes >= 0",
+            name="nonnegative_federation_inbox_event_bytes",
+        ),
+        CheckConstraint(
+            "NOT is_self OR federation_introduced_by_domain IS NULL",
+            name="self_has_no_federation_introducer",
+        ),
+        Index(
+            "ix_instances_federation_introducer",
+            "federation_introduced_by_domain",
+            postgresql_where=text("NOT is_self AND federation_introduced_by_domain IS NOT NULL"),
         ),
     )
 
@@ -128,6 +157,10 @@ class User(Base, FederatedIdMixin, TimestampMixin):
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     profile_version: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
     profile_resolved: Mapped[bool] = mapped_column(Boolean, server_default=true(), nullable=False)
+    # Charge a remote identity to the authenticated peer that introduced it
+    # until the User row is physically garbage-collected. For a profile learned
+    # from its own home this is simply ``origin_domain``.
+    federation_introduced_by_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
 
     __table_args__ = (
         PrimaryKeyConstraint("id", "origin_domain"),
@@ -153,6 +186,11 @@ class User(Base, FederatedIdMixin, TimestampMixin):
             "is_local OR profile_resolved OR username LIKE 'history_%'",
             name="unresolved_history_handle",
         ),
+        CheckConstraint(
+            "(is_local AND federation_introduced_by_domain IS NULL) OR "
+            "(NOT is_local AND federation_introduced_by_domain IS NOT NULL)",
+            name="federation_introducer_matches_locality",
+        ),
         Index("uq_users_username_origin", func.lower(username), "origin_domain", unique=True),
         Index(
             "uq_users_local_email",
@@ -164,6 +202,11 @@ class User(Base, FederatedIdMixin, TimestampMixin):
             "ix_users_unverified_created",
             "created_at",
             postgresql_where=text("is_local AND email_verified_at IS NULL"),
+        ),
+        Index(
+            "ix_users_federation_introducer",
+            "federation_introduced_by_domain",
+            postgresql_where=text("NOT is_local"),
         ),
     )
 
@@ -195,6 +238,9 @@ class UserSettings(Base, LocalUserMixin, TimestampMixin):
     dm_privacy: Mapped[str] = mapped_column(String(16), server_default="shared_guild")
     notification_settings: Mapped[dict[str, Any]] = mapped_column(
         JSONB, default=dict, server_default="{}"
+    )
+    guild_navigation: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=lambda: {"items": []}, server_default='{"items": []}'
     )
     __table_args__ = (
         PrimaryKeyConstraint("user_id", "user_domain"),
@@ -247,6 +293,24 @@ class Relationship(Base, LocalUserMixin, TimestampMixin):
         ),
         CheckConstraint(
             "(user_id, user_domain) <> (target_id, target_domain)", name="not_self_relationship"
+        ),
+        Index(
+            "ix_relationships_pending_in_recipient",
+            "user_id",
+            "user_domain",
+            postgresql_where=text("type = 'pending_in'"),
+        ),
+        Index(
+            "ix_relationships_pending_in_origin",
+            "target_domain",
+            postgresql_where=text("type = 'pending_in'"),
+        ),
+        Index(
+            "ix_relationships_pending_in_recipient_origin",
+            "user_id",
+            "user_domain",
+            "target_domain",
+            postgresql_where=text("type = 'pending_in'"),
         ),
     )
 
@@ -410,6 +474,9 @@ class Guild(Base, FederatedIdMixin, TimestampMixin):
     history_policy_generation: Mapped[int] = mapped_column(
         BigInteger, server_default="1", nullable=False
     )
+    snapshot_generation: Mapped[int] = mapped_column(BigInteger, server_default="1", nullable=False)
+    sync_error_code: Mapped[str | None] = mapped_column(String(64))
+    sync_error: Mapped[str | None] = mapped_column(String(500))
     unavailable: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
     __table_args__ = (
         PrimaryKeyConstraint("id", "origin_domain"),
@@ -428,7 +495,10 @@ class Guild(Base, FederatedIdMixin, TimestampMixin):
             initially="DEFERRED",
             use_alter=True,
         ),
-        CheckConstraint("sync_status IN ('ready','syncing','stale','failed')", name="sync_status"),
+        CheckConstraint(
+            "sync_status IN ('ready','syncing','stale','failed','quota_paused')",
+            name="sync_status",
+        ),
         CheckConstraint(
             "next_event_seq >= 1 AND last_event_seq >= 0 AND last_event_seq < next_event_seq",
             name="event_sequence_order",
@@ -441,6 +511,67 @@ class Guild(Base, FederatedIdMixin, TimestampMixin):
         CheckConstraint(
             "history_policy_generation >= 1", name="positive_history_policy_generation"
         ),
+        CheckConstraint("snapshot_generation >= 1", name="positive_snapshot_generation"),
+        CheckConstraint(
+            "sync_status IN ('failed','quota_paused') OR sync_error_code IS NULL",
+            name="sync_error_requires_failure",
+        ),
+    )
+
+
+class FederationReplicaUsage(Base, TimestampMixin):
+    """Trigger-maintained database footprint for one remote guild replica."""
+
+    __tablename__ = "federation_replica_usage"
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    message_rows: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    message_bytes: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    reaction_rows: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    reaction_bytes: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    member_rows: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    member_bytes: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    attachment_rows: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    attachment_bytes: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    projection_rows: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    projection_bytes: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    structural_rows: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    structural_bytes: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    total_rows: Mapped[int] = mapped_column(
+        BigInteger,
+        Computed(
+            "message_rows + reaction_rows + member_rows + attachment_rows + "
+            "projection_rows + structural_rows",
+            persisted=True,
+        ),
+    )
+    total_bytes: Mapped[int] = mapped_column(
+        BigInteger,
+        Computed(
+            "message_bytes + reaction_bytes + member_bytes + attachment_bytes + "
+            "projection_bytes + structural_bytes",
+            persisted=True,
+        ),
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("guild_id", "guild_domain"),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain"],
+            ["guilds.id", "guilds.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "message_rows >= 0 AND reaction_rows >= 0 AND member_rows >= 0 "
+            "AND attachment_rows >= 0 AND projection_rows >= 0 AND structural_rows >= 0",
+            name="nonnegative_rows",
+        ),
+        CheckConstraint(
+            "message_bytes >= 0 AND reaction_bytes >= 0 AND member_bytes >= 0 "
+            "AND attachment_bytes >= 0 AND projection_bytes >= 0 "
+            "AND structural_bytes >= 0",
+            name="nonnegative_bytes",
+        ),
+        Index("ix_federation_replica_usage_origin", "guild_domain"),
     )
 
 
@@ -560,6 +691,35 @@ class GuildMember(Base, TimestampMixin):
         CheckConstraint("voice_flags >= 0", name="nonnegative_voice_flags"),
         CheckConstraint("member_version >= 1", name="positive_member_version"),
         Index("ix_guild_members_user", "user_id", "user_domain"),
+    )
+
+
+class RemoteGuildMembershipIntent(Base, LocalUserMixin, TimestampMixin):
+    """Local authority over rejoining a guild hosted by another instance.
+
+    This row deliberately has no foreign key to ``guilds``.  A replica can be
+    purged after its final local member leaves. Missing intent is fail-closed
+    for a new membership, while short-lived rows correlate explicit joins and
+    guard delayed snapshots until bounded retention removes them.
+    """
+
+    __tablename__ = "remote_guild_membership_intents"
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    state: Mapped[str] = mapped_column(
+        String(16), default="departed", server_default="departed", nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("guild_id", "guild_domain", "user_id", "user_domain"),
+        *LocalUserMixin.locality_constraints("remote_guild_membership_intents"),
+        CheckConstraint("guild_id >= 0", name="nonnegative_guild_id"),
+        CheckConstraint("guild_domain <> user_domain", name="guild_is_remote_from_local_user"),
+        CheckConstraint("state IN ('departed','joining')", name="state_value"),
+        Index(
+            "ix_remote_guild_membership_intents_user",
+            "user_id",
+            "user_domain",
+        ),
     )
 
 
@@ -871,21 +1031,9 @@ class Message(Base, FederatedIdMixin):
         ),
         ForeignKeyConstraint(["author_id", "author_domain"], ["users.id", "users.origin_domain"]),
         ForeignKeyConstraint(["webhook_id"], ["webhooks.id"], ondelete="SET NULL"),
-        ForeignKeyConstraint(
-            [
-                "referenced_message_id",
-                "referenced_message_domain",
-                "channel_id",
-                "channel_domain",
-            ],
-            [
-                "messages.id",
-                "messages.origin_domain",
-                "messages.channel_id",
-                "messages.channel_domain",
-            ],
-            name="fk_messages_reply_ref_channel",
-        ),
+        # Reply references deliberately remain opaque after an older message
+        # is evicted from a non-authoritative DM cache. Mutation paths validate
+        # that a newly supplied reference belongs to this channel.
         CheckConstraint("id >= 0", name="nonnegative_id"),
         CheckConstraint(
             "(referenced_message_id IS NULL) = (referenced_message_domain IS NULL)",
@@ -1269,6 +1417,13 @@ class DMConversation(Base, FederatedIdMixin, TimestampMixin):
     type: Mapped[str] = mapped_column(String(16), server_default="direct")
     authority_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
     channel_type: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
+    history_truncated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    history_truncated_before_id: Mapped[int | None] = mapped_column(BigInteger)
+    history_truncated_before_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    history_cache_start_id: Mapped[int | None] = mapped_column(BigInteger)
+    history_cache_start_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
     __table_args__ = (
         PrimaryKeyConstraint("id", "origin_domain"),
         ForeignKeyConstraint(["authority_domain"], ["instances.domain"]),
@@ -1285,6 +1440,18 @@ class DMConversation(Base, FederatedIdMixin, TimestampMixin):
         CheckConstraint("channel_type = 1", name="channel_type"),
         CheckConstraint("origin_domain = authority_domain", name="origin_is_authority"),
         CheckConstraint("pair_key ~ '^[0-9a-f]{64}$'", name="pair_key_format"),
+        CheckConstraint(
+            "(history_truncated_before_id IS NULL) = (history_truncated_before_domain IS NULL)",
+            name="history_truncated_before_ref_complete",
+        ),
+        CheckConstraint(
+            "(history_cache_start_id IS NULL) = (history_cache_start_domain IS NULL)",
+            name="history_cache_start_ref_complete",
+        ),
+        CheckConstraint(
+            "history_truncated OR history_truncated_before_id IS NULL",
+            name="history_boundary_requires_truncation",
+        ),
     )
 
 
@@ -1303,6 +1470,94 @@ class DMParticipant(Base):
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(["user_id", "user_domain"], ["users.id", "users.origin_domain"]),
+    )
+
+
+class FederatedDMStorageUsage(Base, TimestampMixin):
+    """Trigger-maintained high-water accounting for a cross-instance DM.
+
+    Logical message deletion and metadata clearing do not release capacity.
+    Charges leave this row only when the underlying SQL rows are physically
+    deleted (or moved to another conversation), preventing delete/rewrite loops
+    from evading retained-state admission.
+    """
+
+    __tablename__ = "federated_dm_storage_usage"
+    conversation_id: Mapped[int] = mapped_column(BigInteger)
+    conversation_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    authority_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    remote_origin_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    message_rows: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    message_bytes: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    attachment_rows: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    attachment_bytes: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    projection_rows: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    projection_bytes: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    total_rows: Mapped[int] = mapped_column(
+        BigInteger,
+        Computed("message_rows + attachment_rows + projection_rows", persisted=True),
+    )
+    total_bytes: Mapped[int] = mapped_column(
+        BigInteger,
+        Computed("message_bytes + attachment_bytes + projection_bytes", persisted=True),
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("conversation_id", "conversation_domain"),
+        ForeignKeyConstraint(
+            ["conversation_id", "conversation_domain"],
+            ["dm_conversations.id", "dm_conversations.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(["authority_domain"], ["instances.domain"]),
+        ForeignKeyConstraint(["remote_origin_domain"], ["instances.domain"]),
+        CheckConstraint(
+            "message_rows >= 0 AND attachment_rows >= 0 AND projection_rows >= 0",
+            name="nonnegative_rows",
+        ),
+        CheckConstraint(
+            "message_bytes >= 0 AND attachment_bytes >= 0 AND projection_bytes >= 0",
+            name="nonnegative_bytes",
+        ),
+        Index("ix_federated_dm_storage_usage_authority", "authority_domain"),
+        Index("ix_federated_dm_storage_usage_remote_origin", "remote_origin_domain"),
+    )
+
+
+class FederatedDMRowCharge(Base):
+    """Per-row retained charge used to release high-water usage exactly."""
+
+    __tablename__ = "federated_dm_row_charges"
+    table_name: Mapped[str] = mapped_column(String(32))
+    row_id: Mapped[int] = mapped_column(BigInteger)
+    row_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    conversation_id: Mapped[int] = mapped_column(BigInteger)
+    conversation_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    category: Mapped[str] = mapped_column(String(16), nullable=False)
+    charge_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    __table_args__ = (
+        PrimaryKeyConstraint("table_name", "row_id", "row_domain"),
+        ForeignKeyConstraint(
+            ["conversation_id", "conversation_domain"],
+            [
+                "federated_dm_storage_usage.conversation_id",
+                "federated_dm_storage_usage.conversation_domain",
+            ],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "table_name IN ('messages','attachments','message_projections')",
+            name="table_name",
+        ),
+        CheckConstraint(
+            "category IN ('message','attachment','projection')",
+            name="category",
+        ),
+        CheckConstraint("charge_bytes > 0", name="positive_charge"),
+        Index(
+            "ix_federated_dm_row_charges_conversation",
+            "conversation_id",
+            "conversation_domain",
+        ),
     )
 
 
@@ -1326,16 +1581,9 @@ class ReadState(Base, LocalUserMixin):
             ["channels.id", "channels.origin_domain"],
             ondelete="CASCADE",
         ),
-        ForeignKeyConstraint(
-            ["last_message_id", "last_message_domain", "channel_id", "channel_domain"],
-            [
-                "messages.id",
-                "messages.origin_domain",
-                "messages.channel_id",
-                "messages.channel_domain",
-            ],
-            name="fk_read_states_last_message_ref_channel",
-        ),
+        # A read cursor is an ordering watermark, not ownership of the message
+        # row. Keeping the opaque composite reference preserves unread state
+        # when an older non-authoritative DM cache entry is evicted.
         CheckConstraint("mention_count >= 0", name="nonnegative_mentions"),
     )
 
@@ -1526,12 +1774,16 @@ class FederationEvent(Base):
     origin_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     event_type: Mapped[str] = mapped_column(String(100))
     envelope: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    envelope_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         PrimaryKeyConstraint("origin_domain", "event_id"),
         ForeignKeyConstraint(["origin_domain"], ["instances.domain"]),
         CheckConstraint("expires_at IS NULL OR expires_at > created_at", name="positive_retention"),
+        CheckConstraint("envelope_bytes >= 0", name="nonnegative_envelope_bytes"),
     )
 
 
@@ -1620,6 +1872,27 @@ class RemoteMediaCache(Base):
     )
 
 
+class RemoteMediaOrphan(Base):
+    """A remote-cache object that is not safe to forget until deletion succeeds."""
+
+    __tablename__ = "remote_media_orphans"
+    object_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    next_retry_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        CheckConstraint("size >= 0", name="nonnegative_size"),
+        CheckConstraint("attempts >= 0", name="nonnegative_attempts"),
+        Index("ix_remote_media_orphans_retry", "next_retry_at"),
+    )
+
+
 class RemoteMediaTombstone(Base):
     """Durable authority proof that remote attachment bytes must not be served."""
 
@@ -1630,10 +1903,12 @@ class RemoteMediaTombstone(Base):
     deleted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     __table_args__ = (
         PrimaryKeyConstraint("origin_domain", "attachment_id"),
         ForeignKeyConstraint(["origin_domain"], ["instances.domain"], ondelete="CASCADE"),
         CheckConstraint("attachment_id >= 0", name="nonnegative_attachment_id"),
+        Index("ix_remote_media_tombstones_expiry", "expires_at"),
     )
 
 

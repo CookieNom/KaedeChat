@@ -21,8 +21,8 @@ use kaede_protocol::EntityRef;
 use livekit::{
     options::TrackPublishOptions,
     prelude::{
-        LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteTrack, Room, RoomEvent, RoomOptions,
-        TrackSource,
+        DisconnectReason, LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteTrack, Room,
+        RoomEvent, RoomOptions, TrackSource,
     },
     webrtc::{
         audio_frame::AudioFrame,
@@ -61,6 +61,8 @@ pub struct VoiceGrant {
     pub can_stream: bool,
     #[serde(default)]
     pub can_use_vad: bool,
+    #[serde(default)]
+    pub move_session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,6 +118,9 @@ pub struct VoiceHandle {
     pub status: watch::Receiver<VoiceStatus>,
     pub video_frames: Option<mpsc::Receiver<RemoteVideoFrame>>,
     pub input_level: Option<Arc<CaptureGate>>,
+    /// Opaque broker correlation for a federated guild voice session.
+    /// Replacement grants must carry the same value as the active handle.
+    pub move_session_id: Option<String>,
     task: JoinHandle<()>,
 }
 
@@ -170,6 +175,7 @@ async fn join(
     capture_settings: CaptureSettings,
     output_device: Option<String>,
 ) -> Result<VoiceHandle, VoiceError> {
+    let move_session_id = grant.move_session_id.clone();
     if grant.can_speak
         && capture_settings.mode == kaede_audio::InputMode::VoiceActivity
         && !grant.can_use_vad
@@ -250,6 +256,7 @@ async fn join(
         status: status_rx,
         video_frames: Some(video_rx),
         input_level,
+        move_session_id,
         task,
     })
 }
@@ -357,7 +364,8 @@ async fn run_room(
                                 });
                             }
                             Err(error) => {
-                                send_media_error(&status, &room, can_speak, can_stream, screen_share.as_ref(), camera.as_ref(), error.to_string());
+                                tracing::warn!(%error, "camera control failed");
+                                send_media_error(&status, &room, can_speak, can_stream, screen_share.as_ref(), camera.as_ref(), error.user_message());
                             }
                         }
                     }
@@ -387,7 +395,8 @@ async fn run_room(
                                 });
                             }
                             Err(error) => {
-                                send_media_error(&status, &room, can_speak, can_stream, screen_share.as_ref(), camera.as_ref(), error.to_string());
+                                tracing::warn!(%error, "screen-share control failed");
+                                send_media_error(&status, &room, can_speak, can_stream, screen_share.as_ref(), camera.as_ref(), error.user_message());
                             }
                         }
                     }
@@ -454,7 +463,10 @@ async fn run_room(
                         });
                     }
                     Some(RoomEvent::Disconnected { reason }) => {
-                        let _ = status.send(VoiceStatus::Failed(format!("Disconnected: {reason:?}")));
+                        tracing::warn!(?reason, "voice room disconnected unexpectedly");
+                        let _ = status.send(VoiceStatus::Failed(
+                            disconnect_message(reason.into()).to_owned(),
+                        ));
                         break;
                     }
                     None => break,
@@ -855,4 +867,104 @@ pub enum VoiceError {
     VoiceActivityDenied,
     #[error("failed to start native capture thread: {0}")]
     CaptureThread(std::io::Error),
+}
+
+impl VoiceError {
+    /// Returns recovery-oriented wording suitable for the voice UI.
+    #[must_use]
+    pub fn user_message(&self) -> String {
+        match self {
+            Self::Api(error) => error.user_message(),
+            Self::Audio(kaede_audio::AudioError::DeviceNotFound) =>
+                "The selected microphone or speaker is no longer available. Choose another audio device and try again."
+                    .to_owned(),
+            Self::Audio(kaede_audio::AudioError::UnsupportedFormat(_)) =>
+                "The selected audio device uses a format Kaede does not support. Choose another device and try again."
+                    .to_owned(),
+            Self::Audio(kaede_audio::AudioError::Backend(_)) =>
+                "Kaede could not open the selected audio device. Check your system audio permissions, then choose the device again."
+                    .to_owned(),
+            Self::LiveKit(_) =>
+                "The voice service could not complete the connection. Check your connection and try joining voice again."
+                    .to_owned(),
+            Self::Camera(_) =>
+                "Kaede could not use the selected camera. Check camera permission and whether another app is using it, then try again."
+                    .to_owned(),
+            Self::CameraWorker(_) =>
+                "The camera stopped unexpectedly. Turn the camera off and on; if it keeps failing, choose another camera."
+                    .to_owned(),
+            Self::VoiceActivityDenied =>
+                "Voice activity is not allowed in this channel. Switch your input mode to push to talk and try again."
+                    .to_owned(),
+            Self::CaptureThread(_) =>
+                "Kaede could not start screen capture. Check screen-recording permission and try sharing again."
+                    .to_owned(),
+        }
+    }
+}
+
+fn disconnect_message(reason: DisconnectReason) -> &'static str {
+    match reason {
+        DisconnectReason::ClientInitiated => "You left voice.",
+        DisconnectReason::DuplicateIdentity => {
+            "This account joined voice from another client, so this connection was closed."
+        }
+        DisconnectReason::ServerShutdown => {
+            "The voice server restarted. Wait a moment and join voice again."
+        }
+        DisconnectReason::ParticipantRemoved => "A moderator disconnected you from voice.",
+        DisconnectReason::RoomDeleted | DisconnectReason::RoomClosed => {
+            "This voice session has ended and is no longer available."
+        }
+        DisconnectReason::StateMismatch | DisconnectReason::Migration => {
+            "The voice session changed while you were connected. Join voice again."
+        }
+        DisconnectReason::JoinFailure => {
+            "The voice service could not finish joining. Check your connection and try again."
+        }
+        DisconnectReason::SignalClose | DisconnectReason::ConnectionTimeout => {
+            "The voice connection was lost. Check your connection and join again."
+        }
+        DisconnectReason::UserUnavailable => "The person you called is unavailable.",
+        DisconnectReason::UserRejected => "The person you called declined the call.",
+        DisconnectReason::SipTrunkFailure => {
+            "The phone connection failed. Wait a moment and try the call again."
+        }
+        DisconnectReason::MediaFailure => {
+            "Voice media stopped working. Check your audio devices and connection, then join again."
+        }
+        DisconnectReason::AgentError => {
+            "The voice assistant stopped unexpectedly. Try joining again."
+        }
+        DisconnectReason::UnknownReason => {
+            "The voice session ended unexpectedly. Check your connection and join again."
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DisconnectReason, VoiceError, disconnect_message};
+
+    #[test]
+    fn voice_errors_explain_the_recovery_action() {
+        assert_eq!(
+            VoiceError::Audio(kaede_audio::AudioError::DeviceNotFound).user_message(),
+            "The selected microphone or speaker is no longer available. Choose another audio device and try again."
+        );
+        assert!(
+            VoiceError::VoiceActivityDenied
+                .user_message()
+                .contains("push to talk")
+        );
+    }
+
+    #[test]
+    fn disconnect_reasons_do_not_leak_debug_enum_names() {
+        assert_eq!(
+            disconnect_message(DisconnectReason::DuplicateIdentity),
+            "This account joined voice from another client, so this connection was closed."
+        );
+        assert!(disconnect_message(DisconnectReason::ConnectionTimeout).contains("join again"));
+    }
 }

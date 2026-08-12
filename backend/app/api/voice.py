@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import time
 from contextlib import suppress
 from dataclasses import asdict
@@ -22,7 +23,6 @@ from app.api.dependencies import (
 )
 from app.chat.audit import add_audit_entry
 from app.chat.events import guild_topic, publish_dispatch, publish_ephemeral, user_topic
-from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
 from app.chat.hierarchy import require_can_manage_member
 from app.chat.permissions import get_permissions, require_permissions
 from app.core.permissions import Permission
@@ -32,7 +32,10 @@ from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef
 from app.db.models import GuildMember, User
 from app.federation.client import signed_request
-from app.federation.network import FederationNetworkError
+from app.federation.network import (
+    FederationNetworkError,
+    decode_federation_response_json,
+)
 from app.federation.security import (
     FederationPrincipal,
     authenticate_federation,
@@ -60,19 +63,48 @@ from app.voice.service import (
     require_voice_enabled,
 )
 from app.voice.state import (
+    FederatedVoiceSession,
     Occupant,
+    activate_federated_voice_home_session,
+    advance_federated_voice_home_session,
+    begin_federated_voice_home_session,
     bump_generation,
+    confirm_federated_voice_home_session,
     current_generation,
+    discard_all_federated_voice_home_sessions,
+    discard_federated_voice_session,
+    discard_pending_federated_voice_home_session,
+    get_federated_voice_session,
     occupancy_snapshot,
     remove_occupant,
     replace_occupancy,
     room_occupants,
     room_state_key,
+    set_federated_voice_authority_session,
     set_occupant,
 )
 
 router = APIRouter(tags=["voice"])
 log = structlog.get_logger()
+
+
+def valid_federated_voice_url(value: str, authority_domain: str) -> bool:
+    """Accept only a TLS LiveKit endpoint on the authenticated authority."""
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme == "wss"
+        and parsed.hostname == authority_domain
+        and port in {None, 443}
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def voice_audit_reason(value: str | None) -> str | None:
@@ -104,10 +136,27 @@ async def channel_voice_token(
                 "permissions": str(int(Permission.CONNECT)),
             },
         )
+    identity = participant_identity(auth.user.id, auth.user.origin_domain)
     if guild.origin_domain == settings.domain:
-        return await authoritative_guild_token(
+        grant = await authoritative_guild_token(
             session, redis, settings, channel=channel, guild=guild, actor=auth.user
         )
+        await discard_all_federated_voice_home_sessions(redis, identity)
+        return grant
+    move_session_id = secrets.token_urlsafe(32)
+    expected_room = f"g.{guild.id}.{channel.id}"
+    await begin_federated_voice_home_session(
+        redis,
+        identity,
+        FederatedVoiceSession(
+            authority_domain=guild.origin_domain,
+            guild_id=str(guild.id),
+            room=expected_room,
+            generation=0,
+            move_session_id=move_session_id,
+        ),
+    )
+    succeeded = False
     try:
         response = await signed_request(
             session,
@@ -120,30 +169,55 @@ async def channel_voice_token(
                 "channel_id": str(channel.id),
                 "actor_id": str(auth.user.id),
                 "actor_domain": auth.user.origin_domain,
+                "move_session_id": move_session_id,
             },
             request_timeout=5,
             max_response_bytes=16 * 1024,
         )
+        if response.status_code != 200:
+            if response.status_code in {401, 403, 404}:
+                raise HTTPException(
+                    status_code=response.status_code, detail={"code": "VOICE_DENIED"}
+                )
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "VOICE_HOME_UNREACHABLE", "retry_after_ms": 2000},
+                headers={"Retry-After": "2"},
+            )
+        try:
+            grant = VoiceTokenResponse.model_validate(decode_federation_response_json(response))
+        except (FederationNetworkError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=502, detail={"code": "VOICE_HOME_INVALID_RESPONSE"}
+            ) from exc
+        if (
+            grant.move_session_id != move_session_id
+            or grant.room != expected_room
+            or not valid_federated_voice_url(grant.url, guild.origin_domain)
+        ):
+            raise HTTPException(status_code=502, detail={"code": "VOICE_HOME_INVALID_RESPONSE"})
+        if not await activate_federated_voice_home_session(
+            redis,
+            identity,
+            move_session_id=move_session_id,
+            authority_domain=guild.origin_domain,
+            guild_id=str(guild.id),
+            room=grant.room,
+            generation=grant.generation,
+        ):
+            raise HTTPException(status_code=409, detail={"code": "VOICE_SESSION_SUPERSEDED"})
+        succeeded = True
+        return grant
     except FederationNetworkError as exc:
         raise HTTPException(
             status_code=503,
             detail={"code": "VOICE_HOME_UNREACHABLE", "retry_after_ms": 2000},
             headers={"Retry-After": "2"},
         ) from exc
-    if response.status_code != 200:
-        if response.status_code in {401, 403, 404}:
-            raise HTTPException(status_code=response.status_code, detail={"code": "VOICE_DENIED"})
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "VOICE_HOME_UNREACHABLE", "retry_after_ms": 2000},
-            headers={"Retry-After": "2"},
-        )
-    try:
-        return VoiceTokenResponse.model_validate(response.json())
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=502, detail={"code": "VOICE_HOME_INVALID_RESPONSE"}
-        ) from exc
+    finally:
+        if not succeeded:
+            with suppress(Exception):
+                await discard_pending_federated_voice_home_session(redis, identity, move_session_id)
 
 
 @router.post("/_kaede/v1/voice/token", response_model=VoiceTokenResponse)
@@ -168,7 +242,13 @@ async def federation_voice_token(
     if actor is None:
         raise HTTPException(status_code=404, detail={"code": "VOICE_USER_NOT_FOUND"})
     return await authoritative_guild_token(
-        session, redis, settings, channel=channel, guild=guild, actor=actor
+        session,
+        redis,
+        settings,
+        channel=channel,
+        guild=guild,
+        actor=actor,
+        move_session_id=payload.move_session_id,
     )
 
 
@@ -250,27 +330,6 @@ async def update_member_voice_moderation(
     if changed:
         member.voice_flags = flags
         member.member_version += 1
-        await queue_guild_mutation(
-            session,
-            settings,
-            guild,
-            auth.user,
-            "guild.member.update",
-            {
-                "member": {
-                    "user": {"id": str(user_id), "origin_domain": user_domain},
-                    "nickname": member.nickname,
-                    "timeout_until": (
-                        member.timeout_until.isoformat() if member.timeout_until else None
-                    ),
-                    "timeout_indefinite": member.timeout_indefinite,
-                    "timeout_reason": member.timeout_reason,
-                    "voice_flags": member.voice_flags,
-                    "member_version": str(member.member_version),
-                }
-            },
-            snapshot_required=True,
-        )
         await add_audit_entry(
             session,
             snowflake,
@@ -289,7 +348,6 @@ async def update_member_voice_moderation(
             ],
         )
         await session.commit()
-        await wake_queued_guild_federation(guild)
     else:
         # Release the guild lock before contacting Redis or LiveKit even when
         # the requested state is already current.
@@ -447,6 +505,19 @@ async def move_member_voice(
     )
     if source_room == f"g.{guild.id}.{target_channel.id}":
         return Response(status_code=204)
+    source_generation = await current_generation(redis, settings.domain, source_room, identity)
+    move_session: FederatedVoiceSession | None = None
+    if user_domain != settings.domain:
+        move_session = await get_federated_voice_session(redis, "authority", identity)
+        if move_session is None or not move_session.ready or not move_session.active:
+            raise HTTPException(status_code=409, detail={"code": "VOICE_MOVE_SESSION_UNAVAILABLE"})
+        if (
+            move_session.authority_domain != settings.domain
+            or move_session.guild_id != str(guild.id)
+            or move_session.room != source_room
+            or move_session.generation != source_generation
+        ):
+            raise HTTPException(status_code=409, detail={"code": "VOICE_MOVE_SESSION_STALE"})
     await add_audit_entry(
         session,
         snowflake,
@@ -471,14 +542,9 @@ async def move_member_voice(
         channel=target_channel,
         guild=guild,
         actor=target_user,
+        move_session_id=(move_session.move_session_id if move_session is not None else None),
+        disconnect_previous=user_domain == settings.domain,
     )
-    await session.commit()
-    await bump_generation(redis, settings.domain, source_room, identity)
-    try:
-        await LiveKitControl(settings).remove_participant(source_room, identity)
-    except LiveKitError:
-        log.warning("voice_move_disconnect_failed", room=source_room, identity=identity)
-    await remove_occupant(redis, settings.domain, source_room, identity)
     move_data = {
         "guild_id": str(guild.id),
         "guild_domain": guild.origin_domain,
@@ -496,8 +562,10 @@ async def move_member_voice(
             {**move_data, "grant": grant.model_dump()},
         )
     else:
+        if move_session is None:
+            raise RuntimeError("remote voice move is missing its correlated session")
         try:
-            await signed_request(
+            move_response = await signed_request(
                 session,
                 settings,
                 "POST",
@@ -508,13 +576,36 @@ async def move_member_voice(
                     "channel_id": str(target_channel.id),
                     "target_id": str(user_id),
                     "target_domain": user_domain,
+                    "move_session_id": move_session.move_session_id,
+                    "source_room": source_room,
+                    "source_generation": source_generation,
                     "grant": grant.model_dump(),
                 },
                 request_timeout=5,
                 max_response_bytes=32 * 1024,
             )
-        except FederationNetworkError:
+        except FederationNetworkError as exc:
+            await session.rollback()
             log.warning("voice_move_delivery_failed", destination=user_domain)
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "VOICE_MOVE_DELIVERY_FAILED", "retry_after_ms": 1_000},
+                headers={"Retry-After": "1"},
+            ) from exc
+        if move_response.status_code != 204:
+            await session.rollback()
+            raise HTTPException(
+                status_code=409 if move_response.status_code == 409 else 503,
+                detail={"code": "VOICE_MOVE_REJECTED"},
+            )
+    await session.commit()
+    if user_domain != settings.domain:
+        await bump_generation(redis, settings.domain, source_room, identity)
+        try:
+            await LiveKitControl(settings).remove_participant(source_room, identity)
+        except LiveKitError:
+            log.warning("voice_move_disconnect_failed", room=source_room, identity=identity)
+        await remove_occupant(redis, settings.domain, source_room, identity)
     return Response(status_code=204)
 
 
@@ -542,8 +633,33 @@ async def federation_voice_move(
     expected_room = f"g.{payload.guild_id}.{payload.channel_id}"
     if payload.grant.room != expected_room:
         raise HTTPException(status_code=400, detail={"code": "KAED_VOICE_INVALID_ROOM"})
-    if urlsplit(payload.grant.url).hostname != principal.origin:
+    if not valid_federated_voice_url(payload.grant.url, principal.origin):
         raise HTTPException(status_code=400, detail={"code": "KAED_VOICE_INVALID_STATE"})
+    try:
+        source_kind, source_guild_id, _source_channel_id = parse_room_name(payload.source_room)
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"code": "KAED_VOICE_INVALID_ROOM"}) from None
+    if source_kind != "g" or source_guild_id != int(payload.guild_id):
+        raise HTTPException(status_code=400, detail={"code": "KAED_VOICE_INVALID_ROOM"})
+    identity = participant_identity(int(payload.target_id), settings.domain)
+    rejection = await advance_federated_voice_home_session(
+        redis,
+        identity,
+        move_session_id=payload.move_session_id,
+        authority_domain=principal.origin,
+        guild_id=payload.guild_id,
+        source_room=payload.source_room,
+        source_generation=payload.source_generation,
+        target_room=payload.grant.room,
+        target_generation=payload.grant.generation,
+    )
+    if rejection is not None:
+        code = (
+            "KAED_VOICE_MOVE_NOT_EXPECTED"
+            if rejection in {"missing", "pending", "inactive"}
+            else "KAED_VOICE_MOVE_STALE"
+        )
+        raise HTTPException(status_code=409, detail={"code": code})
     topic = user_topic(settings.domain, int(payload.target_id))
     move_data = {
         "guild_id": payload.guild_id,
@@ -556,7 +672,11 @@ async def federation_voice_move(
         redis,
         topic,
         "VOICE_TOKEN",
-        {**move_data, "grant": payload.grant.model_dump()},
+        {
+            **move_data,
+            "move_session_id": payload.move_session_id,
+            "grant": payload.grant.model_dump(),
+        },
     )
     return Response(status_code=204)
 
@@ -682,8 +802,30 @@ async def livekit_webhook(
             can_stream=bool(metadata["can_stream"]),
         )
         await set_occupant(redis, settings.domain, occupant)
+        move_session_id = metadata.get("move_session_id")
+        if kind == "g" and user_domain != settings.domain and isinstance(move_session_id, str):
+            await set_federated_voice_authority_session(
+                redis,
+                identity,
+                FederatedVoiceSession(
+                    authority_domain=settings.domain,
+                    guild_id=str(scope_id),
+                    room=room,
+                    generation=generation,
+                    move_session_id=move_session_id,
+                    ready=True,
+                    active=True,
+                ),
+            )
     elif event_type == "participant_left":
         await remove_occupant(redis, settings.domain, room, identity)
+        if kind == "g" and user_domain != settings.domain:
+            await discard_federated_voice_session(
+                redis,
+                "authority",
+                identity,
+                room=room,
+            )
     else:
         return await completed()
     topic = (
@@ -735,14 +877,16 @@ async def federation_voice_state(
     channel, guild = await load_voice_channel(session, channel_id, principal.origin)
     if guild.id != guild_id or channel.guild_id != guild_id:
         raise HTTPException(status_code=404, detail={"code": "VOICE_CHANNEL_NOT_FOUND"})
-    local_member = await session.scalar(
-        select(GuildMember.user_id).where(
-            GuildMember.guild_id == guild_id,
-            GuildMember.guild_domain == principal.origin,
-            GuildMember.user_domain == settings.domain,
+    local_member_ids = list(
+        await session.scalars(
+            select(GuildMember.user_id).where(
+                GuildMember.guild_id == guild_id,
+                GuildMember.guild_domain == principal.origin,
+                GuildMember.user_domain == settings.domain,
+            )
         )
     )
-    if local_member is None:
+    if not local_member_ids:
         raise HTTPException(status_code=403, detail={"code": "KAED_VOICE_NOT_SUBSCRIBED"})
     now = int(time.time())
     if abs(payload.generated_at - now) > settings.federation_clock_skew_seconds:
@@ -766,13 +910,39 @@ async def federation_voice_state(
             occupants.append(occupant)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail={"code": "KAED_VOICE_INVALID_STATE"}) from None
-    await replace_occupancy(
+    replaced = await replace_occupancy(
         redis,
         principal.origin,
         payload.room,
         occupants,
         generated_at=payload.generated_at,
     )
+    if not replaced:
+        return Response(status_code=204)
+    local_occupant_identities = {
+        occupant.identity for occupant in occupants if occupant.user_domain == settings.domain
+    }
+    for local_user_id in local_member_ids:
+        identity = participant_identity(local_user_id, settings.domain)
+        if identity in local_occupant_identities:
+            await confirm_federated_voice_home_session(
+                redis,
+                identity,
+                authority_domain=principal.origin,
+                room=payload.room,
+            )
+        else:
+            # A full authoritative room snapshot fences a session that has
+            # actually left. Pending grants remain valid until their short TTL
+            # so a heartbeat racing initial LiveKit connection cannot cancel it.
+            await discard_federated_voice_session(
+                redis,
+                "home",
+                identity,
+                room=payload.room,
+                active_only=True,
+                authority_domain=principal.origin,
+            )
     await publish_ephemeral(
         redis,
         guild_topic(principal.origin, guild_id),

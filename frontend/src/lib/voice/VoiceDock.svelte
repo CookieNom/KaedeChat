@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api/client';
+  import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import Icon from '$lib/components/Icon.svelte';
   import { Permission } from '$lib/generated/permissions';
   import { onDestroy, onMount } from 'svelte';
@@ -76,6 +76,7 @@
 
   const moved = (event: Event) => {
     const grant = (event as CustomEvent<VoiceToken>).detail;
+    if ((grant.move_session_id ?? null) !== voice.moveSessionId) return;
     const generation = ++connectionGeneration;
     joinController?.abort();
     joinController = null;
@@ -92,7 +93,7 @@
         if (!mounted || generation !== connectionGeneration) await voice.disconnect();
       } catch (caught) {
         if (mounted && generation === connectionGeneration) {
-          error = caught instanceof Error ? caught.message : 'Could not move voice rooms.';
+          error = userErrorMessage(caught, 'Could not move voice rooms. Try joining again.');
         }
       }
     })();
@@ -159,9 +160,10 @@
               ? 'You do not have permission to join this voice channel.'
               : caught.message
             : voice.error ||
-              (caught instanceof Error && caught.message
-                ? caught.message
-                : 'Could not join voice.');
+              userErrorMessage(
+                caught,
+                'Could not join voice. Check your network and microphone permission, then try again.'
+              );
       }
     } finally {
       if (joinController === controller) joinController = null;
@@ -173,7 +175,7 @@
     try {
       await action();
     } catch (caught) {
-      if (mounted) error = caught instanceof Error ? caught.message : 'Voice control failed.';
+      if (mounted) error = userErrorMessage(caught, 'Voice control failed. Try again.');
     }
   }
 </script>

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { api, ApiError } from '$lib/api/client';
+  import { api, userErrorMessage } from '$lib/api/client';
   import { consumeUrlToken } from '$lib/auth/url-token';
   import { tick } from 'svelte';
   let password = $state('');
@@ -37,7 +37,7 @@
       await tick();
       successPanel?.focus();
     } catch (caught) {
-      error = caught instanceof ApiError ? caught.message : 'Could not reset password.';
+      error = userErrorMessage(caught, 'Could not reset your password. Try again.');
     } finally {
       busy = false;
     }
