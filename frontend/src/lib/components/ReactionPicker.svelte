@@ -138,15 +138,17 @@
     min-height: 36px;
   }
   nav {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(30px, 1fr));
     gap: 2px;
-    overflow-x: auto;
+    min-width: 0;
+    overflow-x: hidden;
     padding: 0 0.35rem 0.4rem;
     border-bottom: 1px solid var(--line-soft);
   }
   nav button {
-    width: 34px !important;
-    min-width: 34px;
+    width: 100% !important;
+    min-width: 0;
     min-height: 32px !important;
     justify-content: center !important;
     padding: 0 !important;
@@ -156,6 +158,8 @@
   }
   .results {
     min-height: 0;
+    min-width: 0;
+    overflow-x: hidden;
     overflow-y: auto;
     padding: 0.45rem;
   }
@@ -165,10 +169,14 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: repeat(7, 1fr);
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     gap: 2px;
   }
   .grid button {
+    width: 100% !important;
+    min-width: 0;
     aspect-ratio: 1;
     min-height: 0 !important;
     justify-content: center !important;
