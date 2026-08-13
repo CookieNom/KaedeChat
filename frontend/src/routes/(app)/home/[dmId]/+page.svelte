@@ -1789,15 +1789,15 @@
           title="Pinned messages"
           onclick={togglePins}>📌</button
         >
-        <button
-          class="icon-button"
-          type="button"
-          aria-label="Search messages"
-          title="Search messages"
-          onclick={() => (messageSearchOpen = true)}
-        >
-          <Icon name="search" size={18} />
-        </button>
+        <MessageSearch
+          bind:open={messageSearchOpen}
+          scope="channel"
+          scopeRef={channel ? entityRef(channel) : dmId}
+          accountRef={currentUser ? entityRef(currentUser) : null}
+          {channel}
+          users={channel?.recipients ?? []}
+          placement="header"
+        />
         {#if !activeCall}
           <button class="call-button" onclick={startCall} disabled={!channelReady || callBusy}
             >Start call</button
@@ -1805,14 +1805,6 @@
         {/if}
       </div>
     </header>
-    <MessageSearch
-      bind:open={messageSearchOpen}
-      scope="channel"
-      scopeRef={channel ? entityRef(channel) : dmId}
-      accountRef={currentUser ? entityRef(currentUser) : null}
-      {channel}
-      users={channel?.recipients ?? []}
-    />
     {#if readStateWarning}
       <div class="read-state-warning" role="status">
         <span>{readStateWarning}</span>

@@ -1,6 +1,13 @@
 <script lang="ts">
   import { api, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
+  import {
+    beginMessageSearchOperator,
+    messageSearchOperator,
+    moveSearchSuggestion,
+    replaceMessageSearchOperator,
+    type MessageSearchOperator
+  } from '$lib/chat/message-search';
   import { entityRef } from '$lib/chat/refs';
   import type {
     Channel,
@@ -9,6 +16,7 @@
     UserSummary
   } from '$lib/chat/types';
   import { userDisplayName, userPublicHandle } from '$lib/chat/users';
+  import { assetUrl } from '$lib/media/assets';
   import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
   import Icon from './Icon.svelte';
 
@@ -50,7 +58,22 @@
   let configuredAccountRef = $state<string | null>(null);
   let featureEnabled = $state<boolean | null>(null);
   let advancedOpen = $state(false);
+  let suggestionsOpen = $state(false);
+  let highlightedSuggestion = $state(0);
+  let searchInput: HTMLInputElement | null = $state(null);
   const storageKey = $derived(accountRef ? `kaede.message-search.history.${accountRef}` : null);
+
+  type SearchOperator = MessageSearchOperator;
+  type Suggestion =
+    | { kind: 'operator'; operator: SearchOperator; label: string; hint: string }
+    | { kind: 'user'; operator: 'from' | 'mentions'; user: UserSummary }
+    | { kind: 'content'; value: string }
+    | { kind: 'advanced' };
+
+  const contentKinds = ['image', 'video', 'audio', 'file', 'link', 'embed'] as const;
+  const operatorMatch = $derived(messageSearchOperator(query));
+  const activeOperator = $derived(operatorMatch?.operator ?? null);
+  const operatorNeedle = $derived(operatorMatch?.needle ?? '');
 
   const encrypted = $derived(
     scope === 'channel' &&
@@ -83,6 +106,45 @@
       userDisplayName(a).localeCompare(userDisplayName(b))
     )
   );
+  const authorUser = $derived(authorRef ? userForRef(authorRef) : null);
+  const mentionedUser = $derived(mentionRef ? userForRef(mentionRef) : null);
+  const suggestions = $derived.by((): Suggestion[] => {
+    if (activeOperator === 'from' || activeOperator === 'mentions') {
+      return uniqueUsers
+        .filter((user) => {
+          const searchable = `${userDisplayName(user)} ${userPublicHandle(user)}`.toLowerCase();
+          return !operatorNeedle || searchable.includes(operatorNeedle);
+        })
+        .slice(0, 8)
+        .map((user) => ({ kind: 'user', operator: activeOperator, user }));
+    }
+    if (activeOperator === 'has') {
+      return contentKinds
+        .filter((value) => !operatorNeedle || value.includes(operatorNeedle))
+        .map((value) => ({ kind: 'content', value }));
+    }
+    return [
+      {
+        kind: 'operator',
+        operator: 'from',
+        label: 'From a specific user',
+        hint: 'from: user'
+      },
+      {
+        kind: 'operator',
+        operator: 'has',
+        label: 'Includes a specific type of data',
+        hint: 'has: link, embed or file'
+      },
+      {
+        kind: 'operator',
+        operator: 'mentions',
+        label: 'Mentions a specific user',
+        hint: 'mentions: user'
+      },
+      { kind: 'advanced' }
+    ];
+  });
 
   $effect(() => {
     if (
@@ -137,6 +199,105 @@
   function closeSearch() {
     open = false;
     advancedOpen = false;
+    suggestionsOpen = false;
+    response = null;
+    error = '';
+  }
+
+  function resetSearch() {
+    query = '';
+    clearFilters();
+    sort = 'relevance';
+    cursor = null;
+    closeSearch();
+  }
+
+  function dismissSuggestions() {
+    suggestionsOpen = false;
+    if (!response) open = false;
+  }
+
+  function closeAdvanced() {
+    advancedOpen = false;
+    if (!response) {
+      suggestionsOpen = true;
+      queueMicrotask(() => searchInput?.focus());
+    }
+  }
+
+  function focusSearch() {
+    open = true;
+    suggestionsOpen = true;
+    highlightedSuggestion = 0;
+  }
+
+  function replaceOperator(value = '') {
+    query = replaceMessageSearchOperator(query, value);
+  }
+
+  function beginOperator(operator: SearchOperator) {
+    query = beginMessageSearchOperator(query, operator);
+    highlightedSuggestion = 0;
+    queueMicrotask(() => searchInput?.focus());
+  }
+
+  function selectSuggestion(suggestion: Suggestion) {
+    if (suggestion.kind === 'operator') {
+      beginOperator(suggestion.operator);
+      return;
+    }
+    if (suggestion.kind === 'advanced') {
+      suggestionsOpen = false;
+      advancedOpen = true;
+      return;
+    }
+    if (suggestion.kind === 'user') {
+      replaceOperator();
+      if (suggestion.operator === 'from') authorRef = entityRef(suggestion.user);
+      else mentionRef = entityRef(suggestion.user);
+    } else {
+      replaceOperator();
+      if (!has.includes(suggestion.value)) has = [...has, suggestion.value];
+    }
+    void runSearch();
+  }
+
+  function removeFilter(kind: 'author' | 'mention' | 'has', value = '') {
+    if (kind === 'author') authorRef = '';
+    else if (kind === 'mention') mentionRef = '';
+    else has = has.filter((item) => item !== value);
+    response = null;
+    suggestionsOpen = true;
+    queueMicrotask(() => searchInput?.focus());
+  }
+
+  function userForRef(reference: string) {
+    return uniqueUsers.find((user) => entityRef(user) === reference) ?? null;
+  }
+
+  function handleSearchKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      if (suggestionsOpen) dismissSuggestions();
+      else closeSearch();
+      return;
+    }
+    if (!suggestionsOpen && event.key === 'ArrowDown') {
+      suggestionsOpen = true;
+      highlightedSuggestion = 0;
+      event.preventDefault();
+      return;
+    }
+    if (!suggestionsOpen || suggestions.length === 0) return;
+    if (event.key === 'ArrowDown') {
+      highlightedSuggestion = moveSearchSuggestion(highlightedSuggestion, 1, suggestions.length);
+      event.preventDefault();
+    } else if (event.key === 'ArrowUp') {
+      highlightedSuggestion = moveSearchSuggestion(highlightedSuggestion, -1, suggestions.length);
+      event.preventDefault();
+    } else if (event.key === 'Enter' && (activeOperator || !query.trim())) {
+      selectSuggestion(suggestions[highlightedSuggestion]);
+      event.preventDefault();
+    }
   }
 
   function rememberSearch() {
@@ -150,6 +311,10 @@
     if (encrypted || disabledByInstance || loading || (!next && !hasCriteria)) return;
     loading = true;
     error = '';
+    if (!next) {
+      suggestionsOpen = false;
+      advancedOpen = false;
+    }
     try {
       const result = await api<MessageSearchResponse>('/search/messages', {
         method: 'POST',
@@ -207,307 +372,415 @@
       onsubmit={(event) => {
         event.preventDefault();
         open = true;
-        void runSearch();
+        if (activeOperator && suggestions.length)
+          selectSuggestion(suggestions[highlightedSuggestion]);
+        else void runSearch();
       }}
     >
-      <input
-        bind:value={query}
-        maxlength="512"
-        aria-label="Search messages"
-        placeholder={channel?.name ? `Search ${channel.name}` : 'Search'}
-        onfocus={() => (open = true)}
-        onkeydown={(event) => {
-          if (event.key === 'Escape') closeSearch();
-        }}
-      />
-      <button type="submit" aria-label="Run message search" disabled={loading || !hasCriteria}>
-        <Icon name="search" size={17} strokeWidth={2.2} />
-      </button>
+      <div class="search-composer">
+        {#if authorUser}
+          <button
+            class="search-token"
+            type="button"
+            aria-label="Remove sender filter"
+            onclick={() => removeFilter('author')}
+          >
+            <span>from:</span>{userDisplayName(authorUser)} <b>×</b>
+          </button>
+        {/if}
+        {#if mentionedUser}
+          <button
+            class="search-token"
+            type="button"
+            aria-label="Remove mention filter"
+            onclick={() => removeFilter('mention')}
+          >
+            <span>mentions:</span>{userDisplayName(mentionedUser)} <b>×</b>
+          </button>
+        {/if}
+        {#each has as kind (kind)}
+          <button
+            class="search-token"
+            type="button"
+            aria-label={`Remove ${kind} content filter`}
+            onclick={() => removeFilter('has', kind)}
+          >
+            <span>has:</span>{kind} <b>×</b>
+          </button>
+        {/each}
+        <input
+          bind:this={searchInput}
+          bind:value={query}
+          maxlength="512"
+          aria-label="Search messages"
+          placeholder={channel?.name ? `Search ${channel.name}` : 'Search'}
+          onfocus={focusSearch}
+          oninput={() => {
+            open = true;
+            suggestionsOpen = true;
+            highlightedSuggestion = 0;
+          }}
+          onkeydown={handleSearchKeydown}
+        />
+      </div>
+      {#if hasCriteria || response}
+        <button class="search-clear" type="button" aria-label="Clear search" onclick={resetSearch}
+          >×</button
+        >
+      {:else}
+        <button type="submit" aria-label="Run message search" disabled={loading || !hasCriteria}>
+          <Icon name="search" size={17} strokeWidth={2.2} />
+        </button>
+      {/if}
     </form>
   {/if}
 
   {#if open}
-    {#if placement === 'header'}
+    {#if placement === 'header' && suggestionsOpen}
       <button
         class="page-dismiss"
         type="button"
         aria-label="Close message search"
-        onclick={closeSearch}
+        onclick={dismissSuggestions}
       ></button>
     {/if}
-    <div
-      class:dialog-backdrop={placement === 'dialog'}
-      class:header-layer={placement === 'header'}
-      class="search-layer"
-      role="presentation"
-    >
-      {#if placement === 'dialog'}
-        <button
-          class="backdrop-close"
-          type="button"
-          aria-label="Close message search"
-          onclick={closeSearch}
-        ></button>
-      {/if}
+    {#if suggestionsOpen || advancedOpen || response}
       <div
-        class:advanced={advancedOpen}
-        class:header-popover={placement === 'header'}
-        class="search-panel"
-        role="dialog"
-        tabindex="-1"
-        aria-modal={placement === 'dialog' ? 'true' : undefined}
-        aria-label="Search messages"
-        onkeydown={(event) => {
-          if (event.key === 'Escape') closeSearch();
-        }}
+        class:advanced-layer={advancedOpen && placement === 'header'}
+        class:dialog-backdrop={placement === 'dialog'}
+        class:header-layer={placement === 'header'}
+        class:results-layer={Boolean(response) && !suggestionsOpen && !advancedOpen}
+        class="search-layer"
+        role="presentation"
       >
-        {#if placement === 'dialog' || advancedOpen || response || error || encrypted || disabledByInstance}
-          <header>
-            <div>
-              <h2>{advancedOpen ? 'Advanced search' : 'Search messages'}</h2>
-              {#if placement === 'dialog'}
-                <p>
-                  Typo-tolerant search across {scope === 'guild'
-                    ? 'this guild'
-                    : scope === 'dms'
-                      ? 'your direct messages'
-                      : 'this conversation'}.
-                </p>
-              {/if}
-            </div>
-            <div class="panel-tools">
-              {#if placement === 'dialog' || response || advancedOpen}
-                <button
-                  class:active={advancedOpen || activeFilterCount > 0}
-                  class="advanced-toggle"
-                  type="button"
-                  aria-expanded={advancedOpen}
-                  onclick={() => (advancedOpen = !advancedOpen)}
-                >
-                  Filters{activeFilterCount ? ` · ${activeFilterCount}` : ''}
-                </button>
-              {/if}
-              <button class="close" type="button" aria-label="Close search" onclick={closeSearch}
-                >×</button
-              >
-            </div>
-          </header>
-        {/if}
-
-        {#if placement === 'dialog'}
-          <form
-            class="dialog-query"
-            role="search"
-            onsubmit={(event) => {
-              event.preventDefault();
-              void runSearch();
+        {#if placement === 'dialog' || advancedOpen}
+          <button
+            class="backdrop-close"
+            type="button"
+            aria-label={advancedOpen ? 'Close advanced filters' : 'Close message search'}
+            onclick={() => {
+              if (advancedOpen) closeAdvanced();
+              else closeSearch();
             }}
-          >
-            <label class="query"
-              ><span class="visually-hidden">Search text</span><input
-                bind:value={query}
-                maxlength="512"
-                placeholder="Search messages"
-              /></label
-            >
-            <button type="submit" aria-label="Run message search" disabled={loading || !hasCriteria}
-              ><Icon name="search" size={18} /></button
-            >
-          </form>
+          ></button>
         {/if}
+        <div
+          class:advanced={advancedOpen}
+          class:header-popover={placement === 'header'}
+          class="search-panel"
+          role="dialog"
+          tabindex="-1"
+          aria-modal={placement === 'dialog' ? 'true' : undefined}
+          aria-label="Search messages"
+          onkeydown={(event) => {
+            if (event.key === 'Escape') {
+              if (advancedOpen) closeAdvanced();
+              else closeSearch();
+            }
+          }}
+        >
+          {#if placement === 'dialog' || advancedOpen || (response && !suggestionsOpen) || error || encrypted || disabledByInstance}
+            <header>
+              <div>
+                <h2>
+                  {advancedOpen
+                    ? 'Filters'
+                    : response
+                      ? `${response.results.length}${cursor ? '+' : ''} results`
+                      : 'Search messages'}
+                </h2>
+                {#if placement === 'dialog'}
+                  <p>
+                    Typo-tolerant search across {scope === 'guild'
+                      ? 'this guild'
+                      : scope === 'dms'
+                        ? 'your direct messages'
+                        : 'this conversation'}.
+                  </p>
+                {/if}
+              </div>
+              <div class="panel-tools">
+                {#if (placement === 'dialog' || response) && !advancedOpen}
+                  <button
+                    class:active={advancedOpen || activeFilterCount > 0}
+                    class="advanced-toggle"
+                    type="button"
+                    aria-expanded={advancedOpen}
+                    onclick={() => {
+                      advancedOpen = !advancedOpen;
+                      suggestionsOpen = false;
+                    }}
+                  >
+                    Filters{activeFilterCount ? ` · ${activeFilterCount}` : ''}
+                  </button>
+                {/if}
+                <button
+                  class="close"
+                  type="button"
+                  aria-label={advancedOpen ? 'Close advanced filters' : 'Close search'}
+                  onclick={advancedOpen ? closeAdvanced : closeSearch}>×</button
+                >
+              </div>
+            </header>
+          {/if}
 
-        {#if encrypted}
-          <div class="encrypted-notice" role="status">
-            <strong>Search is unavailable for this encrypted conversation.</strong>
-            <span
-              >End-to-end encrypted message bodies never leave your devices and are never indexed by
-              Kaede.</span
-            >
-          </div>
-        {:else if disabledByInstance}
-          <div class="encrypted-notice" role="status">
-            <strong>Message search is disabled on this instance.</strong>
-            <span
-              >Your instance administrator can enable the private search service during setup.</span
-            >
-          </div>
-        {:else}
-          {#if advancedOpen}
+          {#if placement === 'dialog' && !advancedOpen}
             <form
-              class="advanced-filters"
+              class="dialog-query"
+              role="search"
               onsubmit={(event) => {
                 event.preventDefault();
                 void runSearch();
               }}
             >
-              <div class="filters">
-                <label
-                  >From
-                  <select bind:value={authorRef}
-                    ><option value="">Anyone</option
-                    >{#each uniqueUsers as user (entityRef(user))}<option value={entityRef(user)}
-                        >{userDisplayName(user)} · @{userPublicHandle(user)}</option
-                      >{/each}</select
-                  >
-                </label>
-                <label
-                  >Mentions
-                  <select bind:value={mentionRef}
-                    ><option value="">Anyone</option
-                    >{#each uniqueUsers as user (entityRef(user))}<option value={entityRef(user)}
-                        >{userDisplayName(user)} · @{userPublicHandle(user)}</option
-                      >{/each}</select
-                  >
-                </label>
-                <label
-                  >Sort<select bind:value={sort}
-                    ><option value="relevance">Most relevant</option><option value="newest"
-                      >Newest</option
-                    ><option value="oldest">Oldest</option></select
-                  ></label
-                >
-                <label
-                  >Pinned<select bind:value={pinned}
-                    ><option value="any">Either</option><option value="yes">Pinned</option><option
-                      value="no">Not pinned</option
-                    ></select
-                  ></label
-                >
-                <label
-                  >Author type<select bind:value={authorType}
-                    ><option value="any">Anyone</option><option value="user">People</option><option
-                      value="webhook">Webhooks</option
-                    ></select
-                  ></label
-                >
-                <label>After<input type="date" bind:value={after} /></label>
-                <label>Before<input type="date" bind:value={before} /></label>
-              </div>
-              <fieldset>
-                <legend>Contains</legend>
-                <div class="chips">
-                  {#each ['image', 'video', 'audio', 'file', 'link', 'embed'] as kind (kind)}<button
-                      type="button"
-                      class:active={has.includes(kind)}
-                      aria-pressed={has.includes(kind)}
-                      onclick={() => toggleHas(kind)}>{kind}</button
-                    >{/each}
-                </div>
-              </fieldset>
-              <div class="form-actions">
-                <button class="clear-filters" type="button" onclick={clearFilters}
-                  >Clear filters</button
-                >
-                <button class="submit" type="submit" disabled={loading || !hasCriteria}
-                  >{loading ? 'Searching…' : 'Search'}</button
-                >
-              </div>
+              <label class="query"
+                ><span class="visually-hidden">Search text</span><input
+                  bind:value={query}
+                  maxlength="512"
+                  placeholder="Search messages"
+                /></label
+              >
+              <button
+                type="submit"
+                aria-label="Run message search"
+                disabled={loading || !hasCriteria}><Icon name="search" size={18} /></button
+              >
             </form>
-          {:else if !response}
-            <section class="search-start" aria-label="Search options">
-              <h3>Filters</h3>
-              <button type="button" onclick={() => (advancedOpen = true)}>
-                <span class="quick-icon"><Icon name="user" size={21} /></span>
-                <span><strong>From a specific user</strong><small>from: user</small></span>
-              </button>
-              <button type="button" onclick={() => (advancedOpen = true)}>
-                <span class="quick-icon"><Icon name="image" size={21} /></span>
-                <span
-                  ><strong>Includes a specific type of data</strong><small
-                    >has: link, embed or file</small
-                  ></span
-                >
-              </button>
-              <button type="button" onclick={() => (advancedOpen = true)}>
-                <span class="quick-icon">@</span>
-                <span><strong>Mentions a specific user</strong><small>mentions: user</small></span>
-              </button>
-              <button type="button" onclick={() => (advancedOpen = true)}>
-                <span class="quick-icon"><Icon name="settings" size={21} /></span>
-                <span
-                  ><strong>More filters</strong><small>dates, author type, pins and more</small
-                  ></span
-                >
-              </button>
-            </section>
           {/if}
 
-          {#if history.length && !advancedOpen && !response}
-            <section class="history" aria-label="Recent searches">
-              <div>
-                <strong>Recent searches</strong><button
-                  type="button"
-                  onclick={() => {
-                    history = [];
-                    if (storageKey) sessionStorage.removeItem(storageKey);
-                  }}>Clear</button
-                >
-              </div>
-              <div class="history-list">
-                {#each history as item (item)}<button
+          {#if encrypted}
+            <div class="encrypted-notice" role="status">
+              <strong>Search is unavailable for this encrypted conversation.</strong>
+              <span
+                >End-to-end encrypted message bodies never leave your devices and are never indexed
+                by Kaede.</span
+              >
+            </div>
+          {:else if disabledByInstance}
+            <div class="encrypted-notice" role="status">
+              <strong>Message search is disabled on this instance.</strong>
+              <span
+                >Your instance administrator can enable the private search service during setup.</span
+              >
+            </div>
+          {:else}
+            {#if advancedOpen}
+              <form
+                class="advanced-filters"
+                onsubmit={(event) => {
+                  event.preventDefault();
+                  void runSearch();
+                }}
+              >
+                <div class="filters">
+                  <label
+                    >From
+                    <select bind:value={authorRef}
+                      ><option value="">Anyone</option
+                      >{#each uniqueUsers as user (entityRef(user))}<option value={entityRef(user)}
+                          >{userDisplayName(user)} · @{userPublicHandle(user)}</option
+                        >{/each}</select
+                    >
+                  </label>
+                  <label
+                    >Mentions
+                    <select bind:value={mentionRef}
+                      ><option value="">Anyone</option
+                      >{#each uniqueUsers as user (entityRef(user))}<option value={entityRef(user)}
+                          >{userDisplayName(user)} · @{userPublicHandle(user)}</option
+                        >{/each}</select
+                    >
+                  </label>
+                  <label
+                    >Sort<select bind:value={sort}
+                      ><option value="relevance">Most relevant</option><option value="newest"
+                        >Newest</option
+                      ><option value="oldest">Oldest</option></select
+                    ></label
+                  >
+                  <label
+                    >Pinned<select bind:value={pinned}
+                      ><option value="any">Either</option><option value="yes">Pinned</option><option
+                        value="no">Not pinned</option
+                      ></select
+                    ></label
+                  >
+                  <label
+                    >Author type<select bind:value={authorType}
+                      ><option value="any">Anyone</option><option value="user">People</option
+                      ><option value="webhook">Webhooks</option></select
+                    ></label
+                  >
+                  <label>After<input type="date" bind:value={after} /></label>
+                  <label>Before<input type="date" bind:value={before} /></label>
+                </div>
+                <fieldset>
+                  <legend>Contains</legend>
+                  <div class="chips">
+                    {#each ['image', 'video', 'audio', 'file', 'link', 'embed'] as kind (kind)}<button
+                        type="button"
+                        class:active={has.includes(kind)}
+                        aria-pressed={has.includes(kind)}
+                        onclick={() => toggleHas(kind)}>{kind}</button
+                      >{/each}
+                  </div>
+                </fieldset>
+                <div class="form-actions">
+                  <button class="clear-filters" type="button" onclick={clearFilters}
+                    >Clear filters</button
+                  >
+                  <button class="submit" type="submit" disabled={loading || !hasCriteria}
+                    >{loading ? 'Searching…' : 'Search'}</button
+                  >
+                </div>
+              </form>
+            {:else if suggestionsOpen}
+              <section class="search-start" aria-label="Search options">
+                <h3>
+                  {activeOperator === 'from'
+                    ? 'From user'
+                    : activeOperator === 'mentions'
+                      ? 'Mentions user'
+                      : activeOperator === 'has'
+                        ? 'Message contains'
+                        : 'Filters'}
+                </h3>
+                {#if suggestions.length === 0}
+                  <p class="suggestion-empty">No matching options.</p>
+                {/if}
+                {#each suggestions as suggestion, index (`${suggestion.kind}-${index}`)}
+                  <button
+                    class:highlighted={highlightedSuggestion === index}
+                    type="button"
+                    onpointerenter={() => (highlightedSuggestion = index)}
+                    onclick={() => selectSuggestion(suggestion)}
+                  >
+                    {#if suggestion.kind === 'operator'}
+                      <span class="quick-icon">
+                        {#if suggestion.operator === 'from'}
+                          <Icon name="user" size={19} />
+                        {:else if suggestion.operator === 'has'}
+                          <Icon name="image" size={19} />
+                        {:else}
+                          @
+                        {/if}
+                      </span>
+                      <span
+                        ><strong>{suggestion.label}</strong><small>{suggestion.hint}</small></span
+                      >
+                    {:else if suggestion.kind === 'user'}
+                      <span class="quick-avatar" aria-hidden="true">
+                        {#if suggestion.user.avatar_hash}
+                          <img
+                            src={assetUrl(
+                              suggestion.user.avatar_hash,
+                              'thumbnail_128',
+                              suggestion.user
+                            )}
+                            alt=""
+                          />
+                        {:else}
+                          {userDisplayName(suggestion.user).slice(0, 1).toUpperCase()}
+                        {/if}
+                      </span>
+                      <span
+                        ><strong>{userDisplayName(suggestion.user)}</strong><small
+                          >@{userPublicHandle(suggestion.user)}</small
+                        ></span
+                      >
+                    {:else if suggestion.kind === 'content'}
+                      <span class="quick-icon"><Icon name="image" size={19} /></span>
+                      <span><strong>{suggestion.value}</strong></span>
+                    {:else}
+                      <span class="quick-icon"><Icon name="settings" size={19} /></span>
+                      <span
+                        ><strong>More filters</strong><small
+                          >dates, author type, pins and more</small
+                        ></span
+                      >
+                    {/if}
+                  </button>
+                {/each}
+              </section>
+            {/if}
+
+            {#if history.length && suggestionsOpen && !activeOperator}
+              <section class="history" aria-label="Recent searches">
+                <div>
+                  <strong>Recent searches</strong><button
                     type="button"
                     onclick={() => {
-                      query = item;
-                      void runSearch();
-                    }}><Icon name="search" size={17} />{item}</button
-                  >{/each}
-              </div>
-            </section>
+                      history = [];
+                      if (storageKey) sessionStorage.removeItem(storageKey);
+                    }}>Clear</button
+                  >
+                </div>
+                <div class="history-list">
+                  {#each history as item (item)}<button
+                      type="button"
+                      onclick={() => {
+                        query = item;
+                        void runSearch();
+                      }}><Icon name="search" size={17} />{item}</button
+                    >{/each}
+                </div>
+              </section>
+            {/if}
           {/if}
-        {/if}
 
-        {#if error}<p class="error" role="alert">{error}</p>{/if}
-        {#if response}
-          {#if response.indexing}<p class="partial" role="status">
-              Search is catching up with recent messages. Results may be incomplete for a moment.
-            </p>{/if}
-          {#if response.coverage.authority === 'unavailable' || response.coverage.authority === 'unsupported'}<p
-              class="partial"
-              role="status"
-            >
-              Showing locally cached matches. The conversation’s home instance could not provide
-              complete results.
-            </p>{:else if response.coverage.local === 'cached' && response.coverage.authority === 'not_queried'}<p
-              class="partial"
-              role="status"
-            >
-              Account-wide direct-message search uses this home’s recent federated cache. Search
-              inside a conversation to ask its authority for complete results.
-            </p>{/if}
-          {#if response.encrypted_channel_refs.length}<p class="partial">
-              Encrypted channels were excluded from these results.
-            </p>{/if}
-          <div class="results" aria-live="polite">
-            {#if response.results.length === 0}<p class="empty">
-                No messages matched those filters.
+          {#if error}<p class="error" role="alert">{error}</p>{/if}
+          {#if response && !suggestionsOpen && !advancedOpen}
+            {#if response.indexing}<p class="partial" role="status">
+                Search is catching up with recent messages. Results may be incomplete for a moment.
               </p>{/if}
-            {#each response.results as result (entityRef(result.message))}
-              <button class="result" type="button" onclick={() => jump(result)}>
-                <span class="context"
-                  >{result.guild?.name ??
-                    result.channel.recipients?.map(userDisplayName).join(', ') ??
-                    'Direct message'} · {result.channel.name ?? 'conversation'}</span
-                >
-                <strong
-                  >{result.message.author
-                    ? userDisplayName(result.message.author)
-                    : (result.message.webhook?.name ?? 'Unknown sender')}</strong
-                >
-                <span>{result.snippet}</span><time
-                  >{new Date(result.message.created_at).toLocaleString()}</time
-                >
-              </button>
-            {/each}
-          </div>
-          {#if cursor}<button
-              class="more"
-              type="button"
-              disabled={loading}
-              onclick={() => void runSearch(true)}>Load more</button
-            >{/if}
-        {/if}
+            {#if response.coverage.authority === 'unavailable' || response.coverage.authority === 'unsupported'}<p
+                class="partial"
+                role="status"
+              >
+                Showing locally cached matches. The conversation’s home instance could not provide
+                complete results.
+              </p>{:else if response.coverage.local === 'cached' && response.coverage.authority === 'not_queried'}<p
+                class="partial"
+                role="status"
+              >
+                Account-wide direct-message search uses this home’s recent federated cache. Search
+                inside a conversation to ask its authority for complete results.
+              </p>{/if}
+            {#if response.encrypted_channel_refs.length}<p class="partial">
+                Encrypted channels were excluded from these results.
+              </p>{/if}
+            <div class="results" aria-live="polite">
+              {#if response.results.length === 0}<p class="empty">
+                  No messages matched those filters.
+                </p>{/if}
+              {#each response.results as result (entityRef(result.message))}
+                <button class="result" type="button" onclick={() => jump(result)}>
+                  <span class="context"
+                    >{result.guild?.name ??
+                      result.channel.recipients?.map(userDisplayName).join(', ') ??
+                      'Direct message'} · {result.channel.name ?? 'conversation'}</span
+                  >
+                  <strong
+                    >{result.message.author
+                      ? userDisplayName(result.message.author)
+                      : (result.message.webhook?.name ?? 'Unknown sender')}</strong
+                  >
+                  <span>{result.snippet}</span><time
+                    >{new Date(result.message.created_at).toLocaleString()}</time
+                  >
+                </button>
+              {/each}
+            </div>
+            {#if cursor}<button
+                class="more"
+                type="button"
+                disabled={loading}
+                onclick={() => void runSearch(true)}>Load more</button
+              >{/if}
+          {/if}
+        </div>
       </div>
-    </div>
+    {/if}
   {/if}
 </div>
 
@@ -520,7 +793,7 @@
     z-index: 1001;
   }
   .header-search-box {
-    width: clamp(10rem, 16vw, 13.5rem);
+    width: clamp(12rem, 18vw, 17rem);
     height: 2rem;
     display: flex;
     align-items: center;
@@ -537,12 +810,22 @@
     border-color: color-mix(in srgb, var(--accent, #ff8068) 58%, var(--border, #34363d));
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #ff8068) 16%, transparent);
   }
+  .search-composer {
+    min-width: 0;
+    height: 100%;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.22rem;
+    overflow: hidden;
+    padding-left: 0.3rem;
+  }
   .header-search-box input {
     min-width: 0;
     min-height: 0;
     flex: 1;
     height: 100%;
-    padding: 0 0.2rem 0 0.75rem;
+    padding: 0 0.2rem;
     border: 0;
     border-radius: inherit;
     outline: 0;
@@ -565,7 +848,7 @@
     color: var(--muted, #aaa);
     font-weight: 600;
   }
-  .header-search-box button,
+  .header-search-box > button,
   .dialog-query button {
     width: 2rem;
     height: 100%;
@@ -576,9 +859,34 @@
     background: transparent;
     color: var(--muted, #aaa);
   }
-  .header-search-box button:hover:not(:disabled),
+  .header-search-box > button:hover:not(:disabled),
   .dialog-query button:hover:not(:disabled) {
     color: var(--text, #fff);
+  }
+  .search-token {
+    min-width: max-content;
+    height: 1.45rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0 0.32rem;
+    border: 0;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent, #ff8068) 18%, var(--surface-raised, #202126));
+    color: var(--text, #fff);
+    font-size: 0.72rem;
+    white-space: nowrap;
+  }
+  .search-token:hover {
+    background: color-mix(in srgb, var(--accent, #ff8068) 28%, var(--surface-raised, #202126));
+  }
+  .search-token span {
+    color: var(--accent, #ff8068);
+    font-weight: 800;
+  }
+  .search-token b {
+    color: var(--muted, #aaa);
+    font-size: 0.9rem;
   }
   .page-dismiss {
     position: fixed;
@@ -592,6 +900,22 @@
     top: calc(100% + 0.35rem);
     right: 0;
     z-index: 1000;
+  }
+  .search-layer.header-layer.advanced-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 1100;
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+    background: rgb(0 0 0 / 68%);
+  }
+  .search-layer.header-layer.results-layer {
+    position: fixed;
+    top: 3.75rem;
+    right: 0;
+    bottom: 0;
+    z-index: 900;
   }
   .search-layer.dialog-backdrop {
     position: fixed;
@@ -631,8 +955,22 @@
     box-shadow: 0 12px 32px #000a;
   }
   .search-panel.header-popover.advanced {
-    width: min(660px, calc(100vw - 1rem));
-    padding: 0.75rem;
+    width: min(520px, calc(100vw - 2rem));
+    max-height: min(720px, calc(100dvh - 2rem));
+    padding: 0.9rem;
+    border-radius: 12px;
+  }
+  .results-layer .search-panel.header-popover {
+    width: min(420px, 100vw);
+    height: 100%;
+    max-height: none;
+    display: flex;
+    flex-direction: column;
+    border-radius: 0;
+    border-top: 0;
+    border-bottom: 0;
+    padding: 0.8rem;
+    box-shadow: -12px 20px 40px #0008;
   }
   .search-panel header {
     display: flex;
@@ -702,6 +1040,20 @@
   }
   .advanced-filters {
     padding-top: 0.15rem;
+  }
+  .header-popover.advanced .filters {
+    grid-template-columns: 1fr;
+    gap: 0.58rem;
+    margin: 0.6rem 0 0.75rem;
+  }
+  .header-popover.advanced .filters label {
+    gap: 0.25rem;
+    font-size: 0.8rem;
+  }
+  .header-popover.advanced .filters select,
+  .header-popover.advanced .filters input {
+    padding: 0.55rem 0.65rem;
+    border-radius: 8px;
   }
   .filters {
     display: grid;
@@ -775,8 +1127,32 @@
     text-align: left;
   }
   .search-start > button:hover,
-  .search-start > button:focus-visible {
+  .search-start > button:focus-visible,
+  .search-start > button.highlighted {
     background: var(--surface-raised, #202126);
+  }
+  .quick-avatar {
+    width: 1.65rem;
+    height: 1.65rem;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--accent, #ff8068) 30%, var(--surface-raised, #202126));
+    color: var(--text, #fff);
+    font-size: 0.76rem;
+    font-weight: 850;
+    overflow: hidden;
+  }
+  .quick-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .suggestion-empty {
+    margin: 0;
+    padding: 0.8rem 0.55rem;
+    color: var(--muted, #aaa);
+    font-size: 0.85rem;
   }
   .search-start > button > span:last-child {
     display: grid;
@@ -813,6 +1189,14 @@
     justify-content: space-between;
     gap: 0.75rem;
     align-items: center;
+  }
+  .header-popover.advanced .form-actions {
+    position: sticky;
+    bottom: -0.9rem;
+    margin: 0.75rem -0.9rem -0.9rem;
+    padding: 0.65rem 0.9rem 0.8rem;
+    border-top: 1px solid var(--border, #34363d);
+    background: var(--surface, #151619);
   }
   .clear-filters {
     margin-top: 1rem;
@@ -859,6 +1243,17 @@
     display: grid;
     gap: 0.5rem;
     margin-top: 1rem;
+  }
+  .results-layer .results {
+    min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    margin-top: 0.35rem;
+    padding-right: 0.15rem;
+  }
+  .results-layer .result {
+    padding: 0.7rem;
+    border-radius: 9px;
   }
   .result {
     display: grid;
@@ -918,10 +1313,26 @@
       right: 0.5rem;
       left: 0.5rem;
     }
+    .search-layer.header-layer.advanced-layer {
+      inset: 0;
+      padding: 0;
+    }
+    .search-layer.header-layer.results-layer {
+      top: 4rem;
+      right: 0;
+      left: 0;
+      bottom: 0;
+    }
     .search-panel.header-popover,
     .search-panel.header-popover.advanced {
       width: 100%;
       max-height: calc(100dvh - 4.5rem);
+    }
+    .advanced-layer .search-panel.header-popover.advanced,
+    .results-layer .search-panel.header-popover {
+      height: 100%;
+      max-height: none;
+      border-radius: 0;
     }
   }
 </style>
