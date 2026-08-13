@@ -116,6 +116,8 @@ export interface Message {
   referenced_message_domain: string | null;
   mention_user_refs: FederatedIdentity[];
   attachments?: Attachment[];
+  reaction_counts?: Record<string, number>;
+  reacted_emoji?: string[];
   webhook_id?: string | null;
   webhook?: { id: string | null; name: string; avatar_hash: string | null } | null;
   edited_at: string | null;

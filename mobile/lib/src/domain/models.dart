@@ -523,6 +523,7 @@ final class KaedeMessage {
     this.retryable = true,
     this.pinned = false,
     this.reactionCounts = const <String, int>{},
+    this.reactedEmoji = const <String>{},
     this.deletedAt,
     this.historyPageComplete = false,
     this.historyPageErrorCode,
@@ -568,6 +569,10 @@ final class KaedeMessage {
               ),
             )
           : const <String, int>{},
+      reactedEmoji: Set<String>.unmodifiable(
+        (json['reacted_emoji'] as List? ?? const <Object>[])
+            .map((value) => '$value'),
+      ),
       deletedAt: _string(json['deleted_at']) == null
           ? null
           : DateTime.parse(json['deleted_at']! as String).toUtc(),
@@ -593,6 +598,7 @@ final class KaedeMessage {
   final String? failureReason;
   final bool retryable;
   final bool pinned;
+  final Set<String> reactedEmoji;
   final Map<String, int> reactionCounts;
   final DateTime? deletedAt;
   final bool historyPageComplete;
@@ -614,6 +620,7 @@ final class KaedeMessage {
     bool clearFailureReason = false,
     bool? retryable,
     bool? pinned,
+    Set<String>? reactedEmoji,
     Map<String, int>? reactionCounts,
     DateTime? deletedAt,
     bool? historyPageComplete,
@@ -638,6 +645,7 @@ final class KaedeMessage {
             clearFailureReason ? null : failureReason ?? this.failureReason,
         retryable: retryable ?? this.retryable,
         pinned: pinned ?? this.pinned,
+        reactedEmoji: reactedEmoji ?? this.reactedEmoji,
         reactionCounts: reactionCounts ?? this.reactionCounts,
         deletedAt: deletedAt ?? this.deletedAt,
         historyPageComplete: historyPageComplete ?? this.historyPageComplete,
@@ -668,6 +676,7 @@ final class KaedeMessage {
         'failure_reason': failureReason,
         'retryable': retryable,
         'pinned': pinned,
+        'reacted_emoji': reactedEmoji.toList(),
         'reaction_counts': reactionCounts,
         'deleted_at': deletedAt?.toUtc().toIso8601String(),
         'history_page_complete': historyPageComplete,

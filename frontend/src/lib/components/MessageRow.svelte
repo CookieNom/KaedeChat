@@ -14,11 +14,13 @@
 <script lang="ts">
   import { userErrorMessage } from '$lib/api/client';
   import type { Attachment, Message, PresenceStatus, Role, UserSummary } from '$lib/chat/types';
+  import type { CustomEmojiOption } from '$lib/chat/emojis';
   import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import { entityRef } from '$lib/chat/refs';
   import { inviteReferencesInMessage } from '$lib/chat/invites';
   import { gifFavoriteForUrl, isGifFavorite, klipyGifUrl, toggleGifFavorite } from '$lib/chat/gifs';
   import { previewableLink } from '$lib/chat/links';
+  import { recentReactions, rememberReaction } from '$lib/chat/reactions';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { DISMISS_FLOATING_LAYERS_EVENT, dismissFloatingLayers } from '$lib/ui/floating-layers';
   import { portal } from '$lib/ui/portal';
@@ -35,6 +37,8 @@
   import InviteEmbed from './InviteEmbed.svelte';
   import LinkPreview from './LinkPreview.svelte';
   import MediaViewer from './MediaViewer.svelte';
+  import ReactionEmoji from './ReactionEmoji.svelte';
+  import ReactionPicker from './ReactionPicker.svelte';
 
   let {
     message,
@@ -46,6 +50,10 @@
     referencedMessage = null,
     pinned = false,
     onEdit,
+    canReact = false,
+    customEmojis = [],
+    reactionUserKey = '',
+    onToggleReaction,
     onDelete,
     onMessageAuthor,
     onRetry,
@@ -69,6 +77,10 @@
     pinned?: boolean;
     onEdit?: (message: Message) => void;
     onDelete?: (message: Message) => void;
+    canReact?: boolean;
+    customEmojis?: CustomEmojiOption[];
+    reactionUserKey?: string;
+    onToggleReaction?: (message: Message, emoji: string, remove: boolean) => void;
     onMessageAuthor?: (message: Message) => void;
     onRetry?: (message: Message) => void;
     onViewProfile?: (message: Message, event: MouseEvent) => void;
@@ -86,10 +98,15 @@
   let menuElement = $state<HTMLElement | null>(null);
   let rowElement = $state<HTMLElement | null>(null);
   let menuTrigger: HTMLElement | null = null;
+  let menuAnchorX = 0;
+  let menuAnchorY = 0;
   let confirmingDelete = $state(false);
   let deleteConfirmationButton = $state<HTMLButtonElement | null>(null);
   let feedback = $state('');
   let mediaViewer = $state<Attachment | null>(null);
+  let reactionPickerOpen = $state(false);
+  let recentReactionValues = $state<string[]>([]);
+  let reactionBusy = $state(false);
   let mediaFailures = $state<Record<string, string>>({});
   let mediaAttempts = $state<Record<string, number>>({});
   let attachmentActionError = $state('');
@@ -190,10 +207,14 @@
   function showMenu(pointerX: number, pointerY: number, trigger: HTMLElement | null) {
     dismissFloatingLayers();
     claimMessageMenu(closeExclusiveMenu);
+    menuAnchorX = pointerX;
+    menuAnchorY = pointerY;
     menuTrigger = trigger;
     menuOpen = true;
     addMenuListeners();
     void tick().then(() => {
+      reactionPickerOpen = false;
+      recentReactionValues = recentReactions(reactionUserKey);
       if (!menuOpen || !menuElement) return;
       placeContextMenu(menuElement, pointerX, pointerY);
       menuItems()[0]?.focus();
@@ -255,6 +276,31 @@
     gifFavorited = result.favorite;
     feedback = result.favorite ? 'GIF added to favorites.' : 'GIF removed from favorites.';
     closeMenu(true);
+  }
+
+  async function toggleReaction(value: string, event?: MouseEvent) {
+    event?.stopPropagation();
+    if (!onToggleReaction || reactionBusy) return;
+    const remove = message.reacted_emoji?.includes(value) ?? false;
+    if (!remove && !canReact) return;
+    reactionBusy = true;
+    if (!remove) rememberReaction(reactionUserKey, value);
+    closeMenu(false);
+    try {
+      await onToggleReaction(message, value, remove);
+    } finally {
+      reactionBusy = false;
+    }
+  }
+
+  function openReactionPicker(event: MouseEvent) {
+    event.stopPropagation();
+    reactionPickerOpen = true;
+    void tick().then(() => {
+      if (menuOpen && menuElement) {
+        placeContextMenu(menuElement, menuAnchorX, menuAnchorY);
+      }
+    });
   }
 
   function requestDelete(event: MouseEvent) {
@@ -322,6 +368,7 @@
     removeMenuListeners();
     releaseMessageMenu(closeExclusiveMenu);
     const trigger = menuTrigger;
+    reactionPickerOpen = false;
     menuTrigger = null;
     if (restoreFocus && trigger?.isConnected) void tick().then(() => trigger.focus());
   }
@@ -625,6 +672,23 @@
         <p class="form-error" role="alert">{attachmentActionError}</p>
       {/if}
     {/if}
+    {#if !message.deleted_at && Object.keys(message.reaction_counts ?? {}).length}
+      <div class="message-reactions" aria-label="Message reactions">
+        {#each Object.entries(message.reaction_counts ?? {}) as [emoji, count] (emoji)}
+          <button
+            class:active={message.reacted_emoji?.includes(emoji)}
+            type="button"
+            disabled={!onToggleReaction ||
+              reactionBusy ||
+              (!canReact && !message.reacted_emoji?.includes(emoji))}
+            aria-label={`${message.reacted_emoji?.includes(emoji) ? 'Remove' : 'Add'} ${emoji} reaction, ${count}`}
+            onclick={(event) => void toggleReaction(emoji, event)}
+          >
+            <ReactionEmoji value={emoji} /><span>{count}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
     {#if message.edited_at || message.failed || message.delivery_status === 'failed' || message.delivery_status === 'retrying' || message.queued}
       <div class="message-meta-actions">
         {#if message.edited_at}<small>(edited)</small>{/if}
@@ -658,188 +722,220 @@
       aria-label="Message actions"
       onkeydown={menuKeydown}
     >
-      {#if onMessageAuthor && message.author && !message.deleted_at}
-        <button type="button" role="menuitem" tabindex="-1" onclick={messageAuthor}>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M20 15a4 4 0 0 1-4 4H8l-4 2V7a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v8Z" />
-          </svg>
-          <span>Message {userDisplayName(message.author)}</span>
-        </button>
-      {/if}
-      {#if onReply && !message.deleted_at}
-        <button type="button" role="menuitem" tabindex="-1" onclick={replyToMessage}>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m9 8-5 4 5 4v-3h4c3.5 0 5.8 1.4 7 4-.2-5.8-3.3-9-9-9H9Z" />
-          </svg>
-          <span>Reply</span>
-        </button>
-      {/if}
-      {#if onTogglePin && !message.deleted_at}
-        <button type="button" role="menuitem" tabindex="-1" onclick={togglePin}>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m9 3 6 6-2 2 4 4-2 2-4-4-2 2-6-6 6-6Z" />
-            <path d="m9 15-5 5" />
-          </svg>
-          <span>{pinned ? 'Unpin message' : 'Pin message'}</span>
-        </button>
-      {/if}
-      {#if gifUrl}
-        <button type="button" role="menuitem" tabindex="-1" onclick={favoriteGif}>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z" />
-          </svg>
-          <span>{gifFavorited ? 'Remove from GIF favorites' : 'Add to GIF favorites'}</span>
-        </button>
-      {/if}
-      {#if message.author && message.author.profile_resolved !== false && !message.webhook && onViewProfile}
-        <button type="button" role="menuitem" tabindex="-1" onclick={viewProfile}>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="8" r="4" />
-            <path d="M4 21a8 8 0 0 1 16 0" />
-          </svg>
-          <span>View profile</span>
-        </button>
+      {#if reactionPickerOpen}
+        <ReactionPicker
+          {customEmojis}
+          onSelect={(value) => void toggleReaction(value)}
+          onClose={() => (reactionPickerOpen = false)}
+        />
+      {:else}
+        {#if canReact && onToggleReaction && !message.deleted_at}
+          <div class="quick-reactions" aria-label="Recent reactions">
+            {#each recentReactionValues as emoji (emoji)}
+              <button
+                class:active={message.reacted_emoji?.includes(emoji)}
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                title={`React with ${emoji}`}
+                onclick={(event) => void toggleReaction(emoji, event)}
+                ><ReactionEmoji value={emoji} /></button
+              >
+            {/each}
+          </div>
+          <button type="button" role="menuitem" tabindex="-1" onclick={openReactionPicker}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
+            </svg>
+            <span>Add reaction</span>
+          </button>
+        {/if}
+        {#if onMessageAuthor && message.author && !message.deleted_at}
+          <button type="button" role="menuitem" tabindex="-1" onclick={messageAuthor}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 15a4 4 0 0 1-4 4H8l-4 2V7a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v8Z" />
+            </svg>
+            <span>Message {userDisplayName(message.author)}</span>
+          </button>
+        {/if}
+        {#if onReply && !message.deleted_at}
+          <button type="button" role="menuitem" tabindex="-1" onclick={replyToMessage}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m9 8-5 4 5 4v-3h4c3.5 0 5.8 1.4 7 4-.2-5.8-3.3-9-9-9H9Z" />
+            </svg>
+            <span>Reply</span>
+          </button>
+        {/if}
+        {#if onTogglePin && !message.deleted_at}
+          <button type="button" role="menuitem" tabindex="-1" onclick={togglePin}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m9 3 6 6-2 2 4 4-2 2-4-4-2 2-6-6 6-6Z" />
+              <path d="m9 15-5 5" />
+            </svg>
+            <span>{pinned ? 'Unpin message' : 'Pin message'}</span>
+          </button>
+        {/if}
+        {#if gifUrl}
+          <button type="button" role="menuitem" tabindex="-1" onclick={favoriteGif}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"
+              />
+            </svg>
+            <span>{gifFavorited ? 'Remove from GIF favorites' : 'Add to GIF favorites'}</span>
+          </button>
+        {/if}
+        {#if message.author && message.author.profile_resolved !== false && !message.webhook && onViewProfile}
+          <button type="button" role="menuitem" tabindex="-1" onclick={viewProfile}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="8" r="4" />
+              <path d="M4 21a8 8 0 0 1 16 0" />
+            </svg>
+            <span>View profile</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            tabindex="-1"
+            onclick={(event) => {
+              const handle = message.author ? userPublicHandle(message.author) : null;
+              if (handle) void copy(`@${handle}`, event);
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M16 8a4 4 0 1 1-4-4c4 0 7 3 7 7v1a3 3 0 0 1-6 0V8" />
+              <path d="M19 19a9 9 0 1 1 2-4" />
+            </svg>
+            <span>Copy username</span>
+          </button>
+          {#if developerMode.enabled}
+            <button
+              type="button"
+              role="menuitem"
+              tabindex="-1"
+              onclick={(event) => copy(`${message.author_id}@${message.author_domain}`, event)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 3 7 21m10-18-2 18M3 9h18M2 15h18" />
+              </svg>
+              <span>Copy technical user ID</span>
+            </button>
+          {/if}
+        {/if}
+        {#if message.author && moderationActions.length && onModerate}
+          {#each moderationActions as action, index (action.id)}
+            <button
+              class:menu-separator={index === 0}
+              class:danger-item={action.id === 'kick' || action.id === 'ban'}
+              type="button"
+              role="menuitem"
+              tabindex="-1"
+              onclick={(event) => moderateAuthor(action.id, event)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                {#if action.id === 'timeout'}
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M12 7v5l3 2" />
+                {:else}
+                  <path d="M12 3 4 6v5c0 5 3.4 8.2 8 10 4.6-1.8 8-5 8-10V6l-8-3Z" />
+                {/if}
+              </svg>
+              <span>{action.label} {userDisplayName(message.author)}</span>
+            </button>
+          {/each}
+        {/if}
+        {#if editAvailable}
+          <button
+            class:menu-separator={Boolean(onMessageAuthor && message.author)}
+            type="button"
+            role="menuitem"
+            tabindex="-1"
+            onclick={editMessage}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m4 16-.8 4.8L8 20l11-11-4-4L4 16Z" />
+              <path d="m13.5 6.5 4 4" />
+            </svg>
+            <span>Edit message</span>
+            <kbd>↑</kbd>
+          </button>
+          {#if onDelete}
+            {#if confirmingDelete}
+              <div class="message-delete-confirmation" role="group" aria-label="Confirm deletion">
+                <p>Delete this message?</p>
+                <div>
+                  <button type="button" role="menuitem" tabindex="-1" onclick={cancelDelete}>
+                    Cancel
+                  </button>
+                  <button
+                    bind:this={deleteConfirmationButton}
+                    class="danger-item"
+                    type="button"
+                    role="menuitem"
+                    tabindex="-1"
+                    onclick={deleteMessage}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            {:else}
+              <button
+                class="danger-item"
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                onclick={requestDelete}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6" />
+                </svg>
+                <span>Delete message</span>
+              </button>
+            {/if}
+          {/if}
+        {/if}
+        {#if message.content && !message.deleted_at}
+          <button
+            class:menu-separator={editAvailable || Boolean(onMessageAuthor)}
+            type="button"
+            role="menuitem"
+            tabindex="-1"
+            onclick={(event) => copy(message.content ?? '', event)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8 8h11v12H8z" />
+              <path d="M16 8V4H4v12h4" />
+            </svg>
+            <span>Copy text</span>
+          </button>
+        {/if}
         <button
           type="button"
           role="menuitem"
           tabindex="-1"
-          onclick={(event) => {
-            const handle = message.author ? userPublicHandle(message.author) : null;
-            if (handle) void copy(`@${handle}`, event);
-          }}
+          onclick={(event) => copy(messageLink(), event)}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M16 8a4 4 0 1 1-4-4c4 0 7 3 7 7v1a3 3 0 0 1-6 0V8" />
-            <path d="M19 19a9 9 0 1 1 2-4" />
+            <path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2" />
+            <path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2" />
           </svg>
-          <span>Copy username</span>
+          <span>Copy message link</span>
         </button>
         {#if developerMode.enabled}
           <button
             type="button"
             role="menuitem"
             tabindex="-1"
-            onclick={(event) => copy(`${message.author_id}@${message.author_domain}`, event)}
+            onclick={(event) => copy(entityRef(message), event)}
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M9 3 7 21m10-18-2 18M3 9h18M2 15h18" />
             </svg>
-            <span>Copy technical user ID</span>
+            <span>Copy message ID</span>
           </button>
         {/if}
-      {/if}
-      {#if message.author && moderationActions.length && onModerate}
-        {#each moderationActions as action, index (action.id)}
-          <button
-            class:menu-separator={index === 0}
-            class:danger-item={action.id === 'kick' || action.id === 'ban'}
-            type="button"
-            role="menuitem"
-            tabindex="-1"
-            onclick={(event) => moderateAuthor(action.id, event)}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              {#if action.id === 'timeout'}
-                <circle cx="12" cy="12" r="9" />
-                <path d="M12 7v5l3 2" />
-              {:else}
-                <path d="M12 3 4 6v5c0 5 3.4 8.2 8 10 4.6-1.8 8-5 8-10V6l-8-3Z" />
-              {/if}
-            </svg>
-            <span>{action.label} {userDisplayName(message.author)}</span>
-          </button>
-        {/each}
-      {/if}
-      {#if editAvailable}
-        <button
-          class:menu-separator={Boolean(onMessageAuthor && message.author)}
-          type="button"
-          role="menuitem"
-          tabindex="-1"
-          onclick={editMessage}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m4 16-.8 4.8L8 20l11-11-4-4L4 16Z" />
-            <path d="m13.5 6.5 4 4" />
-          </svg>
-          <span>Edit message</span>
-          <kbd>↑</kbd>
-        </button>
-        {#if onDelete}
-          {#if confirmingDelete}
-            <div class="message-delete-confirmation" role="group" aria-label="Confirm deletion">
-              <p>Delete this message?</p>
-              <div>
-                <button type="button" role="menuitem" tabindex="-1" onclick={cancelDelete}>
-                  Cancel
-                </button>
-                <button
-                  bind:this={deleteConfirmationButton}
-                  class="danger-item"
-                  type="button"
-                  role="menuitem"
-                  tabindex="-1"
-                  onclick={deleteMessage}
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-          {:else}
-            <button
-              class="danger-item"
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              onclick={requestDelete}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6" />
-              </svg>
-              <span>Delete message</span>
-            </button>
-          {/if}
-        {/if}
-      {/if}
-      {#if message.content && !message.deleted_at}
-        <button
-          class:menu-separator={editAvailable || Boolean(onMessageAuthor)}
-          type="button"
-          role="menuitem"
-          tabindex="-1"
-          onclick={(event) => copy(message.content ?? '', event)}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M8 8h11v12H8z" />
-            <path d="M16 8V4H4v12h4" />
-          </svg>
-          <span>Copy text</span>
-        </button>
-      {/if}
-      <button
-        type="button"
-        role="menuitem"
-        tabindex="-1"
-        onclick={(event) => copy(messageLink(), event)}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2" />
-          <path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2" />
-        </svg>
-        <span>Copy message link</span>
-      </button>
-      {#if developerMode.enabled}
-        <button
-          type="button"
-          role="menuitem"
-          tabindex="-1"
-          onclick={(event) => copy(entityRef(message), event)}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M9 3 7 21m10-18-2 18M3 9h18M2 15h18" />
-          </svg>
-          <span>Copy message ID</span>
-        </button>
       {/if}
     </div>
   {/if}

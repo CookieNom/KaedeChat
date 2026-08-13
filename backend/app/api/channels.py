@@ -39,6 +39,7 @@ from app.chat.payloads import (
 )
 from app.chat.permissions import require_permissions
 from app.chat.privacy import blocked_between, lock_relationship_pair, require_can_direct_message
+from app.chat.reaction_payloads import reaction_payloads_for_messages
 from app.chat.schemas import (
     MessageBulkDelete,
     MessageCreate,
@@ -287,6 +288,51 @@ async def proxy_remote_guild_pin(
     return Response(status_code=204)
 
 
+async def proxy_remote_guild_reaction(
+    session: AsyncSession,
+    settings: Settings,
+    access: ChannelAccess,
+    actor: User,
+    message_ref: EntityReferenceLike,
+    emoji: str,
+    *,
+    remove: bool,
+) -> Response:
+    guild = access.guild
+    if guild is None or guild.origin_domain == settings.domain:
+        raise RuntimeError("reaction proxy requires a remote guild")
+    message_id, message_domain = message_ref.resolve(settings.domain)
+    try:
+        response = await signed_request(
+            session,
+            settings,
+            "POST",
+            guild.origin_domain,
+            f"/_kaede/v1/guilds/{guild.id}/proxy-reaction",
+            payload={
+                "actor": profile_from_user(actor),
+                "channel_id": str(access.channel.id),
+                "message_id": f"{message_id}@{message_domain}",
+                "emoji": emoji,
+                "remove": remove,
+            },
+        )
+    except (httpx.HTTPError, FederationNetworkError, RuntimeError):
+        raise HTTPException(
+            status_code=503, detail={"code": "FEDERATED_WRITE_UNAVAILABLE"}
+        ) from None
+    raise_proxy_rejection(response, {400, 403, 404, 409, 429, 507})
+    if response.status_code != 200:
+        raise HTTPException(status_code=503, detail={"code": "FEDERATED_WRITE_UNAVAILABLE"})
+    try:
+        body = decode_federation_response_json(response)
+    except FederationNetworkError:
+        body = None
+    if not isinstance(body, dict) or body.get("reacted") is not (not remove):
+        raise HTTPException(status_code=502, detail={"code": "FEDERATED_WRITE_RESPONSE_INVALID"})
+    return Response(status_code=204)
+
+
 async def channel_message(
     session: AsyncSession,
     settings: Settings,
@@ -456,6 +502,11 @@ async def list_messages(
     attachments = await attachments_for_messages(
         session, {(item.id, item.origin_domain) for item in messages}
     )
+    reaction_payloads = await reaction_payloads_for_messages(
+        session,
+        {(item.id, item.origin_domain) for item in messages},
+        viewer=auth.user,
+    )
     delivery_statuses = (
         await dm_delivery_statuses(session, settings, channel, messages)
         if access.guild is None
@@ -463,11 +514,16 @@ async def list_messages(
     )
     payloads: list[dict[str, object]] = []
     for item in messages:
+        reaction_counts, reacted_emoji = reaction_payloads.get(
+            (item.id, item.origin_domain), ({}, [])
+        )
         payload = message_payload(
             item,
             authors.get((item.author_id, item.author_domain)),
             attachments.get((item.id, item.origin_domain), []),
         )
+        payload["reaction_counts"] = reaction_counts
+        payload["reacted_emoji"] = reacted_emoji
         delivery = delivery_statuses.get((item.id, item.origin_domain))
         if delivery is not None:
             payload["delivery_status"] = delivery[0]
@@ -1455,6 +1511,19 @@ async def add_reaction(
         user_domain=auth.user.origin_domain,
     )
     access = await load_channel_access(session, settings, auth.user, channel_id)
+    if access.guild is not None and access.guild.origin_domain != settings.domain:
+        await require_channel_permissions(
+            session, redis, access, auth.user, required_permissions("reaction.create")
+        )
+        return await proxy_remote_guild_reaction(
+            session,
+            settings,
+            access,
+            auth.user,
+            message_id,
+            payload.emoji,
+            remove=False,
+        )
     require_local_mutation_authority(access, settings)
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
@@ -1552,6 +1621,8 @@ async def add_reaction(
                 "channel_id": str(access.channel.id),
                 "channel_domain": access.channel.origin_domain,
                 "reaction": payload.emoji,
+                "user_id": str(auth.user.id),
+                "user_domain": auth.user.origin_domain,
             },
         )
     else:
@@ -1579,6 +1650,19 @@ async def remove_own_reaction(
         user_domain=auth.user.origin_domain,
     )
     access = await load_channel_access(session, settings, auth.user, channel_id)
+    if access.guild is not None and access.guild.origin_domain != settings.domain:
+        await require_channel_permissions(
+            session, redis, access, auth.user, required_permissions("reaction.delete.self")
+        )
+        return await proxy_remote_guild_reaction(
+            session,
+            settings,
+            access,
+            auth.user,
+            message_id,
+            emoji,
+            remove=True,
+        )
     require_local_mutation_authority(access, settings)
     access = await lock_local_channel_mutation(session, settings, access)
     await require_channel_permissions(
@@ -1625,6 +1709,8 @@ async def remove_own_reaction(
                 "channel_domain": access.channel.origin_domain,
                 "reaction": emoji,
                 "removed": True,
+                "user_id": str(auth.user.id),
+                "user_domain": auth.user.origin_domain,
             },
         )
     response.status_code = 204
@@ -1825,6 +1911,11 @@ async def list_pins(
             .order_by(Pin.pinned_at.desc(), Pin.message_id.desc())
         )
     ).all()
+    reaction_payloads = await reaction_payloads_for_messages(
+        session,
+        {(message.id, message.origin_domain) for _, message, _ in rows},
+        viewer=auth.user,
+    )
     attachments = await attachments_for_messages(
         session, {(message.id, message.origin_domain) for _, message, _ in rows}
     )
@@ -1835,6 +1926,12 @@ async def list_pins(
                 author,
                 attachments.get((message.id, message.origin_domain), []),
             ),
+            "reaction_counts": reaction_payloads.get((message.id, message.origin_domain), ({}, []))[
+                0
+            ],
+            "reacted_emoji": reaction_payloads.get((message.id, message.origin_domain), ({}, []))[
+                1
+            ],
             "pinned_at": pin.pinned_at.isoformat(),
         }
         for pin, message, author in rows

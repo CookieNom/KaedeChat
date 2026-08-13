@@ -17,6 +17,23 @@ import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
 
 void main() {
+  group('message reaction recents', () {
+    test('ranks frequently used emoji and breaks ties by recency', () {
+      expect(
+        rankRecentReactions(<String>['👍', '🔥', '👍', '😂', '🔥', '🔥']),
+        <String>['🔥', '👍', '😂'],
+      );
+      expect(
+        rankRecentReactions(<String>['👍', '😂', '🔥']),
+        <String>['🔥', '😂', '👍'],
+      );
+    });
+
+    test('uses a compact useful default for a new user', () {
+      expect(rankRecentReactions(const <String>[]), hasLength(4));
+    });
+  });
+
   group('message search models', () {
     test('parses encryption policy and bounded search coverage', () {
       final channel = KaedeChannel.fromJson(<String, Object?>{

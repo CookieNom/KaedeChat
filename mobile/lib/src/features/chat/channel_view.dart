@@ -21,6 +21,7 @@ import 'package:kaede_mobile/src/storage/local_database.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
@@ -40,6 +41,137 @@ List<EntityRef> mentionReferences(String content) {
 }
 
 const _automaticHistoryLoadThreshold = 320.0;
+const _defaultRecentReactions = <String>['❤️', '😂', '👍', '🔥'];
+const _reactionEmojiCategories = <String, List<String>>{
+  'Recent': <String>[],
+  'Smileys': <String>[
+    '😀',
+    '😃',
+    '😄',
+    '😁',
+    '😂',
+    '🤣',
+    '😊',
+    '😍',
+    '🥰',
+    '😘',
+    '😎',
+    '🤩',
+    '🥳',
+    '😏',
+    '😢',
+    '😭',
+    '😤',
+    '😡',
+    '🤯',
+    '😱',
+    '🤔',
+    '🫡',
+    '🫠',
+    '👀'
+  ],
+  'People': <String>[
+    '👍',
+    '👎',
+    '👏',
+    '🙌',
+    '🙏',
+    '🤝',
+    '💪',
+    '👌',
+    '✌️',
+    '🤞',
+    '🤟',
+    '🤘',
+    '👋',
+    '🫶',
+    '💅',
+    '🧠'
+  ],
+  'Nature': <String>[
+    '🐶',
+    '🐱',
+    '🐭',
+    '🐹',
+    '🐰',
+    '🦊',
+    '🐻',
+    '🐼',
+    '🐸',
+    '🐵',
+    '🦄',
+    '🐝',
+    '🌸',
+    '🌻',
+    '🌈',
+    '⭐'
+  ],
+  'Food': <String>[
+    '🍎',
+    '🍓',
+    '🍉',
+    '🍕',
+    '🍔',
+    '🍟',
+    '🌮',
+    '🍿',
+    '🍪',
+    '🎂',
+    '☕',
+    '🍺'
+  ],
+  'Activities': <String>[
+    '⚽',
+    '🏀',
+    '🏈',
+    '🎮',
+    '🎲',
+    '🎨',
+    '🎵',
+    '🎉',
+    '🏆',
+    '🚀',
+    '💡',
+    '📌'
+  ],
+  'Symbols': <String>[
+    '❤️',
+    '🧡',
+    '💛',
+    '💚',
+    '💙',
+    '💜',
+    '🖤',
+    '🤍',
+    '💯',
+    '🔥',
+    '✨',
+    '✅',
+    '❌',
+    '⚠️',
+    '❓',
+    '‼️'
+  ],
+};
+
+List<String> rankRecentReactions(List<String> history, {int limit = 4}) {
+  if (history.isEmpty) return _defaultRecentReactions.take(limit).toList();
+  final counts = <String, int>{};
+  final lastUsed = <String, int>{};
+  for (var index = 0; index < history.length; index++) {
+    final emoji = history[index];
+    counts[emoji] = (counts[emoji] ?? 0) + 1;
+    lastUsed[emoji] = index;
+  }
+  final ranked = counts.keys.toList()
+    ..sort((left, right) {
+      final byCount = counts[right]!.compareTo(counts[left]!);
+      return byCount != 0
+          ? byCount
+          : lastUsed[right]!.compareTo(lastUsed[left]!);
+    });
+  return ranked.take(limit).toList();
+}
 
 @visibleForTesting
 bool shouldAutomaticallyLoadEarlier({
@@ -331,6 +463,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                             ? null
                             : () => _jumpTo(message.reference!),
                         onMenu: () => _showMessageActions(message),
+                        onReaction: (emoji) => _toggleReaction(message, emoji),
                         onAuthorTap: message.author == null
                             ? null
                             : () => showUserProfile(
@@ -728,12 +861,148 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     setState(() {});
   }
 
+  String _reactionHistoryKey(EntityRef? user) =>
+      'message-reaction-history:${user?.wire ?? 'anonymous'}';
+
+  Future<List<String>> _recentReactions(EntityRef? user) async {
+    final preferences = await SharedPreferences.getInstance();
+    return rankRecentReactions(
+      preferences.getStringList(_reactionHistoryKey(user)) ?? const <String>[],
+    );
+  }
+
+  Future<void> _rememberReaction(EntityRef? user, String emoji) async {
+    final preferences = await SharedPreferences.getInstance();
+    final key = _reactionHistoryKey(user);
+    final history = preferences.getStringList(key) ?? <String>[];
+    history.add(emoji);
+    if (history.length > 100) history.removeRange(0, history.length - 100);
+    await preferences.setStringList(key, history);
+  }
+
+  Future<void> _toggleReaction(KaedeMessage message, String emoji) async {
+    final state = ref.read(mobileControllerProvider);
+    final channel = state.activeChannel;
+    if (channel == null) return;
+    final removing = message.reactedEmoji.contains(emoji);
+    final canAdd = channel.type == ChannelType.dm ||
+        channel.allows(Permission.addReactions);
+    if (!removing && !canAdd) return;
+    final controller = ref.read(mobileControllerProvider.notifier);
+    try {
+      if (removing) {
+        await controller.repository
+            .removeReaction(message.channelRef, message.ref, emoji);
+      } else {
+        await controller.repository
+            .react(message.channelRef, message.ref, emoji);
+        await _rememberReaction(state.user?.ref, emoji);
+      }
+    } on Object catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+            userFacingError(error, summary: 'Could not update that reaction')),
+      ));
+    }
+  }
+
+  Future<String?> _showReactionPicker(EntityRef? user) async {
+    final recent = await _recentReactions(user);
+    if (!mounted) return null;
+    var category = 'Recent';
+    var query = '';
+    return showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setPickerState) {
+          final all = _reactionEmojiCategories.values.expand((items) => items);
+          final items = query.isNotEmpty
+              ? all.toSet().where((emoji) => emoji.contains(query)).toList()
+              : category == 'Recent'
+                  ? recent
+                  : _reactionEmojiCategories[category]!;
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: min(MediaQuery.sizeOf(context).height * .62, 430),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                child: Column(
+                  children: [
+                    TextField(
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        hintText: 'Search emoji',
+                        prefixIcon: Icon(Icons.search_rounded),
+                        isDense: true,
+                      ),
+                      onChanged: (value) =>
+                          setPickerState(() => query = value.trim()),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: 38,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _reactionEmojiCategories.length,
+                        separatorBuilder: (_, __) => const SizedBox(width: 6),
+                        itemBuilder: (context, index) {
+                          final name =
+                              _reactionEmojiCategories.keys.elementAt(index);
+                          return ChoiceChip(
+                            label: Text(name),
+                            selected: category == name && query.isEmpty,
+                            onSelected: (_) => setPickerState(() {
+                              category = name;
+                              query = '';
+                            }),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: GridView.builder(
+                        gridDelegate:
+                            const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 7,
+                          mainAxisSpacing: 4,
+                          crossAxisSpacing: 4,
+                        ),
+                        itemCount: items.length,
+                        itemBuilder: (context, index) => InkWell(
+                          onTap: () => Navigator.pop(context, items[index]),
+                          borderRadius: BorderRadius.circular(10),
+                          child: Center(
+                              child: Text(items[index],
+                                  style: const TextStyle(fontSize: 25))),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Future<void> _showMessageActions(KaedeMessage message) async {
     if (message.deletedAt != null) return;
     final me = ref.read(mobileControllerProvider).user?.ref;
     final channel = ref.read(mobileControllerProvider).activeChannel!;
+    final canReact = channel.type == ChannelType.dm ||
+        channel.allows(Permission.addReactions);
     final canManage = channel.type == ChannelType.dm ||
         channel.allows(Permission.manageMessages);
+    final recent = canReact ? await _recentReactions(me) : const <String>[];
+    if (!mounted) return;
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
@@ -741,6 +1010,30 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (canReact) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+                child: Row(
+                  children: [
+                    for (final emoji in recent)
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 3),
+                          child: FilledButton.tonal(
+                            onPressed: () =>
+                                Navigator.pop(context, 'reaction:$emoji'),
+                            style: FilledButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                            child: Text(emoji,
+                                style: const TextStyle(fontSize: 23)),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
             ListTile(
                 leading: const Icon(Icons.reply_rounded),
                 title: const Text('Reply'),
@@ -753,10 +1046,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 leading: const Icon(Icons.link_rounded),
                 title: const Text('Copy message link'),
                 onTap: () => Navigator.pop(context, 'copy-link')),
-            ListTile(
-                leading: const Icon(Icons.add_reaction_outlined),
-                title: const Text('Add reaction'),
-                onTap: () => Navigator.pop(context, 'react')),
+            if (canReact)
+              ListTile(
+                  leading: const Icon(Icons.add_reaction_outlined),
+                  title: const Text('Add reaction'),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.pop(context, 'react-picker')),
             if (canManage)
               ListTile(
                   leading: Icon(message.pinned
@@ -782,6 +1077,10 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       ),
     );
     if (!mounted || action == null) return;
+    if (action.startsWith('reaction:')) {
+      await _toggleReaction(message, action.substring('reaction:'.length));
+      return;
+    }
     final controller = ref.read(mobileControllerProvider.notifier);
     try {
       switch (action) {
@@ -808,9 +1107,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             ));
           }
           break;
-        case 'react':
-          await controller.repository
-              .react(message.channelRef, message.ref, '👍');
+        case 'react-picker':
+          final emoji = await _showReactionPicker(me);
+          if (emoji != null) await _toggleReaction(message, emoji);
           break;
         case 'pin':
           if (message.pinned) {
@@ -1207,6 +1506,7 @@ final class _MessageTile extends StatelessWidget {
       required this.compact,
       required this.onReply,
       required this.onMenu,
+      required this.onReaction,
       this.onAuthorTap,
       this.referenced,
       this.onJump});
@@ -1216,6 +1516,7 @@ final class _MessageTile extends StatelessWidget {
   final bool compact;
   final VoidCallback onReply;
   final VoidCallback onMenu;
+  final ValueChanged<String> onReaction;
   final VoidCallback? onAuthorTap;
   final VoidCallback? onJump;
 
@@ -1376,7 +1677,7 @@ final class _MessageTile extends StatelessWidget {
                             _ReactionChip(
                               emoji: reaction.key,
                               count: reaction.value,
-                              onTap: onMenu,
+                              onTap: () => onReaction(reaction.key),
                             ),
                         ],
                       ),

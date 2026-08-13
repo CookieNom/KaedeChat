@@ -2254,14 +2254,29 @@ final class MobileController extends StateNotifier<MobileState> {
       }
       if (data['reaction'] case final reaction?) {
         final counts = Map<String, int>.of(next.reactionCounts);
+        final reacted = Set<String>.of(next.reactedEmoji);
         final key = '$reaction';
-        final count = (counts[key] ?? 0) + (data['removed'] == true ? -1 : 1);
+        final removed = data['removed'] == true;
+        final count = (counts[key] ?? 0) + (removed ? -1 : 1);
         if (count <= 0) {
           counts.remove(key);
         } else {
           counts[key] = count;
         }
-        next = next.copyWith(reactionCounts: Map.unmodifiable(counts));
+        final currentUser = state.user;
+        if (currentUser != null &&
+            '${data['user_id']}' == currentUser.ref.id.value &&
+            '${data['user_domain']}' == currentUser.ref.domain.value) {
+          if (removed) {
+            reacted.remove(key);
+          } else {
+            reacted.add(key);
+          }
+        }
+        next = next.copyWith(
+          reactionCounts: Map.unmodifiable(counts),
+          reactedEmoji: Set.unmodifiable(reacted),
+        );
       }
       if (data.containsKey('delivery_status')) {
         final status = '${data['delivery_status']}';

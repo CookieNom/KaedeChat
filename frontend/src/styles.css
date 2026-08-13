@@ -4755,6 +4755,43 @@ progress {
   font-size: 0.63rem;
 }
 
+.message-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.35rem;
+}
+
+.message-reactions button {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 0.2rem 0.48rem;
+  color: var(--text-soft);
+  background: var(--surface-subtle);
+  font-size: 0.82rem;
+}
+
+.message-reactions button:hover:not(:disabled),
+.message-reactions button.active {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-subtle));
+}
+
+.message-reactions button:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.message-reactions .reaction-emoji-image {
+  width: 19px;
+  height: 19px;
+}
+
 .webhook-badge {
   border-radius: 4px;
   padding: 0.12rem 0.28rem;
@@ -6543,6 +6580,31 @@ body.media-viewer-open {
   text-align: left;
   text-decoration: none;
   cursor: pointer;
+}
+
+.message-context-menu:has(.reaction-picker) {
+  width: min(350px, calc(100vw - 16px));
+  max-height: min(410px, calc(100dvh - 16px));
+  overflow: hidden;
+}
+
+.quick-reactions {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.25rem;
+  padding: 0.2rem;
+}
+
+.message-context-menu .quick-reactions button {
+  min-height: 42px;
+  justify-content: center;
+  padding: 0.25rem;
+  font-size: 1.25rem;
+}
+
+.message-context-menu .quick-reactions button.active {
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-hover));
 }
 
 .message-context-menu button {

@@ -88,6 +88,7 @@ from app.db.models import (
     MessageProjection,
     PeerKey,
     Pin,
+    Reaction,
     RemoteMediaTombstone,
     Role,
     User,
@@ -167,6 +168,7 @@ from app.federation.schemas import (
     GuildLeaveRequest,
     GuildPinProxyRequest,
     GuildProxyRequest,
+    GuildReactionProxyRequest,
     InboxResult,
     InviteResolveRequest,
     PresenceFederationRequest,
@@ -4130,3 +4132,116 @@ async def federation_guild_pin_proxy(
             },
         )
     return {"pinned": payload.pinned}
+
+
+@router.post("/_kaede/v1/guilds/{guild_id}/proxy-reaction")
+async def federation_guild_reaction_proxy(
+    guild_id: Snowflake,
+    payload: GuildReactionProxyRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, bool]:
+    """Apply a remote member's reaction at the authoritative guild home."""
+    require_guild_federation_access(principal)
+    if payload.actor.origin_domain != principal.origin:
+        raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
+    actor = await upsert_remote_user(session, settings, payload.actor)
+    guild = await home_guild(session, settings, guild_id, for_update=True)
+    channel = await session.get(Channel, (int(payload.channel_id), guild.origin_domain))
+    if (
+        channel is None
+        or channel.unavailable
+        or channel.guild_id != guild.id
+        or channel.type not in {0, 5}
+    ):
+        raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+    needed = Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY
+    if not payload.remove:
+        needed |= Permission.ADD_REACTIONS
+    actor_permissions = await require_permissions(
+        session,
+        redis,
+        guild,
+        actor,
+        needed,
+        channel=channel,
+    )
+    await validate_custom_emoji_use(
+        session,
+        actor,
+        payload.emoji,
+        target_guild=guild,
+        target_permissions=actor_permissions,
+        trust_unknown_external=True,
+    )
+    message_id, message_domain = payload.message_id.resolve(settings.domain)
+    message = await session.get(Message, (message_id, message_domain))
+    if (
+        message is None
+        or message.deleted_at is not None
+        or (message.channel_id, message.channel_domain) != (channel.id, channel.origin_domain)
+    ):
+        raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
+    changed = False
+    if payload.remove:
+        removed = await session.scalar(
+            delete(Reaction)
+            .where(
+                Reaction.message_id == message.id,
+                Reaction.message_domain == message.origin_domain,
+                Reaction.user_id == actor.id,
+                Reaction.user_domain == actor.origin_domain,
+                Reaction.emoji_key == payload.emoji,
+            )
+            .returning(Reaction.message_id)
+        )
+        changed = removed is not None
+    else:
+        inserted = await session.scalar(
+            pg_insert(Reaction)
+            .values(
+                message_id=message.id,
+                message_domain=message.origin_domain,
+                user_id=actor.id,
+                user_domain=actor.origin_domain,
+                emoji_key=payload.emoji,
+            )
+            .on_conflict_do_nothing()
+            .returning(Reaction.message_id)
+        )
+        changed = inserted is not None
+    if changed:
+        await queue_guild_mutation(
+            session,
+            settings,
+            guild,
+            actor,
+            "guild.reaction.remove" if payload.remove else "guild.reaction.add",
+            {
+                "message": {"id": str(message.id), "origin_domain": message.origin_domain},
+                "user": {"id": str(actor.id), "origin_domain": actor.origin_domain},
+                "emoji": payload.emoji,
+            },
+            channel=channel,
+        )
+    await session.commit()
+    if changed:
+        await wake_queued_guild_federation(guild)
+        await publish_dispatch(
+            redis,
+            guild_topic(guild.origin_domain, guild.id),
+            "MESSAGE_UPDATE",
+            {
+                "id": str(message.id),
+                "origin_domain": message.origin_domain,
+                "channel_id": str(channel.id),
+                "channel_domain": channel.origin_domain,
+                "reaction": payload.emoji,
+                "removed": payload.remove,
+                "user_id": str(actor.id),
+                "user_domain": actor.origin_domain,
+            },
+        )
+    return {"reacted": not payload.remove}

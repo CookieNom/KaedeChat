@@ -22,6 +22,7 @@
   } from '$lib/chat/completion';
   import { mentionsUser } from '$lib/chat/mentions';
   import { messageSearchUserCandidates } from '$lib/chat/message-search';
+  import { applyReactionUpdate, type ReactionUpdate } from '$lib/chat/reaction-state';
   import { guildModerationActions } from '$lib/chat/moderation';
   import { guildHistorySyncGuidance, guildReplicaSyncGuidance } from '$lib/chat/guild-sync';
   import {
@@ -387,6 +388,9 @@
   );
   const canSendMessages = $derived(
     Boolean(channel && channelHasPermission(channel, Permission.SEND_MESSAGES))
+  );
+  const canAddReactions = $derived(
+    Boolean(channel && channelHasPermission(channel, Permission.ADD_REACTIONS))
   );
   const canAttachFiles = $derived(
     Boolean(canSendMessages && channel && channelHasPermission(channel, Permission.ATTACH_FILES))
@@ -1823,7 +1827,11 @@
       const update = dispatch.d as Message;
       setMessages(
         messages.map((item) =>
-          entityKey(item) === entityKey(update) ? { ...item, ...update } : item
+          entityKey(item) === entityKey(update)
+            ? 'reaction' in update
+              ? applyReactionUpdate(item, update as unknown as ReactionUpdate, currentUser)
+              : { ...item, ...update }
+            : item
         )
       );
     } else if (dispatch.t === 'ATTACHMENT_UPDATE') {
@@ -3016,6 +3024,20 @@
     }
   }
 
+  async function toggleMessageReaction(message: Message, emoji: string, remove: boolean) {
+    if (!channel || (!canAddReactions && !remove)) return;
+    const channelRef = encodeURIComponent(entityRef(channel));
+    const messageRef = encodeURIComponent(entityRef(message));
+    try {
+      await api(
+        `/channels/${channelRef}/messages/${messageRef}/reactions${remove ? `/${encodeURIComponent(emoji)}` : ''}`,
+        remove ? { method: 'DELETE' } : { method: 'POST', body: JSON.stringify({ emoji }) }
+      );
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not update that reaction. Try again.');
+    }
+  }
+
   function jumpToPinnedMessage(message: Message) {
     pinsOpen = false;
     jumpToMessageReference(entityRef(message));
@@ -3736,6 +3758,10 @@
                   onRetry={retryMessage}
                   onViewProfile={openMessageProfile}
                   onReply={startReply}
+                  canReact={canAddReactions}
+                  customEmojis={pickerEmojis}
+                  reactionUserKey={currentUser ? entityKey(currentUser) : ''}
+                  onToggleReaction={toggleMessageReaction}
                   onJumpToReference={jumpToReply}
                   onTogglePin={canManageMessages ? togglePinnedMessage : undefined}
                   moderationActions={item.message.author

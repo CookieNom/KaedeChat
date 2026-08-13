@@ -392,6 +392,10 @@ final class KaedeRepository {
         '/api/v1/channels/${channel.wire}/messages/${message.wire}/reactions',
         data: <String, Object?>{'emoji': emoji},
       );
+  Future<void> removeReaction(
+          EntityRef channel, EntityRef message, String emoji) =>
+      api.sendJson('DELETE',
+          '/api/v1/channels/${channel.wire}/messages/${message.wire}/reactions/${Uri.encodeComponent(emoji)}');
   Future<void> pin(EntityRef channel, EntityRef message) => api.sendJson(
       'PUT', '/api/v1/channels/${channel.wire}/pins/${message.wire}');
   Future<void> unpin(EntityRef channel, EntityRef message) => api.sendJson(

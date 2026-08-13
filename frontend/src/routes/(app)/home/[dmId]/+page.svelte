@@ -23,6 +23,7 @@
     reconcileMessage,
     type MessageDeliveryUpdate
   } from '$lib/chat/reconcile';
+  import { applyReactionUpdate, type ReactionUpdate } from '$lib/chat/reaction-state';
   import {
     discardAttachments,
     pendingMessageSend,
@@ -510,7 +511,11 @@
       const update = dispatch.d as Message;
       setMessages(
         messages.map((item) =>
-          entityKey(item) === entityKey(update) ? { ...item, ...update } : item
+          entityKey(item) === entityKey(update)
+            ? 'reaction' in update
+              ? applyReactionUpdate(item, update as unknown as ReactionUpdate, currentUser)
+              : { ...item, ...update }
+            : item
         )
       );
     } else if (dispatch.t === 'ATTACHMENT_UPDATE') {
@@ -1469,6 +1474,20 @@
     }
   }
 
+  async function toggleMessageReaction(message: Message, emoji: string, remove: boolean) {
+    if (!channel) return;
+    const channelRef = encodeURIComponent(entityRef(channel));
+    const messageRef = encodeURIComponent(entityRef(message));
+    try {
+      await api(
+        `/channels/${channelRef}/messages/${messageRef}/reactions${remove ? `/${encodeURIComponent(emoji)}` : ''}`,
+        remove ? { method: 'DELETE' } : { method: 'POST', body: JSON.stringify({ emoji }) }
+      );
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not update that reaction. Try again.');
+    }
+  }
+
   function jumpToPinnedMessage(message: Message) {
     pinsOpen = false;
     jumpToMessageReference(entityRef(message));
@@ -1912,6 +1931,10 @@
                   onReply={startReply}
                   onJumpToReference={jumpToReply}
                   onTogglePin={togglePinnedMessage}
+                  canReact
+                  customEmojis={pickerEmojis}
+                  reactionUserKey={currentUser ? entityKey(currentUser) : ''}
+                  onToggleReaction={toggleMessageReaction}
                 />
               {/if}
             {/snippet}
