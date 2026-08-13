@@ -1795,7 +1795,7 @@
           scopeRef={channel ? entityRef(channel) : dmId}
           accountRef={currentUser ? entityRef(currentUser) : null}
           {channel}
-          users={channel?.recipients ?? []}
+          users={[...(currentUser ? [currentUser] : []), ...(channel?.recipients ?? [])]}
           placement="header"
         />
         {#if !activeCall}

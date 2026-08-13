@@ -709,7 +709,10 @@
       scope="dms"
       scopeRef={null}
       accountRef={currentUser ? entityRef(currentUser) : null}
-      users={directMessages.flatMap((channel) => channel.recipients ?? [])}
+      users={[
+        ...(currentUser ? [currentUser] : []),
+        ...directMessages.flatMap((channel) => channel.recipients ?? [])
+      ]}
       onJump={jumpToSearchResult}
     />
 

@@ -54,7 +54,9 @@
     onJumpToReference,
     onTogglePin,
     moderationActions = [],
-    onModerate
+    onModerate,
+    domIdPrefix = 'message',
+    actionsEnabled = true
   }: {
     message: Message;
     compact?: boolean;
@@ -74,6 +76,8 @@
     onTogglePin?: (message: Message, pinned: boolean) => void;
     moderationActions?: Array<{ id: 'kick' | 'timeout' | 'ban'; label: string }>;
     onModerate?: (user: UserSummary, action: 'kick' | 'timeout' | 'ban') => void;
+    domIdPrefix?: string;
+    actionsEnabled?: boolean;
   } = $props();
 
   let menuOpen = $state(false);
@@ -93,7 +97,7 @@
   const editAvailable = $derived(
     canEdit && !message.deleted_at && !message.pending && !message.queued
   );
-  const menuAvailable = $derived(!message.pending && !message.queued);
+  const menuAvailable = $derived(actionsEnabled && !message.pending && !message.queued);
   const inviteReferences = $derived(
     message.content ? inviteReferencesInMessage(message.content) : []
   );
@@ -405,7 +409,7 @@
   class:compact
   class:menu-open={menuOpen}
   class="message-row"
-  id={`message-${entityRef(message)}`}
+  id={`${domIdPrefix}-${entityRef(message)}`}
   oncontextmenu={openContextMenu}
 >
   <span class="visually-hidden" role="status" aria-live="polite">{feedback}</span>
@@ -416,7 +420,7 @@
       aria-label={`Open actions for message from ${authorName()} at ${accessibleTime()}`}
       aria-haspopup="menu"
       aria-expanded={menuOpen}
-      aria-controls={menuOpen ? `message-actions-${entityRef(message)}` : undefined}
+      aria-controls={menuOpen ? `${domIdPrefix}-actions-${entityRef(message)}` : undefined}
       onclick={openKeyboardMenu}
     >
       Message actions
@@ -638,7 +642,7 @@
     <div
       use:portal
       bind:this={menuElement}
-      id={`message-actions-${entityRef(message)}`}
+      id={`${domIdPrefix}-actions-${entityRef(message)}`}
       class="message-context-menu"
       role="menu"
       tabindex="-1"

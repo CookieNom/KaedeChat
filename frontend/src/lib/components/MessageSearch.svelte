@@ -19,6 +19,7 @@
   import { assetUrl } from '$lib/media/assets';
   import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
   import Icon from './Icon.svelte';
+  import MessageRow from './MessageRow.svelte';
 
   let {
     open = $bindable(false),
@@ -61,6 +62,7 @@
   let suggestionsOpen = $state(false);
   let highlightedSuggestion = $state(0);
   let searchInput: HTMLInputElement | null = $state(null);
+  let searchRoot: HTMLDivElement | null = $state(null);
   const storageKey = $derived(accountRef ? `kaede.message-search.history.${accountRef}` : null);
 
   type SearchOperator = MessageSearchOperator;
@@ -217,6 +219,12 @@
     if (!response) open = false;
   }
 
+  function dismissOnOutsidePointer(event: PointerEvent) {
+    if (!open || placement !== 'header' || advancedOpen) return;
+    const target = event.target;
+    if (target instanceof Node && !searchRoot?.contains(target)) closeSearch();
+  }
+
   function closeAdvanced() {
     advancedOpen = false;
     if (!response) {
@@ -363,7 +371,9 @@
   }
 </script>
 
-<div class:header-placement={placement === 'header'} class="message-search">
+<svelte:window onpointerdown={dismissOnOutsidePointer} />
+
+<div bind:this={searchRoot} class:header-placement={placement === 'header'} class="message-search">
   {#if placement === 'header'}
     <form
       class:open
@@ -436,14 +446,6 @@
   {/if}
 
   {#if open}
-    {#if placement === 'header' && suggestionsOpen}
-      <button
-        class="page-dismiss"
-        type="button"
-        aria-label="Close message search"
-        onclick={dismissSuggestions}
-      ></button>
-    {/if}
     {#if suggestionsOpen || advancedOpen || response}
       <div
         class:advanced-layer={advancedOpen && placement === 'header'}
@@ -754,21 +756,25 @@
                   No messages matched those filters.
                 </p>{/if}
               {#each response.results as result (entityRef(result.message))}
-                <button class="result" type="button" onclick={() => jump(result)}>
-                  <span class="context"
-                    >{result.guild?.name ??
-                      result.channel.recipients?.map(userDisplayName).join(', ') ??
-                      'Direct message'} · {result.channel.name ?? 'conversation'}</span
-                  >
-                  <strong
-                    >{result.message.author
-                      ? userDisplayName(result.message.author)
-                      : (result.message.webhook?.name ?? 'Unknown sender')}</strong
-                  >
-                  <span>{result.snippet}</span><time
-                    >{new Date(result.message.created_at).toLocaleString()}</time
-                  >
-                </button>
+                <article class="result">
+                  <button class="result-context" type="button" onclick={() => jump(result)}>
+                    <span
+                      >{result.guild?.name ??
+                        result.channel.recipients?.map(userDisplayName).join(', ') ??
+                        'Direct message'} · {result.channel.name ?? 'conversation'}</span
+                    >
+                    <span>Jump</span>
+                  </button>
+                  <MessageRow
+                    message={result.message}
+                    mentionUsers={uniqueUsers}
+                    domIdPrefix="search-result"
+                    actionsEnabled={false}
+                  />
+                  {#if !result.message.content && result.snippet}
+                    <p class="remote-snippet">{result.snippet}</p>
+                  {/if}
+                </article>
               {/each}
             </div>
             {#if cursor}<button
@@ -790,7 +796,7 @@
     min-width: 0;
   }
   .header-placement {
-    z-index: 1001;
+    z-index: 1301;
   }
   .header-search-box {
     width: clamp(12rem, 18vw, 17rem);
@@ -888,13 +894,6 @@
     color: var(--muted, #aaa);
     font-size: 0.9rem;
   }
-  .page-dismiss {
-    position: fixed;
-    inset: 0;
-    z-index: 998;
-    border: 0;
-    background: transparent;
-  }
   .search-layer.header-layer {
     position: absolute;
     top: calc(100% + 0.35rem);
@@ -915,7 +914,7 @@
     top: 3.75rem;
     right: 0;
     bottom: 0;
-    z-index: 900;
+    z-index: 1200;
   }
   .search-layer.dialog-backdrop {
     position: fixed;
@@ -961,7 +960,7 @@
     border-radius: 12px;
   }
   .results-layer .search-panel.header-popover {
-    width: min(420px, 100vw);
+    width: min(440px, 100vw);
     height: 100%;
     max-height: none;
     display: flex;
@@ -1241,6 +1240,8 @@
   }
   .results {
     display: grid;
+    grid-auto-rows: max-content;
+    align-content: start;
     gap: 0.5rem;
     margin-top: 1rem;
   }
@@ -1249,27 +1250,73 @@
     flex: 1;
     overflow-y: auto;
     margin-top: 0.35rem;
-    padding-right: 0.15rem;
+    padding: 0.1rem 0.2rem 0.5rem 0;
   }
   .results-layer .result {
-    padding: 0.7rem;
+    padding: 0;
     border-radius: 9px;
   }
   .result {
     display: grid;
-    text-align: left;
-    gap: 0.25rem;
-    padding: 0.85rem;
+    min-width: 0;
+    gap: 0.15rem;
     border: 1px solid var(--border, #34363d);
     border-radius: 12px;
     background: var(--surface-raised, #202126);
     color: inherit;
+    overflow: hidden;
   }
-  .result:hover {
+  .result:hover,
+  .result:focus-within {
     border-color: var(--accent, #ff8068);
   }
-  .result .context,
-  .result time,
+  .result-context {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    width: 100%;
+    padding: 0.48rem 0.65rem;
+    border: 0;
+    border-bottom: 1px solid var(--border, #34363d);
+    background: color-mix(in srgb, var(--surface, #151619) 72%, transparent);
+    color: var(--muted, #aaa);
+    font-size: 0.75rem;
+    text-align: left;
+  }
+  .result-context span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .result-context span:last-child {
+    flex: none;
+    color: var(--accent, #ff8068);
+    font-weight: 750;
+  }
+  .result-context:hover span:last-child {
+    text-decoration: underline;
+  }
+  .result :global(.message-row) {
+    padding: 0.55rem 0.65rem 0.65rem;
+    background: transparent;
+  }
+  .result :global(.message-attachments img),
+  .result :global(.message-attachments video),
+  .result :global(.link-preview),
+  .result :global(.invite-embed) {
+    max-width: 100%;
+    max-height: 240px;
+  }
+  .result :global(.link-preview),
+  .result :global(.invite-embed) {
+    overflow: auto;
+  }
+  .remote-snippet {
+    margin: -0.35rem 0.65rem 0.7rem 3.55rem;
+    color: var(--text, #fff);
+    overflow-wrap: anywhere;
+  }
   .partial {
     color: var(--muted, #aaa);
     font-size: 0.85rem;

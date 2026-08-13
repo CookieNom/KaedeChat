@@ -3608,7 +3608,7 @@
           scopeRef={guild ? entityRef(guild) : guildId}
           accountRef={currentUser ? entityRef(currentUser) : null}
           {channel}
-          users={members.map((member) => member.user)}
+          users={[...(currentUser ? [currentUser] : []), ...members.map((member) => member.user)]}
           placement="header"
         />
         <button
