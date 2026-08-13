@@ -56,7 +56,8 @@
     moderationActions = [],
     onModerate,
     domIdPrefix = 'message',
-    actionsEnabled = true
+    actionsEnabled = true,
+    timestampFormat = 'time'
   }: {
     message: Message;
     compact?: boolean;
@@ -78,6 +79,7 @@
     onModerate?: (user: UserSummary, action: 'kick' | 'timeout' | 'ban') => void;
     domIdPrefix?: string;
     actionsEnabled?: boolean;
+    timestampFormat?: 'time' | 'date-time';
   } = $props();
 
   let menuOpen = $state(false);
@@ -159,7 +161,14 @@
   }
 
   function visibleTime(): string {
-    return new Date(message.created_at).toLocaleTimeString(preferredLocale(), {
+    const createdAt = new Date(message.created_at);
+    if (timestampFormat === 'date-time') {
+      return createdAt.toLocaleString(preferredLocale(), {
+        dateStyle: 'medium',
+        timeStyle: 'short'
+      });
+    }
+    return createdAt.toLocaleTimeString(preferredLocale(), {
       hour: '2-digit',
       minute: '2-digit'
     });

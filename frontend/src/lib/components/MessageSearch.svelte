@@ -770,6 +770,7 @@
                     mentionUsers={uniqueUsers}
                     domIdPrefix="search-result"
                     actionsEnabled={false}
+                    timestampFormat="date-time"
                   />
                   {#if !result.message.content && result.snippet}
                     <p class="remote-snippet">{result.snippet}</p>
