@@ -4351,6 +4351,13 @@ progress {
   box-shadow: 0 1px 6px rgb(0 0 0 / 3%);
 }
 
+/* Message search is rendered from inside the header. Promote that containing
+   stacking context while it is open so the fixed results panel stays above
+   the composer instead of sliding underneath it. */
+.channel-header:has(.message-search .search-layer) {
+  z-index: 4;
+}
+
 .channel-title {
   display: flex;
   min-width: 0;
