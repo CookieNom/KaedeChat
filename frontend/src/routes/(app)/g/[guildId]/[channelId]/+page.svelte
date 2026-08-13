@@ -21,6 +21,7 @@
     replaceCompletion
   } from '$lib/chat/completion';
   import { mentionsUser } from '$lib/chat/mentions';
+  import { messageSearchUserCandidates } from '$lib/chat/message-search';
   import { guildModerationActions } from '$lib/chat/moderation';
   import { guildHistorySyncGuidance, guildReplicaSyncGuidance } from '$lib/chat/guild-sync';
   import {
@@ -155,6 +156,22 @@
     )
   );
   const currentUser = $derived(entities.currentUser);
+  const messageSearchUsers = $derived.by(() => {
+    const guildChannelKeys = new Set((guild?.channels ?? []).map((item) => entityKey(item)));
+    const loadedGuildAuthors = entities.messages.values.flatMap((message) =>
+      message.author &&
+      guildChannelKeys.has(
+        entityKey({ id: message.channel_id, origin_domain: message.channel_domain })
+      )
+        ? [message.author]
+        : []
+    );
+    return messageSearchUserCandidates([
+      currentUser,
+      ...members.map((member) => member.user),
+      ...loadedGuildAuthors
+    ]);
+  });
   const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
   let gifPickerEnabled = $state(false);
@@ -3608,7 +3625,7 @@
           scopeRef={guild ? entityRef(guild) : guildId}
           accountRef={currentUser ? entityRef(currentUser) : null}
           {channel}
-          users={[...(currentUser ? [currentUser] : []), ...members.map((member) => member.user)]}
+          users={messageSearchUsers}
           placement="header"
         />
         <button

@@ -1,3 +1,6 @@
+import { entityRef } from './refs';
+import type { UserSummary } from './types';
+
 export type MessageSearchOperator = 'from' | 'mentions' | 'has';
 
 export type MessageSearchOperatorMatch = {
@@ -31,4 +34,19 @@ export function replaceMessageSearchOperator(query: string, replacement = ''): s
 export function moveSearchSuggestion(current: number, direction: 1 | -1, total: number): number {
   if (total <= 0) return 0;
   return (current + direction + total) % total;
+}
+
+/**
+ * Build autocomplete candidates without reducing federated identities to a
+ * display name or a bare snowflake. The first copy wins so an authoritative
+ * roster profile is not replaced by a potentially older message snapshot.
+ */
+export function messageSearchUserCandidates(
+  users: ReadonlyArray<UserSummary | null | undefined>
+): UserSummary[] {
+  const candidates = new Map<string, UserSummary>();
+  for (const user of users) {
+    if (user && !candidates.has(entityRef(user))) candidates.set(entityRef(user), user);
+  }
+  return [...candidates.values()];
 }
