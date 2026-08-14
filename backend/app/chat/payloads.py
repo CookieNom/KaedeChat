@@ -45,6 +45,8 @@ def user_payload(user: User) -> dict[str, object]:
         "profile_version": str(user.profile_version),
         "profile_resolved": user.profile_resolved,
         "handle": f"{user.username}@{user.origin_domain}",
+        "account_type": user.account_type,
+        "bot": user.account_type == "bot",
     }
 
 

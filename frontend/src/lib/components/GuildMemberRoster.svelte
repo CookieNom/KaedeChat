@@ -42,7 +42,10 @@
       <i class={`presence-dot presence-${presence}`}></i>
     </span>
     <span class="roster-member-copy">
-      <strong>{displayName}</strong>
+      <span class="roster-name"
+        ><strong>{displayName}</strong>{#if member.user.bot}<small class="bot-badge">BOT</small
+          >{/if}</span
+      >
       {#if member.user.custom_status?.trim()}
         <small title={member.user.custom_status}>{member.user.custom_status.trim()}</small>
       {/if}
@@ -249,6 +252,23 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .roster-name {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .bot-badge {
+    border-radius: 4px;
+    padding: 0.08rem 0.28rem;
+    color: var(--on-accent, white);
+    background: var(--accent);
+    font-size: 0.52rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
   }
 
   .roster-member-copy strong {

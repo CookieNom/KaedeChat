@@ -50,6 +50,7 @@
   let notice = $state('');
   let error = $state('');
   let loaded = $state(false);
+  let administrationAvailable = $state(false);
   let busy = $state(false);
   let savedTheme = $state<UserSettings['theme']>('system');
   let assetProgress = $state(0);
@@ -73,6 +74,9 @@
   let disableCode = $state('');
 
   onMount(() => {
+    void api('/administration/')
+      .then(() => (administrationAvailable = true))
+      .catch(() => (administrationAvailable = false));
     const generation = ++lifecycle;
     const controller = new AbortController();
     routeController = controller;
@@ -575,6 +579,7 @@
       <p>Account</p>
       <a href="#profile"><Icon name="user" size={18} />Profile</a>
       <a href="#security"><Icon name="shield" size={18} />Security</a>
+      <a href="/reports"><Icon name="shield" size={18} />My reports</a>
       <p>Preferences</p>
       <a href="#appearance"><Icon name="palette" size={18} />Appearance</a>
       {#if isNativeDesktop()}<a href="#voice-devices"
@@ -583,6 +588,11 @@
       <a href="#notifications"><Icon name="bell" size={18} />Notifications</a>
       <a href="#privacy"><Icon name="lock" size={18} />Privacy</a>
       <a href="#advanced"><Icon name="settings" size={18} />Advanced</a>
+      <p>Build and operate</p>
+      <a href="/developers"><Icon name="server" size={18} />Developer Portal</a>
+      {#if administrationAvailable}<a href={'/administration'}
+          ><Icon name="shield" size={18} />Administration</a
+        >{/if}
     </nav>
     <button class="settings-signout" type="button" disabled={busy} onclick={logout}>
       <Icon name="logout" size={18} />

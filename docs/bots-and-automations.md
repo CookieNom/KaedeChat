@@ -32,8 +32,8 @@ guild, permissions, event intents, data access, channel restrictions, E2EE mode,
 and grant revision.
 
 A **worker** is a bot runtime or deployment identity. Workers have separate
-asymmetric keys and can be limited to particular targets, installations,
-shards, scopes, and intents.
+asymmetric keys and can be limited to particular target domains, scopes,
+intents, and concurrent Gateway sessions.
 
 ```text
                                 REST + Bot Gateway
@@ -57,79 +57,49 @@ published it; it does not prove that a bot is installed or permitted to act.
 
 ## Automation types
 
-| Type | Reads ambient events | Typical use |
-| --- | --- | --- |
-| Channel webhook | No | Build output, alerts, and simple posting |
-| Interaction application | No by default | Commands, forms, buttons, and E2EE-safe workflows |
-| Event bot | Only approved intents and fields | Moderation, logging, and stateful integrations |
+| Type                    | Reads ambient events             | Typical use                                        |
+| ----------------------- | -------------------------------- | -------------------------------------------------- |
+| Channel webhook         | No                               | Build output, alerts, and simple posting           |
+| Interaction application | No by default                    | Slash commands and E2EE-safe interaction workflows |
+| Event bot               | Only approved intents and fields | Moderation, logging, and stateful integrations     |
 
 Existing `kwh_` channel webhook secrets remain write-only. They cannot be
 upgraded to bot credentials. User-account automation and silent user
 impersonation are not supported.
 
-## Application identity and keys
+## Application identity and worker keys
 
-Each application has an immutable composite ID and an application root key. Key
-purposes are kept separate:
+Every application has an immutable composite reference such as
+`123@apps.example` and a linked bot account. The application home is the
+control plane for its profile, commands, install templates, target policy, and
+worker authorizations. It is not a proxy for normal bot traffic.
 
-```text
-application root key
-    +-- certifies worker delegation public keys
-    +-- certifies interaction endpoint public keys
-    +-- certifies separate E2EE application/device public-key bindings
-```
+The application home publishes a manifest in Kaede's existing signed federation
+envelope. The manifest includes:
 
-The root certifies those public keys; it does not derive or hold an E2EE device
-private key. Device private keys are generated and retained by the bot runtime.
+- the application and bot-account composite references;
+- the public profile, active status, scopes, intents, and permission ceiling;
+- exact allow or deny rules for target instances;
+- active install templates and command definitions;
+- active worker public keys and their authorization ceilings; and
+- manifest and command generations.
 
-### Managed keys
+Targets verify the application home's instance signature, bind every referenced
+identity to that origin, enforce strict schemas and size limits, and cache only
+the records needed for an active installation. A target refreshes worker
+authorization directly from the application home before accepting an unknown or
+stale worker.
 
-Kaede-managed root custody is the default and does not require a separate KMS.
-Setup creates a versioned application-key wrapping key in the deployment's
-existing secret boundary. The application home generates and encrypts each root,
-uses it only for application identity operations, and includes the wrapping key
-in the operator's encrypted secret backup. The root is not displayed or copied
-into a worker container.
+A developer creates a hash-only `kb1_ctl_` control credential in the Developer
+Portal. During one-time enrollment, the Python wrapper generates an Ed25519
+worker key locally and submits only its public key. The private key is written to
+an owner-only state directory and is used for target assertions and DPoP
+proofs. Control credentials can enroll workers and publish commands; they cannot
+connect as the bot, call runtime routes, or authenticate a human session.
 
-Workers enroll with a one-time code. The SDK generates the worker key locally
-and sends only its public key. The managed root signs the resulting delegation.
-Normal REST, Gateway, and message traffic never requires the root private key.
-
-Managed custody does not give the application home access to E2EE conversation
-content. Encryption device keys are separate and remain with the bot runtime.
-
-### External custody
-
-Applications that need their own KMS, HSM, or offline signer can register a root
-public key and complete ownership challenges with an external signer. The
-Developer Portal provides adapters and copyable signing payloads, while the
-Python SDK provides KMS and HSM integrations.
-
-Moving between managed and external custody is a root rotation. Targets accept
-a transition signed by both roots. If the old root is unavailable, each affected
-installation must be reapproved. An application home cannot silently replace a
-root already pinned by a target.
-
-### Signed manifest
-
-The application home publishes a bounded signed manifest containing:
-
-- Application and bot-user composite IDs.
-- Name, description, icon, publisher, and application status.
-- Root and worker-delegation public keys, key IDs, and validity periods.
-- Interaction endpoint and endpoint-ownership key when HTTP delivery is used.
-- Exact OAuth redirect URIs.
-- Declared scopes, intents, permissions, commands, and E2EE modes.
-- Application target policy and exact allow or deny rules.
-- Manifest, keyset, command, and revocation generations.
-- Revoked key IDs and signed root transitions.
-- Supported protocol capabilities.
-
-Targets retrieve manifests through Kaede's bounded federation transport.
-Redirects are not followed, domains are canonicalized, response sizes and
-durations are limited, and private or unsafe network destinations are rejected.
-At installation time, the target pins the application ID, root fingerprint, and
-accepted manifest digest.
+E2EE device keys are a separate concern from the worker API key. The current API
+carries typed encrypted envelopes and records the installation's E2EE mode, but
+it never treats the worker signing key as an encryption key.
 
 ## Direct target authentication
 
@@ -146,35 +116,31 @@ Each target acts as the authorization server for its installations:
 5. Authorization intersects the token ceiling with the current installation
    revision and live guild permissions.
 
-Example worker assertion:
+The worker signs the canonical assertion bytes:
 
-```json
-{
-  "iss": "123@apps.example",
-  "sub": "123@apps.example",
-  "aud": "https://chat.example/api/v1/bots/token",
-  "worker_id": "production-eu-2",
-  "delegation_generation": 8,
-  "iat": 1786644000,
-  "exp": 1786644060,
-  "jti": "random-single-use-value"
-}
+```text
+kaede-worker-assertion-v1
+123@apps.example
+456789
+https://chat.example/api/v1/bots/token
+1786644000
+1786644060
+random-single-use-value
 ```
 
-The target checks the exact issuer and audience, a narrow time window, key
-validity, delegation ceilings, and a bounded replay cache. It may also require a
-target-issued DPoP nonce.
+The request body carries those fields plus the URL-safe Ed25519 signature. The
+target checks the exact application reference, worker ID, audience, 60-second
+maximum assertion lifetime, worker validity and target allowlist, current
+installation, and a single-use nonce.
 
 Access tokens are random opaque values stored as hashes. A token is bound to:
 
-- Application, bot user, worker, and target issuer.
-- Installation set or shard range.
-- Scope and intent ceilings.
-- Installation and worker generations.
-- DPoP key thumbprint.
-- Creation, expiry, last use, and revocation.
+- application, bot user, worker, and target issuer;
+- the intersection of application and worker scope and intent ceilings;
+- the enrolled worker public-key thumbprint; and
+- creation, eight-minute expiry, last use, and revocation.
 
-The normal lifetime is five to ten minutes. Workers obtain another token with
+The target-token lifetime is eight minutes. Workers obtain another token with
 their key rather than keeping a permanent target secret. Tokens never appear in
 query strings, redirects, logs, or WebSocket URLs.
 
@@ -184,31 +150,25 @@ A guild installation begins from a Kaede client or a portable bot invite. The
 person approving it must currently have `MANAGE_GUILD` on the authoritative
 guild.
 
-1. The target resolves and verifies the signed application manifest.
-2. It applies instance, application, and guild policies.
-3. It verifies the installer and current guild permission.
-4. The consent page shows the application's origin, publisher, verification
-   state, permissions, intents, channel access, message/history access, E2EE
-   behavior, and external retention warning.
-5. The installer may narrow optional grants before approval.
-6. The target creates the bot member, installation, initial grant revision, and
-   audit event in one transaction.
-7. The target returns a signed, non-secret installation receipt.
-8. An enrolled worker connects directly to the target.
+1. The target resolves and verifies the application home's signed manifest.
+2. It applies the target operator's instance blocks and the developer's exact
+   target policy.
+3. It checks that the signed-in user currently has `MANAGE_GUILD`.
+4. The consent page shows the bot identity and origin, requested scopes,
+   intents, permission bits, E2EE mode, and retention warning.
+5. The target creates the visible bot member, managed bot role, installation,
+   grant revision, audit record, and federated guild mutations in one
+   transaction.
+6. An enrolled worker then authenticates and connects directly to that target.
 
-Browser authorization uses an exact registered HTTPS redirect URI,
-authorization code, PKCE S256, `state`, issuer binding, short expiry, and single
-use. Implicit grants are not supported.
+The install link uses the user's existing Kaede session; bot tokens and control
+credentials never enter the browser flow. A remote guild selected from a local
+replica sends the install request to the authoritative guild home for the final
+permission check and commit.
 
-Changing permissions, intents, channel restrictions, data grants, or E2EE mode
-increments the installation's grant revision. Tokens and Gateway sessions stop
-receiving authority removed by a newer revision.
-
-Uninstall is immediate at the target. It deactivates the installation, advances
-the revision, revokes tokens, closes Gateway sessions, removes queued non-audit
-events, rotates an E2EE epoch when needed, removes the bot member, and sends a
-best-effort signed notice to the application home. An outage elsewhere cannot
-delay local revocation.
+Uninstall is authoritative and immediate. It marks the installation revoked,
+revokes target tokens, removes the managed role and bot membership, publishes
+the guild changes, and does not wait for the application home to be online.
 
 ## Portable invite links
 
@@ -367,47 +327,41 @@ principal.
 
 These routes use an authenticated human or team member session:
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `POST` | `/api/v1/applications` | Create an application and bot user |
-| `GET` | `/api/v1/applications` | List owned or team-managed applications |
-| `GET/PATCH` | `/api/v1/applications/{app}` | Read or update application configuration |
-| `POST` | `/api/v1/applications/{app}/credentials` | Create a named control credential |
-| `DELETE` | `/api/v1/applications/{app}/credentials/{credential}` | Revoke a credential |
-| `POST` | `/api/v1/applications/{app}/keys/rotate` | Start a managed or externally signed rotation |
-| `GET/PUT` | `/api/v1/applications/{app}/instance-policy` | Manage target policy |
-| `GET/PUT` | `/api/v1/applications/{app}/interaction-endpoint` | Verify HTTP delivery |
-| `GET/POST` | `/api/v1/applications/{app}/install-templates` | List or create invite templates |
-| `GET/PATCH/DELETE` | `/api/v1/applications/{app}/install-templates/{template}` | Manage a template |
-| `GET` | `/api/v1/applications/{app}/installations` | List installations and health |
+| Method       | Path                                                  | Purpose                                  |
+| ------------ | ----------------------------------------------------- | ---------------------------------------- |
+| `POST`       | `/api/v1/applications`                                | Create an application and bot user       |
+| `GET`        | `/api/v1/applications`                                | List owned or team-managed applications  |
+| `GET/PATCH`  | `/api/v1/applications/{app}`                          | Read or update application configuration |
+| `GET/POST`   | `/api/v1/applications/{app}/credentials`              | Create a named control credential        |
+| `DELETE`     | `/api/v1/applications/{app}/credentials/{credential}` | Revoke a credential                      |
+| `GET`        | `/api/v1/applications/{app}/instance-rules`           | List exact-domain target rules           |
+| `PUT/DELETE` | `/api/v1/applications/{app}/instance-rules/{domain}`  | Set or remove an exact-domain rule       |
+| `GET/POST`   | `/api/v1/applications/{app}/install-templates`        | List or create invite templates          |
+| `GET`        | `/api/v1/applications/{app}/installations`            | List installations and health            |
 
 Secrets and one-time enrollment codes are shown once. Later reads return only a
 label, safe prefix/suffix, timestamps, expiry, last use, and revocation state.
 
 ### Installation management
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/v1/applications/{app}/authorize` | Begin browser consent |
-| `GET` | `/api/v1/bot-invites/{app}/{template}` | Resolve the signed invite card |
-| `POST` | `/api/v1/bot-invites/{app}/{template}/prepare` | Request a guild consent challenge |
-| `POST` | `/api/v1/guilds/{guild}/integrations/bots` | Confirm and commit an install |
-| `GET` | `/api/v1/guilds/{guild}/integrations/bots` | List installations |
-| `GET` | `/api/v1/guilds/{guild}/integrations/bots/{installation}` | Read exact grants and health |
-| `PATCH` | `/api/v1/guilds/{guild}/integrations/bots/{installation}` | Change grants with consent |
-| `DELETE` | `/api/v1/guilds/{guild}/integrations/bots/{installation}` | Revoke immediately |
+| Method   | Path                                                      | Purpose                        |
+| -------- | --------------------------------------------------------- | ------------------------------ |
+| `GET`    | `/api/v1/bot-invites/{app}/{template}`                    | Resolve the signed invite card |
+| `POST`   | `/api/v1/guilds/{guild}/integrations/bots`                | Confirm and commit an install  |
+| `GET`    | `/api/v1/guilds/{guild}/integrations/bots`                | List installations             |
+| `DELETE` | `/api/v1/guilds/{guild}/integrations/bots/{installation}` | Revoke immediately             |
 
 Installation responses contain no worker or bot secret.
 
 ### Worker authentication
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `POST` | `/api/v1/bots/workers/register` | Register a delegated worker public key |
-| `DELETE` | `/api/v1/bots/workers/{worker}` | Revoke a worker and its sessions |
-| `POST` | `/api/v1/bots/token` | Issue a DPoP-bound target token |
-| `POST` | `/api/v1/bots/token/revoke` | Revoke a token or session |
-| `GET` | `/api/v1/bots/@me` | Read worker, installation, and target ceilings |
+| Method   | Path                                              | Purpose                                        |
+| -------- | ------------------------------------------------- | ---------------------------------------------- |
+| `POST`   | `/api/v1/bot-control/applications/{app}/workers`  | Register a delegated worker public key         |
+| `PUT`    | `/api/v1/bot-control/applications/{app}/commands` | Publish commands from deployment tooling       |
+| `DELETE` | `/api/v1/applications/{app}/workers/{worker}`     | Revoke a worker and its sessions               |
+| `POST`   | `/api/v1/bots/token`                              | Issue a DPoP-bound target token                |
+| `GET`    | `/api/v1/bots/@me`                                | Read worker, installation, and target ceilings |
 
 ### Resource operations
 
@@ -416,10 +370,8 @@ Supported resource operations include:
 - Guild, channel, role, member, and permission lookup.
 - Cursor-paginated message history when every required grant allows it.
 - Message send and edit/delete-own operations.
-- Separately granted message and member moderation operations.
-- Reactions and bounded attachment upload/download.
+- Reactions and attachment metadata permitted by message-content grants.
 - Allowed-mention controls that default to no broad role or everyone mentions.
-- Audit reasons and idempotency keys for mutations.
 - Typed `encrypted` and `content_unavailable` fields instead of empty content.
 
 ## Commands and interactions
@@ -429,16 +381,10 @@ message access. Kaede supports:
 
 - Slash commands.
 - User and message context commands.
-- Autocomplete for typed options.
-- Buttons.
-- String, user, role, channel, and mentionable select menus.
-- Modals with bounded text inputs.
-- Immediate, deferred, follow-up, edited, and private responses.
+- Immediate responses and deferred responses within the interaction lifetime.
 
-Commands may be application-global or guild-specific. Guild commands become
-available after authoritative registration. Global command updates carry a
-signed generation and report `pending`, `active`, `superseded`, or `failed`
-rather than assuming instant propagation.
+Commands are application-global and become
+available after authoritative registration. Each atomic command replacement increments the signed application command generation.
 
 Example command definition:
 
@@ -448,7 +394,6 @@ Example command definition:
   "type": "chat_input",
   "description": "Create a poll",
   "default_member_permissions": ["SEND_MESSAGES"],
-  "dm_permission": false,
   "contexts": ["guild"],
   "options": [
     {
@@ -475,295 +420,170 @@ counts, nesting, and total bytes are bounded and validated by the authority.
 
 ### Command and response routes
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET/PUT` | `/api/v1/applications/{app}/commands` | Atomically replace global commands |
-| `GET/PUT` | `/api/v1/applications/{app}/guilds/{guild}/commands` | Atomically replace guild commands |
-| `GET` | `/api/v1/applications/{app}/commands/status` | Read validation and propagation state |
-| `POST` | `/api/v1/interactions/{interaction}/{token}/callback` | Send the initial response or defer |
-| `PATCH/DELETE` | `/api/v1/interactions/{interaction}/{token}/response` | Change the original response |
-| `POST` | `/api/v1/interactions/{interaction}/{token}/followups` | Create a follow-up |
-| `PATCH/DELETE` | `/api/v1/interactions/{interaction}/{token}/followups/{message}` | Change a follow-up |
-
-Command replacement and response mutations accept idempotency keys.
+| Method    | Path                                  | Purpose                                    |
+| --------- | ------------------------------------- | ------------------------------------------ |
+| `GET/PUT` | `/api/v1/applications/{app}/commands` | Read or atomically replace global commands |
 
 ### Delivery
 
-An interaction includes its ID and type, application, installation, target,
-grant revision, resource composite IDs, invoking member permissions, command
-version, typed resolved options, locale, encryption mode, and a short-lived
-callback token. Context commands include only the selected user or message
-projection.
+An interaction includes its ID, application and installation references, guild and channel references, invoking user, command definition, bounded options, encryption payload when required, and expiry time.
 
-Delivery uses either the direct Bot Gateway or one verified HTTPS endpoint per
-application environment. Delivery is at-least-once; handlers deduplicate with
-the event ID and idempotency key.
+Delivery uses the direct Bot Gateway. Events are at-least-once and carry a stable
+interaction ID, so handlers must be idempotent.
 
-HTTP interaction requests are signed by the target. The signature covers the
-timestamp, nonce, method, path, content digest, application, installation,
-interaction, and issuer. Endpoint registration uses an ownership challenge.
-Targets do not follow redirects and reject private, loopback, link-local,
-metadata, reserved, or otherwise unsafe destinations.
-
-The initial response deadline defaults to three seconds. A bot may defer and use
-a longer bounded follow-up window. Private responses are visible only to the
-invoking user and are not stored or federated as ordinary channel messages.
+An interaction remains valid for fifteen minutes. A bot may respond immediately or defer before sending its one channel response. E2EE responses must carry an encrypted message envelope.
 
 ## Bot Gateway
 
-The Bot Gateway shares Kaede's heartbeat, sequence, resume, and bounded-frame
-behavior but has a separate authentication and session namespace from user
-connections.
+The Bot Gateway uses a separate authentication and session namespace from user
+connections. A worker obtains an eight-minute target token, connects to
+`/api/v1/bots/gateway`, and proves possession of its enrolled Ed25519 key.
 
-1. The worker obtains a DPoP-bound target token.
-2. It upgrades with authorization and DPoP headers.
-3. The target sends `HELLO` with heartbeat, session-start limits, maximum frame
-   size, and supported schemas.
-4. The worker sends `IDENTIFY` with intents, worker and shard identity,
-   installation selection, SDK metadata, and capability versions.
-5. The target intersects those requests with current installation grants and
-   returns `READY`.
-6. Events include sequence, event ID, installation, grant revision, and typed
-   payload.
-7. A short-lived, target- and key-bound credential supports resume. A retention
-   gap returns `GAP` or `RESYNC_REQUIRED`.
+The target sends a heartbeat interval. The worker identifies with its token,
+proof, and last per-topic cursors. `READY` lists active installations visible
+to that worker. Event frames carry a type, topic, topic sequence, and filtered
+payload. The server retains a bounded topic backlog; a cursor older than that
+backlog receives an explicit `GAP` event instead of silently missing data.
 
-One connection can multiplex many installations, but authorization and
-redaction are evaluated for every event. One session per
-`(application, target, shard)` is active unless the target allocates more
-concurrency or accepts an explicit takeover.
-
-Events include installation and grant changes, guild and channel lifecycle,
-permitted member and role updates, messages, reactions, voice states,
-interactions, rate-limit notices, gaps, and revocation. Presence and typing are
-separately privileged and may be coalesced. Bot-authored messages are excluded
-from other bots' message events by default to reduce loops.
+Intent selection controls delivery, while scopes and current installation
+grants control fields and actions. Message content and attachments are removed
+unless both the worker and installation have the content grant. Gateway session
+counts are atomically limited per worker, token expiry is checked while the
+connection is open, frames are capped at 1 MiB, and heartbeats keep the session
+lease alive.
 
 ## Rate limits and backpressure
 
-Targets enforce shared atomic limits across several dimensions:
+Runtime REST requests consume shared Dragonfly token buckets for both the
+application and worker. The defaults allow 1,200 requests per application and
+600 per worker each minute on a target. Token issuance, control operations,
+application creation, invite resolution, interaction creation, and federated
+install routes have their own smaller buckets. Message sends, reactions,
+uploads, slow mode, mention limits, and other reused chat actions keep their
+ordinary per-resource limits.
 
-- Application and credential.
-- Worker, Gateway session, and shard.
-- Installation.
-- Route bucket and major resource.
-- Guild, channel, user, and source address.
-- History, member lists, search, moderation, and attachment work.
-- Queued event rows, bytes, age, and fanout.
-- Interactions, autocomplete, components, and HTTP endpoint concurrency.
-- Invalid requests, token assertions, identify, reconnect, and resume attempts.
-
-Adding workers does not increase application or installation ceilings. Guild
-slowmode, upload limits, mention protections, and moderation rules still apply.
-
-A limited request returns `429`, `Retry-After`, stable bucket headers, and a
-machine-readable body:
-
-```json
-{
-  "code": "BOT_RATE_LIMITED",
-  "message": "This bot is sending requests too quickly.",
-  "retry_after": 1.25,
-  "global": false,
-  "scope": "installation",
-  "bucket": "messages:create:channel"
-}
-```
-
-The SDK learns limits from responses rather than hard-coding Discord values.
-Defaults are operator-configurable with hard safety ceilings for untrusted
-traffic. Capacity load shedding returns `503`; it is not disguised as a rate
-limit. User-invoked commands receive a visible retry or failure state.
-
-Workers isolate each target with independent connection, parser, retry, queue,
-memory, disk, attachment, and concurrency budgets. A malicious or broken target
-cannot exhaust every other connection. Remotely supplied retry delays are
-clamped to safe SDK bounds.
+A limited request returns `429`, `Retry-After`, and the standard
+`X-RateLimit-*` headers. The response body has the stable `RATE_LIMITED` code
+and `retry_after_ms`. The Python wrapper reads `Retry-After` and retries with
+a bounded delay. It keeps a separate HTTP client, token, Gateway connection, and
+reconnect loop for each target, so one offline instance does not prevent other
+targets from operating.
 
 ## End-to-end encrypted conversations
 
-A bot can participate in E2EE only when users explicitly give one of its
-verified encryption endpoints access. The bot operator then becomes a party
-that can read the disclosed plaintext; Kaede cannot promise deletion after the
-bot receives it.
+Bot authorization is already fail-closed for E2EE. Servers never expose
+plaintext content or plaintext history from an encrypted channel. Message
+responses use `content: null`, retain the encrypted envelope when authorized,
+and mark unavailable content explicitly.
 
-### Interaction-only mode
+Install templates support three E2EE modes:
 
-This is the default in encrypted conversations:
+- `disabled` rejects commands and bot messages in encrypted channels.
+- `interaction_only` accepts only an explicit `encrypted_payload` submitted
+  with a command. It grants no ambient message or history access.
+- `participant` permits encrypted message envelopes only after the bot is an
+  explicit room participant. It still never enables server-side plaintext
+  search or history.
 
-- The bot receives no ambient message content, attachment keys, or history.
-- The invoking client constructs only the command, form, or selected context.
-- The client encrypts that payload to the verified application or device key.
-- The target relays ciphertext without decrypting or replacing it.
-- A private result can be encrypted directly to the invoking device.
+The current server, federation, UI, and Python model preserve those mode and
+payload boundaries so the forthcoming device/key-distribution protocol can be
+added without changing the Bot API contract. Until that protocol supplies and
+verifies bot device keys, applications must treat encrypted payloads as opaque
+ciphertext; no route falls back to plaintext.
 
-Authenticated data binds the room, installation, device, application key,
-event, timestamp, target, and encryption epoch. This prevents replay and
-cross-room substitution.
-
-### Participant mode
-
-A guild administrator and affected participants may add a bot as a
-cryptographic room participant. The client keeps a visible disclosure that the
-bot operator can read content delivered after admission.
-
-- The bot uses a signed E2EE device key separate from API credentials.
-- Clients verify it against the pinned application and installation.
-- Admission starts a new room encryption epoch.
-- Removal or revocation immediately starts another epoch.
-- Pre-installation history keys are denied by default.
-- Attachment keys are granted separately.
-- Reliable reconnect uses bounded ciphertext catch-up from the admission point.
-
-Server-side plaintext search, indexing, link previews, content moderation, and
-history APIs remain unavailable for encrypted messages. A participant bot may
-keep its own index of content it can decrypt, but that is a separate persistent
-data disclosure shown during consent.
-
-API responses distinguish `encrypted`, `content_unavailable`, and
-`permission_denied`. They do not represent unavailable plaintext as an empty
-string. E2EE bot support must use Kaede's audited device and room-key protocol;
-the application API reserves the encryption modes and typed payloads needed for
-that integration.
+Once a bot is deliberately made a cryptographic participant, its operator is a
+recipient and can retain anything it decrypts. Removing access can stop future
+delivery but cannot erase data already copied by that operator. Pre-install
+history remains excluded by default.
 
 ## Storage model
 
-Durable PostgreSQL models:
+The two bot migrations add durable PostgreSQL records for developer teams and
+members, applications and bot identities, hash-only control credentials,
+workers and public keys, exact target rules, install templates, commands,
+installations, short-lived target-token digests, interactions, instance
+administrator grants and audit events, and Trust & Safety reports.
 
-- `BotApplication`: owner team, bot user, composite ID, profile, status,
-  custody mode, policy and manifest generations, defaults, interaction settings,
-  and timestamps.
-- `BotApplicationKey`: purpose, public key, key ID, validity, generation,
-  transition proof, custody reference, and revocation.
-- `BotCredential`: digest, safe display characters, label, ceiling, creation,
-  expiry, last use, and revocation.
-- `BotInstallation`: application and guild references, bot member, installer,
-  grants, restrictions, E2EE mode, manifest digest, revision, status, and dates.
-- `BotWorker`: public key, target/install/shard ceilings, scopes, intents,
-  generation, session cap, validity, and status.
-- `BotInstanceRule`: exact target origin or application ID, decision, and audit
-  metadata.
-- `BotInstallTemplate`: stable slug, grants, contexts, E2EE default, digest,
-  generation, status, and presentation data.
-- `ApplicationCommand`: application, optional guild, normalized definition,
-  schema digest, generation, state, and dates.
-- `BotToken`: target-local digest, DPoP thumbprint, worker and installation
-  bounds, generations, expiry, last use, and revocation.
+Composite references retain both snowflake and origin. Database constraints
+bind bot users to applications, enforce fixed role and state values, keep grants
+non-negative, prevent duplicate installations and command names, and preserve
+complete foreign references. Deleting an application cascades its private
+control records; report and audit records follow their own retention policy.
 
-Gateway sessions, DPoP nonces, replay IDs, callback tokens, rate buckets, shard
-leases, and private-response state are short-lived Dragonfly data.
-
-Remote applications and installations have quotas for record count, command
-bytes, queued events, media, and retention. Removing or suspending an
-installation cleans up its non-audit transient state without deleting required
-security and moderation records.
+Dragonfly stores request nonces, DPoP replay markers, rate buckets, Gateway
+session counts, topic cursors, and bounded event backlogs. Raw control tokens,
+target access tokens, and worker private keys are never stored in plaintext by
+the server.
 
 ## Python SDK
 
-The first-party Python package is asynchronous and follows familiar
-`discord.py` conventions without copying Discord's wire protocol. Worker
-enrollment is a one-time provisioning step:
+The first-party `kaede-bot` package is asynchronous and keeps a familiar
+decorator-based interface. See
+[Python bot API quickstart](bot-api-quickstart.md) for the complete enrollment
+and startup flow.
 
-```console
-kaede-bot worker enroll \
-  --application 123@apps.example \
-  --state-dir /var/lib/poll-garden/kaede
-```
-
-The command prompts for the enrollment code without echoing it, consumes it
-once, and does not retain it. It generates the worker private key locally and
-atomically stores the key, delegation, and target metadata in the state
-directory. That directory must be persistent and readable only by the bot
-process, such as an owner-only host directory, protected container volume, or
-operating-system credential store. The stored key material must not be committed
-or baked into an image. Environment variables may hold only the state-directory
-path, never the key or delegation content.
-
-Normal startup loads the persisted worker state and does not use an enrollment
-code:
+One-time enrollment uses a control credential and stores the generated worker
+private key in an owner-only directory. Normal startup loads that state:
 
 ```python
-import os
+import asyncio
 
-import kaede
-from kaede.ext import commands
+import kaede_bot as kaede
 
-bot = commands.Bot(
-    application="123@apps.example",
-    worker_state=kaede.WorkerState.load(os.environ["KAEDE_BOT_STATE_DIR"]),
+bot = kaede.Client(
+    worker_state=kaede.WorkerState.load("/run/secrets/kaede-worker"),
     intents=kaede.Intents.default(),
 )
 
 
-@bot.event
-async def on_ready(target: kaede.Instance) -> None:
-    print(f"Connected to {target.domain}")
+@bot.command(name="ping", description="Check whether the bot is awake")
+async def ping(interaction: kaede.Interaction) -> None:
+    await interaction.respond("Pong!")
 
 
-@bot.command(name="ping", description="Check whether the bot is responding")
-async def ping(ctx: commands.Context) -> None:
-    await ctx.respond("Pong!", private=True)
-
-
-bot.run()
+asyncio.run(bot.start("https://chat.example", "https://community.example"))
 ```
 
-The SDK includes:
+The package provides:
 
-- Typed client, application, installation, instance, guild, channel, member,
-  role, message, and interaction models.
-- Decorators for slash and context commands, autocomplete, buttons, selects,
-  and modals.
-- Typed permissions, `await channel.send(...)`, and async pagination.
-- Local worker-key generation and enrollment.
-- Managed-root enrollment plus external signer, KMS, and HSM adapters.
-- Independent connection pools, rate buckets, and circuit breakers per target.
-- Heartbeat, resume, bounded reconnect, sharding, deduplication, gap handling,
-  idempotency, and safe retries.
-- Explicit bounded caches rather than unbounded member or message retention.
-- Domain-qualified IDs; numeric IDs are never assumed to be globally unique.
-- `EncryptedPayload`, `ContentUnavailable`, and `HistoryUnavailable` types.
-- Typed exceptions with error code, trace ID, issuer, retry metadata, and bucket.
-- An ASGI interaction adapter that verifies signatures before dispatch.
-- A raw-event interface for unsupported extensions.
+- `WorkerState.enroll`, safe local key persistence, and control-token command
+  synchronization;
+- direct multi-target token exchange, DPoP signing, heartbeat, cursor resume,
+  bounded reconnect, and `Retry-After` handling;
+- `Client.event` and `Client.command` decorators;
+- typed `EntityRef`, `User`, `Message`, `Interaction`, and error classes;
+- message send/edit/delete, history iteration primitives, reactions, and user
+  lookup; and
+- explicit `content_unavailable`, encrypted payload, and composite-reference
+  handling.
 
-FastAPI OpenAPI is the REST source of truth. Gateway and interaction payloads
-use checked-in discriminated JSON Schemas. CI runs the SDK against backend
-contract fixtures and compatibility tests.
+A snowflake is never converted into a username. `fetch_user(EntityRef)`
+resolves the authoritative profile, and `User.handle` returns normal
+`username@instance` formatting while `User.mention` retains the full
+composite reference.
 
 ## User-facing behavior
 
-The Developer Portal covers application creation, team access, bot profile,
-commands, credentials, worker enrollment, key custody and rotation, interaction
-endpoints, scopes, intents, federation policy, install templates, invite
-previews, installation health, rates, errors, and audit history.
+User settings links to the responsive Developer Portal. Every active local user
+may create applications. The portal manages personal or shared teams,
+application profile and defaults, commands, hash-only control credentials,
+worker public keys, install templates, exact instance policy rules, and current
+installations. Secrets are shown once.
 
-Guild Integrations keeps channel webhooks and applications separate. An
-installation page shows the bot's identity and origin, exact permissions,
-intents, data grants, channel restrictions, content/history access, E2EE mode,
-connection state, and recent audit activity. Guild administrators can narrow
-grants, disable the integration, or revoke it.
+Portable invite links open a native consent card. The guild chooser lists only
+guilds where the user can manage the guild, including federated replicas. It
+shows requested API scopes, Gateway intents, permission bits, E2EE behavior,
+application origin, support and privacy links, and the third-party retention
+warning. Guild settings has a separate Integrations page for installed bots and
+immediate revocation.
 
-### Bot badges
-
-Bot accounts display a platform-owned `BOT` badge:
-
-- Immediately after the display name in member lists and member search.
-- After the author name and before secondary metadata on bot-authored messages.
-- In replies, pins, threads, search results, profiles, and moderation previews.
-- In compact, mobile drawer, web, and desktop layouts.
-
-The badge has an accessible name and is not conveyed by color alone. Opening it
-shows `Bot account` and the immutable application origin. A publisher or
-verification mark is separate from the `BOT` badge.
-
-Only the authoritative account discriminator and linked application ID can
-produce the badge. A nickname, role, message, embed, webhook name, or remote HTML
-cannot imitate it. Webhooks use a distinct `WEBHOOK` label.
-
-Bot-authored messages and profiles show their application origin. Broad
-mentions, automatic link fetching, and other amplification-prone behavior are
-off unless explicitly requested and permitted.
+Bot users have an authoritative `account_type=bot` discriminator and
+application reference. Member lists and bot-authored messages render an
+accessible `BOT` badge next to the name. The badge comes from trusted account
+data, not a nickname, role, embed, webhook name, or remote HTML. Bot usernames
+use ordinary account formatting with a collision-resistant numeric suffix, and
+API payloads include the readable `username@instance` handle alongside the
+composite snowflake reference.
 
 ## Operational rules
 

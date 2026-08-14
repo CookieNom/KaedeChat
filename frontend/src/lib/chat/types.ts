@@ -11,6 +11,8 @@ export interface UserSummary {
   custom_status?: string | null;
   profile_version?: string;
   profile_resolved?: boolean;
+  account_type?: 'human' | 'bot';
+  bot?: boolean;
   handle: string;
 }
 

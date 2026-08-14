@@ -13,6 +13,10 @@ allowed to access and send writes back to the authority for validation.
 
 - Guild text and voice channels, roles, channel overrides, invites, moderation,
   reactions, pins, attachments, webhooks, and audit logs
+- Federated bot applications with consent-based guild installs, direct target
+  authentication, scoped REST and Gateway access, slash commands, bot badges,
+  exact-instance policies, E2EE-aware grants, a responsive Developer Portal,
+  and the asynchronous `kaede-bot` Python SDK
 - Direct messages, friend requests, blocking, presence, unread state, and
   two-party calls
 - Typo-tolerant message search with author, mention, content-type, date, pin,
@@ -34,7 +38,11 @@ allowed to access and send writes back to the authority for validation.
 The federation wire format is documented in
 [docs/kaede-fed-v1.md](docs/kaede-fed-v1.md). Architectural and operational
 details are in [docs/architecture.md](docs/architecture.md) and
-[docs/operator.md](docs/operator.md).
+[docs/operator.md](docs/operator.md). Bot developers can start with
+[docs/bot-api-quickstart.md](docs/bot-api-quickstart.md) and use the full
+[bot and automation contract](docs/bots-and-automations.md). Instance owners
+and delegated staff should read the
+[administration and developer portal guide](docs/administration-and-developer-portals.md).
 
 ## Setup
 

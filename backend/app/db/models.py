@@ -145,6 +145,9 @@ class PeerKey(Base):
 class User(Base, FederatedIdMixin, TimestampMixin):
     __tablename__ = "users"
     is_local: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    account_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="human", server_default="human"
+    )
     username: Mapped[str] = mapped_column(String(USERNAME_LENGTH), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(100))
     avatar_hash: Mapped[str | None] = mapped_column(String(128))
@@ -172,9 +175,15 @@ class User(Base, FederatedIdMixin, TimestampMixin):
             name="fk_users_origin_locality_instances",
         ),
         CheckConstraint("username ~ '^[a-z0-9_.]{2,32}$'", name="username_format"),
+        CheckConstraint("account_type IN ('human','bot')", name="account_type_value"),
         CheckConstraint(
-            "NOT is_local OR password_hash IS NOT NULL",
+            "NOT is_local OR account_type = 'bot' OR password_hash IS NOT NULL",
             name="local_auth_fields",
+        ),
+        CheckConstraint(
+            "account_type = 'human' OR (password_hash IS NULL AND email IS NULL "
+            "AND email_verified_at IS NULL AND totp_secret_encrypted IS NULL)",
+            name="bot_has_no_human_auth_fields",
         ),
         CheckConstraint(
             "is_local OR (password_hash IS NULL AND email IS NULL "
@@ -1995,5 +2004,8 @@ class InstanceBlock(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (CheckConstraint("level IN ('silence','suspend')", name="block_level"),)
 
+
+# Keep extension models registered when callers import this canonical module.
+from app.db import bot_models as bot_models  # noqa: E402, F401
 
 ALL_MODEL_TABLES = tuple(Base.metadata.tables)

@@ -61,6 +61,20 @@ def test_complete_v1_schema_is_registered() -> None:
         "remote_media_tombstones",
         "user_storage_usage",
         "instance_blocks",
+        "instance_admin_grants",
+        "instance_audit_events",
+        "developer_teams",
+        "developer_team_members",
+        "bot_applications",
+        "bot_credentials",
+        "bot_workers",
+        "bot_instance_rules",
+        "bot_install_templates",
+        "application_commands",
+        "bot_installations",
+        "bot_tokens",
+        "bot_interactions",
+        "abuse_reports",
     }
     assert required == set(Base.metadata.tables)
 
@@ -308,7 +322,8 @@ def test_local_user_tables_have_database_constraints() -> None:
         isinstance(constraint, CheckConstraint)
         and constraint.name is not None
         and constraint.name.endswith("local_auth_fields")
-        and str(constraint.sqltext) == "NOT is_local OR password_hash IS NOT NULL"
+        and str(constraint.sqltext)
+        == "NOT is_local OR account_type = 'bot' OR password_hash IS NOT NULL"
         for constraint in users.constraints
     )
     for table_name in {

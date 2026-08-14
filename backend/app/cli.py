@@ -7,10 +7,13 @@ import os
 import re
 import secrets
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Annotated
 from urllib.parse import urlsplit
 
 import typer
+from redis.asyncio import Redis
+from sqlalchemy import func, select
 
 from app.bootstrap import (
     IdentityKeyError,
@@ -19,6 +22,9 @@ from app.bootstrap import (
     rotate_instance_signing_key,
 )
 from app.core.settings import get_settings
+from app.core.snowflake import SnowflakeGenerator, WorkerLease
+from app.db.bot_models import InstanceAdminGrant
+from app.db.models import User
 from app.db.session import create_engine_and_sessionmaker
 
 cli = typer.Typer(no_args_is_help=True)
@@ -251,6 +257,115 @@ def preflight(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo("configuration preflight passed")
+
+
+async def admin_grant_operation(identifier: str, role: str, *, revoke: bool) -> str:
+    allowed = {
+        "owner",
+        "administrator",
+        "trust_safety",
+        "bot_reviewer",
+        "operations",
+        "auditor",
+    }
+    if role not in allowed:
+        raise typer.BadParameter(f"role must be one of: {', '.join(sorted(allowed))}")
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    lease: WorkerLease | None = None
+    try:
+        lease = await WorkerLease.acquire(redis)
+        snowflake = SnowflakeGenerator(lease)
+        async with sessionmaker() as session:
+            normalized = identifier.strip()
+            if "@" in normalized:
+                username, domain = normalized.rsplit("@", 1)
+                if domain.lower().rstrip(".") != settings.domain:
+                    raise typer.BadParameter("administrators must be local users")
+            else:
+                username = normalized
+            user = await session.scalar(
+                select(User).where(
+                    User.is_local.is_(True),
+                    User.account_type == "human",
+                    func.lower(User.username) == username.lower(),
+                )
+            )
+            if user is None:
+                raise typer.BadParameter("local user was not found")
+            grant = await session.scalar(
+                select(InstanceAdminGrant)
+                .where(
+                    InstanceAdminGrant.user_id == user.id,
+                    InstanceAdminGrant.user_domain == user.origin_domain,
+                    InstanceAdminGrant.role == role,
+                    InstanceAdminGrant.revoked_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if revoke:
+                if grant is None:
+                    raise typer.BadParameter("the user does not have that active role")
+                grant.revoked_at = datetime.now(UTC)
+                grant.generation += 1
+                action = "revoked"
+            else:
+                if grant is None:
+                    grant = InstanceAdminGrant(
+                        id=await snowflake.mint(),
+                        user_id=user.id,
+                        user_domain=user.origin_domain,
+                        user_is_local=True,
+                        role=role,
+                    )
+                    session.add(grant)
+                action = "granted"
+            await session.commit()
+            return f"{role} {action} for {user.username}@{user.origin_domain}"
+    finally:
+        if lease is not None:
+            await lease.close()
+        await redis.aclose()
+        await engine.dispose()
+
+
+@cli.command("admin-grant")
+def admin_grant(
+    username: Annotated[
+        str,
+        typer.Argument(help="Local username or username@this-instance."),
+    ],
+    role: Annotated[
+        str,
+        typer.Option(
+            "--role",
+            help=("owner, administrator, trust_safety, bot_reviewer, operations, or auditor."),
+        ),
+    ] = "owner",
+) -> None:
+    """Grant browser administration access. Owner grants are CLI-only."""
+
+    typer.echo(asyncio.run(admin_grant_operation(username, role, revoke=False)))
+
+
+@cli.command("admin-revoke")
+def admin_revoke(
+    username: Annotated[
+        str,
+        typer.Argument(help="Local username or username@this-instance."),
+    ],
+    role: Annotated[
+        str,
+        typer.Option(
+            "--role",
+            help=("owner, administrator, trust_safety, bot_reviewer, operations, or auditor."),
+        ),
+    ] = "owner",
+) -> None:
+    """Revoke browser administration access, including an owner grant."""
+
+    typer.echo(asyncio.run(admin_grant_operation(username, role, revoke=True)))
 
 
 def main() -> None:

@@ -8,6 +8,45 @@ export interface ApiErrorIssue {
 
 const ERROR_MESSAGES: Record<string, string> = {
   ADMIN_AUTHENTICATION_REQUIRED: 'Sign in with an administrator account to continue.',
+  ADMIN_GRANT_NOT_FOUND: 'That administrator grant no longer exists.',
+  APPLICATION_NOT_FOUND: 'That application no longer exists or you cannot manage it.',
+  APPLICATION_PERMISSION_DENIED: "You don't have permission to manage that application.",
+  BOT_ALREADY_INSTALLED: 'That bot is already installed in this guild.',
+  BOT_CONTROL_AUTH_REQUIRED: 'Provide an application control credential for this operation.',
+  BOT_CONTROL_SCOPE_REQUIRED: 'That control credential does not allow this operation.',
+  BOT_CONTROL_TOKEN_INVALID: 'That application control credential is invalid, expired, or revoked.',
+  BOT_CREDENTIAL_NOT_FOUND: 'That application credential no longer exists.',
+  BOT_E2EE_CONTENT_UNAVAILABLE:
+    'This bot cannot read plaintext from an end-to-end encrypted channel.',
+  BOT_E2EE_DISABLED: 'This bot is not enabled for encrypted interactions in this guild.',
+  BOT_E2EE_ENVELOPE_REQUIRED:
+    'Send an encrypted envelope when this bot posts in an end-to-end encrypted channel.',
+  BOT_INSTANCE_BLOCKED: 'This bot’s home instance is blocked by the target instance.',
+  BOT_INVITE_NOT_FOUND: 'That bot invitation is invalid, disabled, or no longer available.',
+  BOT_NOT_INSTALLED: 'That bot is not installed in this guild.',
+  BOT_SCOPE_REQUIRED: 'This bot was not granted the API scope required for that action.',
+  BOT_TARGET_NOT_DELEGATED: 'This worker is not authorized to connect to that instance.',
+  BOT_WORKER_NOT_FOUND: 'That bot worker is invalid, expired, or revoked.',
+  COMMAND_NAME_DUPLICATE: 'Each application command must have a unique name and type.',
+  COMMAND_SET_TOO_LARGE: 'This command set has too many commands or options.',
+  DEVELOPER_TEAM_NOT_FOUND: 'That developer team no longer exists or you cannot access it.',
+  E2EE_INTERACTION_PAYLOAD_REQUIRED:
+    'This encrypted channel requires an encrypted command payload.',
+  E2EE_MESSAGE_REPORT_UNAVAILABLE:
+    'Encrypted message contents cannot be reported to the server because it cannot read them.',
+  FEDERATED_COMMANDS_UNAVAILABLE:
+    'Commands from that remote application are temporarily unavailable.',
+  INTERACTION_ALREADY_RESPONDED: 'This interaction already has a response.',
+  INTERACTION_EXPIRED: 'This interaction expired before the bot responded.',
+  INTERACTION_NOT_FOUND: 'That interaction no longer exists or is not assigned to this bot.',
+  OWNER_CLI_MANAGED: 'Instance owner access can only be changed from the server CLI.',
+  OWNER_REQUIRED: 'Only an instance owner can perform that action.',
+  REPORT_NOT_FOUND: 'That safety report no longer exists or you cannot access it.',
+  TEAM_LAST_OWNER: 'Add another team owner before removing or changing the last owner.',
+  TEAM_OWNER_REQUIRED: 'Only a developer team owner can perform that action.',
+  TEMPLATE_EXCEEDS_APPLICATION: 'The invite requests access that the application has not enabled.',
+  WORKER_EXCEEDS_APPLICATION:
+    'The worker requests scopes or intents that the application has not enabled.',
   AUTHENTICATION_REQUIRED: 'Your session has expired. Sign in again to continue.',
   CSRF_GUARD: 'This page is out of date. Reload it and try again.',
   MISSING_PERMISSIONS: "You don't have permission to do that.",

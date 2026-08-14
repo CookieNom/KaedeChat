@@ -2210,6 +2210,11 @@
         <a href="#notifications"><Icon name="bell" size={18} />Notifications</a>
         <p>Guild</p>
         <a href="#overview"><Icon name="server" size={18} />Overview</a>
+        {#if hasPermission(Permission.MANAGE_GUILD)}
+          <a href={`/g/${encodeURIComponent(guildId)}/integrations`}
+            ><Icon name="server" size={18} />Bots & automations</a
+          >
+        {/if}
         {#if canManageRoles}
           <a href="#roles"><Icon name="shield" size={18} />Roles</a>
         {/if}

@@ -18,6 +18,7 @@
   import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import { entityRef } from '$lib/chat/refs';
   import { inviteReferencesInMessage } from '$lib/chat/invites';
+  import { botInvitesInMessage } from '$lib/chat/bot-invites';
   import { gifFavoriteForUrl, isGifFavorite, klipyGifUrl, toggleGifFavorite } from '$lib/chat/gifs';
   import { previewableLink } from '$lib/chat/links';
   import { recentReactions, rememberReaction } from '$lib/chat/reactions';
@@ -35,11 +36,13 @@
   import { onDestroy, tick } from 'svelte';
   import Markdown from './Markdown.svelte';
   import InviteEmbed from './InviteEmbed.svelte';
+  import BotInviteEmbed from './BotInviteEmbed.svelte';
   import LinkPreview from './LinkPreview.svelte';
   import MediaViewer from './MediaViewer.svelte';
   import ReactionEmoji from './ReactionEmoji.svelte';
   import ReactionPicker from './ReactionPicker.svelte';
   import ReactionViewer from './ReactionViewer.svelte';
+  import ReportMessageDialog from './ReportMessageDialog.svelte';
 
   let {
     message,
@@ -107,6 +110,7 @@
   let mediaViewer = $state<Attachment | null>(null);
   let reactionPickerOpen = $state(false);
   let reactionViewerOpen = $state(false);
+  let reportDialogOpen = $state(false);
   let reactionViewerInitialEmoji = $state<string | undefined>(undefined);
   let reactionViewerReturnFocus: HTMLElement | null = null;
   let recentReactionValues = $state<string[]>([]);
@@ -124,6 +128,7 @@
   const inviteReferences = $derived(
     message.content ? inviteReferencesInMessage(message.content) : []
   );
+  const botInviteReferences = $derived(message.content ? botInvitesInMessage(message.content) : []);
   const gifUrl = $derived(klipyGifUrl(message.content));
   let gifFavorited = $derived(gifUrl ? isGifFavorite(gifUrl) : false);
   const linkPreviewUrl = $derived(previewableLink(message.content));
@@ -322,6 +327,12 @@
     if (returnFocus?.isConnected) {
       void tick().then(() => returnFocus.focus());
     }
+  }
+
+  function openReportDialog(event: MouseEvent) {
+    event.stopPropagation();
+    closeMenu(false);
+    reportDialogOpen = true;
   }
 
   function requestDelete(event: MouseEvent) {
@@ -574,6 +585,7 @@
           <strong>{authorName()}</strong>
         {/if}
         {#if message.webhook}<small class="webhook-badge">WEBHOOK</small>{/if}
+        {#if message.author?.bot}<small class="bot-badge">BOT</small>{/if}
         <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
       </header>
     {:else}
@@ -600,6 +612,9 @@
       <Markdown content={message.content} {mentionUsers} {mentionRoles} />
       {#each inviteReferences as reference (reference)}
         <InviteEmbed {reference} />
+      {/each}
+      {#each botInviteReferences as reference (`${reference.applicationRef}/${reference.templateSlug}`)}
+        <BotInviteEmbed {reference} />
       {/each}
       {#if linkPreviewUrl && (message.flags & 4) === 0}
         <LinkPreview url={linkPreviewUrl} />
@@ -877,6 +892,14 @@
             </button>
           {/each}
         {/if}
+        {#if !message.e2ee && !message.deleted_at}
+          <button type="button" role="menuitem" tabindex="-1" onclick={openReportDialog}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 21V4m0 1h11l-2 4 2 4H5" />
+            </svg>
+            <span>Report message</span>
+          </button>
+        {/if}
         {#if editAvailable}
           <button
             class:menu-separator={Boolean(onMessageAuthor && message.author)}
@@ -979,6 +1002,14 @@
     onClose={closeReactionViewer}
   />
 {/if}
+{#if reportDialogOpen}
+  <ReportMessageDialog
+    {message}
+    onClose={() => (reportDialogOpen = false)}
+    onSubmitted={() => (feedback = 'Report submitted to Trust & Safety.')}
+  />
+{/if}
+
 {#if mediaViewer}
   <MediaViewer attachment={mediaViewer} onClose={() => (mediaViewer = null)} />
 {/if}

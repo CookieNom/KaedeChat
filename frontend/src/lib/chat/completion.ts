@@ -10,11 +10,11 @@ export interface CompletionOption {
   emoji?: string;
   imageUrl?: string;
   color?: string;
-  kind?: 'user' | 'role' | 'channel' | 'unicode-emoji' | 'custom-emoji';
+  kind?: 'user' | 'role' | 'channel' | 'unicode-emoji' | 'custom-emoji' | 'application-command';
 }
 
 export interface CompletionQuery {
-  marker: '@' | '#' | ':';
+  marker: '@' | '#' | ':' | '/';
   query: string;
   start: number;
   end: number;
@@ -22,6 +22,8 @@ export interface CompletionQuery {
 
 export function completionAt(value: string, cursor: number): CompletionQuery | null {
   const prefix = value.slice(0, cursor);
+  const slash = /^\/([a-z0-9_-]*)$/i.exec(prefix);
+  if (slash) return { marker: '/', query: slash[1], start: 0, end: cursor };
   const match = /(?:^|\s)([@#:])([\w.+-]*)(?::)?$/.exec(prefix);
   if (!match) return null;
   const marker = match[1] as '@' | '#' | ':';

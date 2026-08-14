@@ -7686,3 +7686,16 @@ body.media-viewer-open {
     background-position: -220% 0;
   }
 }
+
+.bot-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+  padding: 0.08rem 0.3rem;
+  color: var(--on-accent, white);
+  background: var(--accent);
+  font-size: 0.58rem;
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: 0.04em;
+}

@@ -113,6 +113,8 @@
             class="completion-preview completion-preview-role"
             style={`--role-color:${option.color}`}
           ></i>
+        {:else if option.kind === 'application-command'}
+          <span class="completion-preview completion-preview-symbol" aria-hidden="true">/</span>
         {:else if option.kind === 'channel'}
           <span class="completion-preview completion-preview-symbol" aria-hidden="true">#</span>
         {:else}

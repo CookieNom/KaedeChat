@@ -21,6 +21,11 @@
     replaceCompletion
   } from '$lib/chat/completion';
   import { mentionsUser } from '$lib/chat/mentions';
+  import {
+    commandCompletions,
+    commandInvocation,
+    type ApplicationCommand
+  } from '$lib/chat/application-commands';
   import { messageSearchUserCandidates } from '$lib/chat/message-search';
   import { applyReactionUpdate, type ReactionUpdate } from '$lib/chat/reaction-state';
   import { guildModerationActions } from '$lib/chat/moderation';
@@ -175,6 +180,8 @@
   });
   const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
+  let applicationCommands = $state<ApplicationCommand[]>([]);
+  let commandNotice = $state('');
   let gifPickerEnabled = $state(false);
   let gifPickerOpen = $state(false);
   let messageSearchOpen = $state(false);
@@ -475,6 +482,8 @@
       ];
     if (completionQuery.marker === '#')
       return channelCompletions(guild?.channels ?? [], completionQuery.query);
+    if (completionQuery.marker === '/')
+      return commandCompletions(applicationCommands, completionQuery.query);
     const needle = completionQuery.query.toLocaleLowerCase();
     const custom = pickerEmojis
       .filter((emoji) => emoji.name.toLocaleLowerCase().includes(needle))
@@ -2340,6 +2349,8 @@
       setMembers([]);
       resetUploads();
       content = '';
+      applicationCommands = [];
+      commandNotice = '';
       composerCursor = 0;
       editingMessage = null;
       composerDraftBeforeEdit = null;
@@ -2453,7 +2464,8 @@
         loadedReadStates,
         loadedCurrentUser,
         loadedEmojis,
-        loadedPins
+        loadedPins,
+        loadedCommands
       ] = await Promise.all([
         api<Guild>(`/guilds/${encodeURIComponent(targetGuild)}`),
         api<Guild[]>('/users/@me/guilds'),
@@ -2463,7 +2475,10 @@
         api<ReadStateStatus[]>('/users/@me/read-states'),
         api<UserSummary>('/users/@me'),
         api<CustomEmoji[]>('/users/@me/emojis'),
-        api<Message[]>(`/channels/${encodeURIComponent(targetChannel)}/pins`).catch(() => [])
+        api<Message[]>(`/channels/${encodeURIComponent(targetChannel)}/pins`).catch(() => []),
+        api<ApplicationCommand[]>(
+          `/guilds/${encodeURIComponent(targetGuild)}/application-commands`
+        ).catch(() => [])
       ]);
       if (
         routeGeneration !== loadGeneration ||
@@ -2475,6 +2490,7 @@
       guild = preserveHistorySync(loadedGuild);
       availableEmojis = loadedEmojis;
       pinnedMessages = loadedPins;
+      applicationCommands = loadedCommands;
       setGuilds(loadedGuilds);
       setReadStates(loadedReadStates);
       entities.ingestCurrentUser(loadedCurrentUser);
@@ -2654,6 +2670,43 @@
       } catch (caught) {
         if (generation === loadGeneration)
           error = userErrorMessage(caught, 'Could not edit the message. Try again.');
+      } finally {
+        if (generation === loadGeneration) busy = false;
+      }
+      return;
+    }
+    const invocation = !retry ? commandInvocation(text, applicationCommands) : null;
+    if (invocation) {
+      if (!channelReady || !channel || busy) return;
+      if (channel.encryption_mode === 'e2ee') {
+        error =
+          'Bot commands are disabled in this E2EE channel until encrypted interactions are enabled in this client.';
+        return;
+      }
+      const generation = loadGeneration;
+      busy = true;
+      error = '';
+      commandNotice = '';
+      try {
+        await api(`/channels/${encodeURIComponent(entityRef(channel))}/interactions`, {
+          method: 'POST',
+          body: JSON.stringify({
+            application_ref: invocation.command.application_ref,
+            command_name: invocation.command.name,
+            command_type: invocation.command.type,
+            options: invocation.options
+          })
+        });
+        if (generation !== loadGeneration) return;
+        content = '';
+        composerCursor = 0;
+        commandNotice = `/${invocation.command.name} sent to ${invocation.command.application_name}.`;
+        window.setTimeout(() => {
+          if (generation === loadGeneration) commandNotice = '';
+        }, 5000);
+      } catch (caught) {
+        if (generation === loadGeneration)
+          error = userErrorMessage(caught, 'The bot command could not be delivered.');
       } finally {
         if (generation === loadGeneration) busy = false;
       }
@@ -3926,6 +3979,9 @@
               </svg>
             </button>
           </form>
+          {#if commandNotice}<p class="composer-feature-warning" role="status">
+              <span>{commandNotice}</span>
+            </p>{/if}
           {#if gifConfigurationError}
             <p class="composer-feature-warning" role="status">
               <span>{gifConfigurationError}</span>

@@ -16,7 +16,13 @@ from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.admin import router as admin_router
+from app.api.admin_portal import router as admin_portal_router
+from app.api.applications import federation_router as bot_install_federation_router
+from app.api.applications import router as applications_router
 from app.api.auth import router as auth_router
+from app.api.bot_federation import router as bot_federation_router
+from app.api.bot_gateway import router as bot_gateway_router
+from app.api.bots import router as bots_router
 from app.api.calls import router as calls_router
 from app.api.channels import router as channels_router
 from app.api.dms import router as dms_router
@@ -24,6 +30,8 @@ from app.api.federation import router as federation_router
 from app.api.gifs import router as gifs_router
 from app.api.guild_lifecycle import router as guild_lifecycle_router
 from app.api.guilds import router as guilds_router
+from app.api.interactions import federation_router as interaction_federation_router
+from app.api.interactions import router as interactions_router
 from app.api.invites import router as invites_router
 from app.api.link_previews import router as link_previews_router
 from app.api.management import router as management_router
@@ -106,6 +114,12 @@ app = FastAPI(
 )
 app.include_router(auth_router)
 app.include_router(admin_router)
+app.include_router(admin_portal_router)
+app.include_router(applications_router)
+app.include_router(bot_install_federation_router)
+app.include_router(bots_router)
+app.include_router(bot_federation_router)
+app.include_router(bot_gateway_router)
 app.include_router(federation_router)
 app.include_router(users_router)
 app.include_router(voice_router)
@@ -116,6 +130,8 @@ app.include_router(channels_router)
 app.include_router(calls_router)
 app.include_router(dms_router)
 app.include_router(invites_router)
+app.include_router(interactions_router)
+app.include_router(interaction_federation_router)
 app.include_router(link_previews_router)
 app.include_router(management_router)
 app.include_router(media_router)

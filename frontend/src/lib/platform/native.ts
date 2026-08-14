@@ -123,7 +123,12 @@ function safeNativeRoute(value: string): string | null {
   try {
     const url = new URL(value, 'https://desktop.kaede.invalid');
     if (url.origin !== 'https://desktop.kaede.invalid') return null;
-    if (!/^\/(?:home(?:\/|$)|g\/|settings(?:\/|$)|invite\/)/.test(url.pathname)) return null;
+    if (
+      !/^\/(?:home(?:\/|$)|g\/|settings(?:\/|$)|developers(?:\/|$)|administration(?:\/|$)|applications\/|invite\/)/.test(
+        url.pathname
+      )
+    )
+      return null;
     return `${url.pathname}${url.search}${url.hash}`;
   } catch {
     return null;
