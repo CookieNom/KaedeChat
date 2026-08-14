@@ -73,6 +73,142 @@ low cache/history defaults written by older setup versions; manual deployments
 can find the corresponding variables and sizing guidance in
 [docs/operator.md](docs/operator.md#federation-storage-budgets).
 
+### Production Docker deployment
+
+Before deploying, point the instance domain at the host, install Docker Engine
+with the Compose plugin, and arrange TLS certificates. A bundled Garage deployment
+also needs DNS and a certificate for `media.<your-domain>`. Keep TCP 80/443 public,
+but do not expose the Caddy or API loopback ports directly. Voice deployments have
+additional RTC and TURN ports listed in the
+[operator guide](docs/operator.md#hosts-certificates-and-ports).
+
+From a clean checkout, generate the production configuration and review the files
+before starting anything:
+
+```sh
+make setup
+chmod 600 .env
+make env-check
+make generated-compose-check
+```
+
+The generated deployment consists of `.env`, `deploy/compose.generated.yml`, and
+`deploy/generated/README.txt`. If host nginx was selected, also review and install
+`deploy/generated/kaede.nginx.conf`, run `nginx -t`, and reload nginx only after the
+validation succeeds. The wizard does not obtain certificates, install the proxy
+file, change firewall rules, or start Kaede. External-S3 deployments must keep the
+configured buckets private and allow browser `PUT`, `GET`, and `HEAD` requests from
+the Kaede origin as described by the wizard.
+
+Render the exact production topology, then build and start it:
+
+```sh
+KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
+  -f deploy/compose.yml -f deploy/compose.generated.yml config --quiet
+
+KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
+  -f deploy/compose.yml -f deploy/compose.generated.yml \
+  up -d --build --wait --wait-timeout 180
+```
+
+Startup is migration-safe: `preflight` validates the operator configuration,
+`migrate` applies every pending Alembic revision through the repository's current
+head and runs the idempotent instance bootstrap, and the API, Gateway, workers, and
+edge wait for that one-shot service to succeed. Do not run Alembic separately on
+the host. A failed migration or preflight leaves the application services stopped;
+inspect and correct the failure rather than bypassing the dependency gate.
+
+Check the one-shot services, application logs, and readiness after startup:
+
+```sh
+KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
+  -f deploy/compose.yml -f deploy/compose.generated.yml ps --all
+
+KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
+  -f deploy/compose.yml -f deploy/compose.generated.yml \
+  logs --tail=200 migrate api gateway worker scheduler caddy
+
+curl --fail http://127.0.0.1:18082/health/ready
+curl --fail https://chat.example.com/.well-known/kaede/server
+```
+
+Replace `chat.example.com` and the diagnostic port with the values selected in
+setup. `migrate`, `preflight`, `frontend-build`, and storage initialization are
+expected to exit successfully; long-running services should be healthy. The public
+discovery request verifies DNS, TLS, nginx, Caddy routing, and the federation
+identity together.
+
+### Accessing the Administration panel
+
+Register the first ordinary local human account through the Kaede web interface,
+then grant that account the `owner` role from the running API container:
+
+```sh
+KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
+  -f deploy/compose.yml -f deploy/compose.generated.yml \
+  exec -T api kaede admin-grant alice --role owner
+```
+
+The command accepts either a local username such as `alice` or the complete local
+handle `alice@chat.example.com`. Remote users and bot accounts cannot receive
+instance-administration roles. Open `https://chat.example.com/administration` and
+sign in with that normal user account; if it was already signed in, reload the page
+after granting the role. The browser does not use or expose an operator admin
+token.
+
+Owners can delegate non-owner roles in the panel, or the host can manage them from
+the CLI:
+
+```sh
+# Available roles: owner, administrator, trust_safety, bot_reviewer,
+# operations, and auditor.
+KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
+  -f deploy/compose.yml -f deploy/compose.generated.yml \
+  exec -T api kaede admin-grant bob --role trust_safety
+
+KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
+  -f deploy/compose.yml -f deploy/compose.generated.yml \
+  exec -T api kaede admin-revoke bob --role trust_safety
+```
+
+Owner grants and removals remain CLI-only. Keep at least two protected local owner
+accounts so one lost account does not lock out instance administration. The
+responsive Developer Portal is separate at `/developers` and is available to every
+active local human account without an administration grant. Role capabilities,
+instance blocking, bot review, and Trust & Safety behavior are documented in the
+[administration and developer portal guide](docs/administration-and-developer-portals.md).
+
+### Routine operation and upgrades
+
+Use the same two Compose files for every production command; omitting the generated
+file can silently omit the selected storage and optional-service topology. Follow
+logs with:
+
+```sh
+KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
+  -f deploy/compose.yml -f deploy/compose.generated.yml logs -f \
+  api gateway worker scheduler caddy
+```
+
+Before an upgrade, take and verify a PostgreSQL, object-storage, secret, and
+configuration backup from one quiesced writer boundary. Then pull only a clean
+fast-forward, rerun `make setup` so new settings are added without replacing durable
+secrets or custom quota values, validate, build, stop writers, run the new `migrate`
+service once, and restart. The exact safe sequence and rollback limits are in
+[Manual upgrade and rollback](docs/operator.md#manual-upgrade-and-rollback); the
+[backup boundary](docs/operator.md#backup-and-restore-boundary) explains why a
+database dump alone is insufficient.
+
+To stop Kaede while preserving named volumes:
+
+```sh
+KAEDE_OPERATOR_ENV_FILE="$PWD/.env" docker compose --env-file .env \
+  -f deploy/compose.yml -f deploy/compose.generated.yml down
+```
+
+Do not add `-v` unless permanently deleting the PostgreSQL, Dragonfly, Garage, and
+other named-volume data is intentional and a verified recovery path exists.
+
 ### Optional automatic updates
 
 Kaede's production Compose topology builds the web and backend from this Git
