@@ -1,5 +1,10 @@
 # Desktop release requirements
 
+> This document describes the archived Slint client. It is retained for
+> historical reference and does not control the current release workflow. See
+> [the Tauri client release guide](../../docs/releasing.md) for tag formats,
+> signing secrets, packages, and GitHub Releases.
+
 Release builds are reproducible from the locked Cargo workspace. CI can build
 unsigned artifacts, but public distribution additionally requires:
 
@@ -20,14 +25,5 @@ The canonical signed bytes are the UTF-8 sequence
 manifest carries those three fields plus a base64 Ed25519 signature. Its package
 URL must use HTTPS and the package must fit the client's bounded download limit.
 
-Tagging `desktop-vX.Y.Z` runs `.github/workflows/desktop-release.yml` and creates:
-
-- a Debian package and portable Linux archive with desktop entry, icon, and
-  `kaede://` URL handler;
-- a per-user Windows MSI plus a portable ZIP with URL-protocol registration;
-- a macOS application bundle, ZIP, and DMG with URL-scheme and privacy-purpose
-  declarations.
-
-Windows and macOS artifacts are signed only when their protected CI credentials
-are present. Unsigned workflow artifacts are suitable for testing, not public
-distribution. Linux repository signing remains an operator responsibility.
+These historical package requirements do not imply that the archived client is
+built or published by `.github/workflows/desktop-release.yml`.

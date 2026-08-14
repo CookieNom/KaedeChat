@@ -51,6 +51,12 @@ flutter build appbundle --release
 
 The application ID and iOS bundle ID are both `chat.kaede.mobile`.
 
+Tag-triggered GitHub Releases build a signed APK together with the desktop
+clients. Configure the four `ANDROID_*` repository secrets listed in
+[`desktop/docs/releasing.md`](../desktop/docs/releasing.md) before pushing a
+release tag. The workflow deliberately fails instead of publishing an unsigned
+APK or generating a throwaway key that would break application updates.
+
 ## Firebase Cloud Messaging setup
 
 Firebase is optional. Foreground gateway notifications and unread indicators

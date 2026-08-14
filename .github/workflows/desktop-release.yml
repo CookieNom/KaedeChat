@@ -1,38 +1,49 @@
-name: Desktop release build
+name: Client release
 
 on:
-  workflow_dispatch:
   push:
-    tags: ["desktop-v*"]
+    tags:
+      - "v*"
+      - "desktop-v*"
 
 permissions:
   contents: read
 
+concurrency:
+  group: client-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "22.23.1"
+  PNPM_VERSION: "10.34.0"
+  RUST_VERSION: "1.92.0"
+  TAURI_CLI_VERSION: "2.11.4"
+  FLUTTER_VERSION: "3.41.4"
+
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            artifact: kaede-chat-linux-x86_64
-          - os: windows-2025
-            artifact: kaede-chat-windows-x86_64
-          - os: macos-15
-            artifact: kaede-chat-macos-arm64
-    runs-on: ${{ matrix.os }}
+  desktop-linux:
+    name: Linux desktop
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Linux native dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang cmake file libasound2-dev libayatana-appindicator3-dev libdbus-1-dev libgtk-3-dev librsvg2-dev libssl-dev libudev-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config wget
+      - name: Install Linux desktop dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          clang cmake file libasound2-dev libayatana-appindicator3-dev
+          libdbus-1-dev libgtk-3-dev librsvg2-dev libssl-dev libudev-dev
+          libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config wget
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-        with: { version: "10.34.0", run_install: false }
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with: { node-version: "22.23.1", cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.92.0 --profile minimal
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
       - name: Cache Cargo artifacts
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -40,27 +51,316 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             desktop/target
-          key: desktop-release-${{ runner.os }}-${{ hashFiles('desktop/Cargo.lock') }}
-      - run: pnpm --dir frontend install --frozen-lockfile
-      - run: pnpm --dir frontend lint
-      - run: pnpm --dir frontend check
-      - run: pnpm --dir frontend test
-      - run: pnpm --dir frontend build
+          key: client-release-linux-${{ hashFiles('desktop/Cargo.lock') }}
+      - name: Build embedded frontend
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend build
       - name: Install pinned Tauri CLI
-        run: cargo +1.92.0 install tauri-cli --version 2.11.4 --locked
-      - name: Build platform bundles
+        run: cargo +"$RUST_VERSION" install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Build Linux packages
         working-directory: desktop/tauri
-        run: cargo +1.92.0 tauri build --config src-tauri/tauri.conf.json
-      - name: Write checksums
+        run: >-
+          cargo +"$RUST_VERSION" tauri build
+          --config src-tauri/tauri.conf.json
+          --bundles appimage,deb
+      - name: Collect Linux release files
         shell: bash
         run: |
-          mkdir -p desktop/dist
-          find desktop/target/release/bundle -type f -exec cp {} desktop/dist/ \;
-          cd desktop/dist
-          if command -v sha256sum >/dev/null; then sha256sum * > SHA256SUMS; else shasum -a 256 * > SHA256SUMS; fi
-      - name: Upload packaged build for release approval
+          set -euo pipefail
+          mkdir -p release-assets
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              *.AppImage) extension="AppImage" ;;
+              *.deb) extension="deb" ;;
+              *) continue ;;
+            esac
+            cp "$file" "release-assets/Kaede-Chat-${GITHUB_REF_NAME}-linux-x86_64.${extension}"
+          done < <(find desktop/target/release/bundle -type f \
+            \( -name '*.AppImage' -o -name '*.deb' \) -print0)
+          test -n "$(find release-assets -type f -print -quit)"
+          for file in release-assets/*; do
+            name="$(basename "$file")"
+            (cd release-assets && sha256sum "$name" > "$name.sha256")
+          done
+      - name: Upload Linux release files
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ matrix.artifact }}
-          path: desktop/dist/*
+          name: kaede-chat-linux-x86_64
+          path: release-assets/*
           if-no-files-found: error
+          retention-days: 7
+
+  desktop-windows:
+    name: Windows desktop
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+      - name: Cache Cargo artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/target
+          key: client-release-windows-${{ hashFiles('desktop/Cargo.lock') }}
+      - name: Build embedded frontend
+        shell: bash
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend build
+      - name: Import Windows signing certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE_BASE64 -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            throw "WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD are required"
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP "kaede-release.pfx"
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64)
+          )
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate `
+            -FilePath $certificatePath `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Password $password
+          "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build Windows executable
+        shell: bash
+        run: >-
+          cargo +"$RUST_VERSION" build --locked --release
+          --manifest-path desktop/Cargo.toml -p kaede-tauri
+      - name: Sign and collect Windows release file
+        shell: pwsh
+        run: |
+          $signTool = Get-ChildItem `
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signTool) { throw "signtool.exe is unavailable on the runner" }
+          $source = "desktop\target\release\kaede-tauri.exe"
+          & $signTool.FullName sign /sha1 $env:WINDOWS_CERTIFICATE_THUMBPRINT `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $source
+          if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed" }
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $name = "Kaede-Chat-$($env:GITHUB_REF_NAME)-windows-x86_64.exe"
+          $destination = Join-Path "release-assets" $name
+          Copy-Item $source $destination
+          $hash = (Get-FileHash -Algorithm SHA256 $destination).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content "$destination.sha256" -Encoding ascii
+      - name: Upload Windows release files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kaede-chat-windows-x86_64
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop-macos:
+    name: macOS desktop (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+      - name: Cache Cargo artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/target
+          key: client-release-macos-${{ matrix.arch }}-${{ hashFiles('desktop/Cargo.lock') }}
+      - name: Build embedded frontend
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend build
+      - name: Import Apple Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE_BASE64"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          certificate="$RUNNER_TEMP/kaede-release.p12"
+          keychain="$RUNNER_TEMP/kaede-release.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 -D > "$certificate"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security import "$certificate" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$keychain"
+      - name: Install pinned Tauri CLI
+        run: cargo +"$RUST_VERSION" install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Build, sign, and notarize macOS packages
+        working-directory: desktop/tauri
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_SIGNING_IDENTITY"
+          test -n "$APPLE_ID"
+          test -n "$APPLE_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+          cargo +"$RUST_VERSION" tauri build \
+            --config src-tauri/tauri.conf.json \
+            --bundles app,dmg
+      - name: Collect macOS release files
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          arch="${{ matrix.arch }}"
+          dmg="$(find desktop/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          if [ -n "$dmg" ]; then
+            cp "$dmg" "release-assets/Kaede-Chat-${GITHUB_REF_NAME}-macos-${arch}.dmg"
+          fi
+          app="$(find desktop/target/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [ -n "$app" ]; then
+            ditto -c -k --sequesterRsrc --keepParent "$app" \
+              "release-assets/Kaede-Chat-${GITHUB_REF_NAME}-macos-${arch}.zip"
+          fi
+          test -n "$(find release-assets -type f -print -quit)"
+          for file in release-assets/*; do
+            name="$(basename "$file")"
+            (cd release-assets && shasum -a 256 "$name" > "$name.sha256")
+          done
+      - name: Upload macOS release files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kaede-chat-macos-${{ matrix.arch }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install pinned Flutter SDK
+        working-directory: ${{ runner.temp }}
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git flutter
+          echo "${{ runner.temp }}/flutter/bin" >> "$GITHUB_PATH"
+      - name: Configure Android release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+          keystore="$RUNNER_TEMP/kaede-upload.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          {
+            printf 'storePassword=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
+            printf 'keyPassword=%s\n' "$ANDROID_KEY_PASSWORD"
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'storeFile=%s\n' "$keystore"
+          } > android/key.properties
+          chmod 600 "$keystore" android/key.properties
+      - name: Build signed release APK
+        run: |
+          flutter pub get
+          flutter build apk --release
+      - name: Collect Android release file
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          name="Kaede-Chat-${GITHUB_REF_NAME}-android.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "release-assets/$name"
+          (cd release-assets && sha256sum "$name" > "$name.sha256")
+      - name: Upload Android release files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kaede-chat-android
+          path: mobile/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: [desktop-linux, desktop-windows, desktop-macos, android]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download client release files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Publish tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test -n "$(find release-assets -type f -print -quit)"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "Kaede Chat $GITHUB_REF_NAME" \
+              --draft=false
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --generate-notes \
+              --title "Kaede Chat $GITHUB_REF_NAME"
+          fi
+          find release-assets -type f -print0 | \
+            xargs -0 gh release upload "$GITHUB_REF_NAME" --clobber
