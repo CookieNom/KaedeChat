@@ -215,6 +215,7 @@
   let typingTimer: number | null = null;
   let gateway: GatewayClient | null = null;
   let subscribedGuildRef = '';
+  let lastMemberRefreshAt = 0;
   let dispatchBuffer: Dispatch[] | null = null;
   let uploads = $state<PendingUpload[]>([]);
   let fileInput = $state<HTMLInputElement | null>(null);
@@ -2145,9 +2146,13 @@
     }
   }
 
-  function ensureMemberSubscription(targetGuild: string) {
-    if (!gateway || !targetGuild || subscribedGuildRef === targetGuild) return;
+  function ensureMemberSubscription(targetGuild: string, refresh = false) {
+    if (!gateway || !targetGuild) return;
+    if (!refresh && subscribedGuildRef === targetGuild) return;
+    const now = Date.now();
+    if (refresh && subscribedGuildRef === targetGuild && now - lastMemberRefreshAt < 5_000) return;
     subscribedGuildRef = targetGuild;
+    lastMemberRefreshAt = now;
     gateway.subscribeMembers(targetGuild);
   }
 
@@ -2202,15 +2207,20 @@
         if (selfModerationRetryTimer !== null) window.clearTimeout(selfModerationRetryTimer);
         selfModerationRetryTimer = null;
       } else {
+        ensureMemberSubscription(guildId, true);
         void refreshSelfModeration();
       }
     };
     const focused = () => {
       refreshVoiceOccupancy();
+      ensureMemberSubscription(guildId, true);
       void refreshSelfModeration();
     };
     const voiceRefreshTimer = window.setInterval(refreshVoiceOccupancy, 30_000);
-    const sessionReset = () => recoverCurrentRoute();
+    const sessionReset = () => {
+      ensureMemberSubscription(guildId, true);
+      recoverCurrentRoute();
+    };
     const profileRequest = (event: Event) => void openHandleProfile(event);
     const receive = (event: Event) => {
       const dispatch = (event as CustomEvent<Dispatch>).detail;
@@ -2253,6 +2263,7 @@
       client.removeEventListener(GATEWAY_SESSION_RESET_EVENT, sessionReset);
       client.releaseMembers();
       subscribedGuildRef = '';
+      lastMemberRefreshAt = 0;
       if (gateway === client) gateway = null;
       resetTyping();
       if (slowmodeTimer) window.clearInterval(slowmodeTimer);

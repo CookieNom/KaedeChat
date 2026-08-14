@@ -159,13 +159,21 @@ export class ChatEntityStore {
     );
   }
 
-  clearSession(): void {
+  beginGatewaySession(user: UserSummary): void {
+    const preserveMembers = Boolean(
+      this.currentUser && entityKey(this.currentUser) === entityKey(user)
+    );
+    this.clearSession({ preserveMembers });
+    this.ingestCurrentUser(user);
+  }
+
+  clearSession(options: { preserveMembers?: boolean } = {}): void {
     this.guilds.clear();
     this.channels.clear();
     this.users.clear();
     this.messages.clear();
     this.readStates.clear();
-    this.members.clear();
+    if (!options.preserveMembers) this.members.clear();
     this.relationships.clear();
     this.presences = {};
     this.currentUser = null;

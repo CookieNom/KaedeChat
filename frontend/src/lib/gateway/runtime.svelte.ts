@@ -50,8 +50,13 @@ function applyEntityDispatch(dispatch: Dispatch): void {
   switch (dispatch.t) {
     case 'READY': {
       const ready = dispatch.d as ReadyPayload;
-      chatEntities.clearSession();
-      chatEntities.ingestCurrentUser(ready.user);
+      // A full gateway re-identify may happen after a tab has slept or a resume
+      // cursor expires. The route reload restores messages over HTTP, while the
+      // roster is a separate gateway request. Keep the same account's last
+      // known roster until that request arrives instead of flashing—or
+      // indefinitely leaving—an empty member list. Account changes still clear
+      // all member data before the new READY is applied.
+      chatEntities.beginGatewaySession(ready.user);
       chatEntities.ingestGuilds(ready.guilds);
       chatEntities.channels.upsertMany(ready.dm_channels);
       chatEntities.readStates.upsertMany(ready.read_states);

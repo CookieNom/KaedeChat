@@ -16,6 +16,7 @@ htmlcov/
 *.dump
 backend/.test-data/
 frontend/node_modules/
+/node_modules/
 frontend/.pnpm-store/
 /.pnpm-store/
 frontend/.svelte-kit/

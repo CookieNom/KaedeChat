@@ -79,6 +79,35 @@ describe('normalized entity collections', () => {
     expect(store.users.get('7@alpha.test')).toEqual(user);
   });
 
+  it('preserves a same-account roster across a gateway re-identify when requested', () => {
+    const store = new ChatEntityStore();
+    const user: UserSummary = {
+      id: '7',
+      origin_domain: 'alpha.test',
+      username: 'mio',
+      display_name: 'Mio',
+      avatar_hash: null,
+      handle: 'mio@alpha.test'
+    };
+    store.ingestCurrentUser(user);
+    store.ingestMembers([
+      {
+        guild_id: '1',
+        guild_domain: 'alpha.test',
+        user,
+        nickname: null,
+        role_ids: []
+      }
+    ]);
+
+    store.beginGatewaySession(user);
+
+    expect(store.currentUser).toEqual(user);
+    expect(store.members.values).toHaveLength(1);
+    store.beginGatewaySession({ ...user, id: '8' });
+    expect(store.members.values).toEqual([]);
+  });
+
   it('replaces visible denormalized placeholders when a profile resolves live', () => {
     const store = new ChatEntityStore();
     const placeholder: UserSummary = {
