@@ -431,7 +431,8 @@
     closeMenu(true);
   }
 
-  function windowScroll() {
+  function windowScroll(event: Event) {
+    if (menuElement && event.composedPath().includes(menuElement)) return;
     closeMenu(true);
   }
 
