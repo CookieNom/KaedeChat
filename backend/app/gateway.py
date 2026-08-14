@@ -967,6 +967,29 @@ def ready_payload(
     }
 
 
+async def hydrated_ready_payload(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    redis: Redis,
+    user: User,
+    guilds: list[Guild],
+    states: list[ReadState],
+    dm_channels: list[dict[str, object]],
+    gateway_session_id: str,
+) -> dict[str, object]:
+    """Build READY with optional projections that must not break login."""
+    presence_preference = await current_presence_preference(sessionmaker, redis, user)
+    history_statuses = await guild_history_sync_statuses(redis, user, guilds)
+    return ready_payload(
+        user,
+        guilds,
+        states,
+        dm_channels,
+        gateway_session_id,
+        presence_preference,
+        history_statuses,
+    )
+
+
 async def next_pubsub(pubsub: GatewaySubscription) -> dict[str, Any] | None:
     while True:
         message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=45)
@@ -1075,6 +1098,15 @@ async def touch_gateway_session(redis: Redis, session_id: str) -> None:
     user_sessions_key = f"gateway:user-sessions:{domain}:{user_id}"
     await redis.zadd(user_sessions_key, {session_id: expires_at_ms})
     await redis.expire(user_sessions_key, SESSION_TTL_SECONDS + 60)
+
+
+async def discard_gateway_session(redis: Redis, user: User, session_id: str) -> None:
+    """Remove a fresh handshake that never became resumable."""
+    user_sessions_key = f"gateway:user-sessions:{user.origin_domain}:{user.id}"
+    async with redis.pipeline(transaction=True) as pipeline:
+        pipeline.delete(session_key(session_id), session_progress_key(session_id))
+        pipeline.zrem(user_sessions_key, session_id)
+        await pipeline.execute()
 
 
 async def store_gateway_session(
@@ -2004,6 +2036,8 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
     pubsub: GatewaySubscription | None = None
     connection_lock_key: str | None = None
     connection_owner: str | None = None
+    fresh_session: tuple[User, str] | None = None
+    fresh_session_resumable = False
     try:
         await websocket.accept()
         connections.add(websocket)
@@ -2158,7 +2192,6 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                 )
             sequence += 1
             presence_preference = await current_presence_preference(sessionmaker, redis, user)
-            history_statuses = await guild_history_sync_statuses(redis, user, guilds)
             await websocket.send_json(
                 {
                     "op": GatewayOp.DISPATCH,
@@ -2181,6 +2214,7 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                     reason=json.dumps({"code": "SESSION_LIMIT", "limit": USER_SESSION_LIMIT}),
                 )
                 return
+            fresh_session = (user, gateway_session_id)
             connection_lock_key = f"gateway:connection-owner:{gateway_session_id}"
             connection_owner = secrets.token_urlsafe(16)
             if not await redis.set(
@@ -2239,20 +2273,19 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                 await websocket.send_json({"op": GatewayOp.INVALID_SESSION, "d": False})
                 return
             visibility = await build_visibility_summary(sessionmaker, redis, user, guilds)
-            presence_preference = await current_presence_preference(sessionmaker, redis, user)
             await websocket.send_json(
                 {
                     "op": GatewayOp.DISPATCH,
                     "t": "READY",
                     "s": 0,
-                    "d": ready_payload(
+                    "d": await hydrated_ready_payload(
+                        sessionmaker,
+                        redis,
                         user,
                         guilds,
                         states,
                         dm_channels,
                         gateway_session_id,
-                        presence_preference,
-                        history_statuses,
                     ),
                 }
             )
@@ -2275,6 +2308,7 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                     sequence,
                 )
             await persist_gateway_progress(redis, gateway_session_id, sequence, cursors, topics)
+            fresh_session_resumable = True
         if connection_lock_key is None or connection_owner is None:
             await websocket.close(code=GatewayCloseCode.UNKNOWN_ERROR)
             return
@@ -2310,5 +2344,8 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
         if connection_lock_key is not None and connection_owner is not None:
             with suppress(Exception):
                 await release_owned_lease(redis, connection_lock_key, connection_owner)
+        if fresh_session is not None and not fresh_session_resumable:
+            with suppress(Exception):
+                await discard_gateway_session(redis, *fresh_session)
         if pubsub is not None:
             await pubsub.aclose()

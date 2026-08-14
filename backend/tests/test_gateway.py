@@ -148,6 +148,114 @@ async def test_ready_history_status_cache_failure_does_not_break_login(
         }
 
 
+@pytest.mark.asyncio
+async def test_fresh_ready_hydrates_history_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = User(
+        id=7,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        email="maple@example.com",
+        password_hash="hash",
+    )
+    guild = SimpleNamespace(id=42, origin_domain="remote.test")
+    expected_statuses = {
+        (42, "remote.test"): {
+            "history_sync_status": "retrying",
+            "history_sync_error_code": "KAED_FED_HISTORY_CAPACITY",
+        }
+    }
+    captured: dict[str, object] = {}
+
+    async def presence(*_args: object) -> str:
+        return "idle"
+
+    async def statuses(*_args: object) -> dict[tuple[int, str], dict[str, object]]:
+        return expected_statuses
+
+    def payload(*args: object) -> dict[str, object]:
+        captured["args"] = args
+        return {"ready": True}
+
+    monkeypatch.setattr(gateway, "current_presence_preference", presence)
+    monkeypatch.setattr(gateway, "guild_history_sync_statuses", statuses)
+    monkeypatch.setattr(gateway, "ready_payload", payload)
+
+    result = await gateway.hydrated_ready_payload(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        user,
+        [guild],  # type: ignore[list-item]
+        [],
+        [],
+        "fresh-session",
+    )
+
+    assert result == {"ready": True}
+    assert captured["args"] == (
+        user,
+        [guild],
+        [],
+        [],
+        "fresh-session",
+        "idle",
+        expected_statuses,
+    )
+
+
+@pytest.mark.asyncio
+async def test_discard_gateway_session_releases_reserved_slot() -> None:
+    operations: list[tuple[str, tuple[object, ...]]] = []
+
+    class Pipeline:
+        async def __aenter__(self) -> Pipeline:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def delete(self, *args: object) -> None:
+            operations.append(("delete", args))
+
+        def zrem(self, *args: object) -> None:
+            operations.append(("zrem", args))
+
+        async def execute(self) -> None:
+            operations.append(("execute", ()))
+
+    class Redis:
+        def pipeline(self, *, transaction: bool) -> Pipeline:
+            assert transaction
+            return Pipeline()
+
+    user = User(
+        id=7,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        email="maple@example.com",
+        password_hash="hash",
+    )
+
+    await gateway.discard_gateway_session(  # type: ignore[arg-type]
+        Redis(), user, "fresh-session"
+    )
+
+    assert operations == [
+        (
+            "delete",
+            (
+                "gateway:session:fresh-session",
+                "gateway:session:fresh-session:progress",
+            ),
+        ),
+        ("zrem", ("gateway:user-sessions:alpha.test:7", "fresh-session")),
+        ("execute", ()),
+    ]
+
+
 class HandshakeWebSocket:
     def __init__(self, app: SimpleNamespace, payload: object | None = None) -> None:
         self.app = app
