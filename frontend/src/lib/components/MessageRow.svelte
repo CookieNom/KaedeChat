@@ -39,6 +39,7 @@
   import MediaViewer from './MediaViewer.svelte';
   import ReactionEmoji from './ReactionEmoji.svelte';
   import ReactionPicker from './ReactionPicker.svelte';
+  import ReactionViewer from './ReactionViewer.svelte';
 
   let {
     message,
@@ -105,6 +106,9 @@
   let feedback = $state('');
   let mediaViewer = $state<Attachment | null>(null);
   let reactionPickerOpen = $state(false);
+  let reactionViewerOpen = $state(false);
+  let reactionViewerInitialEmoji = $state<string | undefined>(undefined);
+  let reactionViewerReturnFocus: HTMLElement | null = null;
   let recentReactionValues = $state<string[]>([]);
   let reactionBusy = $state(false);
   let mediaFailures = $state<Record<string, string>>({});
@@ -301,6 +305,23 @@
         placeContextMenu(menuElement, menuAnchorX, menuAnchorY);
       }
     });
+  }
+
+  function openReactionViewer(event: MouseEvent) {
+    event.stopPropagation();
+    reactionViewerReturnFocus = menuTrigger ?? rowElement;
+    reactionViewerInitialEmoji = Object.keys(message.reaction_counts ?? {})[0];
+    closeMenu(false);
+    reactionViewerOpen = true;
+  }
+
+  function closeReactionViewer() {
+    reactionViewerOpen = false;
+    const returnFocus = reactionViewerReturnFocus;
+    reactionViewerReturnFocus = null;
+    if (returnFocus?.isConnected) {
+      void tick().then(() => returnFocus.focus());
+    }
   }
 
   function requestDelete(event: MouseEvent) {
@@ -752,6 +773,16 @@
             <span>Add reaction</span>
           </button>
         {/if}
+        {#if Object.keys(message.reaction_counts ?? {}).length > 0}
+          <button type="button" role="menuitem" tabindex="-1" onclick={openReactionViewer}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="9" cy="9" r="3" />
+              <circle cx="17" cy="10" r="2.5" />
+              <path d="M3.5 19c.6-3.2 2.4-5 5.5-5s4.9 1.8 5.5 5M14 15c2.9-.7 5.1.6 6 3" />
+            </svg>
+            <span>View reactions</span>
+          </button>
+        {/if}
         {#if onMessageAuthor && message.author && !message.deleted_at}
           <button type="button" role="menuitem" tabindex="-1" onclick={messageAuthor}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -941,6 +972,13 @@
     </div>
   {/if}
 </article>
+{#if reactionViewerOpen}
+  <ReactionViewer
+    {message}
+    initialEmoji={reactionViewerInitialEmoji}
+    onClose={closeReactionViewer}
+  />
+{/if}
 {#if mediaViewer}
   <MediaViewer attachment={mediaViewer} onClose={() => (mediaViewer = null)} />
 {/if}

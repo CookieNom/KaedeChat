@@ -109,6 +109,11 @@ _CONTRACTS = (
         Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY | Permission.ADD_REACTIONS,
         "channel",
     ),
+    EndpointPermissionContract(
+        "reaction.list",
+        Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY,
+        "channel",
+    ),
     EndpointPermissionContract("reaction.delete.self", Permission.VIEW_CHANNEL, "channel"),
     EndpointPermissionContract("reaction.delete.other", Permission.MANAGE_MESSAGES, "channel"),
     EndpointPermissionContract("pin.update", Permission.MANAGE_MESSAGES, "channel"),

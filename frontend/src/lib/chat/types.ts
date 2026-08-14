@@ -136,6 +136,12 @@ export interface Message {
   history_page_retry_after_ms?: number;
 }
 
+export interface ReactionUsersResponse {
+  items: UserSummary[];
+  total: number;
+  next_after: string | null;
+}
+
 export interface MessageSearchResult {
   message: Message;
   channel: Channel;

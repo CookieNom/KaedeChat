@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
@@ -1052,6 +1053,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                   title: const Text('Add reaction'),
                   trailing: const Icon(Icons.chevron_right_rounded),
                   onTap: () => Navigator.pop(context, 'react-picker')),
+            if (message.reactionCounts.isNotEmpty)
+              ListTile(
+                  leading: const Icon(Icons.people_outline_rounded),
+                  title: const Text('View reactions'),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.pop(context, 'view-reactions')),
             if (canManage)
               ListTile(
                   leading: Icon(message.pinned
@@ -1110,6 +1117,17 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         case 'react-picker':
           final emoji = await _showReactionPicker(me);
           if (emoji != null) await _toggleReaction(message, emoji);
+          break;
+        case 'view-reactions':
+          await showModalBottomSheet<void>(
+            context: context,
+            isScrollControlled: true,
+            showDragHandle: true,
+            builder: (context) => _ReactionViewerSheet(
+              message: message,
+              repository: controller.repository,
+            ),
+          );
           break;
         case 'pin':
           if (message.pinned) {
@@ -1343,6 +1361,190 @@ final class _ChatErrorStrip extends StatelessWidget {
           ),
         ),
       );
+}
+
+final class _ReactionViewerSheet extends StatefulWidget {
+  const _ReactionViewerSheet({
+    required this.message,
+    required this.repository,
+  });
+
+  final KaedeMessage message;
+  final KaedeRepository repository;
+
+  @override
+  State<_ReactionViewerSheet> createState() => _ReactionViewerSheetState();
+}
+
+final class _ReactionViewerSheetState extends State<_ReactionViewerSheet> {
+  late String selectedEmoji;
+  final Map<String, List<KaedeUser>> users = <String, List<KaedeUser>>{};
+  final Map<String, EntityRef?> nextAfter = <String, EntityRef?>{};
+  final Map<String, String> errors = <String, String>{};
+  final Set<String> loading = <String>{};
+
+  List<MapEntry<String, int>> get reactions =>
+      widget.message.reactionCounts.entries
+          .where((entry) => entry.value > 0)
+          .toList(growable: false);
+
+  @override
+  void initState() {
+    super.initState();
+    selectedEmoji = reactions.first.key;
+    _load(selectedEmoji);
+  }
+
+  Future<void> _load(String emoji, {bool append = false}) async {
+    if (loading.contains(emoji)) return;
+    setState(() {
+      loading.add(emoji);
+      errors.remove(emoji);
+    });
+    try {
+      final page = await widget.repository.reactionUsers(
+        widget.message.channelRef,
+        widget.message.ref,
+        emoji,
+        after: append ? nextAfter[emoji] : null,
+      );
+      if (!mounted) return;
+      setState(() {
+        final merged = <EntityRef, KaedeUser>{
+          if (append)
+            for (final user in users[emoji] ?? const <KaedeUser>[])
+              user.ref: user,
+          for (final user in page.items) user.ref: user,
+        };
+        users[emoji] = merged.values.toList(growable: false);
+        nextAfter[emoji] = page.nextAfter;
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() {
+        errors[emoji] = userFacingError(
+          error,
+          summary: 'Could not load the people who reacted',
+        );
+      });
+    } finally {
+      if (mounted) setState(() => loading.remove(emoji));
+    }
+  }
+
+  void _select(String emoji) {
+    if (emoji == selectedEmoji) return;
+    setState(() => selectedEmoji = emoji);
+    if (!users.containsKey(emoji) && !loading.contains(emoji)) _load(emoji);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selectedUsers = users[selectedEmoji] ?? const <KaedeUser>[];
+    final error = errors[selectedEmoji];
+    final isLoading = loading.contains(selectedEmoji);
+    return SafeArea(
+      child: FractionallySizedBox(
+        heightFactor: .62,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Reactions',
+                      style:
+                          TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Close reactions',
+                    onPressed: () => Navigator.pop(context),
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                ],
+              ),
+              SizedBox(
+                height: 44,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: reactions.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 6),
+                  itemBuilder: (context, index) {
+                    final reaction = reactions[index];
+                    return ChoiceChip(
+                      selected: selectedEmoji == reaction.key,
+                      label: Text('${reaction.key}  ${reaction.value}'),
+                      onSelected: (_) => _select(reaction.key),
+                    );
+                  },
+                ),
+              ),
+              const Divider(height: 20),
+              Expanded(
+                child: error != null && selectedUsers.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(error, textAlign: TextAlign.center),
+                            const SizedBox(height: 8),
+                            TextButton(
+                              onPressed: () => _load(selectedEmoji),
+                              child: const Text('Try again'),
+                            ),
+                          ],
+                        ),
+                      )
+                    : selectedUsers.isEmpty && isLoading
+                        ? const Center(child: CircularProgressIndicator())
+                        : selectedUsers.isEmpty
+                            ? const Center(
+                                child: Text('No reactions to show.'),
+                              )
+                            : ListView.builder(
+                                itemCount: selectedUsers.length +
+                                    (nextAfter[selectedEmoji] == null ? 0 : 1),
+                                itemBuilder: (context, index) {
+                                  if (index == selectedUsers.length) {
+                                    return Padding(
+                                      padding: const EdgeInsets.only(top: 8),
+                                      child: OutlinedButton(
+                                        onPressed: isLoading
+                                            ? null
+                                            : () => _load(
+                                                  selectedEmoji,
+                                                  append: true,
+                                                ),
+                                        child: Text(isLoading
+                                            ? 'Loading…'
+                                            : 'Load more'),
+                                      ),
+                                    );
+                                  }
+                                  final user = selectedUsers[index];
+                                  return ListTile(
+                                    contentPadding: const EdgeInsets.symmetric(
+                                        horizontal: 4),
+                                    leading: UserAvatar(user: user, radius: 19),
+                                    title: Text(user.name),
+                                    subtitle: user.profileResolved
+                                        ? Text(user.handle)
+                                        : const Text(
+                                            'Profile unavailable · refreshes automatically'),
+                                  );
+                                },
+                              ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 final class _ReactionChip extends StatelessWidget {

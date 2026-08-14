@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import channels as channel_api
+from app.core.types import EntityRef
 from app.federation.schemas import GuildReactionProxyRequest
 
 
@@ -106,3 +107,69 @@ async def test_remote_guild_reaction_rejects_inconsistent_home_response(
             remove=False,
         )
     assert raised.value.detail == {"code": "FEDERATED_WRITE_RESPONSE_INVALID"}
+
+
+def reaction_user(identifier: int, domain: str, username: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=identifier,
+        origin_domain=domain,
+        username=username,
+        display_name=None,
+        avatar_hash=None,
+        banner_hash=None,
+        bio=None,
+        custom_status=None,
+        profile_version=1,
+        profile_resolved=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reaction_users_are_permission_checked_and_composite_paginated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = reaction_user(9, "local.example", "viewer")
+    access = SimpleNamespace(
+        channel=SimpleNamespace(id=20, origin_domain="remote.example"),
+        guild=SimpleNamespace(id=30, origin_domain="remote.example"),
+    )
+    message = SimpleNamespace(id=40, origin_domain="author.example")
+    users = [
+        reaction_user(7, "alpha.example", "maple"),
+        reaction_user(7, "beta.example", "cedar"),
+        reaction_user(8, "alpha.example", "birch"),
+    ]
+    session = AsyncMock()
+    session.scalars.return_value = users
+    session.scalar.return_value = 3
+    load_access = AsyncMock(return_value=access)
+    require_permissions = AsyncMock()
+    load_message = AsyncMock(return_value=message)
+    monkeypatch.setattr(channel_api, "load_channel_access", load_access)
+    monkeypatch.setattr(channel_api, "require_channel_permissions", require_permissions)
+    monkeypatch.setattr(channel_api, "channel_message", load_message)
+
+    payload = await channel_api.list_reaction_users(
+        channel_id=EntityRef("20@remote.example"),
+        message_id=EntityRef("40@author.example"),
+        emoji="🔥",
+        after=None,
+        limit=2,
+        auth=cast(Any, SimpleNamespace(user=actor)),
+        session=cast(Any, session),
+        redis=cast(Any, SimpleNamespace()),
+        settings=cast(Any, SimpleNamespace(domain="local.example")),
+    )
+
+    load_access.assert_awaited_once()
+    require_permissions.assert_awaited_once()
+    load_message.assert_awaited_once()
+    assert payload["total"] == 3
+    assert payload["next_after"] == "7@beta.example"
+    assert [
+        (item["id"], item["origin_domain"])
+        for item in cast(list[dict[str, object]], payload["items"])
+    ] == [
+        ("7", "alpha.example"),
+        ("7", "beta.example"),
+    ]

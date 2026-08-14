@@ -36,6 +36,7 @@ from app.chat.payloads import (
     guild_payload,
     message_payload,
     render_message_payload,
+    user_payload,
 )
 from app.chat.permissions import require_permissions
 from app.chat.privacy import blocked_between, lock_relationship_pair, require_can_direct_message
@@ -1629,6 +1630,69 @@ async def add_reaction(
         await session.commit()
     response.status_code = 204
     return response
+
+
+@router.get("/{channel_id}/messages/{message_id}/reactions/{emoji}")
+async def list_reaction_users(
+    channel_id: EntityRef,
+    message_id: EntityRef,
+    emoji: str = Path(min_length=1, max_length=320),
+    after: EntityRef | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    """List users for one reaction without expanding ordinary message payloads."""
+
+    access = await load_channel_access(session, settings, auth.user, channel_id)
+    await require_channel_permissions(
+        session,
+        redis,
+        access,
+        auth.user,
+        required_permissions("reaction.list"),
+    )
+    message = await channel_message(session, settings, access.channel, message_id)
+    conditions = [
+        Reaction.message_id == message.id,
+        Reaction.message_domain == message.origin_domain,
+        Reaction.emoji_key == emoji,
+    ]
+    if after is not None:
+        after_id, after_domain = after.resolve(settings.domain)
+        conditions.append(tuple_(Reaction.user_id, Reaction.user_domain) > (after_id, after_domain))
+    statement = (
+        select(User)
+        .join(
+            Reaction,
+            (Reaction.user_id == User.id) & (Reaction.user_domain == User.origin_domain),
+        )
+        .where(*conditions)
+        .order_by(Reaction.user_id, Reaction.user_domain)
+        .limit(limit + 1)
+    )
+    users = list(await session.scalars(statement))
+    has_more = len(users) > limit
+    page = users[:limit]
+    total = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(Reaction)
+            .where(
+                Reaction.message_id == message.id,
+                Reaction.message_domain == message.origin_domain,
+                Reaction.emoji_key == emoji,
+            )
+        )
+        or 0
+    )
+    return {
+        "items": [user_payload(user) for user in page],
+        "total": total,
+        "next_after": (f"{page[-1].id}@{page[-1].origin_domain}" if has_more and page else None),
+    }
 
 
 @router.delete("/{channel_id}/messages/{message_id}/reactions/{emoji}", status_code=204)

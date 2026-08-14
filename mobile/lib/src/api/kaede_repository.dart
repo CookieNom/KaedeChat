@@ -13,6 +13,18 @@ import 'package:uuid/uuid.dart';
 List<String> messageAttachmentIds(Iterable<EntityRef> attachments) =>
     attachments.map((reference) => reference.id.value).toList(growable: false);
 
+final class ReactionUserPage {
+  const ReactionUserPage({
+    required this.items,
+    required this.total,
+    required this.nextAfter,
+  });
+
+  final List<KaedeUser> items;
+  final int total;
+  final EntityRef? nextAfter;
+}
+
 /// Completes the two-phase binding required for scanned profile media.
 ///
 /// The first commit queues processing and commonly returns a pending attachment.
@@ -396,6 +408,38 @@ final class KaedeRepository {
           EntityRef channel, EntityRef message, String emoji) =>
       api.sendJson('DELETE',
           '/api/v1/channels/${channel.wire}/messages/${message.wire}/reactions/${Uri.encodeComponent(emoji)}');
+  Future<ReactionUserPage> reactionUsers(
+    EntityRef channel,
+    EntityRef message,
+    String emoji, {
+    EntityRef? after,
+    int limit = 50,
+  }) async {
+    final payload = await api.getJson(
+      '/api/v1/channels/${channel.wire}/messages/${message.wire}/reactions/${Uri.encodeComponent(emoji)}',
+      query: <String, Object?>{
+        'limit': limit,
+        if (after != null) 'after': after.wire,
+      },
+    );
+    final rawItems = payload['items'];
+    final items = rawItems is List
+        ? rawItems
+            .whereType<Map<Object?, Object?>>()
+            .map((item) => KaedeUser.fromJson(
+                item.map((key, value) => MapEntry('$key', value))))
+            .toList(growable: false)
+        : const <KaedeUser>[];
+    final rawNext = payload['next_after'];
+    return ReactionUserPage(
+      items: items,
+      total: int.tryParse('${payload['total'] ?? 0}') ?? 0,
+      nextAfter: rawNext is String && rawNext.isNotEmpty
+          ? EntityRef.parse(rawNext)
+          : null,
+    );
+  }
+
   Future<void> pin(EntityRef channel, EntityRef message) => api.sendJson(
       'PUT', '/api/v1/channels/${channel.wire}/pins/${message.wire}');
   Future<void> unpin(EntityRef channel, EntityRef message) => api.sendJson(
