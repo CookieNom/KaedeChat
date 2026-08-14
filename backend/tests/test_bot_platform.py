@@ -1,4 +1,6 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from pydantic import ValidationError
@@ -12,7 +14,9 @@ from app.api.applications import (
     CredentialCreate,
     WorkerCreate,
     bot_username,
+    ensure_personal_developer_team,
     normalize_values,
+    team_payload,
 )
 from app.api.bot_federation import _target_policy_allows
 from app.api.bot_gateway import encrypted_message_event, event_intent, filtered_event
@@ -24,7 +28,13 @@ from app.bots.auth import (
     dpop_message,
     worker_assertion_message,
 )
-from app.db.bot_models import BotApplication, BotToken, BotWorker
+from app.db.bot_models import (
+    BotApplication,
+    BotToken,
+    BotWorker,
+    DeveloperTeam,
+    DeveloperTeamMember,
+)
 from app.db.models import User
 
 
@@ -76,6 +86,95 @@ def principal(*, scopes: set[str], intents: set[str]) -> BotPrincipal:
 def test_bot_username_is_normal_account_format_and_unique_suffix() -> None:
     assert bot_username("Weather Bot!", 123456789012345678) == "weather_bot_12345678"
     assert len(bot_username("x" * 100, 123456789012345678)) <= 32
+
+
+def test_personal_team_payload_has_a_stable_product_name() -> None:
+    team = DeveloperTeam(
+        id=1,
+        origin_domain="local.example",
+        name="Old display name's applications",
+        personal=True,
+    )
+    team.created_at = datetime.now(UTC)
+    assert team_payload(team, "owner")["name"] == "Personal"
+
+
+@pytest.mark.asyncio
+async def test_personal_team_is_provisioned_for_every_local_human() -> None:
+    user = User(
+        id=7,
+        origin_domain="local.example",
+        is_local=True,
+        account_type="human",
+        username="alice",
+        password_hash="hash",
+    )
+    result = Mock()
+    result.one_or_none.return_value = None
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=None),
+        execute=AsyncMock(return_value=result),
+        add_all=Mock(),
+        flush=AsyncMock(),
+    )
+    snowflake = SimpleNamespace(mint=AsyncMock(return_value=99))
+
+    team, member = await ensure_personal_developer_team(
+        session,
+        SimpleNamespace(domain="local.example"),
+        SimpleNamespace(user=user),
+        snowflake,
+    )
+
+    assert team.name == "Personal"
+    assert team.personal is True
+    assert member.role == "owner"
+    assert (member.user_id, member.user_domain) == (7, "local.example")
+    session.add_all.assert_called_once_with([team, member])
+    session.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_existing_personal_team_name_is_normalized() -> None:
+    user = User(
+        id=7,
+        origin_domain="local.example",
+        is_local=True,
+        account_type="human",
+        username="alice",
+        password_hash="hash",
+    )
+    team = DeveloperTeam(
+        id=8,
+        origin_domain="local.example",
+        name="Alice's applications",
+        personal=True,
+    )
+    member = DeveloperTeamMember(
+        team_id=8,
+        team_domain="local.example",
+        user_id=7,
+        user_domain="local.example",
+        user_is_local=True,
+        role="owner",
+    )
+    result = Mock()
+    result.one_or_none.return_value = (team, member)
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=None),
+        execute=AsyncMock(return_value=result),
+    )
+
+    resolved_team, resolved_member = await ensure_personal_developer_team(
+        session,
+        SimpleNamespace(domain="local.example"),
+        SimpleNamespace(user=user),
+        SimpleNamespace(mint=AsyncMock()),
+    )
+
+    assert resolved_team is team
+    assert resolved_team.name == "Personal"
+    assert resolved_member.role == "owner"
 
 
 def test_scope_and_worker_validation_is_fail_closed() -> None:

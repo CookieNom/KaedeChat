@@ -497,11 +497,72 @@ def bot_username(name: str, app_id: int) -> str:
 def team_payload(team: DeveloperTeam, role: str) -> dict[str, object]:
     return {
         "ref": f"{team.id}@{team.origin_domain}",
-        "name": team.name,
+        "name": "Personal" if team.personal else team.name,
         "personal": team.personal,
         "role": role,
         "created_at": team.created_at.isoformat(),
     }
+
+
+async def ensure_personal_developer_team(
+    session: AsyncSession,
+    settings: Settings,
+    auth: AuthenticatedUser,
+    snowflake: SnowflakeGenerator,
+) -> tuple[DeveloperTeam, DeveloperTeamMember]:
+    """Return the user's permanent personal application workspace."""
+    if not auth.user.is_local or auth.user.account_type != "human":
+        raise HTTPException(status_code=403, detail={"code": "LOCAL_HUMAN_ACCOUNT_REQUIRED"})
+
+    # Provisioning is lazy so existing installations do not need a row for every
+    # account up front. The per-user transaction lock makes concurrent portal
+    # loads and application creates converge on the same workspace.
+    lock_scope = f"kaede-personal-developer-team:{auth.user.origin_domain}:{auth.user.id}"
+    await session.scalar(select(func.pg_advisory_xact_lock(func.hashtextextended(lock_scope, 0))))
+    row = (
+        await session.execute(
+            select(DeveloperTeam, DeveloperTeamMember)
+            .join(
+                DeveloperTeamMember,
+                (DeveloperTeamMember.team_id == DeveloperTeam.id)
+                & (DeveloperTeamMember.team_domain == DeveloperTeam.origin_domain),
+            )
+            .where(
+                DeveloperTeam.personal.is_(True),
+                DeveloperTeamMember.user_id == auth.user.id,
+                DeveloperTeamMember.user_domain == auth.user.origin_domain,
+                DeveloperTeamMember.role == "owner",
+            )
+            .order_by(DeveloperTeam.created_at, DeveloperTeam.id)
+            .limit(1)
+            .with_for_update()
+        )
+    ).one_or_none()
+    if row is not None:
+        team, member = row
+        # Older deployments used "<display name>'s applications". Normalize it
+        # when the owner next opens the portal so the product name is consistent.
+        team.name = "Personal"
+        member.role = "owner"
+        return team, member
+
+    team = DeveloperTeam(
+        id=await snowflake.mint(),
+        origin_domain=settings.domain,
+        name="Personal",
+        personal=True,
+    )
+    member = DeveloperTeamMember(
+        team_id=team.id,
+        team_domain=team.origin_domain,
+        user_id=auth.user.id,
+        user_domain=auth.user.origin_domain,
+        user_is_local=True,
+        role="owner",
+    )
+    session.add_all([team, member])
+    await session.flush()
+    return team, member
 
 
 async def managed_team(
@@ -523,6 +584,7 @@ async def managed_team(
                 DeveloperTeam.origin_domain == team_domain,
                 DeveloperTeamMember.user_id == auth.user.id,
                 DeveloperTeamMember.user_domain == auth.user.origin_domain,
+                (DeveloperTeam.personal.is_(False)) | (DeveloperTeamMember.role == "owner"),
             )
         )
     ).one_or_none()
@@ -535,7 +597,11 @@ async def managed_team(
 async def list_developer_teams(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
 ) -> list[dict[str, object]]:
+    await ensure_personal_developer_team(session, settings, auth, snowflake)
+    await session.commit()
     rows = (
         await session.execute(
             select(DeveloperTeam, DeveloperTeamMember.role)
@@ -625,6 +691,8 @@ async def add_developer_team_member(
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     team, actor = await managed_team(session, settings, auth, team_ref)
+    if team.personal:
+        raise HTTPException(status_code=409, detail={"code": "PERSONAL_TEAM_MEMBERS_IMMUTABLE"})
     require_team_role(actor, "owner", "administrator")
     if payload.role == "owner" and actor.role != "owner":
         raise HTTPException(status_code=403, detail={"code": "TEAM_OWNER_REQUIRED"})
@@ -684,6 +752,8 @@ async def patch_developer_team_member(
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     team, actor = await managed_team(session, settings, auth, team_ref)
+    if team.personal:
+        raise HTTPException(status_code=409, detail={"code": "PERSONAL_TEAM_MEMBERS_IMMUTABLE"})
     require_team_role(actor, "owner", "administrator")
     if payload.role == "owner" and actor.role != "owner":
         raise HTTPException(status_code=403, detail={"code": "TEAM_OWNER_REQUIRED"})
@@ -712,6 +782,8 @@ async def remove_developer_team_member(
     settings: Settings = Depends(get_settings),
 ) -> Response:
     team, actor = await managed_team(session, settings, auth, team_ref)
+    if team.personal:
+        raise HTTPException(status_code=409, detail={"code": "PERSONAL_TEAM_MEMBERS_IMMUTABLE"})
     user_id, user_domain = user_ref.resolve(settings.domain)
     self_remove = (user_id, user_domain) == (auth.user.id, auth.user.origin_domain)
     if not self_remove:
@@ -754,37 +826,9 @@ async def create_application(
         _, selected_team_member = await managed_team(session, settings, auth, payload.team_ref)
         require_team_role(selected_team_member, "owner", "administrator", "developer")
     else:
-        selected_team_member = await session.scalar(
-            select(DeveloperTeamMember)
-            .join(
-                DeveloperTeam,
-                (DeveloperTeam.id == DeveloperTeamMember.team_id)
-                & (DeveloperTeam.origin_domain == DeveloperTeamMember.team_domain),
-            )
-            .where(
-                DeveloperTeam.personal.is_(True),
-                DeveloperTeamMember.user_id == auth.user.id,
-                DeveloperTeamMember.user_domain == auth.user.origin_domain,
-            )
-            .with_for_update()
+        _, selected_team_member = await ensure_personal_developer_team(
+            session, settings, auth, snowflake
         )
-        if selected_team_member is None:
-            team_id = await snowflake.mint()
-            team = DeveloperTeam(
-                id=team_id,
-                origin_domain=settings.domain,
-                name=f"{auth.user.display_name or auth.user.username}'s applications",
-                personal=True,
-            )
-            selected_team_member = DeveloperTeamMember(
-                team_id=team_id,
-                team_domain=settings.domain,
-                user_id=auth.user.id,
-                user_domain=auth.user.origin_domain,
-                user_is_local=True,
-                role="owner",
-            )
-            session.add_all([team, selected_team_member])
     if selected_team_member is None:
         raise RuntimeError("application team could not be resolved")
     app_id = await snowflake.mint()

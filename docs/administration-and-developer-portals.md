@@ -133,8 +133,10 @@ no action, mark duplicates, and reopen cases. Report creation is rate limited to
 ## Developer Portal
 
 Every active local human user may create applications. Opening `/developers`
-creates a personal developer team when needed. Users may also create named teams
-and add other local users.
+provisions a protected **Personal** team if the account does not have one yet.
+Personal is always available, stays private to that account, and owns new
+applications by default even when the user also belongs to shared teams. Users
+may create named teams and add other local users to those shared workspaces.
 
 Developer-team roles are separate from instance-administrator roles:
 
