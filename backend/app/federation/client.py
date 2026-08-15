@@ -11,7 +11,6 @@ from urllib.parse import urlencode
 import anyio
 import httpx
 from anyio import WouldBlock
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.federation import (
@@ -37,11 +36,15 @@ from app.federation.security import (
 )
 
 MAX_FEDERATION_RESPONSE_BYTES = 4 * 1024 * 1024
-# Keep slow or hostile peers from occupying every SQLAlchemy connection in a
-# worker while request signing/policy locks remain attached to the caller's
-# transaction. The PostgreSQL destination lock below supplies cross-worker
-# serialization; this limiter bounds distinct slow destinations per process.
+# Keep slow or hostile streams from occupying every SQLAlchemy connection in a
+# worker. Hot-link delivery and remote media share this deliberately small
+# budget.
 OUTBOUND_FEDERATION_LIMITER = anyio.CapacityLimiter(4)
+# Short interactive requests use a separate budget so four image downloads or
+# a busy delivery link cannot make reactions, joins, voice, or moderation fail
+# immediately. Keep it deliberately small because callers may already own a
+# SQL session while contacting the peer.
+OUTBOUND_FEDERATION_REQUEST_LIMITER = anyio.CapacityLimiter(4)
 
 
 def silence_blocks_path(path: str) -> bool:
@@ -110,7 +113,7 @@ async def signed_request(
     max_response_bytes: int = MAX_FEDERATION_RESPONSE_BYTES,
 ) -> httpx.Response:
     try:
-        OUTBOUND_FEDERATION_LIMITER.acquire_nowait()
+        OUTBOUND_FEDERATION_REQUEST_LIMITER.acquire_nowait()
     except WouldBlock as exc:
         raise FederationNetworkError("outbound federation is busy; retry shortly") from exc
     try:
@@ -140,7 +143,7 @@ async def signed_request(
     except TimeoutError as exc:
         raise FederationNetworkError("federation request exceeded its deadline") from exc
     finally:
-        OUTBOUND_FEDERATION_LIMITER.release()
+        OUTBOUND_FEDERATION_REQUEST_LIMITER.release()
 
 
 async def _prepare_signed_request(
@@ -160,19 +163,11 @@ async def _prepare_signed_request(
         raise FederationNetworkError("unsafe federation request path")
     if not 0 <= hop <= 5:
         raise FederationNetworkError("federation hop count is outside the allowed range")
-    # All outbound federation uses the same policy→destination order as block
-    # administration. The locks remain attached to the caller's transaction,
-    # fencing discovery and the network exchange against a completed block.
+    # Keep the policy lock attached to the caller's transaction so a completed
+    # block fences discovery and the network exchange. Interactive requests do
+    # not acquire the outbox-drain lock: it coalesces duplicate background
+    # drains and must not reject unrelated user actions to the same peer.
     await lock_block_policy_shared(session)
-    destination_lock = await session.scalar(
-        select(
-            func.pg_try_advisory_xact_lock(
-                func.hashtextextended(f"kaede-outbox-drain:{destination}", 0)
-            )
-        )
-    )
-    if destination_lock is not True:
-        raise FederationNetworkError("another request to this peer is already in progress")
     if settings.federation_mode == "allowlist":
         approved = await session.get(Instance, destination)
         if approved is None or approved.is_self or approved.federation_mode != "allowlist":

@@ -225,6 +225,7 @@ final class GatewayClient {
   bool _closed = false;
   bool _awaitingHeartbeatAck = false;
   Future<void>? _reconnecting;
+  Future<void>? _foregroundReconnect;
   int _malformedFrames = 0;
   var _health = const GatewayHealth(
     GatewayConnectionPhase.offline,
@@ -261,6 +262,41 @@ final class GatewayClient {
       }
       rethrow;
     }
+  }
+
+  /// Replaces a transport attempt that may have been suspended by the mobile
+  /// operating system while the app was in the background.
+  ///
+  /// Dart timers and socket handshakes are not guaranteed to resume promptly
+  /// after Android freezes a process. A fresh foreground attempt is therefore
+  /// generation-fenced from the old supervisor instead of waiting for its
+  /// stale backoff timer. The controller calls this only on a real background
+  /// to foreground transition, so even a socket whose health still appears
+  /// connected is replaced after Android may have suspended it.
+  Future<void> reconnectAfterForeground(SessionTokens tokens) {
+    if (_foregroundReconnect case final pending?) return pending;
+    late final Future<void> pending;
+    pending = _restartAfterForeground(tokens).whenComplete(() {
+      if (identical(_foregroundReconnect, pending)) {
+        _foregroundReconnect = null;
+      }
+    });
+    _foregroundReconnect = pending;
+    return pending;
+  }
+
+  Future<void> _restartAfterForeground(SessionTokens tokens) async {
+    _reconnecting = null;
+    _reconnectAttempts = 0;
+    await connect(tokens);
+    if (_health.isConnected) return;
+    // Keep the foreground operation shared until the replacement transport is
+    // actually identified/resumed. WebSocketChannel.ready only means the HTTP
+    // upgrade succeeded; treating it as completion lets a second lifecycle
+    // callback tear the socket down before HELLO/READY arrives.
+    await health
+        .firstWhere((health) => health.isConnected)
+        .timeout(const Duration(seconds: 15));
   }
 
   Future<void> _openTransport(SessionTokens tokens) async {
@@ -339,6 +375,7 @@ final class GatewayClient {
     _sequence = null;
     _awaitingHeartbeatAck = false;
     _reconnecting = null;
+    _foregroundReconnect = null;
     await _disconnectTransport();
     _setHealth(const GatewayHealth(GatewayConnectionPhase.offline));
   }
@@ -572,10 +609,28 @@ final class GatewayClient {
     _heartbeat?.cancel();
     _heartbeat = null;
     _awaitingHeartbeatAck = false;
-    await _subscription?.cancel();
+    // Detach first. Android can freeze a socket while the app is backgrounded,
+    // and waiting indefinitely for that stale stream/sink to acknowledge
+    // cancellation prevents the replacement connection from ever opening.
+    final subscription = _subscription;
     _subscription = null;
-    await _socket?.sink.close();
+    final socket = _socket;
     _socket = null;
+    if (subscription != null) {
+      try {
+        await subscription.cancel().timeout(const Duration(seconds: 1));
+      } on Object {
+        // The generation fence already makes callbacks from this abandoned
+        // transport inert. Foreground recovery must not wait on its teardown.
+      }
+    }
+    if (socket != null) {
+      try {
+        await socket.sink.close().timeout(const Duration(seconds: 1));
+      } on Object {
+        // The OS/network stack may never finish closing a suspended socket.
+      }
+    }
   }
 
   void _setHealth(GatewayHealth health) {

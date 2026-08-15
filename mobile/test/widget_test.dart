@@ -1338,6 +1338,17 @@ void main() {
       expect(recovered.gatewayProtocolWarning, isNull);
       expect(recovered.pushWarning, isNull);
     });
+
+    test('push relay migration requires the same enabled installation', () {
+      final devices = <Map<String, Object?>>[
+        <String, Object?>{'id': 'old-device', 'enabled': true},
+        <String, Object?>{'id': 'this-device', 'enabled': false},
+      ];
+
+      expect(hasRegisteredPushInstallation(devices, 'this-device'), isFalse);
+      expect(hasRegisteredPushInstallation(devices, 'old-device'), isTrue);
+      expect(hasRegisteredPushInstallation(devices, 'unknown-device'), isFalse);
+    });
   });
 
   group('local message notification policy', () {

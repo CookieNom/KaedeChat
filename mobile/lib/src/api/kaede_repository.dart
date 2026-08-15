@@ -925,6 +925,9 @@ final class KaedeRepository {
         },
       );
 
+  Future<List<Map<String, Object?>>> pushDevices() =>
+      api.getList('/api/v1/users/@me/push-devices');
+
   Future<Map<String, Object?>> beginRelayPushEnrollment({
     required String installationId,
     required String platform,

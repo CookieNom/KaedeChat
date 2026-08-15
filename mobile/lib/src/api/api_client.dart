@@ -63,6 +63,8 @@ final class KaedeApiClient {
 
   Future<bool> pushOptedIn() => _vault.readPushOptIn();
 
+  Future<bool?> pushOptInChoice() => _vault.readPushOptInChoice();
+
   Future<void> savePushOptIn(bool enabled) => _vault.writePushOptIn(enabled);
 
   Future<void> clearRelayPushState() => _vault.clearRelayPushState();

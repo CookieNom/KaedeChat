@@ -62,6 +62,16 @@ String _randomPushToken() {
 bool notificationPreviewsEnabled(Map<String, bool> settings) =>
     settings['show_notification_previews'] ?? true;
 
+bool hasRegisteredPushInstallation(
+  Iterable<Map<String, Object?>> devices,
+  String installationId,
+) =>
+    devices.any(
+      (device) =>
+          '${device['id'] ?? ''}' == installationId &&
+          device['enabled'] == true,
+    );
+
 /// Resolves a persisted composite reference against the conversations the
 /// account can currently access. DMs are the deterministic first fallback,
 /// followed by guild text/announcement channels in server and channel order.
@@ -486,6 +496,7 @@ final class MobileController extends StateNotifier<MobileState> {
   var _validGatewayEventsAfterWarning = 0;
 
   void setAppActive(bool active) {
+    final becameActive = active && !_appActive;
     _appActive = active;
     push.setAppVisibility(
       active: active,
@@ -496,6 +507,9 @@ final class MobileController extends StateNotifier<MobileState> {
       _appLockTimer?.cancel();
       _appLockTimer = null;
       unawaited(_lockAfterBackgroundIfNeeded());
+      if (becameActive) {
+        unawaited(retryRealtime(foreground: true));
+      }
       unawaited(_flushOutbox());
       unawaited(_refreshReadBadges());
       unawaited(_activateNotifications());
@@ -580,11 +594,15 @@ final class MobileController extends StateNotifier<MobileState> {
         : state.copyWith(pushWarning: warning);
   }
 
-  Future<void> retryRealtime() async {
+  Future<void> retryRealtime({bool foreground = false}) async {
     final tokens = api.tokens;
     if (tokens == null || state.phase != SessionPhase.ready) return;
     try {
-      await gateway.connect(tokens);
+      if (foreground) {
+        await gateway.reconnectAfterForeground(tokens);
+      } else {
+        await gateway.connect(tokens);
+      }
     } on Object {
       // GatewayClient keeps retrying and publishes the actionable state.
     }
@@ -3010,8 +3028,26 @@ final class MobileController extends StateNotifier<MobileState> {
 
   Future<void> _requestNotificationDelivery() async {
     try {
-      if (!await api.pushOptedIn()) return;
-      if (!await push.requestPermission()) {
+      final choice = await api.pushOptInChoice();
+      if (choice == false) return;
+      if (choice == null) {
+        // Relay transport introduced an explicit local preference after older
+        // builds had already registered devices. Migrate only an installation
+        // that the authenticated home confirms was previously registered;
+        // this preserves an existing choice without prompting or silently
+        // enrolling a new installation.
+        final installationId = await api.installationId();
+        final devices = await repository.pushDevices();
+        final previouslyRegistered =
+            hasRegisteredPushInstallation(devices, installationId);
+        if (!previouslyRegistered || !await push.permissionGranted()) return;
+        final migrated = await _registerPushDevice(
+          requireStoredOptIn: false,
+        );
+        if (migrated) await api.savePushOptIn(true);
+        return;
+      }
+      if (!await push.permissionGranted()) {
         _setPushRegistrationWarning(
           'System notifications are turned off. Enable them in Android settings to receive alerts.',
         );

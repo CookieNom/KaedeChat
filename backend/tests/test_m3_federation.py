@@ -41,6 +41,8 @@ from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
 from app.db.models import Channel, Instance, PeerKey, User
 from app.federation.client import (
     OUTBOUND_FEDERATION_LIMITER,
+    OUTBOUND_FEDERATION_REQUEST_LIMITER,
+    _prepare_signed_request,
     signed_request,
     silence_blocks_path,
 )
@@ -218,9 +220,9 @@ async def test_rejected_peer_refresh_does_not_mutate_cached_trust(
 
 @pytest.mark.asyncio
 async def test_outbound_federation_capacity_fails_before_touching_database() -> None:
-    borrowers = [object() for _ in range(4)]
+    borrowers = [object() for _ in range(OUTBOUND_FEDERATION_REQUEST_LIMITER.total_tokens)]
     for borrower in borrowers:
-        OUTBOUND_FEDERATION_LIMITER.acquire_on_behalf_of_nowait(borrower)
+        OUTBOUND_FEDERATION_REQUEST_LIMITER.acquire_on_behalf_of_nowait(borrower)
     session = SimpleNamespace(get=AsyncMock(), scalar=AsyncMock())
     try:
         with pytest.raises(FederationNetworkError, match="busy"):
@@ -233,10 +235,83 @@ async def test_outbound_federation_capacity_fails_before_touching_database() -> 
             )
     finally:
         for borrower in borrowers:
-            OUTBOUND_FEDERATION_LIMITER.release_on_behalf_of(borrower)
+            OUTBOUND_FEDERATION_REQUEST_LIMITER.release_on_behalf_of(borrower)
 
     session.get.assert_not_awaited()
     session.scalar.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_slow_stream_capacity_does_not_block_interactive_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    borrowers = [object() for _ in range(OUTBOUND_FEDERATION_LIMITER.total_tokens)]
+    for borrower in borrowers:
+        OUTBOUND_FEDERATION_LIMITER.acquire_on_behalf_of_nowait(borrower)
+    client = httpx.AsyncClient()
+    monkeypatch.setattr(
+        "app.federation.client._prepare_signed_request",
+        AsyncMock(
+            return_value=(
+                "https://beta.localhost",
+                client,
+                "/_kaede/v1/test",
+                b"",
+                {},
+            )
+        ),
+    )
+    request = AsyncMock(return_value=httpx.Response(204))
+    monkeypatch.setattr("app.federation.client.bounded_http_request", request)
+    try:
+        response = await signed_request(
+            cast(Any, SimpleNamespace()),
+            settings(),
+            "POST",
+            "beta.localhost",
+            "/_kaede/v1/test",
+        )
+    finally:
+        for borrower in borrowers:
+            OUTBOUND_FEDERATION_LIMITER.release_on_behalf_of(borrower)
+
+    assert response.status_code == 204
+    request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_interactive_request_does_not_take_background_drain_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(scalar=AsyncMock())
+    monkeypatch.setattr("app.federation.client.lock_block_policy_shared", AsyncMock())
+    monkeypatch.setattr("app.federation.client.matching_block", AsyncMock(return_value=None))
+    monkeypatch.setattr("app.federation.client.ensure_peer", AsyncMock())
+    monkeypatch.setattr(
+        "app.federation.client.federation_signing_headers",
+        AsyncMock(return_value={"Authorization": "test"}),
+    )
+    client = httpx.AsyncClient()
+    monkeypatch.setattr(
+        "app.federation.client.peer_http_client",
+        AsyncMock(return_value=("https://beta.localhost", client)),
+    )
+
+    _, prepared_client, target, _, _ = await _prepare_signed_request(
+        cast(Any, session),
+        settings(),
+        "POST",
+        "beta.localhost",
+        "/_kaede/v1/guilds/1/proxy-reaction",
+        payload={"emoji": "🔥"},
+        query=None,
+        request_timeout=10,
+        hop=1,
+    )
+
+    assert target == "/_kaede/v1/guilds/1/proxy-reaction"
+    session.scalar.assert_not_awaited()
+    await prepared_client.aclose()
 
 
 @pytest.mark.asyncio

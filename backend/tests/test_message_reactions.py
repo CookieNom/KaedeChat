@@ -121,6 +121,7 @@ def reaction_user(identifier: int, domain: str, username: str) -> SimpleNamespac
         custom_status=None,
         profile_version=1,
         profile_resolved=True,
+        account_type="user",
     )
 
 

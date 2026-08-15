@@ -123,8 +123,16 @@ final class SessionVault {
     await storage.delete(key: _pushOptIn);
   }
 
-  Future<bool> readPushOptIn() async =>
-      (await storage.read(key: _pushOptIn)) == 'true';
+  Future<bool?> readPushOptInChoice() async {
+    final value = await storage.read(key: _pushOptIn);
+    return switch (value) {
+      'true' => true,
+      'false' => false,
+      _ => null,
+    };
+  }
+
+  Future<bool> readPushOptIn() async => await readPushOptInChoice() ?? false;
 
   Future<void> writePushOptIn(bool enabled) =>
       storage.write(key: _pushOptIn, value: enabled ? 'true' : 'false');
