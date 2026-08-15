@@ -99,13 +99,19 @@ http://media.{$KAEDE_DOMAIN} {
 http://push.{$KAEDE_DOMAIN} {
 	@untrusted_edge not header X-Kaede-Edge-Secret {$KAEDE_EDGE_SECRET}
 	respond @untrusted_edge 403
-	request_header -X-Kaede-Edge-Secret
-	@relay path /push/v1/* /_kaede/push/v1/* /.well-known/kaede/*
-	reverse_proxy @relay api:8000 {
-		header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
-		header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
-		header_up X-Forwarded-Proto {http.request.header.X-Forwarded-Proto}
-		header_up -X-Kaede-Edge-Secret
+
+	# Preserve authentication-before-sanitization ordering. At top level Caddy
+	# sorts request_header ahead of respond, which would remove the credential
+	# before @untrusted_edge evaluates and reject every legitimate request.
+	route {
+		request_header -X-Kaede-Edge-Secret
+		@relay path /push/v1/* /_kaede/push/v1/* /.well-known/kaede/*
+		reverse_proxy @relay api:8000 {
+			header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
+			header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
+			header_up X-Forwarded-Proto {http.request.header.X-Forwarded-Proto}
+			header_up -X-Kaede-Edge-Secret
+		}
+		respond 404
 	}
-	respond 404
 }
