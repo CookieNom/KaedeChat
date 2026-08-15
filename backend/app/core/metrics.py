@@ -17,6 +17,8 @@ from app.db.models import (
     FederationReplicaUsage,
     Guild,
     Instance,
+    PushRelayDelivery,
+    PushWakeOutbox,
     SearchIndexOutbox,
 )
 
@@ -126,6 +128,26 @@ async def render_metrics(redis: Redis, sessionmaker: async_sessionmaker[AsyncSes
                 )
             )
         ).one()
+        push_home_pending, push_home_oldest = (
+            await session.execute(
+                select(func.count(PushWakeOutbox.request_id), func.min(PushWakeOutbox.created_at))
+            )
+        ).one()
+        push_relay_pending, push_relay_oldest = (
+            await session.execute(
+                select(
+                    func.count(PushRelayDelivery.request_id),
+                    func.min(PushRelayDelivery.created_at),
+                ).where(PushRelayDelivery.state == "pending")
+            )
+        ).one()
+    now = time.time()
+    push_home_oldest_age = (
+        max(0.0, now - push_home_oldest.timestamp()) if push_home_oldest is not None else 0.0
+    )
+    push_relay_oldest_age = (
+        max(0.0, now - push_relay_oldest.timestamp()) if push_relay_oldest is not None else 0.0
+    )
     failure_total = int(await redis.get("metrics:counter:federation_delivery_failures") or 0)
     quota_rejections = int(
         await redis.get("metrics:counter:federation_inbox_quota_rejections") or 0
@@ -213,6 +235,18 @@ async def render_metrics(redis: Redis, sessionmaker: async_sessionmaker[AsyncSes
         "# HELP kaede_search_index_retrying_messages Search projections delayed by errors.",
         "# TYPE kaede_search_index_retrying_messages gauge",
         _sample("kaede_search_index_retrying_messages", int(search_failed or 0)),
+        "# HELP kaede_push_home_outbox_pending Content-free wakes awaiting relay acceptance.",
+        "# TYPE kaede_push_home_outbox_pending gauge",
+        _sample("kaede_push_home_outbox_pending", int(push_home_pending or 0)),
+        "# HELP kaede_push_home_outbox_oldest_age_seconds Age of the oldest home wake.",
+        "# TYPE kaede_push_home_outbox_oldest_age_seconds gauge",
+        _sample("kaede_push_home_outbox_oldest_age_seconds", push_home_oldest_age),
+        "# HELP kaede_push_relay_queue_pending Wakes awaiting the platform provider.",
+        "# TYPE kaede_push_relay_queue_pending gauge",
+        _sample("kaede_push_relay_queue_pending", int(push_relay_pending or 0)),
+        "# HELP kaede_push_relay_queue_oldest_age_seconds Age of the oldest relay wake.",
+        "# TYPE kaede_push_relay_queue_oldest_age_seconds gauge",
+        _sample("kaede_push_relay_queue_oldest_age_seconds", push_relay_oldest_age),
         "# HELP kaede_job_duration_seconds_total Cumulative observed task duration.",
         "# TYPE kaede_job_duration_seconds_total counter",
         "# HELP kaede_job_runs_total Observed task executions.",

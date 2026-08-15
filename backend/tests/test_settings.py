@@ -243,6 +243,42 @@ def test_mobile_push_service_account_is_validated_and_secret_safe() -> None:
     assert gateway.push_enabled is True
 
 
+def test_official_push_relay_needs_no_home_firebase_secret() -> None:
+    home = settings(service_role="worker", push_relay_enabled=True)
+    assert home.push_relay_url == "https://push.kaede.chat"
+    assert home.push_relay_origin == "kaede.chat"
+    assert home.push_relay_fcm_service_account_b64 is None
+
+    with pytest.raises(ValidationError, match="push_relay_origin"):
+        settings(
+            service_role="worker",
+            domain="relay.example",
+            push_relay_origin="other.example",
+            push_relay_service_enabled=True,
+            push_relay_fcm_service_account_b64=VALID_FCM_ACCOUNT,
+        )
+    with pytest.raises(ValidationError, match="push_relay_fcm_service_account_b64"):
+        settings(
+            service_role="worker",
+            domain="relay.example",
+            push_relay_origin="relay.example",
+            push_relay_service_enabled=True,
+        )
+
+    relay = settings(
+        service_role="worker",
+        domain="relay.example",
+        push_relay_url="https://push.relay.example",
+        push_relay_origin="relay.example",
+        push_relay_service_enabled=True,
+        push_relay_fcm_service_account_b64=VALID_FCM_ACCOUNT,
+    )
+    assert VALID_FCM_ACCOUNT not in repr(relay)
+
+    with pytest.raises(ValidationError, match="origin URL"):
+        settings(push_relay_url="https://push.kaede.chat/tenant-a")
+
+
 def test_media_configuration_is_bounded_and_secret_safe() -> None:
     configured = settings()
     assert "GK00000000000000000000000000000000" not in repr(configured)

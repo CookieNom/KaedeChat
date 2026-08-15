@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+import json
+import re
+import secrets
+import time
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from redis.asyncio import Redis
 from sqlalchemy import delete, exists, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -17,6 +23,7 @@ from app.chat.payloads import public_user_display_name
 from app.chat.permissions import get_permissions
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
+from app.core.task_wake import enqueue_best_effort
 from app.db.models import (
     Attachment,
     Channel,
@@ -25,25 +32,59 @@ from app.db.models import (
     GuildNotificationSetting,
     Message,
     PushDevice,
+    PushRelayDelivery,
+    PushRelaySubscription,
     ReadState,
     User,
     UserSettings,
 )
+from app.federation.network import FederationNetworkError, normalize_domain
+from app.federation.security import (
+    FederationPrincipal,
+    authenticate_federation,
+    federation_client_ip,
+    matching_block,
+)
+from app.push.client import revoke_relay_subscription as revoke_remote_relay_subscription
 from app.push.presentation import (
     notification_previews_enabled,
     push_body,
     push_presentation,
+)
+from app.push.relay import (
+    RELAY_GRANT_TTL_SECONDS,
+    RELAY_SUBSCRIPTION_DAYS,
+    encrypt_provider_token,
+    encrypt_wake_secret,
+    opaque_token,
+    secret_digest,
+    signed_push_document,
+    subscription_id,
+    utc_from_epoch,
+    verify_push_document,
 )
 from app.push.schemas import (
     PushDeviceCreate,
     PushDeviceResponse,
     PushNotificationRedeem,
     PushNotificationResponse,
+    PushRelayEnrollmentComplete,
+    PushRelayEnrollmentCreate,
+    PushRelaySubscriptionCreate,
+    PushRelayWakeCreate,
 )
 from app.push.service import PUSH_TOKEN_CONTEXT
 from app.push.sync import claim_push_sync, load_push_sync
 
 router = APIRouter(prefix="/api/v1/users/@me/push-devices", tags=["push devices"])
+relay_router = APIRouter(tags=["push relay"])
+
+
+def require_relay_transport_host(request: Request, settings: Settings) -> None:
+    """Keep relay-only endpoints off the ordinary application origin."""
+
+    if request.url.hostname != urlsplit(settings.push_relay_url).hostname:
+        raise HTTPException(status_code=404, detail={"code": "PUSH_RELAY_NOT_FOUND"})
 
 
 def rotated_token_fields(
@@ -57,8 +98,13 @@ def rotated_token_fields(
 
     return {
         "platform": body.platform,
+        "transport": "direct_fcm",
         "token_hash": digest,
         "token_encrypted": encrypted,
+        "relay_origin": None,
+        "relay_subscription_id": None,
+        "relay_route_id": None,
+        "relay_wake_secret_encrypted": None,
         "device_name": body.device_name,
         "enabled": True,
         "last_seen_at": now,
@@ -73,6 +119,8 @@ def payload(device: PushDevice) -> PushDeviceResponse:
         device_name=device.device_name,
         enabled=device.enabled,
         last_seen_at=device.last_seen_at.isoformat(),
+        transport=cast(Literal["relay", "direct_fcm"], device.transport),
+        relay_origin=device.relay_origin,
     )
 
 
@@ -84,6 +132,30 @@ def _push_event_not_found() -> HTTPException:
             "message": "This notification is no longer available",
         },
     )
+
+
+def relay_enrollment_key(route_id: str) -> str:
+    digest = hashlib.sha256(route_id.encode("ascii")).hexdigest()
+    return f"push:relay-enrollment:{digest}"
+
+
+async def _push_relay_rate_limit(
+    redis: Redis,
+    scope: str,
+    *,
+    limit: int,
+) -> None:
+    digest = hashlib.sha256(scope.encode()).hexdigest()[:32]
+    key = f"push-relay:rate:{digest}"
+    count = await redis.incr(key)
+    if count == 1:
+        await redis.expire(key, 60)
+    if count > limit:
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "PUSH_RELAY_RATE_LIMITED", "retry_after": 60},
+            headers={"Retry-After": "60"},
+        )
 
 
 async def _claim_or_not_found(redis: Redis, token: str, encoded: str | bytes) -> None:
@@ -156,6 +228,7 @@ async def register_push_device(
         user_domain=auth.user.origin_domain,
         user_is_local=True,
         platform=body.platform,
+        transport="direct_fcm",
         token_hash=digest,
         token_encrypted=encrypted,
         device_name=body.device_name,
@@ -190,6 +263,429 @@ async def register_push_device(
     if device is None:  # pragma: no cover - defensive against external deletion
         raise RuntimeError("push registration disappeared after commit")
     return payload(device)
+
+
+@router.get("/capabilities")
+async def push_capabilities(
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    return {
+        "relay": {
+            "enabled": settings.push_relay_enabled,
+            "url": settings.push_relay_url if settings.push_relay_enabled else None,
+            "origin": settings.push_relay_origin if settings.push_relay_enabled else None,
+            "app_id": settings.push_relay_app_id if settings.push_relay_enabled else None,
+            "privacy": {
+                "content_free": True,
+                "relay_sees_home_origin": True,
+                "relay_sees_delivery_timing": True,
+            },
+        },
+        "direct_fcm": settings.push_enabled,
+    }
+
+
+@router.post("/relay/enrollment")
+async def begin_relay_enrollment(
+    body: PushRelayEnrollmentCreate,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    if not settings.push_relay_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "PUSH_RELAY_DISABLED", "message": "Push relay is disabled"},
+        )
+    if body.app_id != settings.push_relay_app_id:
+        raise HTTPException(status_code=400, detail={"code": "PUSH_RELAY_APP_MISMATCH"})
+    await _push_relay_rate_limit(
+        redis,
+        f"enrollment-user:{auth.user.origin_domain}:{auth.user.id}",
+        limit=10,
+    )
+    pending = json.dumps(
+        {
+            "user_id": str(auth.user.id),
+            "user_domain": auth.user.origin_domain,
+            "installation_id": str(body.installation_id),
+            "platform": body.platform,
+            "app_id": body.app_id,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    if not await redis.set(
+        relay_enrollment_key(body.route_id),
+        pending,
+        ex=RELAY_GRANT_TTL_SECONDS,
+        nx=True,
+    ):
+        raise HTTPException(status_code=409, detail={"code": "PUSH_RELAY_ENROLLMENT_EXISTS"})
+    now = int(time.time())
+    grant = await signed_push_document(
+        session,
+        settings,
+        {
+            "type": "push.enrollment",
+            "grant_id": opaque_token(),
+            "audience": settings.push_relay_origin,
+            "app_id": body.app_id,
+            "platform": body.platform,
+            "route_id": body.route_id,
+            "issued_at": now,
+            "expires_at": now + RELAY_GRANT_TTL_SECONDS,
+        },
+    )
+    return {
+        "relay_url": settings.push_relay_url,
+        "relay_origin": settings.push_relay_origin,
+        "grant": grant,
+    }
+
+
+@router.post("/relay/complete", status_code=status.HTTP_201_CREATED)
+async def complete_relay_enrollment(
+    body: PushRelayEnrollmentComplete,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> PushDeviceResponse:
+    if not settings.push_relay_enabled:
+        raise HTTPException(status_code=503, detail={"code": "PUSH_RELAY_DISABLED"})
+    try:
+        receipt = dict(body.receipt)
+        await verify_push_document(
+            session,
+            settings,
+            receipt,
+            expected_origin=settings.push_relay_origin,
+            expected_type="push.subscription",
+        )
+        subscription = str(receipt["subscription_id"])
+        if (
+            re.fullmatch(r"^kps_[A-Za-z0-9_-]{32,59}$", subscription) is None
+            or receipt.get("home_origin") != settings.domain
+            or receipt.get("route_id") != body.route_id
+            or receipt.get("app_id") != settings.push_relay_app_id
+            or receipt.get("platform") != body.platform
+        ):
+            raise ValueError("push subscription receipt is not bound to this enrollment")
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "PUSH_RELAY_RECEIPT_INVALID",
+                "message": "The relay receipt is invalid or expired.",
+            },
+        ) from None
+    encoded_pending = await redis.getdel(relay_enrollment_key(body.route_id))
+    expected_pending = {
+        "user_id": str(auth.user.id),
+        "user_domain": auth.user.origin_domain,
+        "installation_id": str(body.installation_id),
+        "platform": body.platform,
+        "app_id": settings.push_relay_app_id,
+    }
+    try:
+        pending = json.loads(encoded_pending) if encoded_pending is not None else None
+    except (TypeError, ValueError):
+        pending = None
+    if pending != expected_pending:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "PUSH_RELAY_ENROLLMENT_EXPIRED"},
+        )
+    device_id = str(body.installation_id)
+    await session.scalar(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(f"installation:{device_id}", 0)))
+    )
+    await session.execute(
+        delete(PushDevice).where(
+            PushDevice.relay_subscription_id == subscription,
+            PushDevice.id != device_id,
+        )
+    )
+    now = datetime.now(UTC)
+    statement = pg_insert(PushDevice).values(
+        id=device_id,
+        user_id=auth.user.id,
+        user_domain=auth.user.origin_domain,
+        user_is_local=True,
+        platform=body.platform,
+        transport="relay",
+        token_hash=None,
+        token_encrypted=None,
+        relay_origin=settings.push_relay_origin,
+        relay_subscription_id=subscription,
+        relay_route_id=body.route_id,
+        relay_wake_secret_encrypted=encrypt_wake_secret(body.wake_secret, settings),
+        device_name=body.device_name,
+        enabled=True,
+        last_seen_at=now,
+    )
+    await session.execute(
+        statement.on_conflict_do_update(
+            index_elements=[PushDevice.id],
+            set_={
+                "user_id": auth.user.id,
+                "user_domain": auth.user.origin_domain,
+                "user_is_local": True,
+                "platform": body.platform,
+                "transport": "relay",
+                "token_hash": None,
+                "token_encrypted": None,
+                "relay_origin": settings.push_relay_origin,
+                "relay_subscription_id": subscription,
+                "relay_route_id": body.route_id,
+                "relay_wake_secret_encrypted": encrypt_wake_secret(body.wake_secret, settings),
+                "device_name": body.device_name,
+                "enabled": True,
+                "last_seen_at": now,
+                "updated_at": now,
+            },
+        )
+    )
+    await session.commit()
+    device = await session.get(PushDevice, device_id)
+    if device is None:
+        raise RuntimeError("relay push registration disappeared after commit")
+    return payload(device)
+
+
+async def _relay_registration_rate_limit(
+    redis: Redis, request: Request, settings: Settings
+) -> None:
+    source = federation_client_ip(request, settings)
+    await _push_relay_rate_limit(redis, f"registration-source:{source}", limit=30)
+
+
+@relay_router.post("/push/v1/subscriptions", status_code=status.HTTP_201_CREATED)
+async def create_relay_subscription(
+    body: PushRelaySubscriptionCreate,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    if not settings.push_relay_service_enabled:
+        raise HTTPException(status_code=404, detail={"code": "PUSH_RELAY_NOT_FOUND"})
+    require_relay_transport_host(request, settings)
+    await _relay_registration_rate_limit(redis, request, settings)
+    grant = dict(body.grant)
+    try:
+        home_origin = normalize_domain(str(grant["origin"]))
+        if await matching_block(session, home_origin) is not None:
+            raise ValueError("push enrollment authority is blocked")
+        await verify_push_document(
+            session,
+            settings,
+            grant,
+            expected_origin=home_origin,
+            expected_type="push.enrollment",
+        )
+        grant_id = str(grant["grant_id"])
+        app_id = str(grant["app_id"])
+        platform = str(grant["platform"])
+        route_id = str(grant["route_id"])
+        if (
+            re.fullmatch(r"^[A-Za-z0-9_-]{43}$", grant_id) is None
+            or re.fullmatch(r"^[A-Za-z0-9_-]{43}$", route_id) is None
+            or platform not in {"android", "ios"}
+            or grant.get("audience") != settings.domain
+            or app_id != settings.push_relay_app_id
+        ):
+            raise ValueError("push grant has the wrong audience or application")
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "PUSH_RELAY_GRANT_INVALID",
+                "message": "The signed enrollment grant is invalid or expired.",
+            },
+        ) from None
+    await _push_relay_rate_limit(
+        redis,
+        f"registration-origin:{home_origin}",
+        limit=300,
+    )
+    await session.scalar(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(f"push-relay-grant:{grant_id}", 0)))
+    )
+    if await session.scalar(
+        select(PushRelaySubscription.id).where(PushRelaySubscription.grant_id == grant_id)
+    ):
+        raise HTTPException(status_code=409, detail={"code": "PUSH_RELAY_GRANT_USED"})
+    token_hash = hashlib.sha256(body.provider_token.encode()).digest()
+    identifier = subscription_id()
+    expiry = datetime.now(UTC) + timedelta(days=RELAY_SUBSCRIPTION_DAYS)
+    session.add(
+        PushRelaySubscription(
+            id=identifier,
+            grant_id=grant_id,
+            home_origin=home_origin,
+            app_id=app_id,
+            platform=platform,
+            route_id=route_id,
+            provider_token_hash=token_hash,
+            provider_token_encrypted=encrypt_provider_token(body.provider_token, settings),
+            management_secret_hash=secret_digest(body.management_secret),
+            enabled=True,
+            expires_at=expiry,
+        )
+    )
+    now = int(time.time())
+    receipt = await signed_push_document(
+        session,
+        settings,
+        {
+            "type": "push.subscription",
+            "subscription_id": identifier,
+            "home_origin": home_origin,
+            "app_id": app_id,
+            "platform": platform,
+            "route_id": route_id,
+            "issued_at": now,
+            "expires_at": now + RELAY_GRANT_TTL_SECONDS,
+        },
+    )
+    await session.commit()
+    return {"subscription_id": identifier, "receipt": receipt}
+
+
+@relay_router.delete(
+    "/push/v1/subscriptions/{subscription}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def revoke_relay_subscription_by_device(
+    subscription: str,
+    request: Request,
+    management_secret: str = Header(alias="X-Kaede-Push-Management", min_length=43, max_length=43),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Allow the device to revoke its opaque route without contacting its home."""
+
+    if not settings.push_relay_service_enabled:
+        raise HTTPException(status_code=404, detail={"code": "PUSH_RELAY_NOT_FOUND"})
+    require_relay_transport_host(request, settings)
+    await _relay_registration_rate_limit(redis, request, settings)
+    if re.fullmatch(r"^kps_[A-Za-z0-9_-]{32,59}$", subscription) is None:
+        raise HTTPException(status_code=404, detail={"code": "PUSH_RELAY_NOT_FOUND"})
+    row = await session.get(PushRelaySubscription, subscription)
+    if row is None or not secrets.compare_digest(
+        row.management_secret_hash, secret_digest(management_secret)
+    ):
+        # Do not reveal whether a guessed subscription exists.
+        raise HTTPException(status_code=404, detail={"code": "PUSH_RELAY_NOT_FOUND"})
+    row.enabled = False
+    await session.commit()
+
+
+@relay_router.post("/_kaede/push/v1/wakes", status_code=status.HTTP_202_ACCEPTED)
+async def accept_relay_wake(
+    body: PushRelayWakeCreate,
+    request: Request,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    if not settings.push_relay_service_enabled:
+        raise HTTPException(status_code=404, detail={"code": "PUSH_RELAY_NOT_FOUND"})
+    require_relay_transport_host(request, settings)
+    if principal.silenced:
+        raise HTTPException(status_code=403, detail={"code": "PUSH_RELAY_ORIGIN_BLOCKED"})
+    if body.expires_at <= int(time.time()) or body.expires_at > int(time.time()) + 600:
+        raise HTTPException(status_code=400, detail={"code": "PUSH_RELAY_WAKE_EXPIRED"})
+    subscription = await session.get(PushRelaySubscription, body.subscription_id)
+    if (
+        subscription is None
+        or not subscription.enabled
+        or subscription.expires_at <= datetime.now(UTC)
+        or subscription.home_origin != principal.origin
+        or subscription.route_id != body.route_id
+    ):
+        raise HTTPException(status_code=410, detail={"code": "PUSH_RELAY_SUBSCRIPTION_GONE"})
+    subscription.last_seen_at = datetime.now(UTC)
+    inserted = await session.scalar(
+        pg_insert(PushRelayDelivery)
+        .values(
+            home_origin=principal.origin,
+            request_id=body.request_id,
+            subscription_id=body.subscription_id,
+            route_id=body.route_id,
+            event_token=body.event_token,
+            delivery_id=body.delivery_id,
+            wake_mac=body.wake_mac,
+            priority=body.priority,
+            expires_at=utc_from_epoch(body.expires_at),
+        )
+        .on_conflict_do_nothing(
+            index_elements=[PushRelayDelivery.home_origin, PushRelayDelivery.request_id]
+        )
+        .returning(PushRelayDelivery.request_id)
+    )
+    await session.commit()
+    if inserted is None:
+        existing = await session.get(PushRelayDelivery, (principal.origin, body.request_id))
+        expected = (
+            body.subscription_id,
+            body.route_id,
+            body.event_token,
+            body.delivery_id,
+            body.expires_at,
+            body.priority,
+            body.wake_mac,
+        )
+        if existing is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "PUSH_RELAY_IDEMPOTENCY_CONFLICT"},
+            )
+        actual = (
+            existing.subscription_id,
+            existing.route_id,
+            existing.event_token,
+            existing.delivery_id,
+            int(existing.expires_at.timestamp()),
+            existing.priority,
+            existing.wake_mac,
+        )
+        if actual != expected:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "PUSH_RELAY_IDEMPOTENCY_CONFLICT"},
+            )
+        return {"status": existing.state}
+    # The minute sweep is the durable recovery path; this wake keeps normal
+    # delivery latency low without making relay acceptance depend on Taskiq.
+    from app.tasks import push_relay_provider_sweep
+
+    await enqueue_best_effort(push_relay_provider_sweep)
+    return {"status": "pending"}
+
+
+@relay_router.delete(
+    "/_kaede/push/v1/subscriptions/{subscription}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def revoke_relay_subscription(
+    subscription: str,
+    request: Request,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    if not settings.push_relay_service_enabled:
+        raise HTTPException(status_code=404, detail={"code": "PUSH_RELAY_NOT_FOUND"})
+    require_relay_transport_host(request, settings)
+    if principal.silenced:
+        raise HTTPException(status_code=403, detail={"code": "PUSH_RELAY_ORIGIN_BLOCKED"})
+    row = await session.get(PushRelaySubscription, subscription)
+    if row is not None and row.home_origin == principal.origin:
+        row.enabled = False
+        await session.commit()
 
 
 @router.post(
@@ -319,14 +815,18 @@ async def redeem_push_notification(
         if guild is None:  # Defensive: guild channels were validated above.
             return await _suppress_push(redis, body.event_token, encoded)
         title = f"{author_name} in {guild.name}"
-    show_preview = notification_previews_enabled(preferences)
-    title, notification_body = push_presentation(
-        show_preview=show_preview,
-        is_dm=is_dm,
-        is_mention=is_mention,
-        title=title,
-        body=push_body(message, has_attachment),
-    )
+    encrypted = message.e2ee is not None
+    show_preview = notification_previews_enabled(preferences) and not encrypted
+    if encrypted:
+        title, notification_body = "Kaede Chat", "New encrypted message"
+    else:
+        title, notification_body = push_presentation(
+            show_preview=show_preview,
+            is_dm=is_dm,
+            is_mention=is_mention,
+            title=title,
+            body=push_body(message, has_attachment),
+        )
     await _claim_or_not_found(redis, body.event_token, encoded)
     return PushNotificationResponse(
         kind=cast(Literal["direct_message", "mention", "guild_message"], event.kind),
@@ -346,6 +846,7 @@ async def unregister_push_device(
     device_id: UUID,
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> None:
     device = await session.scalar(
         select(PushDevice)
@@ -361,5 +862,9 @@ async def unregister_push_device(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "PUSH_DEVICE_NOT_FOUND", "message": "Push device not found"},
         )
+    relay_subscription = device.relay_subscription_id if device.transport == "relay" else None
     await session.delete(device)
     await session.commit()
+    if relay_subscription is not None:
+        with suppress(FederationNetworkError):
+            await revoke_remote_relay_subscription(session, settings, relay_subscription)

@@ -46,6 +46,7 @@ SENSITIVE_NAMES = {
     "KAEDE_MEDIA_S3_SECRET_KEY",
     "KAEDE_MEDIA_S3_SESSION_TOKEN",
     "KAEDE_PROXY_SECRET",
+    "KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64",
     "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64",
     "KAEDE_SECRET_KEY",
     "KAEDE_SEARCH_MASTER_KEY",
@@ -513,6 +514,55 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
                 "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64 is required when mobile push is enabled"
             )
         _validate_fcm_service_account(push_credential)
+    relay_enabled = values.get("KAEDE_PUSH_RELAY_ENABLED", "true").strip().lower()
+    if relay_enabled not in {"true", "false"}:
+        raise DeploymentConfigurationError(
+            "KAEDE_PUSH_RELAY_ENABLED must be true or false"
+        )
+    if relay_enabled == "true":
+        relay_url = urlsplit(
+            values.get("KAEDE_PUSH_RELAY_URL", "https://push.kaede.chat").strip()
+        )
+        if (
+            relay_url.scheme != "https"
+            or not relay_url.hostname
+            or relay_url.username
+            or relay_url.password
+            or relay_url.path not in {"", "/"}
+            or relay_url.query
+            or relay_url.fragment
+        ):
+            raise DeploymentConfigurationError(
+                "KAEDE_PUSH_RELAY_URL must be an HTTPS origin URL without a path"
+            )
+        relay_origin = values.get("KAEDE_PUSH_RELAY_ORIGIN", "kaede.chat").strip()
+        if not re.fullmatch(
+            r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", relay_origin
+        ):
+            raise DeploymentConfigurationError(
+                "KAEDE_PUSH_RELAY_ORIGIN must be a canonical lower-case domain"
+            )
+    relay_service = (
+        values.get("KAEDE_PUSH_RELAY_SERVICE_ENABLED", "false").strip().lower()
+    )
+    if relay_service not in {"true", "false"}:
+        raise DeploymentConfigurationError(
+            "KAEDE_PUSH_RELAY_SERVICE_ENABLED must be true or false"
+        )
+    if relay_service == "true":
+        if (
+            values.get("KAEDE_PUSH_RELAY_ORIGIN", "kaede.chat").strip()
+            != values.get("KAEDE_DOMAIN", "").strip()
+        ):
+            raise DeploymentConfigurationError(
+                "KAEDE_PUSH_RELAY_ORIGIN must equal KAEDE_DOMAIN on the relay operator"
+            )
+        credential = values.get("KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64", "").strip()
+        if not credential:
+            raise DeploymentConfigurationError(
+                "KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64 is required when the relay service is enabled"
+            )
+        _validate_fcm_service_account(credential)
 
     search_enabled = values.get("KAEDE_SEARCH_ENABLED", "false").strip().lower()
     if search_enabled not in {"true", "false"}:

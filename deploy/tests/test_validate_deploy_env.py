@@ -218,7 +218,6 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
             },
             observability=False,
         )
-
     def test_invalid_auto_update_configuration_is_rejected(self) -> None:
         invalid = (
             ("AUTO_UPDATE_ENABLED", "yes"),
@@ -339,6 +338,48 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
                 | {
                     "KAEDE_PUSH_ENABLED": "true",
                     "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64": alternate_endpoint,
+                },
+                observability=False,
+            )
+
+    def test_public_push_relay_needs_no_home_credential_but_service_does(self) -> None:
+        validate_values(
+            self.production
+            | {
+                "KAEDE_PUSH_RELAY_ENABLED": "true",
+                "KAEDE_PUSH_RELAY_URL": "https://push.kaede.chat",
+                "KAEDE_PUSH_RELAY_ORIGIN": "kaede.chat",
+            },
+            observability=False,
+        )
+        with self.assertRaisesRegex(DeploymentConfigurationError, "origin URL"):
+            validate_values(
+                self.production
+                | {
+                    "KAEDE_PUSH_RELAY_ENABLED": "true",
+                    "KAEDE_PUSH_RELAY_URL": "https://push.kaede.chat/tenant-a",
+                },
+                observability=False,
+            )
+        with self.assertRaisesRegex(
+            DeploymentConfigurationError, "must equal KAEDE_DOMAIN"
+        ):
+            validate_values(
+                self.production
+                | {
+                    "KAEDE_PUSH_RELAY_SERVICE_ENABLED": "true",
+                    "KAEDE_PUSH_RELAY_ORIGIN": "kaede.chat",
+                },
+                observability=False,
+            )
+        with self.assertRaisesRegex(
+            DeploymentConfigurationError, "PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64"
+        ):
+            validate_values(
+                self.production
+                | {
+                    "KAEDE_PUSH_RELAY_SERVICE_ENABLED": "true",
+                    "KAEDE_PUSH_RELAY_ORIGIN": self.production["KAEDE_DOMAIN"],
                 },
                 observability=False,
             )

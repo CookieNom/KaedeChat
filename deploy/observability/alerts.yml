@@ -39,3 +39,13 @@ groups:
         for: 5m
         labels: { severity: warning }
         annotations: { summary: "Kaede remote-media LRU cache is deferring admissions at its hard ceiling" }
+      - alert: KaedePushHomeOutboxDelayed
+        expr: kaede_push_home_outbox_oldest_age_seconds > 30
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Kaede push wakes are not reaching the configured relay promptly" }
+      - alert: KaedePushRelayQueueDelayed
+        expr: kaede_push_relay_queue_oldest_age_seconds > 30
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Kaede push relay provider delivery is delayed" }

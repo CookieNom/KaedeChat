@@ -56,6 +56,17 @@ final class KaedeApiClient {
 
   Future<String> installationId() => _vault.installationId();
 
+  Future<RelayPushState?> relayPushState() => _vault.readRelayPushState();
+
+  Future<void> saveRelayPushState(RelayPushState state) =>
+      _vault.writeRelayPushState(state);
+
+  Future<bool> pushOptedIn() => _vault.readPushOptIn();
+
+  Future<void> savePushOptIn(bool enabled) => _vault.writePushOptIn(enabled);
+
+  Future<void> clearRelayPushState() => _vault.clearRelayPushState();
+
   Future<SessionTokens?> restore() async {
     _tokens = await _vault.read();
     _selectedInstance = _tokens?.instance;
@@ -115,6 +126,79 @@ final class KaedeApiClient {
       return _jsonList(response.data);
     } on DioException catch (error) {
       throw KaedeException.fromDio(error);
+    }
+  }
+
+  Future<Map<String, Object?>> postPublicJson(
+    Uri uri, {
+    required Map<String, Object?> data,
+    required String expectedOrigin,
+  }) async {
+    if (uri.scheme != 'https' ||
+        uri.host != expectedOrigin ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasFragment) {
+      throw const KaedeException(
+        code: 'PUSH_RELAY_INVALID',
+        message:
+            'The configured notification relay is not trusted by this app.',
+        status: 502,
+      );
+    }
+    final client = Dio(BaseOptions(
+      connectTimeout: const Duration(seconds: 12),
+      receiveTimeout: const Duration(seconds: 20),
+      sendTimeout: const Duration(seconds: 20),
+      followRedirects: false,
+      headers: const <String, String>{
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'X-Kaede-Client': 'mobile',
+      },
+    ));
+    try {
+      final response = await client.post<Object?>(uri.toString(), data: data);
+      return _jsonObject(response.data);
+    } on DioException catch (error) {
+      throw KaedeException.fromDio(error);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> deletePublic(
+    Uri uri, {
+    required String expectedOrigin,
+    required Map<String, String> headers,
+  }) async {
+    if (uri.scheme != 'https' ||
+        uri.host != expectedOrigin ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasFragment) {
+      throw const KaedeException(
+        code: 'PUSH_RELAY_INVALID',
+        message:
+            'The configured notification relay is not trusted by this app.',
+        status: 502,
+      );
+    }
+    final client = Dio(BaseOptions(
+      connectTimeout: const Duration(seconds: 12),
+      receiveTimeout: const Duration(seconds: 20),
+      sendTimeout: const Duration(seconds: 20),
+      followRedirects: false,
+      headers: <String, String>{
+        'Accept': 'application/json',
+        'X-Kaede-Client': 'mobile',
+        ...headers,
+      },
+    ));
+    try {
+      await client.delete<Object?>(uri.toString());
+    } on DioException catch (error) {
+      throw KaedeException.fromDio(error);
+    } finally {
+      client.close(force: true);
     }
   }
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -34,6 +35,29 @@ enum DegradedFeature {
 
 String _lastConversationKey(String accountKey) =>
     'last_conversation:${Uri.encodeComponent(accountKey)}';
+
+const _pushTransport = String.fromEnvironment(
+  'KAEDE_PUSH_TRANSPORT',
+  defaultValue: 'relay',
+);
+const _pinnedPushRelayUrl = String.fromEnvironment(
+  'KAEDE_PUSH_RELAY_URL',
+  defaultValue: 'https://push.kaede.chat',
+);
+const _pinnedPushRelayOrigin = String.fromEnvironment(
+  'KAEDE_PUSH_RELAY_ORIGIN',
+  defaultValue: 'kaede.chat',
+);
+const _pushApplicationId = String.fromEnvironment(
+  'KAEDE_PUSH_APP_ID',
+  defaultValue: 'chat.kaede.mobile',
+);
+
+String _randomPushToken() {
+  final random = Random.secure();
+  final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+  return base64UrlEncode(bytes).replaceAll('=', '');
+}
 
 bool notificationPreviewsEnabled(Map<String, bool> settings) =>
     settings['show_notification_previews'] ?? true;
@@ -423,6 +447,8 @@ final class MobileController extends StateNotifier<MobileState> {
   final LocalDatabase database;
   final PushService push;
   bool get remotePushAvailable => push.remotePushAvailable;
+  bool get usesPushRelay => _pushTransport == 'relay';
+  String get pushRelayHost => Uri.parse(_pinnedPushRelayUrl).host;
   StreamSubscription<GatewayEvent>? _gatewaySubscription;
   StreamSubscription<GatewayHealth>? _gatewayHealthSubscription;
   StreamSubscription<String>? _pushTokenSubscription;
@@ -2849,12 +2875,14 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<bool> _registerPushDevice({
     String? token,
     bool surfaceErrors = false,
+    bool requireStoredOptIn = true,
   }) async {
     final accountKey = api.tokens?.accountKey;
     final generation = _sessionLoadGeneration;
     if (accountKey == null || !_sessionIsCurrent(accountKey, generation)) {
       return false;
     }
+    if (requireStoredOptIn && !await api.pushOptedIn()) return false;
     try {
       final resolvedToken = token ?? await push.pushToken();
       if (resolvedToken == null ||
@@ -2867,14 +2895,84 @@ final class MobileController extends StateNotifier<MobileState> {
         }
         return false;
       }
-      final response = await repository.registerPushDevice(
-        installationId: await api.installationId(),
-        token: resolvedToken,
-        platform: Platform.isIOS ? 'ios' : 'android',
-        deviceName: Platform.operatingSystemVersion.length <= 100
-            ? Platform.operatingSystemVersion
-            : Platform.operatingSystemVersion.substring(0, 100),
-      );
+      final installationId = await api.installationId();
+      final platform = Platform.isIOS ? 'ios' : 'android';
+      final deviceName = Platform.operatingSystemVersion.length <= 100
+          ? Platform.operatingSystemVersion
+          : Platform.operatingSystemVersion.substring(0, 100);
+      late final Map<String, Object?> response;
+      if (_pushTransport == 'direct_fcm') {
+        response = await repository.registerPushDevice(
+          installationId: installationId,
+          token: resolvedToken,
+          platform: platform,
+          deviceName: deviceName,
+        );
+      } else {
+        final previousRelayState = await api.relayPushState();
+        final routeId = _randomPushToken();
+        final wakeSecret = _randomPushToken();
+        final managementSecret = _randomPushToken();
+        final enrollment = await repository.beginRelayPushEnrollment(
+          installationId: installationId,
+          platform: platform,
+          routeId: routeId,
+          appId: _pushApplicationId,
+        );
+        final relayUrl = Uri.parse('${enrollment['relay_url'] ?? ''}');
+        final relayOrigin = '${enrollment['relay_origin'] ?? ''}';
+        final pinnedUrl = Uri.parse(_pinnedPushRelayUrl);
+        if (relayUrl.scheme != 'https' ||
+            relayUrl.host != pinnedUrl.host ||
+            relayUrl.port != pinnedUrl.port ||
+            relayUrl.path != pinnedUrl.path ||
+            relayOrigin != _pinnedPushRelayOrigin) {
+          throw const KaedeException(
+            code: 'PUSH_RELAY_INVALID',
+            message:
+                'Your home offered a notification relay that this app does not trust.',
+            status: 502,
+          );
+        }
+        final grant = Map<String, Object?>.from(enrollment['grant']! as Map);
+        final subscription = await repository.createRelayPushSubscription(
+          relayUrl: relayUrl,
+          grant: grant,
+          providerToken: resolvedToken,
+          managementSecret: managementSecret,
+        );
+        final receipt =
+            Map<String, Object?>.from(subscription['receipt']! as Map);
+        response = await repository.completeRelayPushEnrollment(
+          installationId: installationId,
+          platform: platform,
+          routeId: routeId,
+          wakeSecret: wakeSecret,
+          receipt: receipt,
+          deviceName: deviceName,
+        );
+        final home = api.tokens?.instance;
+        if (home == null) return false;
+        await api.saveRelayPushState(RelayPushState(
+          home: home,
+          relayUrl: relayUrl,
+          relayOrigin: Domain(relayOrigin),
+          subscriptionId: '${subscription['subscription_id']}',
+          routeId: routeId,
+          wakeSecret: wakeSecret,
+          managementSecret: managementSecret,
+        ));
+        if (previousRelayState != null &&
+            previousRelayState.subscriptionId !=
+                '${subscription['subscription_id']}') {
+          try {
+            await repository.revokeRelayPushSubscription(previousRelayState);
+          } on Object {
+            // The home binding now points at the new route. The old relay
+            // subscription expires even if this best-effort cleanup is lost.
+          }
+        }
+      }
       if (_sessionIsCurrent(accountKey, generation)) {
         _pushDeviceId = '${response['id']}';
         _setPushRegistrationWarning(null);
@@ -2912,6 +3010,7 @@ final class MobileController extends StateNotifier<MobileState> {
 
   Future<void> _requestNotificationDelivery() async {
     try {
+      if (!await api.pushOptedIn()) return;
       if (!await push.requestPermission()) {
         _setPushRegistrationWarning(
           'System notifications are turned off. Enable them in Android settings to receive alerts.',
@@ -2998,7 +3097,7 @@ final class MobileController extends StateNotifier<MobileState> {
       throw const KaedeException(
         code: 'PUSH_PROVIDER_UNAVAILABLE',
         message:
-            'This app build is not configured for background notifications. Ask your instance operator for a push-enabled build.',
+            'This community build has no compatible background notification provider.',
         status: 503,
       );
     }
@@ -3018,8 +3117,12 @@ final class MobileController extends StateNotifier<MobileState> {
       final registered = await _registerPushDevice(
         token: token,
         surfaceErrors: true,
+        requireStoredOptIn: false,
       );
-      if (registered) _setPushRegistrationWarning(null);
+      if (registered) {
+        await api.savePushOptIn(true);
+        _setPushRegistrationWarning(null);
+      }
       return registered;
     } on Object catch (error) {
       _setPushRegistrationWarning(userFacingError(
@@ -3028,6 +3131,30 @@ final class MobileController extends StateNotifier<MobileState> {
       ));
       rethrow;
     }
+  }
+
+  Future<void> disablePushNotifications() async {
+    final deviceId = _pushDeviceId;
+    final relayState = await api.relayPushState();
+    _pushDeviceId = null;
+    await api.savePushOptIn(false);
+    if (relayState != null) {
+      try {
+        await repository.revokeRelayPushSubscription(relayState);
+      } on Object {
+        // The authenticated home revocation below is an independent path.
+      }
+    }
+    if (deviceId != null) {
+      try {
+        await repository.unregisterPushDevice(deviceId);
+      } on Object {
+        // With the device-held relay state removed, subsequent v2 wakes fail
+        // authentication even if an offline home cannot revoke immediately.
+      }
+    }
+    await api.clearRelayPushState();
+    _setPushRegistrationWarning(null);
   }
 
   String _message(Object error) => userFacingError(error);

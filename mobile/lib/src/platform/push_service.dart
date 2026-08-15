@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/widgets.dart';
@@ -10,6 +11,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -22,24 +24,105 @@ enum NotificationKind {
   activity,
 }
 
-final class OpaquePushWake {
-  const OpaquePushWake(this.eventToken);
+const _configuredPushTransport = String.fromEnvironment(
+  'KAEDE_PUSH_TRANSPORT',
+  defaultValue: 'relay',
+);
 
+final class OpaquePushWake {
+  const OpaquePushWake({
+    required this.version,
+    required this.eventToken,
+    this.routeId,
+    this.deliveryId,
+    this.expiresAt,
+    this.wakeMac,
+  });
+
+  final int version;
   final String eventToken;
+  final String? routeId;
+  final String? deliveryId;
+  final int? expiresAt;
+  final String? wakeMac;
 
   static final _tokenPattern = RegExp(r'^[A-Za-z0-9_-]{43}$');
 
   static OpaquePushWake? parse(Map<String, dynamic> data) {
-    if (data.length != 2 ||
-        !data.containsKey('sync_version') ||
-        !data.containsKey('event_token')) {
+    final version = int.tryParse('${data['sync_version'] ?? ''}');
+    final token = '${data['event_token'] ?? ''}';
+    if (!_tokenPattern.hasMatch(token)) return null;
+    if (version == 1 && data.length == 2) {
+      return OpaquePushWake(version: 1, eventToken: token);
+    }
+    if (version != 2 || data.length != 6) return null;
+    final routeId = '${data['route_id'] ?? ''}';
+    final deliveryId = '${data['delivery_id'] ?? ''}';
+    final expiresAt = int.tryParse('${data['expires_at'] ?? ''}');
+    final wakeMac = '${data['wake_mac'] ?? ''}';
+    if (!_tokenPattern.hasMatch(routeId) ||
+        !_tokenPattern.hasMatch(deliveryId) ||
+        !_tokenPattern.hasMatch(wakeMac) ||
+        expiresAt == null) {
       return null;
     }
-    if ('${data['sync_version'] ?? ''}' != '1') return null;
-    final token = '${data['event_token'] ?? ''}';
-    return _tokenPattern.hasMatch(token) ? OpaquePushWake(token) : null;
+    return OpaquePushWake(
+      version: 2,
+      eventToken: token,
+      routeId: routeId,
+      deliveryId: deliveryId,
+      expiresAt: expiresAt,
+      wakeMac: wakeMac,
+    );
   }
 }
+
+Future<bool> authenticatePushWake(
+  OpaquePushWake wake,
+  RelayPushState? state, {
+  String configuredTransport = _configuredPushTransport,
+  int? nowEpochSeconds,
+}) async {
+  // Direct/community builds have no relay state and may accept the legacy
+  // home-to-FCM wake. A relay enrollment requires a device-authenticated v2
+  // wake, so the relay cannot downgrade to an unsigned v1 payload.
+  if (wake.version == 1) {
+    return configuredTransport == 'direct_fcm' && state == null;
+  }
+  final expiresAt = wake.expiresAt;
+  final now = nowEpochSeconds ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  if (state == null ||
+      wake.routeId != state.routeId ||
+      expiresAt == null ||
+      expiresAt < now ||
+      expiresAt > now + 600) {
+    return false;
+  }
+  try {
+    final key = base64Url.decode(
+      base64Url.normalize(state.wakeSecret),
+    );
+    final canonical = utf8.encode(
+      '2\n${wake.routeId}\n${wake.eventToken}\n${wake.deliveryId}\n$expiresAt',
+    );
+    final calculated = await Hmac.sha256().calculateMac(
+      canonical,
+      secretKey: SecretKey(key),
+    );
+    final supplied = base64Url.decode(base64Url.normalize(wake.wakeMac!));
+    if (calculated.bytes.length != supplied.length) return false;
+    var difference = 0;
+    for (var index = 0; index < supplied.length; index += 1) {
+      difference |= calculated.bytes[index] ^ supplied[index];
+    }
+    return difference == 0;
+  } on Object {
+    return false;
+  }
+}
+
+Future<bool> _trustedRelayWake(OpaquePushWake wake, SessionVault vault) async =>
+    authenticatePushWake(wake, await vault.readRelayPushState());
 
 final class PushNotificationEnvelope {
   const PushNotificationEnvelope({
@@ -211,6 +294,8 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   }
   final wake = OpaquePushWake.parse(message.data);
   if (wake == null) return;
+  const vault = SessionVault();
+  if (!await _trustedRelayWake(wake, vault)) return;
   final local = await _initializeBackgroundNotifications();
   final redemption = await _redeemOpaqueWake(wake);
   final notification = redemption.notification;
@@ -245,8 +330,17 @@ Future<_PushRedemption> _redeemOpaqueWake(OpaquePushWake wake) async {
     return notification == null
         ? const _PushRedemption(showFallback: true)
         : _PushRedemption(notification: notification);
-  } on Object {
+  } on KaedeException catch (error) {
+    if (error.status == 404 || error.status == 204) {
+      return const _PushRedemption();
+    }
+    return _PushRedemption(
+      showFallback: error.status == 0 || error.status >= 500,
+    );
+  } on TimeoutException {
     return const _PushRedemption(showFallback: true);
+  } on Object {
+    return const _PushRedemption();
   }
 }
 
@@ -403,6 +497,7 @@ final class PushService {
     try {
       final wake = OpaquePushWake.parse(message.data);
       if (wake == null) return;
+      if (!await _trustedRelayWake(wake, const SessionVault())) return;
       final redemption = await _redeemOpaqueWake(wake);
       final notification = redemption.notification;
       if (notification != null) {

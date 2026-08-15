@@ -45,6 +45,9 @@ from app.db.models import (
     MessageProjection,
     OneTimeToken,
     PushDevice,
+    PushRelayDelivery,
+    PushRelaySubscription,
+    PushWakeOutbox,
     ReadState,
     Session,
     User,
@@ -100,7 +103,15 @@ from app.media.jobs import (
 )
 from app.media.processing import IMAGE_PIPELINE_VERSION
 from app.media.service import attachment_payload
-from app.push.service import decrypt_device_token, fcm_client
+from app.push.client import send_relay_wake
+from app.push.relay import (
+    PUSH_WAKE_TTL_SECONDS,
+    decrypt_provider_token,
+    decrypt_wake_secret,
+    stable_wake_identifier,
+    wake_mac,
+)
+from app.push.service import decrypt_device_token, fcm_client, relay_fcm_client
 from app.push.sync import PushSyncEvent, discard_push_sync, issue_push_sync
 from app.search.meili import (
     SearchUnavailable,
@@ -385,7 +396,7 @@ async def project_message_record(
                 or (last_message_id, last_message_domain or "") < (latest.id, latest.origin_domain),
             },
         )
-    if settings.push_enabled:
+    if settings.push_enabled or settings.push_relay_enabled:
         for _, message in messages:
             await enqueue_best_effort(
                 mobile_push_message,
@@ -411,7 +422,7 @@ async def mobile_push_message(
     """
 
     settings = get_settings()
-    if not settings.push_enabled:
+    if not (settings.push_enabled or settings.push_relay_enabled):
         return 0
     message_domain = normalize_domain(message_domain)
     if not 0 <= message_id <= (1 << 63) - 1 or not 0 <= after_user_id <= (1 << 63) - 1:
@@ -500,7 +511,7 @@ async def mobile_push_message(
                 if item.get("origin_domain") == settings.domain
                 and str(item.get("id", "")).isdigit()
             }
-            devices_to_notify: list[tuple[str, str, str, str, int]] = []
+            devices_to_notify: list[tuple[PushDevice, str, int]] = []
 
             users = {
                 user.id: user
@@ -580,9 +591,7 @@ async def mobile_push_message(
                 for device in devices_by_user.get(user_id, []):
                     devices_to_notify.append(
                         (
-                            device.id,
-                            decrypt_device_token(device, settings),
-                            device.platform,
+                            device,
                             {
                                 "kaede_dms": "direct_message",
                                 "kaede_mentions": "mention",
@@ -592,16 +601,83 @@ async def mobile_push_message(
                         )
                     )
 
-            # Release the read transaction before making any external request.
+            # Relay wakes enter a durable home outbox before any external
+            # request. Provider tokens never enter this instance.
             event_message_id = message.id
             event_message_domain = message.origin_domain
-            await session.rollback()
-            client = fcm_client(settings)
-            for device_id, token, platform, notification_kind, user_id in devices_to_notify:
+            direct_notifications: list[tuple[PushDevice, str, int]] = []
+            for device, notification_kind, user_id in devices_to_notify:
+                if device.transport != "relay":
+                    # A home can switch from its legacy/custom FCM transport to
+                    # the relay without immediately deleting old registrations.
+                    # Ignore those registrations unless direct delivery remains
+                    # configured; otherwise a missing Firebase credential would
+                    # turn an ordinary message projection into a failed job.
+                    if settings.push_enabled:
+                        direct_notifications.append((device, notification_kind, user_id))
+                    continue
                 event_token = await issue_push_sync(
                     redis,
                     PushSyncEvent(
-                        device_id=device_id,
+                        device_id=device.id,
+                        user_id=user_id,
+                        user_domain=settings.domain,
+                        message_id=event_message_id,
+                        message_domain=event_message_domain,
+                        kind=notification_kind,
+                    ),
+                )
+                inserted = await session.scalar(
+                    pg_insert(PushWakeOutbox)
+                    .values(
+                        request_id=stable_wake_identifier(
+                            settings,
+                            purpose="request",
+                            device_id=device.id,
+                            message_id=event_message_id,
+                            message_domain=event_message_domain,
+                            kind=notification_kind,
+                        ),
+                        device_id=device.id,
+                        message_id=event_message_id,
+                        message_domain=event_message_domain,
+                        kind=notification_kind,
+                        event_token=event_token,
+                        delivery_id=stable_wake_identifier(
+                            settings,
+                            purpose="delivery",
+                            device_id=device.id,
+                            message_id=event_message_id,
+                            message_domain=event_message_domain,
+                            kind=notification_kind,
+                        ),
+                        expires_at=datetime.now(UTC) + timedelta(seconds=PUSH_WAKE_TTL_SECONDS),
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            PushWakeOutbox.device_id,
+                            PushWakeOutbox.message_id,
+                            PushWakeOutbox.message_domain,
+                            PushWakeOutbox.kind,
+                        ]
+                    )
+                    .returning(PushWakeOutbox.request_id)
+                )
+                if inserted is None:
+                    await discard_push_sync(redis, event_token)
+            await session.commit()
+            if any(device.transport == "relay" for device, _, _ in devices_to_notify):
+                await enqueue_best_effort(push_relay_outbox_sweep)
+
+            # Direct/custom-FCM delivery is retained for separately signed
+            # community clients. It is intentionally not the official path.
+            if direct_notifications:
+                client = fcm_client(settings)
+            for device, notification_kind, user_id in direct_notifications:
+                event_token = await issue_push_sync(
+                    redis,
+                    PushSyncEvent(
+                        device_id=device.id,
                         user_id=user_id,
                         user_domain=settings.domain,
                         message_id=event_message_id,
@@ -611,9 +687,9 @@ async def mobile_push_message(
                 )
                 try:
                     result = await client.send_sync(
-                        token,
+                        decrypt_device_token(device, settings),
                         event_token=event_token,
-                        platform=platform,
+                        platform=device.platform,
                     )
                 except httpx.HTTPError:
                     await discard_push_sync(redis, event_token)
@@ -623,7 +699,7 @@ async def mobile_push_message(
                 else:
                     await discard_push_sync(redis, event_token)
                     if result.token_invalid:
-                        invalid_device_ids.append(device_id)
+                        invalid_device_ids.append(device.id)
 
             if invalid_device_ids:
                 await session.execute(
@@ -643,6 +719,227 @@ async def mobile_push_message(
             message_domain,
             next_cursor,
         )
+    return delivered
+
+
+@broker.task(task_name="mobile.push_relay_outbox", schedule=[{"cron": "* * * * *"}])
+@observed_job("mobile.push_relay_outbox")
+async def push_relay_outbox_sweep() -> int:
+    """Drain content-free home wakes without keeping a DB lock over HTTP."""
+
+    settings = get_settings()
+    if not settings.push_relay_enabled:
+        return 0
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    accepted = 0
+    try:
+        async with sessionmaker() as session:
+            now = datetime.now(UTC)
+            rows = list(
+                await session.scalars(
+                    select(PushWakeOutbox)
+                    .where(PushWakeOutbox.next_attempt_at <= now)
+                    .order_by(PushWakeOutbox.next_attempt_at, PushWakeOutbox.created_at)
+                    .limit(250)
+                    .with_for_update(skip_locked=True)
+                )
+            )
+            claimed: list[dict[str, Any]] = []
+            for row in rows:
+                device = await session.get(PushDevice, row.device_id)
+                if row.expires_at <= now or device is None or not device.enabled:
+                    if row.event_token is not None:
+                        await discard_push_sync(redis, row.event_token)
+                    await session.delete(row)
+                    continue
+                if (
+                    device.transport != "relay"
+                    or device.relay_subscription_id is None
+                    or device.relay_route_id is None
+                    or device.relay_wake_secret_encrypted is None
+                    or device.relay_origin != settings.push_relay_origin
+                    or row.event_token is None
+                ):
+                    if row.event_token is not None:
+                        await discard_push_sync(redis, row.event_token)
+                    await session.delete(row)
+                    continue
+                expires = int(row.expires_at.timestamp())
+                claimed.append(
+                    {
+                        "row": row,
+                        "payload": {
+                            "version": 2,
+                            "request_id": row.request_id,
+                            "subscription_id": device.relay_subscription_id,
+                            "route_id": device.relay_route_id,
+                            "event_token": row.event_token,
+                            "delivery_id": row.delivery_id,
+                            "expires_at": expires,
+                            "priority": "normal",
+                            "wake_mac": wake_mac(
+                                decrypt_wake_secret(device.relay_wake_secret_encrypted, settings),
+                                route_id=device.relay_route_id,
+                                event_token=row.event_token,
+                                delivery_id=row.delivery_id,
+                                expires_at=expires,
+                            ),
+                        },
+                    }
+                )
+                row.attempts += 1
+                # Lease the delivery long enough to prevent a concurrent sweep
+                # from issuing the same provider request while this one is in flight.
+                row.next_attempt_at = now + timedelta(seconds=60)
+            await session.commit()
+
+            for item in claimed:
+                row = cast(PushWakeOutbox, item["row"])
+                try:
+                    response = await send_relay_wake(session, settings, item["payload"])
+                except FederationNetworkError as exc:
+                    current = await session.get(PushWakeOutbox, row.request_id)
+                    if current is not None:
+                        current.last_error = str(exc)[:200]
+                        await session.commit()
+                    continue
+                current = await session.get(PushWakeOutbox, row.request_id)
+                if current is None:
+                    continue
+                if response.status_code in {200, 202}:
+                    await session.delete(current)
+                    accepted += 1
+                elif response.status_code == 410:
+                    device = await session.get(PushDevice, current.device_id)
+                    if device is not None:
+                        device.enabled = False
+                    if current.event_token is not None:
+                        await discard_push_sync(redis, current.event_token)
+                    await session.delete(current)
+                elif response.status_code == 429:
+                    try:
+                        delay = max(1, min(600, int(response.headers.get("Retry-After", "30"))))
+                    except ValueError:
+                        delay = 30
+                    current.next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay)
+                    current.last_error = "relay rate limited"
+                elif response.status_code < 500:
+                    if current.event_token is not None:
+                        await discard_push_sync(redis, current.event_token)
+                    await session.delete(current)
+                else:
+                    current.last_error = f"relay HTTP {response.status_code}"
+                await session.commit()
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+    return accepted
+
+
+@broker.task(task_name="mobile.push_relay_provider", schedule=[{"cron": "* * * * *"}])
+@observed_job("mobile.push_relay_provider")
+async def push_relay_provider_sweep() -> int:
+    """Relay-side provider sender; only this worker needs Firebase credentials."""
+
+    settings = get_settings()
+    if not settings.push_relay_service_enabled:
+        return 0
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    delivered = 0
+    try:
+        async with sessionmaker() as session:
+            now = datetime.now(UTC)
+            rows = list(
+                await session.scalars(
+                    select(PushRelayDelivery)
+                    .where(
+                        PushRelayDelivery.state == "pending",
+                        PushRelayDelivery.next_attempt_at <= now,
+                    )
+                    .order_by(PushRelayDelivery.next_attempt_at)
+                    .limit(500)
+                    .with_for_update(skip_locked=True)
+                )
+            )
+            claimed: list[tuple[str, str]] = []
+            for row in rows:
+                if row.expires_at <= now:
+                    row.state = "expired"
+                    continue
+                row.attempts += 1
+                # This is an in-flight lease, not the retry schedule. A provider
+                # call can consume most of the HTTP timeout, so a short
+                # exponential value here would allow another worker to send the
+                # same wake concurrently. Failures below replace the lease with
+                # their actual backoff.
+                row.next_attempt_at = now + timedelta(seconds=60)
+                claimed.append((row.home_origin, row.request_id))
+            await session.commit()
+            client = relay_fcm_client(settings)
+            for identity in claimed:
+                delivery = await session.get(PushRelayDelivery, identity)
+                if delivery is None or delivery.state != "pending":
+                    continue
+                subscription = await session.get(PushRelaySubscription, delivery.subscription_id)
+                if (
+                    subscription is None
+                    or not subscription.enabled
+                    or subscription.expires_at <= datetime.now(UTC)
+                ):
+                    delivery.state = "invalid"
+                    await session.commit()
+                    continue
+                try:
+                    result = await client.send_relay(
+                        decrypt_provider_token(subscription.provider_token_encrypted, settings),
+                        route_id=delivery.route_id,
+                        event_token=delivery.event_token,
+                        delivery_id=delivery.delivery_id,
+                        expires_at=int(delivery.expires_at.timestamp()),
+                        wake_mac=delivery.wake_mac,
+                        platform=subscription.platform,
+                    )
+                except httpx.HTTPError as exc:
+                    delivery.last_error = str(exc)[:200]
+                    delivery.next_attempt_at = datetime.now(UTC) + timedelta(
+                        seconds=min(120, 2 ** min(delivery.attempts, 6))
+                    )
+                    await session.commit()
+                    continue
+                if result.delivered:
+                    delivery.state = "delivered"
+                    delivered += 1
+                elif result.token_invalid:
+                    delivery.state = "invalid"
+                    subscription.enabled = False
+                else:
+                    delivery.last_error = "provider rejected wake"
+                    delivery.next_attempt_at = datetime.now(UTC) + timedelta(
+                        seconds=min(120, 2 ** min(delivery.attempts, 6))
+                    )
+                await session.commit()
+            await session.execute(
+                delete(PushRelayDelivery).where(
+                    PushRelayDelivery.state.in_(["delivered", "expired", "invalid"]),
+                    PushRelayDelivery.created_at < datetime.now(UTC) - timedelta(days=1),
+                )
+            )
+            await session.execute(
+                delete(PushRelaySubscription).where(
+                    (PushRelaySubscription.expires_at <= datetime.now(UTC))
+                    | (
+                        PushRelaySubscription.enabled.is_(False)
+                        & (
+                            PushRelaySubscription.last_seen_at
+                            < datetime.now(UTC) - timedelta(days=1)
+                        )
+                    )
+                )
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
     return delivered
 
 

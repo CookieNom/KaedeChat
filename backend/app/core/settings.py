@@ -302,9 +302,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TURNSTILE_SECRET", "turnstile_secret"),
     )
 
-    # Mobile push. The credential is the base64-encoded Firebase service-account
-    # JSON document; keeping it encoded makes multiline private keys safe in
-    # env files and Compose interpolation.
+    # Mobile push. Relay delivery is the normal official-app path; direct FCM
+    # remains available for separately signed community builds. A relay service
+    # is enabled only on the operator that owns the corresponding mobile app.
+    push_relay_enabled: bool = True
+    push_relay_url: str = "https://push.kaede.chat"
+    push_relay_origin: str = "kaede.chat"
+    push_relay_app_id: str = "chat.kaede.mobile"
+    push_relay_service_enabled: bool = False
+    push_relay_fcm_service_account_b64: SecretStr | None = None
     push_enabled: bool = False
     push_fcm_service_account_b64: SecretStr | None = None
 
@@ -330,6 +336,7 @@ class Settings(BaseSettings):
         "klipy_api_key",
         "turnstile_site_key",
         "turnstile_secret",
+        "push_relay_fcm_service_account_b64",
         "push_fcm_service_account_b64",
         "search_master_key",
         mode="before",
@@ -398,7 +405,35 @@ class Settings(BaseSettings):
             raise ValueError("must be a valid Cloudflare Turnstile secret")
         return value
 
-    @field_validator("push_fcm_service_account_b64")
+    @field_validator("push_relay_origin")
+    @classmethod
+    def validate_push_relay_origin(cls, value: str) -> str:
+        return cls.validate_domain(value)
+
+    @field_validator("push_relay_url")
+    @classmethod
+    def validate_push_relay_url(cls, value: str) -> str:
+        parsed = urlsplit(value.rstrip("/"))
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("must be an absolute HTTP(S) URL")
+        if (
+            parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError("must be an origin URL without credentials, path, query, or fragment")
+        return value.rstrip("/")
+
+    @field_validator("push_relay_app_id")
+    @classmethod
+    def validate_push_relay_app_id(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{2,159}", value):
+            raise ValueError("must be a valid mobile application identifier")
+        return value
+
+    @field_validator("push_relay_fcm_service_account_b64", "push_fcm_service_account_b64")
     @classmethod
     def validate_push_service_account(cls, value: SecretStr | None) -> SecretStr | None:
         if value is None:
@@ -903,6 +938,26 @@ class Settings(BaseSettings):
         push_runtime = self.service_role in {"full", "worker", "preflight"}
         if push_runtime and self.push_enabled and self.push_fcm_service_account_b64 is None:
             raise ValueError("push_fcm_service_account_b64 is required when mobile push is enabled")
+        relay_push_runtime = self.service_role in {"full", "worker"}
+        if (
+            relay_push_runtime
+            and self.push_relay_service_enabled
+            and self.push_relay_fcm_service_account_b64 is None
+        ):
+            raise ValueError(
+                "push_relay_fcm_service_account_b64 is required when the push relay "
+                "service is enabled"
+            )
+        if self.push_relay_service_enabled and self.push_relay_origin != self.domain:
+            raise ValueError(
+                "push_relay_origin must match domain when the push relay service is enabled"
+            )
+        if (
+            self.environment == "production"
+            and self.push_relay_enabled
+            and urlsplit(self.push_relay_url).scheme != "https"
+        ):
+            raise ValueError("push_relay_url must use HTTPS in production")
         if self.environment == "production":
             if self.domain.endswith(".localhost"):
                 raise ValueError("a .localhost domain cannot be used in production")

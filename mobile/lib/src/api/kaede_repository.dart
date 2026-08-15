@@ -925,6 +925,71 @@ final class KaedeRepository {
         },
       );
 
+  Future<Map<String, Object?>> beginRelayPushEnrollment({
+    required String installationId,
+    required String platform,
+    required String routeId,
+    required String appId,
+  }) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/users/@me/push-devices/relay/enrollment',
+        data: <String, Object?>{
+          'installation_id': installationId,
+          'platform': platform,
+          'route_id': routeId,
+          'app_id': appId,
+        },
+      );
+
+  Future<Map<String, Object?>> createRelayPushSubscription({
+    required Uri relayUrl,
+    required Map<String, Object?> grant,
+    required String providerToken,
+    required String managementSecret,
+  }) =>
+      api.postPublicJson(
+        relayUrl.resolve('/push/v1/subscriptions'),
+        expectedOrigin: relayUrl.host,
+        data: <String, Object?>{
+          'grant': grant,
+          'provider_token': providerToken,
+          'management_secret': managementSecret,
+        },
+      );
+
+  Future<void> revokeRelayPushSubscription(RelayPushState state) =>
+      api.deletePublic(
+        state.relayUrl.resolve(
+          '/push/v1/subscriptions/${Uri.encodeComponent(state.subscriptionId)}',
+        ),
+        expectedOrigin: state.relayUrl.host,
+        headers: <String, String>{
+          'X-Kaede-Push-Management': state.managementSecret,
+        },
+      );
+
+  Future<Map<String, Object?>> completeRelayPushEnrollment({
+    required String installationId,
+    required String platform,
+    required String routeId,
+    required String wakeSecret,
+    required Map<String, Object?> receipt,
+    String? deviceName,
+  }) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/users/@me/push-devices/relay/complete',
+        data: <String, Object?>{
+          'installation_id': installationId,
+          'platform': platform,
+          'route_id': routeId,
+          'wake_secret': wakeSecret,
+          'receipt': receipt,
+          if (deviceName != null) 'device_name': deviceName,
+        },
+      );
+
   Future<void> unregisterPushDevice(String deviceId) => api.sendJson(
         'DELETE',
         '/api/v1/users/@me/push-devices/$deviceId',

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,7 +19,17 @@ class _Result:
 
 class _Session:
     def __init__(self) -> None:
-        self.rows = iter(((7, 2), (80, 800), (120, 1200, 3), (11, 4)))
+        now = datetime.now(UTC)
+        self.rows = iter(
+            (
+                (7, 2),
+                (80, 800),
+                (120, 1200, 3),
+                (11, 4),
+                (5, now - timedelta(seconds=12)),
+                (3, now - timedelta(seconds=8)),
+            )
+        )
 
     async def execute(self, _statement: object) -> _Result:
         return _Result(next(self.rows))
@@ -68,3 +79,5 @@ async def test_metrics_expose_federation_capacity_and_replica_pauses(
     assert "kaede_federation_remote_media_cache_capacity_bytes 500000" in rendered
     assert "kaede_search_index_pending_messages 11" in rendered
     assert "kaede_search_index_retrying_messages 4" in rendered
+    assert "kaede_push_home_outbox_pending 5" in rendered
+    assert "kaede_push_relay_queue_pending 3" in rendered

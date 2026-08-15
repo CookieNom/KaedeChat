@@ -1,21 +1,30 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.api.push import rotated_token_fields
+from app.api.push import (
+    _push_relay_rate_limit,
+    relay_enrollment_key,
+    rotated_token_fields,
+)
 from app.chat.payloads import public_user_display_name
 from app.db.models import User
 from app.push.presentation import notification_previews_enabled, push_presentation
+from app.push.relay import stable_wake_identifier, wake_mac
 from app.push.schemas import (
     PushDeviceCreate,
     PushNotificationRedeem,
     PushNotificationResponse,
+    PushRelaySubscriptionCreate,
+    PushRelayWakeCreate,
 )
-from app.push.service import fcm_sync_payload
+from app.push.service import fcm_relay_payload, fcm_sync_payload
 from app.push.sync import (
     PushSyncEvent,
     claim_push_sync,
@@ -28,6 +37,8 @@ from app.push.sync import (
 class MemoryRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
+        self.counters: dict[str, int] = {}
+        self.expiries: dict[str, int] = {}
 
     async def set(self, key: str, value: str, **_: object) -> bool:
         if key in self.values:
@@ -43,6 +54,14 @@ class MemoryRedis:
 
     async def delete(self, key: str) -> int:
         return int(self.values.pop(key, None) is not None)
+
+    async def incr(self, key: str) -> int:
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        self.expiries[key] = seconds
+        return True
 
 
 def test_public_user_display_name_hides_unresolved_history_handle() -> None:
@@ -183,6 +202,100 @@ def test_fcm_payload_is_an_opaque_content_free_wake(platform: str) -> None:
 def test_fcm_payload_rejects_unknown_platform() -> None:
     with pytest.raises(ValueError, match="unsupported push platform"):
         fcm_sync_payload("provider-token", "x" * 43, "windows")
+
+
+def test_relay_payload_is_content_free_and_mac_bound() -> None:
+    secret = "A" * 43
+    fields = {
+        "route_id": "r" * 43,
+        "event_token": "e" * 43,
+        "delivery_id": "d" * 43,
+        "expires_at": 2_000_000_000,
+    }
+    mac = wake_mac(secret, **fields)
+    payload = fcm_relay_payload(
+        "provider-token",
+        **fields,
+        wake_mac=mac,
+        platform="android",
+    )
+    assert payload["message"]["data"] == {
+        "sync_version": "2",
+        "route_id": fields["route_id"],
+        "event_token": fields["event_token"],
+        "delivery_id": fields["delivery_id"],
+        "expires_at": str(fields["expires_at"]),
+        "wake_mac": mac,
+    }
+    rendered = str(payload)
+    for private_value in ("user_id", "message_ref", "channel_ref", "sender", "content"):
+        assert private_value not in rendered
+
+
+def test_relay_wake_schema_and_idempotency_identifiers_are_strict() -> None:
+    settings = SimpleNamespace(secret_key_bytes=b"s" * 32)
+    request_id = stable_wake_identifier(
+        settings,  # type: ignore[arg-type]
+        purpose="request",
+        device_id="8a73864e-f353-4880-991e-fcbf1c916dbf",
+        message_id=42,
+        message_domain="remote.example",
+        kind="mention",
+    )
+    assert len(request_id) == 43
+    assert request_id == stable_wake_identifier(
+        settings,  # type: ignore[arg-type]
+        purpose="request",
+        device_id="8a73864e-f353-4880-991e-fcbf1c916dbf",
+        message_id=42,
+        message_domain="remote.example",
+        kind="mention",
+    )
+    wake = PushRelayWakeCreate(
+        version=2,
+        request_id=request_id,
+        subscription_id="kps_" + "s" * 40,
+        route_id="r" * 43,
+        event_token="e" * 43,
+        delivery_id="d" * 43,
+        expires_at=2_000_000_000,
+        wake_mac="m" * 43,
+    )
+    assert wake.version == 2
+    with pytest.raises(ValidationError):
+        PushRelayWakeCreate(**{**wake.model_dump(), "request_id": "not opaque"})
+
+
+def test_relay_subscription_rejects_malformed_device_secrets() -> None:
+    with pytest.raises(ValidationError):
+        PushRelaySubscriptionCreate(grant={}, provider_token="p" * 32, management_secret="short")
+
+
+def test_relay_pending_enrollment_keys_do_not_expose_device_routes() -> None:
+    route = "r" * 43
+    key = relay_enrollment_key(route)
+    assert route not in key
+    assert key == relay_enrollment_key(route)
+
+
+@pytest.mark.asyncio
+async def test_push_relay_rate_limit_is_scoped_hashed_and_retryable() -> None:
+    redis = MemoryRedis()
+    scope = "registration-origin:private-home.example"
+
+    await _push_relay_rate_limit(redis, scope, limit=2)  # type: ignore[arg-type]
+    await _push_relay_rate_limit(redis, scope, limit=2)  # type: ignore[arg-type]
+
+    with pytest.raises(HTTPException) as raised:
+        await _push_relay_rate_limit(redis, scope, limit=2)  # type: ignore[arg-type]
+
+    error = raised.value
+    assert getattr(error, "status_code", None) == 429
+    assert getattr(error, "headers", None) == {"Retry-After": "60"}
+    assert len(redis.counters) == 1
+    key = next(iter(redis.counters))
+    assert scope not in key
+    assert redis.expiries[key] == 60
 
 
 @pytest.mark.parametrize(

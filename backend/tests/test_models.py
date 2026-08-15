@@ -13,6 +13,9 @@ def test_complete_v1_schema_is_registered() -> None:
         "users",
         "user_settings",
         "push_devices",
+        "push_wake_outbox",
+        "push_relay_subscriptions",
+        "push_relay_deliveries",
         "relationships",
         "sessions",
         "one_time_tokens",
@@ -83,10 +86,12 @@ def test_push_devices_are_local_encrypted_registrations() -> None:
     devices = Base.metadata.tables["push_devices"]
     assert tuple(devices.primary_key.columns.keys()) == ("id",)
     assert devices.c.token_hash.unique is True
-    assert devices.c.token_encrypted.nullable is False
+    assert devices.c.token_encrypted.nullable is True
+    assert devices.c.transport.server_default is not None
     assert "ck_push_devices_push_devices_user_is_local" in constraint_names("push_devices")
     assert "ck_push_devices_platform_value" in constraint_names("push_devices")
     assert "ck_push_devices_token_hash_length" in constraint_names("push_devices")
+    assert "ck_push_devices_transport_fields" in constraint_names("push_devices")
     local_user = foreign_key_for_columns(
         "push_devices", ("user_id", "user_domain", "user_is_local")
     )

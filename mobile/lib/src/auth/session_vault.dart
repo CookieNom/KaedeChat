@@ -45,6 +45,46 @@ final class SessionTokens {
       );
 }
 
+final class RelayPushState {
+  const RelayPushState({
+    required this.home,
+    required this.relayUrl,
+    required this.relayOrigin,
+    required this.subscriptionId,
+    required this.routeId,
+    required this.wakeSecret,
+    required this.managementSecret,
+  });
+
+  factory RelayPushState.fromJson(Map<String, Object?> json) => RelayPushState(
+        home: Domain(json['home']! as String),
+        relayUrl: Uri.parse(json['relay_url']! as String),
+        relayOrigin: Domain(json['relay_origin']! as String),
+        subscriptionId: json['subscription_id']! as String,
+        routeId: json['route_id']! as String,
+        wakeSecret: json['wake_secret']! as String,
+        managementSecret: json['management_secret']! as String,
+      );
+
+  final Domain home;
+  final Uri relayUrl;
+  final Domain relayOrigin;
+  final String subscriptionId;
+  final String routeId;
+  final String wakeSecret;
+  final String managementSecret;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'home': home.value,
+        'relay_url': relayUrl.toString(),
+        'relay_origin': relayOrigin.value,
+        'subscription_id': subscriptionId,
+        'route_id': routeId,
+        'wake_secret': wakeSecret,
+        'management_secret': managementSecret,
+      };
+}
+
 final class SessionVault {
   const SessionVault([
     this.storage = const FlutterSecureStorage(
@@ -58,6 +98,8 @@ final class SessionVault {
 
   static const _activeSession = 'kaede.active-session.v1';
   static const _installationId = 'kaede.installation-id.v1';
+  static const _relayPushState = 'kaede.push-relay-state.v1';
+  static const _pushOptIn = 'kaede.push-opt-in.v1';
   final FlutterSecureStorage storage;
 
   Future<SessionTokens?> read() async {
@@ -75,7 +117,37 @@ final class SessionVault {
   Future<void> write(SessionTokens tokens) =>
       storage.write(key: _activeSession, value: jsonEncode(tokens.toJson()));
 
-  Future<void> clear() => storage.delete(key: _activeSession);
+  Future<void> clear() async {
+    await storage.delete(key: _activeSession);
+    await clearRelayPushState();
+    await storage.delete(key: _pushOptIn);
+  }
+
+  Future<bool> readPushOptIn() async =>
+      (await storage.read(key: _pushOptIn)) == 'true';
+
+  Future<void> writePushOptIn(bool enabled) =>
+      storage.write(key: _pushOptIn, value: enabled ? 'true' : 'false');
+
+  Future<RelayPushState?> readRelayPushState() async {
+    final encoded = await storage.read(key: _relayPushState);
+    if (encoded == null) return null;
+    try {
+      return RelayPushState.fromJson(
+        Map<String, Object?>.from(jsonDecode(encoded) as Map),
+      );
+    } on Object {
+      await clearRelayPushState();
+      return null;
+    }
+  }
+
+  Future<void> writeRelayPushState(RelayPushState state) => storage.write(
+        key: _relayPushState,
+        value: jsonEncode(state.toJson()),
+      );
+
+  Future<void> clearRelayPushState() => storage.delete(key: _relayPushState);
 
   Future<String> installationId() async {
     final existing = await storage.read(key: _installationId);

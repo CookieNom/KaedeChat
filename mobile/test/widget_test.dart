@@ -1,8 +1,12 @@
+import 'dart:convert';
+
+import 'package:cryptography/cryptography.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
@@ -980,6 +984,105 @@ void main() {
       ]) {
         expect(OpaquePushWake.parse(payload), isNull, reason: '$payload');
       }
+    });
+
+    test('accepts only an exact content-free relay wake payload', () {
+      final wake = OpaquePushWake.parse(<String, dynamic>{
+        'sync_version': '2',
+        'route_id': 'r' * 43,
+        'event_token': 'e' * 43,
+        'delivery_id': 'd' * 43,
+        'expires_at': '2000000000',
+        'wake_mac': 'm' * 43,
+      });
+
+      expect(wake?.version, 2);
+      expect(wake?.routeId, 'r' * 43);
+      expect(wake?.deliveryId, 'd' * 43);
+      expect(wake?.wakeMac, 'm' * 43);
+      expect(
+        OpaquePushWake.parse(<String, dynamic>{
+          'sync_version': '2',
+          'route_id': 'r' * 43,
+          'event_token': 'e' * 43,
+          'delivery_id': 'd' * 43,
+          'expires_at': '2000000000',
+          'wake_mac': 'm' * 43,
+          'message_ref': '42@private.example',
+        }),
+        isNull,
+      );
+    });
+
+    test('requires the configured transport and device MAC before redemption',
+        () async {
+      final legacy = OpaquePushWake.parse(<String, dynamic>{
+        'sync_version': '1',
+        'event_token': 'e' * 43,
+      })!;
+      expect(
+        await authenticatePushWake(
+          legacy,
+          null,
+          configuredTransport: 'relay',
+        ),
+        isFalse,
+      );
+      expect(
+        await authenticatePushWake(
+          legacy,
+          null,
+          configuredTransport: 'direct_fcm',
+        ),
+        isTrue,
+      );
+
+      final secretBytes = List<int>.generate(32, (index) => index);
+      final secret = base64UrlEncode(secretBytes).replaceAll('=', '');
+      const expiresAt = 2000000000;
+      final canonical = utf8.encode(
+        '2\n${'r' * 43}\n${'e' * 43}\n${'d' * 43}\n$expiresAt',
+      );
+      final calculated = await Hmac.sha256().calculateMac(
+        canonical,
+        secretKey: SecretKey(secretBytes),
+      );
+      final mac = base64UrlEncode(calculated.bytes).replaceAll('=', '');
+      final relayWake = OpaquePushWake.parse(<String, dynamic>{
+        'sync_version': '2',
+        'route_id': 'r' * 43,
+        'event_token': 'e' * 43,
+        'delivery_id': 'd' * 43,
+        'expires_at': '$expiresAt',
+        'wake_mac': mac,
+      })!;
+      final state = RelayPushState(
+        home: Domain('home.example'),
+        relayUrl: Uri.parse('https://push.example'),
+        relayOrigin: Domain('example'),
+        subscriptionId: 'kps_${'s' * 40}',
+        routeId: 'r' * 43,
+        wakeSecret: secret,
+        managementSecret: 'm' * 43,
+      );
+      expect(
+        await authenticatePushWake(
+          relayWake,
+          state,
+          configuredTransport: 'relay',
+          nowEpochSeconds: expiresAt - 60,
+        ),
+        isTrue,
+      );
+      expect(
+        await authenticatePushWake(
+          relayWake,
+          state,
+          configuredTransport: 'relay',
+          nowEpochSeconds: expiresAt + 1,
+        ),
+        isFalse,
+      );
     });
 
     test('parses notification content only after authenticated redemption', () {

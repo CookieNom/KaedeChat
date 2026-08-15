@@ -22,6 +22,8 @@ FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
 
 
 def decrypt_device_token(device: PushDevice, settings: Settings) -> str:
+    if device.token_encrypted is None:
+        raise ValueError("push device does not contain a direct provider token")
     return decrypt_secret(
         device.token_encrypted,
         settings.secret_key_bytes,
@@ -66,14 +68,50 @@ def fcm_sync_payload(token: str, event_token: str, platform: str) -> dict[str, A
     return {"message": message}
 
 
+def fcm_relay_payload(
+    token: str,
+    *,
+    route_id: str,
+    event_token: str,
+    delivery_id: str,
+    expires_at: int,
+    wake_mac: str,
+    platform: str,
+) -> dict[str, Any]:
+    """Build a MAC-authenticated, content-free relay wake."""
+
+    for value in (route_id, event_token, delivery_id, wake_mac):
+        if not PUSH_SYNC_TOKEN_RE.fullmatch(value):
+            raise ValueError("invalid relay wake field")
+    data = {
+        "sync_version": "2",
+        "route_id": route_id,
+        "event_token": event_token,
+        "delivery_id": delivery_id,
+        "expires_at": str(expires_at),
+        "wake_mac": wake_mac,
+    }
+    message: dict[str, Any] = {"token": token, "data": data}
+    ttl = max(0, min(600, expires_at - int(time.time())))
+    if platform == "android":
+        message["android"] = {"priority": "high", "ttl": f"{ttl}s"}
+    elif platform == "ios":
+        message["apns"] = {
+            "headers": {"apns-push-type": "background", "apns-priority": "5"},
+            "payload": {"aps": {"content-available": 1}},
+        }
+    else:
+        raise ValueError("unsupported push platform")
+    return {"message": message}
+
+
 class FcmClient:
     """Small FCM HTTP v1 client with a process-local OAuth token cache."""
 
-    def __init__(self, settings: Settings) -> None:
-        encoded = settings.push_fcm_service_account_b64
+    def __init__(self, encoded: str | None) -> None:
         if encoded is None:
             raise RuntimeError("Firebase service account is not configured")
-        document = json.loads(base64.b64decode(encoded.get_secret_value()))
+        document = json.loads(base64.b64decode(encoded))
         self.project_id = str(document["project_id"])
         self.client_email = str(document["client_email"])
         self.token_uri = str(document["token_uri"])
@@ -170,13 +208,69 @@ class FcmClient:
         response.raise_for_status()
         return FcmResult(delivered=False, token_invalid=invalid)
 
+    async def send_relay(
+        self,
+        token: str,
+        *,
+        route_id: str,
+        event_token: str,
+        delivery_id: str,
+        expires_at: int,
+        wake_mac: str,
+        platform: str,
+    ) -> FcmResult:
+        payload = fcm_relay_payload(
+            token,
+            route_id=route_id,
+            event_token=event_token,
+            delivery_id=delivery_id,
+            expires_at=expires_at,
+            wake_mac=wake_mac,
+            platform=platform,
+        )
+        response: httpx.Response | None = None
+        async with httpx.AsyncClient(timeout=10) as client:
+            for attempt in range(3):
+                response = await client.post(
+                    f"https://fcm.googleapis.com/v1/projects/{self.project_id}/messages:send",
+                    headers={"Authorization": f"Bearer {await self._token()}"},
+                    json=payload,
+                )
+                if response.status_code == 401 and attempt == 0:
+                    self._access_token = None
+                    continue
+                if response.status_code != 429 and response.status_code < 500:
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(0.25 * (2**attempt))
+        if response is None:
+            raise RuntimeError("FCM relay request did not execute")
+        if response.is_success:
+            return FcmResult(delivered=True)
+        if response.status_code in {400, 404}:
+            return FcmResult(delivered=False, token_invalid=True)
+        response.raise_for_status()
+        return FcmResult(delivered=False)
+
 
 _clients: dict[str, FcmClient] = {}
 
 
 def fcm_client(settings: Settings) -> FcmClient:
-    client = _clients.get(settings.domain)
+    key = f"direct:{settings.domain}"
+    client = _clients.get(key)
     if client is None:
-        client = FcmClient(settings)
-        _clients[settings.domain] = client
+        credential = settings.push_fcm_service_account_b64
+        client = FcmClient(credential.get_secret_value() if credential is not None else None)
+        _clients[key] = client
+    return client
+
+
+def relay_fcm_client(settings: Settings) -> FcmClient:
+    key = f"relay:{settings.domain}"
+    client = _clients.get(key)
+    if client is None:
+        credential = settings.push_relay_fcm_service_account_b64
+        client = FcmClient(credential.get_secret_value() if credential is not None else None)
+        _clients[key] = client
     return client

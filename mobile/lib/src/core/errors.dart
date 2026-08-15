@@ -223,6 +223,20 @@ final class KaedeException implements Exception {
       'TURNSTILE_REQUIRED': 'Complete the security check to continue.',
       'PUSH_DISABLED':
           'Push notifications are not configured on this instance.',
+      'PUSH_RELAY_APP_MISMATCH':
+          'This app is not compatible with your home’s configured notification relay.',
+      'PUSH_RELAY_DISABLED':
+          'Your home does not currently support background delivery for this app.',
+      'PUSH_RELAY_ENROLLMENT_EXISTS':
+          'Notification setup is already in progress. Wait a moment and try again.',
+      'PUSH_RELAY_ENROLLMENT_EXPIRED':
+          'Notification setup expired. Enable background notifications again.',
+      'PUSH_RELAY_GRANT_INVALID':
+          'The signed notification setup request is invalid or expired.',
+      'PUSH_RELAY_RATE_LIMITED':
+          'Too many notification registrations were attempted. Wait before trying again.',
+      'PUSH_RELAY_RECEIPT_INVALID':
+          'The notification relay could not complete registration. Try again later.',
       'GIF_PICKER_DISABLED': 'The GIF picker is disabled on this instance.',
       'GIF_PROVIDER_UNAVAILABLE':
           'The GIF provider is temporarily unavailable. Try again later.',

@@ -37,6 +37,7 @@ from app.api.link_previews import router as link_previews_router
 from app.api.management import router as management_router
 from app.api.media import router as media_router
 from app.api.moderation import router as moderation_router
+from app.api.push import relay_router as push_relay_router
 from app.api.push import router as push_router
 from app.api.relationships import router as relationships_router
 from app.api.search import router as search_router
@@ -137,6 +138,7 @@ app.include_router(management_router)
 app.include_router(media_router)
 app.include_router(moderation_router)
 app.include_router(push_router)
+app.include_router(push_relay_router)
 app.include_router(relationships_router)
 app.include_router(search_router)
 app.include_router(webhooks_router)

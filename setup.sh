@@ -979,7 +979,7 @@ else
 fi
 
 section 'Interaction services' \
-  'KLIPY adds a GIF picker. Turnstile protects authentication. Firebase optionally delivers mobile notifications while the app is closed.'
+  'KLIPY adds a GIF picker. Turnstile protects authentication. The public relay is the recommended closed-app notification path.'
 if confirm 'Enable the KLIPY GIF picker?' "$([[ $(old KAEDE_KLIPY_ENABLED false) == true ]] && printf true || printf false)"; then
   KLIPY_ENABLED=true
   if [[ -n ${OLD[KAEDE_KLIPY_API_KEY]-} ]] && confirm 'Reuse existing KLIPY API key?' true; then
@@ -1007,48 +1007,52 @@ else
   TURNSTILE_SECRET_VALUE=
 fi
 
-if confirm 'Enable closed-app Android and iOS notifications through Firebase Cloud Messaging?' "$([[ $(old KAEDE_PUSH_ENABLED false) == true ]] && printf true || printf false)"; then
+PUSH_CHOICE=$(choose 'Closed-app mobile notifications' \
+  'Official Kaede Push Relay (recommended)' \
+  'Direct Firebase for a custom/community app build' \
+  'Disabled')
+PUSH_RELAY_ENABLED=false
+PUSH_RELAY_URL=$(old KAEDE_PUSH_RELAY_URL https://push.kaede.chat)
+PUSH_RELAY_ORIGIN=$(old KAEDE_PUSH_RELAY_ORIGIN kaede.chat)
+PUSH_RELAY_APP_ID=$(old KAEDE_PUSH_RELAY_APP_ID chat.kaede.mobile)
+PUSH_ENABLED=false
+PUSH_FCM_SERVICE_ACCOUNT_B64=
+if [[ $PUSH_CHOICE == 'Official Kaede Push Relay (recommended)' ]]; then
+  PUSH_RELAY_ENABLED=true
+  note 'Recommended: users of the official Kaede app receive closed-app notifications without this instance owning Firebase credentials.'
+  note 'This instance sends signed, content-free wakes to push.kaede.chat. The relay sees this home domain, an opaque subscription, timing, and provider results; it does not receive message content, sender names, room/message identifiers, attachments, or encryption keys.'
+  note 'Users can decline or disable relay delivery. Chat and foreground notifications continue during a relay outage.'
+elif [[ $PUSH_CHOICE == 'Direct Firebase for a custom/community app build' ]]; then
   PUSH_ENABLED=true
-  note 'FCM setup requires a Firebase project. Google Analytics and billing are not required for Cloud Messaging.'
-  note 'Register Android package chat.kaede.mobile, then download its client file to mobile/android/app/google-services.json.'
-  note 'For production, create a dedicated Google Cloud service account with only Firebase Cloud Messaging API Admin (roles/firebasecloudmessaging.admin), then generate its JSON key.'
-  note 'Revoke and replace the key immediately if it is ever pasted into chat, logs, or an issue tracker.'
-  note 'The service-account JSON is the private backend credential; it is NOT google-services.json and must never be committed.'
-  note 'See README.md and mobile/README.md for the complete setup and privacy notes.'
-  if [[ -f $ROOT/mobile/android/app/google-services.json && ! -L $ROOT/mobile/android/app/google-services.json ]]; then
-    note 'Found the Android Firebase client file at mobile/android/app/google-services.json.'
-  else
-    warn 'Android Firebase client file not found at mobile/android/app/google-services.json; closed-app Android notifications will not work until it is added and the app is rebuilt.'
-  fi
+  note 'Direct Firebase is for a separately signed custom app with its own application ID, Firebase project, and update lineage. It cannot notify the official store app.'
   if [[ -n ${OLD[KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64]-} ]] && confirm 'Reuse the existing Firebase service-account credential?' true; then
     PUSH_FCM_SERVICE_ACCOUNT_B64=${OLD[KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64]}
   else
-    FIREBASE_CREDENTIAL_SOURCE=$(choose 'How should setup read the private Firebase service-account JSON?' \
-      'Read from a file' 'Paste JSON now')
-    if [[ $FIREBASE_CREDENTIAL_SOURCE == 'Read from a file' ]]; then
-      FIREBASE_SERVICE_ACCOUNT_PATH=$(prompt_text 'Private Firebase service-account JSON path (not google-services.json)')
-      [[ -f $FIREBASE_SERVICE_ACCOUNT_PATH && ! -L $FIREBASE_SERVICE_ACCOUNT_PATH ]] || \
-        die 'Firebase service-account path must be a regular, non-symlink file'
-      [[ $(basename -- "$FIREBASE_SERVICE_ACCOUNT_PATH") != google-services.json ]] || \
-        die 'google-services.json is the public Android client configuration, not a backend service-account credential'
-      (( $(wc -c < "$FIREBASE_SERVICE_ACCOUNT_PATH") <= 65536 )) || \
-        die 'Firebase service-account file must not exceed 64 KiB'
-      PUSH_FCM_SERVICE_ACCOUNT_B64=$(openssl base64 -A -in "$FIREBASE_SERVICE_ACCOUNT_PATH")
-    else
-      FIREBASE_SERVICE_ACCOUNT_JSON=$(prompt_multiline_secret 'Firebase service-account JSON')
-      ((${#FIREBASE_SERVICE_ACCOUNT_JSON} <= 65536)) || \
-        die 'Firebase service-account JSON must not exceed 64 KiB'
-      [[ $FIREBASE_SERVICE_ACCOUNT_JSON == *'"type"'* && $FIREBASE_SERVICE_ACCOUNT_JSON == *'"service_account"'* ]] || \
-        die 'pasted JSON does not identify itself as a Firebase service account'
-      PUSH_FCM_SERVICE_ACCOUNT_B64=$(printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" | openssl base64 -A)
-      unset FIREBASE_SERVICE_ACCOUNT_JSON
-    fi
-    [[ -n $PUSH_FCM_SERVICE_ACCOUNT_B64 ]] || die 'Firebase service-account file is empty'
+    FIREBASE_SERVICE_ACCOUNT_PATH=$(prompt_text 'Private Firebase service-account JSON path (not google-services.json)')
+    [[ -f $FIREBASE_SERVICE_ACCOUNT_PATH && ! -L $FIREBASE_SERVICE_ACCOUNT_PATH ]] || \
+      die 'Firebase service-account path must be a regular, non-symlink file'
+    [[ $(basename -- "$FIREBASE_SERVICE_ACCOUNT_PATH") != google-services.json ]] || \
+      die 'google-services.json is a client file, not a backend service-account credential'
+    (( $(wc -c < "$FIREBASE_SERVICE_ACCOUNT_PATH") <= 65536 )) || \
+      die 'Firebase service-account file must not exceed 64 KiB'
+    PUSH_FCM_SERVICE_ACCOUNT_B64=$(openssl base64 -A -in "$FIREBASE_SERVICE_ACCOUNT_PATH")
   fi
-  note 'The mobile builds also need their platform Firebase configuration files; see mobile/README.md.'
-else
-  PUSH_ENABLED=false
-  PUSH_FCM_SERVICE_ACCOUNT_B64=
+fi
+
+PUSH_RELAY_SERVICE_ENABLED=false
+PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64=
+if [[ $DOMAIN == "$PUSH_RELAY_ORIGIN" ]] && confirm 'Operate the configured mobile push relay on this instance?' "$([[ $(old KAEDE_PUSH_RELAY_SERVICE_ENABLED false) == true ]] && printf true || printf false)"; then
+  PUSH_RELAY_SERVICE_ENABLED=true
+  PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64=$(old KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64 "$(old KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64 '')")
+  if [[ -z $PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64 ]]; then
+    FIREBASE_SERVICE_ACCOUNT_PATH=$(prompt_text 'Relay Firebase service-account JSON path (not google-services.json)')
+    [[ -f $FIREBASE_SERVICE_ACCOUNT_PATH && ! -L $FIREBASE_SERVICE_ACCOUNT_PATH ]] || \
+      die 'Firebase service-account path must be a regular, non-symlink file'
+    (( $(wc -c < "$FIREBASE_SERVICE_ACCOUNT_PATH") <= 65536 )) || \
+      die 'Firebase service-account file must not exceed 64 KiB'
+    PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64=$(openssl base64 -A -in "$FIREBASE_SERVICE_ACCOUNT_PATH")
+  fi
+  note 'Only relay workers receive this Firebase credential. Federated home instances never do.'
 fi
 
 if confirm 'Enable typo-tolerant message search with the bundled private Meilisearch service?' "$([[ $(old KAEDE_SEARCH_ENABLED true) == true ]] && printf true || printf false)"; then
@@ -1389,6 +1393,14 @@ emit() {
     emit KAEDE_TURNSTILE_SITE_KEY "$TURNSTILE_SITE_KEY"
     emit TURNSTILE_SECRET "$TURNSTILE_SECRET_VALUE"
   fi
+  emit KAEDE_PUSH_RELAY_ENABLED "$PUSH_RELAY_ENABLED"
+  emit KAEDE_PUSH_RELAY_URL "$PUSH_RELAY_URL"
+  emit KAEDE_PUSH_RELAY_ORIGIN "$PUSH_RELAY_ORIGIN"
+  emit KAEDE_PUSH_RELAY_APP_ID "$PUSH_RELAY_APP_ID"
+  emit KAEDE_PUSH_RELAY_SERVICE_ENABLED "$PUSH_RELAY_SERVICE_ENABLED"
+  if [[ $PUSH_RELAY_SERVICE_ENABLED == true ]]; then
+    emit KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64 "$PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64"
+  fi
   emit KAEDE_PUSH_ENABLED "$PUSH_ENABLED"
   [[ $PUSH_ENABLED == false ]] || emit KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64 "$PUSH_FCM_SERVICE_ACCOUNT_B64"
   emit KAEDE_APP_URL "https://$DOMAIN"
@@ -1410,6 +1422,9 @@ emit() {
     emit LIVEKIT_API_SECRET "$LIVEKIT_SECRET"
     emit LIVEKIT_TURN_CERT_PATH "$CERT_PATH"
     emit LIVEKIT_TURN_KEY_PATH "$KEY_PATH"
+  fi
+  if [[ $PUSH_RELAY_SERVICE_ENABLED == true ]]; then
+    printf '\nPush relay: create public DNS for push.%s, include it in the TLS certificate, and enable the generated nginx relay virtual host.\n' "$DOMAIN"
   fi
   if [[ $OBSERVABILITY == true ]]; then
     emit GRAFANA_ADMIN_USER "$GRAFANA_USER"
@@ -1440,12 +1455,12 @@ YAML
 render_overlay "$STAGE_DIR/compose.yml"
 
 remove_marked_blocks() {
-  local source=$1 output=$2 remove_upstream=$3
-  awk -v remove_upstream="$remove_upstream" '
-    /# KAEDE_SETUP_GARAGE_MEDIA_BEGIN/ { skip=1; next }
-    /# KAEDE_SETUP_GARAGE_MEDIA_END/ { skip=0; next }
-    remove_upstream == "true" && /# KAEDE_SETUP_GARAGE_UPSTREAM_BEGIN/ { skip=1; next }
-    remove_upstream == "true" && /# KAEDE_SETUP_GARAGE_UPSTREAM_END/ { skip=0; next }
+  local source=$1 output=$2 remove_media=$3 remove_push_relay=$4
+  awk -v remove_media="$remove_media" -v remove_push_relay="$remove_push_relay" '
+    remove_media == "true" && /# KAEDE_SETUP_GARAGE_MEDIA_BEGIN/ { skip=1; next }
+    remove_media == "true" && /# KAEDE_SETUP_GARAGE_MEDIA_END/ { skip=0; next }
+    remove_push_relay == "true" && /# KAEDE_SETUP_PUSH_RELAY_BEGIN/ { skip=1; next }
+    remove_push_relay == "true" && /# KAEDE_SETUP_PUSH_RELAY_END/ { skip=0; next }
     !skip && $0 !~ /^# KAEDE_SETUP_/ { print }
   ' "$source" > "$output"
 }
@@ -1458,11 +1473,11 @@ if [[ $HOST_NGINX == true ]]; then
   [[ -f $ROOT/deploy/nginx/kaede.conf.example ]] || \
     die 'deploy/nginx/kaede.conf.example is missing; restore it from the repository before generating nginx configuration'
   HOST_STAGE="$STAGE_DIR/generated/kaede.nginx.conf.raw"
-  if [[ $STORAGE == garage ]]; then
-    awk '$0 !~ /^# KAEDE_SETUP_/' "$ROOT/deploy/nginx/kaede.conf.example" > "$HOST_STAGE"
-  else
-    remove_marked_blocks "$ROOT/deploy/nginx/kaede.conf.example" "$HOST_STAGE" false
-  fi
+  remove_marked_blocks \
+    "$ROOT/deploy/nginx/kaede.conf.example" \
+    "$HOST_STAGE" \
+    "$([[ $STORAGE == garage ]] && printf false || printf true)" \
+    "$([[ $PUSH_RELAY_SERVICE_ENABLED == true ]] && printf false || printf true)"
   sed \
     -e "s|chat\.example\.com|$(sed_escape "$DOMAIN")|g" \
     -e "s|server 127\.0\.0\.1:18081;|server 127.0.0.1:$EDGE_PORT;|g" \
@@ -1481,7 +1496,7 @@ fi
   printf 'Validate:\n  make env-check\n  make generated-compose-check\n\n'
   printf 'Internal Caddy edge: 127.0.0.1:%s\n' "$EDGE_PORT"
   printf 'Selected storage: %s\nSelected email: %s\nKLIPY GIF picker: %s\nTurnstile: %s\nMobile push: %s\nAutomatic updates: %s\n' \
-    "$STORAGE" "$EMAIL" "$KLIPY_ENABLED" "$TURNSTILE_ENABLED" "$PUSH_ENABLED" "$AUTO_UPDATE"
+    "$STORAGE" "$EMAIL" "$KLIPY_ENABLED" "$TURNSTILE_ENABLED" "$PUSH_CHOICE" "$AUTO_UPDATE"
   if [[ $AUTO_UPDATE == true ]]; then
     printf 'Updater source: %s/%s every %s (up to %s jitter)\n' \
       "$AUTO_UPDATE_REMOTE" "$AUTO_UPDATE_BRANCH" "$AUTO_UPDATE_INTERVAL" "$AUTO_UPDATE_JITTER"
@@ -1516,7 +1531,7 @@ if [[ $USE_GUM == true ]]; then
     "Email: $EMAIL" \
     "KLIPY GIF picker: $KLIPY_ENABLED" \
     "Turnstile: $TURNSTILE_ENABLED" \
-    "Mobile push: $PUSH_ENABLED" \
+    "Mobile push: $PUSH_CHOICE" \
     "Automatic updates: $AUTO_UPDATE" \
     "Host nginx file: $HOST_NGINX" \
     "Voice: $VOICE" \
@@ -1527,7 +1542,7 @@ else
   printf '  Domain:          %s\n  Internal Caddy:  127.0.0.1:%s\n' "$DOMAIN" "$EDGE_PORT"
   printf '  Storage:         %s\n  Email:           %s\n' "$STORAGE" "$EMAIL"
   printf '  KLIPY GIFs:      %s\n  Turnstile:       %s\n  Mobile push:     %s\n' \
-    "$KLIPY_ENABLED" "$TURNSTILE_ENABLED" "$PUSH_ENABLED"
+    "$KLIPY_ENABLED" "$TURNSTILE_ENABLED" "$PUSH_CHOICE"
   printf '  Auto updates:     %s\n' "$AUTO_UPDATE"
   printf '  Host nginx file: %s\n  Voice:           %s\n  Observability:   %s\n' "$HOST_NGINX" "$VOICE" "$OBSERVABILITY"
   printf '  Secrets:         generated or preserved; never displayed\n'

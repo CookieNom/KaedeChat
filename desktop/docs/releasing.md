@@ -35,7 +35,11 @@ is pushed:
   `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`
   for Developer ID signing and notarization;
 - `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
-  and `ANDROID_KEY_PASSWORD` for the long-lived Android upload key.
+  and `ANDROID_KEY_PASSWORD` for the long-lived Android upload key;
+- `ANDROID_GOOGLE_SERVICES_JSON_BASE64` for the official
+  `chat.kaede.mobile` Firebase client configuration. This public client
+  configuration is injected at build time and is not the relay's private
+  service-account credential.
 
 Encode binary certificate and keystore files with standard base64 and store only
 the encoded value in GitHub Secrets. Missing signing material fails its build
@@ -58,6 +62,8 @@ git tag -s v0.1.10 -m "Kaede Chat 0.1.10"
 git push origin v0.1.10
 ```
 
+The workflow publishes both a signed sideload APK and a Play-ready AAB. Both
+are built in official-relay mode and contain no Firebase service-account key.
 The workflow creates the GitHub Release only after every signed build succeeds.
 Rerunning the workflow for the same tag replaces that tag's assets rather than
 creating a second release.

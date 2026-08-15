@@ -58,8 +58,8 @@ make setup
 
 The wizard creates a private `.env`, selects Garage or an external S3-compatible
 provider, configures optional email, voice, private message search, KLIPY GIF,
-and Turnstile services,
-can configure optional Firebase Cloud Messaging and source-based automatic
+and Turnstile services, configures the recommended public mobile push relay or
+a custom direct-Firebase build, and configures source-based automatic
 updates, offers optional common or advanced federation/storage quota tuning,
 and can render a host nginx configuration. Quota prompts accept friendly
 counts such as `250K` or `2.5M` and sizes such as `100GB` or `100GiB`; keeping
@@ -229,43 +229,34 @@ Automatic migrations make verified backups especially important. Read the
 [automatic-update safety and recovery notes](docs/operator.md#optional-automatic-updates)
 before enabling it. No updater is enabled by default.
 
-### Optional Firebase mobile notifications
+### Mobile apps and background notifications
 
-Firebase Cloud Messaging is required only for reliable notifications after the
-mobile process has been suspended or terminated. FCM is a no-cost Firebase
-product and does not require billing or Google Analytics, but creating the
-Firebase project requires a Google account.
+The official Kaede app is a federated client and can sign in to any compatible
+Kaede home. Closed-app delivery uses the Kaede-operated relay at
+`push.kaede.chat`; self-hosted homes do not need or receive the official
+Firebase credentials.
 
-Before choosing Firebase in `make setup`:
+| Mobile distribution | Closed-app path | Operator requirement |
+| --- | --- | --- |
+| Official store/GitHub app | Official Kaede relay | Enable the relay during `make setup` |
+| Community/custom app | Its own relay or direct FCM | Distinct app ID, signing identity, Firebase/APNs project, and credentials |
+| No-push build | None | Foreground alerts and unread state still work |
 
-1. Create a project in the [Firebase console](https://console.firebase.google.com/).
-2. Add an Android application with package name `chat.kaede.mobile`.
-3. Download its `google-services.json` client configuration and save it as
-   `mobile/android/app/google-services.json`.
-4. Create a dedicated Google Cloud service account with only **Firebase Cloud
-   Messaging API Admin** (`roles/firebasecloudmessaging.admin`), generate a JSON
-   key for it, and save the file outside version control. Revoke and replace the
-   key immediately if it is ever pasted into chat, logs, or an issue tracker.
-5. Run `make setup` and enable Firebase Cloud Messaging. Choose either to read
-   the private service-account JSON from a local file or paste its complete
-   contents into the hidden multiline prompt. For pasted input, finish with
-   `KAEDE_FIREBASE_JSON_END` on a line by itself. The wizard stores only the
-   base64 representation in the private `.env` file.
-6. Rebuild the mobile application, restart the Kaede API and worker processes,
-   and enable system notifications from Kaede's notification settings.
+A participating home sends a signed, short-lived, content-free wake for a
+device that opted in. The app then retrieves notification details from its home
+over an authenticated connection; encrypted message content is decrypted only
+on the device. The relay is not anonymous: it can observe the requesting home,
+an opaque subscription, delivery timing, network metadata, platform, and
+provider result. It does not receive message text, sender names, guild/channel/
+message identifiers, attachments, or encryption keys. FCM or APNs still sees
+its ordinary device and delivery metadata.
 
-These are two different files: `google-services.json` identifies the Android
-client and is bundled into the APK; the service-account JSON authorizes the
-backend to send notifications and must never be bundled, logged, or committed.
-Both must belong to the same Firebase project. Kaede works in the foreground
-without either file, but terminated-process delivery does not.
-
-FCM transport is TLS-protected but not end-to-end encrypted, so Kaede sends FCM
-only a short-lived random wake token. The authenticated app redeems that token
-directly from the Kaede API and creates the visible notification locally;
-sender names, message text, and channel/message references never enter the FCM
-payload. See [mobile/README.md](mobile/README.md#firebase-cloud-messaging-setup)
-for build details and the exact privacy boundary.
+Relay use is optional for both the operator and user. The official app still
+connects when a home disables it, but closed-app notifications are unavailable.
+Anyone concerned about the relay trust boundary may build a community client
+with a distinct application/bundle ID and provider, or disable push entirely.
+See [docs/mobile-push.md](docs/mobile-push.md) for protocol, privacy, migration,
+and custom-build details.
 
 For a manual setup:
 

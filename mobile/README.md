@@ -51,88 +51,50 @@ flutter build appbundle --release
 
 The application ID and iOS bundle ID are both `chat.kaede.mobile`.
 
-Tag-triggered GitHub Releases build a signed APK together with the desktop
-clients. Configure the four `ANDROID_*` repository secrets listed in
+Tag-triggered GitHub Releases build a signed APK and Play AAB together with the
+desktop clients. Configure the four Android signing secrets and the official
+Firebase client-configuration secret listed in
 [`desktop/docs/releasing.md`](../desktop/docs/releasing.md) before pushing a
 release tag. The workflow deliberately fails instead of publishing an unsigned
-APK or generating a throwaway key that would break application updates.
+artifact, omitting push support, or generating a throwaway key that would break
+application updates.
 
-## Firebase Cloud Messaging setup
+## Background notification builds
 
-Firebase is optional. Foreground gateway notifications and unread indicators
-continue to work without it; reliable delivery after Android suspends or
-terminates Kaede requires a platform push provider.
+Official releases use the Kaede relay at `push.kaede.chat`. The official
+Firebase client configuration is injected by protected release CI; federated
+home operators do not receive either it or the provider service account. The
+app pins the relay and registers its provider token directly there.
 
-FCM is a no-cost Firebase product and does not require a billing account or
-Google Analytics. To configure Android delivery:
+Community builds use a distinct application/bundle ID, signing identity,
+Firebase/APNs project, and update lineage. Configure these Dart definitions:
 
-1. Create a Firebase project and register an Android application whose package
-   name is exactly `chat.kaede.mobile`.
-2. Download the Android client configuration to
-   `android/app/google-services.json`. From the repository root, the same path
-   is `mobile/android/app/google-services.json`.
-3. In Google Cloud IAM, create a dedicated service account with only **Firebase
-   Cloud Messaging API Admin** (`roles/firebasecloudmessaging.admin`), generate
-   a JSON key, and download it somewhere outside the repository. Revoke and
-   replace any key that is ever pasted into chat, logs, or an issue tracker.
-4. From the repository root, run `make setup` and choose to enable Firebase
-   Cloud Messaging. Either provide the private service-account JSON file path or
-   paste the complete JSON into the hidden multiline prompt, ending it with
-   `KAEDE_FIREBASE_JSON_END` on a line by itself. The wizard base64-encodes it
-   into the private operator `.env` as
-   `KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64` and sets `KAEDE_PUSH_ENABLED=true`.
-5. Run the environment validators, rebuild the APK/app bundle, and restart the
-   API and worker services so both device registration and delivery use the new
-   configuration.
+```sh
+flutter build apk \
+  --dart-define=KAEDE_PUSH_TRANSPORT=relay \
+  --dart-define=KAEDE_PUSH_RELAY_URL=https://push.example.com \
+  --dart-define=KAEDE_PUSH_RELAY_ORIGIN=example.com \
+  --dart-define=KAEDE_PUSH_APP_ID=org.example.kaede
+```
 
-Do not confuse the two JSON documents:
+For a single-home custom build, `KAEDE_PUSH_TRANSPORT=direct_fcm` retains the
+legacy authenticated token registration. That home sets
+`KAEDE_PUSH_ENABLED=true` and supplies its service account. Direct mode cannot
+notify `chat.kaede.mobile` unless it owns the matching official Firebase
+project, which third-party operators do not.
 
-- `google-services.json` contains non-secret Android client/project identifiers
-  and is bundled into the application. It is ignored by this repository so
-  operators can inject the correct project at build time.
-- The service-account JSON contains a private key. Never place it under
-  `mobile/`, bundle it in an application, commit it, or paste it into logs. Only
-  the Kaede backend/worker environment may receive it.
+Android still requires `android/app/google-services.json` for the selected app
+ID. iOS requires `GoogleService-Info.plist`, the Push Notifications/Background
+Modes entitlements, APNs credentials in Firebase, and valid Apple signing. The
+provider service-account JSON is private server material and must never be
+placed under `mobile/`, bundled, logged, or committed.
 
-Both files must belong to the same Firebase project. The Gradle build applies
-the Google Services plugin only when `android/app/google-services.json` exists,
-so credential-free community builds remain valid. After installation, Android
-13 and later also require the user to grant the notification permission.
-
-For iOS, additionally inject `ios/Runner/GoogleService-Info.plist`, enable Push
-Notifications and Background Modes in the signing profile, upload the APNs key
-to the same Firebase project, and satisfy Apple's signing requirements.
-
-### FCM privacy boundary
-
-FCM connections are protected in transit but are not end-to-end encrypted by
-default. Kaede therefore sends FCM a data-only wake containing only a protocol
-version and a short-lived random token. It does not send sender names, message
-text, notification kind, or channel/message references through FCM. The app
-redeems the single-use token over the authenticated Kaede API, where device
-ownership, current channel access, read state, do-not-disturb, and notification
-preferences are rechecked before the app creates a local notification. If that
-direct fetch fails, a content-free local fallback asks the user to open Kaede.
-Message previews are enabled by default and can be disabled per account. When
-enabled, the authenticated response can include the sender name, bounded
-message preview, and validated avatar hash. Android renders these locally with
-private lock-screen visibility; avatar thumbnails are fetched separately over
-HTTPS with no Kaede authorization header, capped at 512 KiB, and kept in a
-bounded temporary cache. An explicit disabled preference always overrides the
-default.
-
-FCM still receives the app's provider token and delivery metadata such as the
-Firebase project, target device, timing, platform, and network address. Message
-previews affect only the authenticated Kaede response and local notification;
-they do not change the FCM payload.
-
-The app creates distinct user-controllable notification categories. The
-repository includes authenticated, encrypted device registration and an FCM
-HTTP v1 worker for notifications while the process is terminated. Device tokens
-are encrypted at rest by the backend.
-
-Do-not-disturb and per-guild `all`, `mentions`, or `none` settings are checked
-both when queuing the wake and when redeeming it.
+Relay wakes are content-free and authenticated by a device/home secret that the
+relay does not possess. The app verifies that MAC before redemption or fallback.
+Notification details are fetched from the signed-in home, which rechecks access
+and preferences. Encrypted messages use a generic notification unless the
+device can decrypt locally. Full protocol and privacy details are in
+[`docs/mobile-push.md`](../docs/mobile-push.md).
 
 ## Security boundaries
 

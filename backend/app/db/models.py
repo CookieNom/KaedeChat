@@ -265,8 +265,15 @@ class PushDevice(Base, LocalUserMixin, TimestampMixin):
     __tablename__ = "push_devices"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     platform: Mapped[str] = mapped_column(String(16), nullable=False)
-    token_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False, unique=True)
-    token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    transport: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="relay", server_default="relay"
+    )
+    token_hash: Mapped[bytes | None] = mapped_column(LargeBinary(32), unique=True)
+    token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
+    relay_origin: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    relay_subscription_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    relay_route_id: Mapped[str | None] = mapped_column(String(64))
+    relay_wake_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
     device_name: Mapped[str | None] = mapped_column(String(100))
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=true()
@@ -277,8 +284,119 @@ class PushDevice(Base, LocalUserMixin, TimestampMixin):
     __table_args__ = (
         *LocalUserMixin.locality_constraints("push_devices"),
         CheckConstraint("platform IN ('android','ios')", name="platform_value"),
-        CheckConstraint("octet_length(token_hash) = 32", name="token_hash_length"),
+        CheckConstraint("transport IN ('relay','direct_fcm')", name="transport_value"),
+        CheckConstraint(
+            "token_hash IS NULL OR octet_length(token_hash) = 32", name="token_hash_length"
+        ),
+        CheckConstraint(
+            "(transport = 'direct_fcm' AND token_hash IS NOT NULL AND token_encrypted IS NOT NULL "
+            "AND relay_origin IS NULL AND relay_subscription_id IS NULL "
+            "AND relay_route_id IS NULL AND relay_wake_secret_encrypted IS NULL) OR "
+            "(transport = 'relay' AND token_hash IS NULL AND token_encrypted IS NULL "
+            "AND relay_origin IS NOT NULL AND relay_subscription_id IS NOT NULL "
+            "AND relay_route_id IS NOT NULL AND relay_wake_secret_encrypted IS NOT NULL)",
+            name="transport_fields",
+        ),
         Index("ix_push_devices_user", "user_id", "user_domain"),
+    )
+
+
+class PushWakeOutbox(Base):
+    """A content-free wake waiting to be accepted durably by a relay."""
+
+    __tablename__ = "push_wake_outbox"
+    request_id: Mapped[str] = mapped_column(String(43), primary_key=True)
+    device_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("push_devices.id", ondelete="CASCADE"), nullable=False
+    )
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    event_token: Mapped[str | None] = mapped_column(String(43))
+    delivery_id: Mapped[str] = mapped_column(String(43), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_error: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "device_id", "message_id", "message_domain", "kind", name="uq_push_wake_event"
+        ),
+        CheckConstraint("attempts >= 0", name="nonnegative_attempts"),
+        CheckConstraint("kind IN ('direct_message','mention','guild_message')", name="kind_value"),
+        Index("ix_push_wake_outbox_due", "next_attempt_at", "expires_at"),
+    )
+
+
+class PushRelaySubscription(Base):
+    """Official/custom relay routing state with no Kaede account identifier."""
+
+    __tablename__ = "push_relay_subscriptions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    grant_id: Mapped[str] = mapped_column(String(43), nullable=False, unique=True)
+    home_origin: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    app_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False)
+    route_id: Mapped[str] = mapped_column(String(43), nullable=False)
+    provider_token_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    provider_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    management_secret_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (
+        CheckConstraint("platform IN ('android','ios')", name="platform_value"),
+        CheckConstraint("octet_length(provider_token_hash) = 32", name="token_hash_length"),
+        CheckConstraint(
+            "octet_length(management_secret_hash) = 32", name="management_secret_hash_length"
+        ),
+        Index("ix_push_relay_subscriptions_home", "home_origin", "enabled"),
+        Index("ix_push_relay_subscriptions_token_hash", "provider_token_hash"),
+    )
+
+
+class PushRelayDelivery(Base):
+    """Relay-side durable provider queue and idempotency outcome."""
+
+    __tablename__ = "push_relay_deliveries"
+    home_origin: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    request_id: Mapped[str] = mapped_column(String(43))
+    subscription_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("push_relay_subscriptions.id", ondelete="CASCADE")
+    )
+    route_id: Mapped[str] = mapped_column(String(43), nullable=False)
+    event_token: Mapped[str] = mapped_column(String(43), nullable=False)
+    delivery_id: Mapped[str] = mapped_column(String(43), nullable=False)
+    wake_mac: Mapped[str] = mapped_column(String(43), nullable=False)
+    priority: Mapped[str] = mapped_column(String(12), nullable=False, server_default="normal")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_error: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("home_origin", "request_id"),
+        CheckConstraint("priority IN ('normal','urgent')", name="priority_value"),
+        CheckConstraint("state IN ('pending','delivered','expired','invalid')", name="state_value"),
+        CheckConstraint("attempts >= 0", name="nonnegative_attempts"),
+        Index("ix_push_relay_deliveries_due", "state", "next_attempt_at", "expires_at"),
     )
 
 

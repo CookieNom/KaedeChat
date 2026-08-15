@@ -290,6 +290,23 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               'System notification categories can also be changed in your phone settings.',
           child: Column(
             children: [
+              Text(
+                ref.read(mobileControllerProvider.notifier).usesPushRelay
+                    ? 'If enabled, your account on ${mobile.user?.ref.domain.value ?? 'your home instance'} '
+                        'uses Kaede Push Relay (${ref.read(mobileControllerProvider.notifier).pushRelayHost}) for '
+                        'closed-app delivery. Your home sends a signed, content-free '
+                        'wake. The relay sees your home instance, an opaque device '
+                        'subscription, delivery timing, and provider results; it does '
+                        'not receive message text, sender names, room identifiers, '
+                        'attachments, or encryption keys.'
+                    : 'This community build uses its own Firebase provider for '
+                        'closed-app delivery. If enabled, your home stores this '
+                        'installation’s provider token and sends only an opaque '
+                        'wake to Firebase. The wake contains no message text, sender '
+                        'name, room identifier, attachment, or encryption key.',
+                style: const TextStyle(color: KaedeColors.muted),
+              ),
+              const SizedBox(height: 12),
               SizedBox(
                 width: double.infinity,
                 child: FilledButton.icon(
@@ -312,7 +329,26 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     }
                   },
                   icon: const Icon(Icons.notifications_active_outlined),
-                  label: const Text('Enable system notifications'),
+                  label: const Text('Enable background notifications'),
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () async {
+                    await ref
+                        .read(mobileControllerProvider.notifier)
+                        .disablePushNotifications();
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                      content: Text(
+                        'Background notifications are disabled for this account.',
+                      ),
+                    ));
+                  },
+                  icon: const Icon(Icons.notifications_off_outlined),
+                  label: const Text('Disable background notifications'),
                 ),
               ),
               if (mobile.pushWarning case final warning?)
@@ -345,7 +381,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   padding: EdgeInsets.only(top: 10),
                   child: Text(
                     'This build can show alerts while Kaede is running, but '
-                    'closed-app push is not configured.',
+                    'it has no compatible closed-app push provider.',
                     style: TextStyle(color: KaedeColors.muted),
                   ),
                 ),

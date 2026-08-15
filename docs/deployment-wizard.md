@@ -110,18 +110,18 @@ Turnstile requires the widget's public site key and private secret. The wizard
 stores the latter under Cloudflare's `TURNSTILE_SECRET` name and never prints
 either private credential. Registration validation binds successful tokens to
 the instance hostname and distinct `kaede-register` or `kaede-login` action.
-Firebase mobile push is optional. The wizard explains that operators must first
-create a Firebase project, register Android package `chat.kaede.mobile`, place
-the downloaded client file at `mobile/android/app/google-services.json`, and
-generate a private service-account key from **Project settings > Service
-accounts**. When selected, the wizard reports whether the Android client file is
-present, then lets the operator read a local non-symlink service-account JSON
-file or paste the JSON through a hidden multiline prompt. File mode rejects
-`google-services.json` as a backend credential; paste mode ends with
-`KAEDE_FIREBASE_JSON_END` on a line by itself. The wizard stores only the
-private key's base64 representation in the operator environment. The Android and iOS
-Firebase application files are installed separately at build/signing time and
-remain ignored by Git. FCM itself does not require billing or Google Analytics.
+The mobile push choice recommends the public Kaede relay. This works with the
+official app and requires no Firebase account or provider credential on a
+federated home. The wizard shows the relay's metadata boundary before enabling
+it. Operators may instead choose direct Firebase for a separately signed custom
+app or disable closed-app delivery.
+
+When run for the configured relay authority itself, the wizard can enable the
+relay service and read its private Firebase service-account JSON from a local,
+non-symlink file. Compose passes that credential only to relay workers; the
+standalone deployment validator checks it before startup.
+The public Android/iOS Firebase application files remain build-time inputs and
+are ignored by Git. See [mobile push delivery](mobile-push.md).
 
 Automatic updates are disabled by default. When enabled, setup installs a
 `kaede-auto-update.timer` in the current user's systemd configuration. Its first

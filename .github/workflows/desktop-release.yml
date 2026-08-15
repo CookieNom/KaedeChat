@@ -313,17 +313,41 @@ jobs:
             printf 'storeFile=%s\n' "$keystore"
           } > android/key.properties
           chmod 600 "$keystore" android/key.properties
-      - name: Build signed release APK
+      - name: Inject official Firebase client configuration
+        env:
+          ANDROID_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_GOOGLE_SERVICES_JSON_BASE64"
+          printf '%s' "$ANDROID_GOOGLE_SERVICES_JSON_BASE64" | base64 --decode \
+            > android/app/google-services.json
+          python3 -c 'import json; d=json.load(open("android/app/google-services.json")); clients=d.get("client", []); assert any(c.get("client_info", {}).get("android_client_info", {}).get("package_name") == "chat.kaede.mobile" for c in clients), "Firebase config is not for chat.kaede.mobile"'
+          chmod 600 android/app/google-services.json
+      - name: Validate and build signed Android releases
         run: |
           flutter pub get
-          flutter build apk --release
-      - name: Collect Android release file
+          flutter analyze
+          flutter test
+          flutter build apk --release \
+            --dart-define=KAEDE_PUSH_TRANSPORT=relay \
+            --dart-define=KAEDE_PUSH_RELAY_URL=https://push.kaede.chat \
+            --dart-define=KAEDE_PUSH_RELAY_ORIGIN=kaede.chat \
+            --dart-define=KAEDE_PUSH_APP_ID=chat.kaede.mobile
+          flutter build appbundle --release \
+            --dart-define=KAEDE_PUSH_TRANSPORT=relay \
+            --dart-define=KAEDE_PUSH_RELAY_URL=https://push.kaede.chat \
+            --dart-define=KAEDE_PUSH_RELAY_ORIGIN=kaede.chat \
+            --dart-define=KAEDE_PUSH_APP_ID=chat.kaede.mobile
+      - name: Collect Android release files
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          name="Kaede-Chat-${GITHUB_REF_NAME}-android.apk"
-          cp build/app/outputs/flutter-apk/app-release.apk "release-assets/$name"
-          (cd release-assets && sha256sum "$name" > "$name.sha256")
+          apk="Kaede-Chat-${GITHUB_REF_NAME}-android.apk"
+          bundle="Kaede-Chat-${GITHUB_REF_NAME}-android-play.aab"
+          cp build/app/outputs/flutter-apk/app-release.apk "release-assets/$apk"
+          cp build/app/outputs/bundle/release/app-release.aab "release-assets/$bundle"
+          (cd release-assets && sha256sum "$apk" > "$apk.sha256")
+          (cd release-assets && sha256sum "$bundle" > "$bundle.sha256")
       - name: Upload Android release files
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
