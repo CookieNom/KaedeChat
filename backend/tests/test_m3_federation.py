@@ -38,7 +38,7 @@ from app.core.federation import (
 from app.core.gateway_ops import EVENT_NAMES
 from app.core.settings import Settings
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
-from app.db.models import Channel, Instance, PeerKey, User
+from app.db.models import Channel, FederationEvent, FederationOutbox, Instance, PeerKey, User
 from app.federation.client import (
     OUTBOUND_FEDERATION_LIMITER,
     OUTBOUND_FEDERATION_REQUEST_LIMITER,
@@ -50,6 +50,7 @@ from app.federation.delivery import (
     BACKOFF_SECONDS,
     drain_destination,
     expired_guild_context,
+    group_state_rejection_is_upgrade_retryable,
     lock_outbox_destinations,
     publish_dm_delivery_update,
     retry_delay,
@@ -377,6 +378,31 @@ async def test_duplicate_destination_drain_returns_without_querying_rows() -> No
     )
     assert session.scalar_calls == 2
     session.scalars.assert_not_awaited()
+
+
+def test_group_state_generic_rejection_retries_only_during_upgrade_window() -> None:
+    now = datetime.now(UTC)
+    event = FederationEvent(
+        event_id="kcfe_group",
+        origin_domain="alpha.localhost",
+        event_type="dm.group.state",
+        envelope={},
+    )
+    row = FederationOutbox(
+        destination="beta.localhost",
+        event_origin_domain="alpha.localhost",
+        event_id=event.event_id,
+        created_at=now - timedelta(hours=1),
+    )
+
+    assert group_state_rejection_is_upgrade_retryable(event, row, "KAED_FED_EVENT_REJECTED", now)
+    assert not group_state_rejection_is_upgrade_retryable(
+        event, row, "KAED_FED_BAD_EVENT_SIGNATURE", now
+    )
+    row.created_at = now - timedelta(hours=25)
+    assert not group_state_rejection_is_upgrade_retryable(
+        event, row, "KAED_FED_EVENT_REJECTED", now
+    )
 
 
 @pytest.mark.asyncio

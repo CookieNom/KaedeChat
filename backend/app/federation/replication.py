@@ -590,6 +590,7 @@ async def replicate_conversation(
         authority_domain=authority_domain,
         pair_key=pair_key,
         participant_domains=participant_domains,
+        conversation_type=conversation_type,
     )
     if await session.get(Instance, origin) is None:
         if origin == settings.domain:

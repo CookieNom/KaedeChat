@@ -235,15 +235,25 @@ async def admit_federated_dm_conversation(
     authority_domain: str,
     pair_key: str,
     participant_domains: set[str],
+    conversation_type: str = "direct",
 ) -> bool:
     """Admit a new cross-instance conversation before its row is inserted."""
 
     if len(participant_domains) < 2:
         return False
     remote_origins = participant_domains - {settings.domain}
-    if len(remote_origins) != 1:
+    if conversation_type == "direct" and len(remote_origins) != 1:
         raise ValueError("federated direct conversation must have exactly one remote origin")
-    remote_origin = next(iter(remote_origins))
+    if conversation_type == "group":
+        # A group can span several homes. Its authority is the durable writer
+        # and therefore the only stable, fair quota scope shared by every
+        # replica. On the authority itself, the aggregate authority limits are
+        # sufficient; charging one invited home would penalize it arbitrarily.
+        remote_origin = authority_domain
+    elif conversation_type == "direct":
+        remote_origin = next(iter(remote_origins))
+    else:
+        raise ValueError("unsupported DM conversation type")
     await lock_federated_dm_authority(session, authority_domain)
     if remote_origin != authority_domain:
         await lock_federated_dm_authority(session, remote_origin)
@@ -267,21 +277,22 @@ async def admit_federated_dm_conversation(
             retained_by_authority + 1,
             settings.federation_dm_max_conversations_per_authority,
         )
-    retained_by_origin = int(
-        await session.scalar(
-            select(func.count())
-            .select_from(FederatedDMStorageUsage)
-            .where(FederatedDMStorageUsage.remote_origin_domain == remote_origin)
+    if remote_origin != settings.domain:
+        retained_by_origin = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(FederatedDMStorageUsage)
+                .where(FederatedDMStorageUsage.remote_origin_domain == remote_origin)
+            )
+            or 0
         )
-        or 0
-    )
-    if retained_by_origin >= settings.federation_dm_max_conversations_per_remote_origin:
-        raise FederatedDMQuotaExceeded(
-            "remote origin",
-            "conversations",
-            retained_by_origin + 1,
-            settings.federation_dm_max_conversations_per_remote_origin,
-        )
+        if retained_by_origin >= settings.federation_dm_max_conversations_per_remote_origin:
+            raise FederatedDMQuotaExceeded(
+                "remote origin",
+                "conversations",
+                retained_by_origin + 1,
+                settings.federation_dm_max_conversations_per_remote_origin,
+            )
     return True
 
 
@@ -297,17 +308,26 @@ async def register_federated_dm_conversation(
     if len(participant_domains) < 2:
         return None
     remote_origins = participant_domains - {settings.domain}
-    if len(remote_origins) != 1:
+    if conversation.type == "direct" and len(remote_origins) != 1:
         raise ValueError("federated direct conversation must have exactly one remote origin")
+    if conversation.type == "group":
+        quota_origin = conversation.authority_domain
+    elif conversation.type == "direct":
+        quota_origin = next(iter(remote_origins))
+    else:
+        raise ValueError("unsupported DM conversation type")
     await session.execute(
         pg_insert(FederatedDMStorageUsage)
         .values(
             conversation_id=conversation.id,
             conversation_domain=conversation.origin_domain,
             authority_domain=conversation.authority_domain,
-            remote_origin_domain=next(iter(remote_origins)),
+            remote_origin_domain=quota_origin,
         )
-        .on_conflict_do_nothing(index_elements=["conversation_id", "conversation_domain"])
+        .on_conflict_do_update(
+            index_elements=["conversation_id", "conversation_domain"],
+            set_={"remote_origin_domain": quota_origin},
+        )
     )
     return await session.get(
         FederatedDMStorageUsage,
@@ -342,6 +362,7 @@ async def _usage_for_conversation(
         authority_domain=conversation.authority_domain,
         pair_key=conversation.pair_key,
         participant_domains=participant_domains,
+        conversation_type=conversation.type,
     )
     return await register_federated_dm_conversation(
         session,
@@ -1045,7 +1066,7 @@ async def admit_federated_dm_message(
     authority_bytes = authority_size + delta.total_bytes
     remote_origin_messages = origin_rows + delta.message_rows
     remote_origin_bytes = origin_size + delta.total_bytes
-    limits = (
+    limits = [
         (
             "conversation",
             "messages",
@@ -1070,19 +1091,24 @@ async def admit_federated_dm_message(
             authority_bytes,
             settings.federation_dm_max_bytes_per_authority,
         ),
-        (
-            "remote origin",
-            "messages",
-            remote_origin_messages,
-            settings.federation_dm_max_messages_per_remote_origin,
-        ),
-        (
-            "remote origin",
-            "bytes",
-            remote_origin_bytes,
-            settings.federation_dm_max_bytes_per_remote_origin,
-        ),
-    )
+    ]
+    if usage.remote_origin_domain != settings.domain:
+        limits.extend(
+            [
+                (
+                    "remote origin",
+                    "messages",
+                    remote_origin_messages,
+                    settings.federation_dm_max_messages_per_remote_origin,
+                ),
+                (
+                    "remote origin",
+                    "bytes",
+                    remote_origin_bytes,
+                    settings.federation_dm_max_bytes_per_remote_origin,
+                ),
+            ]
+        )
     for scope, resource, used, limit in limits:
         if used > limit:
             raise FederatedDMQuotaExceeded(scope, resource, used, limit)

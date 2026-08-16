@@ -12,6 +12,7 @@ from app.federation.dm_storage import (
     FederatedDMStorageDelta,
     admit_federated_dm_conversation,
     admit_federated_dm_message,
+    register_federated_dm_conversation,
 )
 from app.federation.relationships import (
     RelationshipQuotaExceeded,
@@ -103,6 +104,84 @@ async def test_remote_origin_conversation_cap_reserves_local_authority_capacity(
 
     assert rejected.value.scope == "remote origin"
     assert rejected.value.limit == 10_000
+
+
+@pytest.mark.asyncio
+async def test_multi_home_group_uses_its_authority_as_the_replica_quota_scope() -> None:
+    usage = SimpleNamespace(remote_origin_domain="beta.localhost")
+    session = cast(
+        AsyncSession,
+        SimpleNamespace(
+            scalar=AsyncMock(side_effect=[None, None, 0, 0]),
+            execute=AsyncMock(),
+            get=AsyncMock(return_value=usage),
+        ),
+    )
+    configured = settings(domain="alpha.localhost")
+
+    admitted = await admit_federated_dm_conversation(
+        session,
+        configured,
+        authority_domain="beta.localhost",
+        pair_key="a" * 64,
+        participant_domains={
+            "alpha.localhost",
+            "gamma.localhost",
+            "delta.localhost",
+        },
+        conversation_type="group",
+    )
+    conversation = DMConversation(
+        id=99,
+        origin_domain="beta.localhost",
+        authority_domain="beta.localhost",
+        pair_key="a" * 64,
+        type="group",
+        owner_id=7,
+        owner_domain="beta.localhost",
+    )
+    registered = await register_federated_dm_conversation(
+        session,
+        configured,
+        conversation,
+        participant_domains={
+            "alpha.localhost",
+            "gamma.localhost",
+            "delta.localhost",
+        },
+    )
+
+    assert admitted
+    assert registered is usage
+    assert session.execute.await_count == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_local_group_authority_does_not_charge_an_arbitrary_invited_home() -> None:
+    session = cast(
+        AsyncSession,
+        SimpleNamespace(
+            # Authority lock, existing conversation, authority conversation count.
+            scalar=AsyncMock(side_effect=[None, None, 0]),
+        ),
+    )
+    configured = settings(domain="alpha.localhost")
+
+    admitted = await admit_federated_dm_conversation(
+        session,
+        configured,
+        authority_domain="alpha.localhost",
+        pair_key="b" * 64,
+        participant_domains={
+            "alpha.localhost",
+            "beta.localhost",
+            "gamma.localhost",
+        },
+        conversation_type="group",
+    )
+
+    assert admitted
+    assert session.scalar.await_count == 3  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

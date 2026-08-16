@@ -611,6 +611,7 @@ async def create_group_direct_message(
             authority_domain=settings.domain,
             pair_key=lookup_key,
             participant_domains=participant_domains,
+            conversation_type="group",
         )
     except FederatedDMQuotaExceeded as exc:
         raise HTTPException(status_code=507, detail=exc.detail()) from exc

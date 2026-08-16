@@ -100,6 +100,21 @@ def retry_delay(attempts: int) -> timedelta:
     return timedelta(seconds=base * _JITTER.uniform(0.85, 1.15))
 
 
+def group_state_rejection_is_upgrade_retryable(
+    event: FederationEvent,
+    row: FederationOutbox,
+    code: str,
+    now: datetime,
+) -> bool:
+    """Keep generic group-state rejections live across a rolling upgrade."""
+
+    return bool(
+        event.event_type == "dm.group.state"
+        and code == "KAED_FED_EVENT_REJECTED"
+        and now - row.created_at < timedelta(hours=24)
+    )
+
+
 async def enforce_queue_limits(session: AsyncSession, destination: str) -> None:
     pending = await session.scalar(
         select(func.count(FederationOutbox.id)).where(
@@ -455,9 +470,24 @@ async def drain_destination(
                     delivery_updates.append((event, "delivered", None))
             elif status == "rejected":
                 await increment_metric(redis, "federation_delivery_failures")
-                row.status = "failed"
-                row.last_error = str((result or {}).get("code") or "peer rejected event")[:500]
                 event = by_ref.get((row.event_origin_domain, row.event_id))
+                rejection_code = str((result or {}).get("code") or "peer rejected event")[:500]
+                # Group-state support was expanded from two homes to many.
+                # During a rolling deployment, an older peer reports only the
+                # generic rejection code. Keep the signed state retryable for
+                # one day so the recipient can upgrade without requiring the
+                # group owner to remove and re-add everyone.
+                if event is not None and group_state_rejection_is_upgrade_retryable(
+                    event, row, rejection_code, now
+                ):
+                    row.attempts += 1
+                    row.status = "retry"
+                    row.next_retry_at = now + retry_delay(row.attempts)
+                    row.last_error = rejection_code
+                    delivery_updates.append((event, "retrying", rejection_code))
+                    continue
+                row.status = "failed"
+                row.last_error = rejection_code
                 if event is not None:
                     delivery_updates.append((event, "failed", row.last_error))
                     reconciled = await reconcile_relationship_capacity_rejection(
