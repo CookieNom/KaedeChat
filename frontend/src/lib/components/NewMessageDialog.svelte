@@ -329,6 +329,13 @@
     font: inherit;
   }
 
+  .search-field input:focus,
+  .search-field input:focus-visible {
+    border-color: transparent;
+    outline: 0;
+    box-shadow: none;
+  }
+
   .picker-help {
     padding: 9px 28px 16px;
     font-size: 0.88rem;

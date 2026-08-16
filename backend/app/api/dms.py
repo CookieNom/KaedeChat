@@ -17,12 +17,14 @@ from app.api.dependencies import (
 from app.chat.events import publish_dispatch, user_topic
 from app.chat.group_conversations import (
     apply_authoritative_group_mutation,
+    create_group_mutation_notice,
     group_conversation_content,
     load_authoritative_group,
+    reload_group_projection,
     require_group_invite_friend,
     require_group_member,
 )
-from app.chat.payloads import dm_channel_payload
+from app.chat.payloads import dm_channel_payload, render_message_payload
 from app.chat.privacy import blocked_between, require_can_direct_message
 from app.chat.schemas import DMGroupCreate, DMGroupMemberAdd, DMGroupUpdate, DMOpenRequest
 from app.core.dm import (
@@ -37,7 +39,7 @@ from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef
-from app.db.models import Channel, DMConversation, DMParticipant, User
+from app.db.models import Channel, DMConversation, DMParticipant, Message, User
 from app.federation.client import signed_request
 from app.federation.dm_storage import (
     FederatedDMQuotaExceeded,
@@ -51,7 +53,11 @@ from app.federation.network import (
     FederationNetworkError,
     decode_federation_response_json,
 )
-from app.federation.replication import profile_from_user, replicate_conversation
+from app.federation.replication import (
+    profile_from_user,
+    replicate_conversation,
+    replicate_group_notice,
+)
 from app.federation.schemas import RemoteUserProfile
 from app.federation.users import resolve_handle
 from app.tasks import federation_deliver
@@ -109,13 +115,16 @@ async def queue_group_state(
     *,
     extra_domains: set[str] | None = None,
     deleted: bool = False,
+    notice: dict[str, object] | None = None,
 ) -> set[str]:
     envelope = await build_envelope(
         session,
         settings,
         "dm.group.state",
         actor,
-        group_conversation_content(conversation, channel, participants, deleted=deleted),
+        group_conversation_content(
+            conversation, channel, participants, deleted=deleted, notice=notice
+        ),
     )
     destinations = {
         participant.origin_domain
@@ -132,14 +141,15 @@ async def publish_local_group_state(
     redis: Redis,
     session: AsyncSession,
     settings: Settings,
-    conversation: DMConversation,
-    channel: Channel,
-    before: list[User],
-    after: list[User],
+    conversation_id: int,
+    conversation_domain: str,
+    before_refs: set[tuple[int, str]],
     *,
     created: bool = False,
-) -> None:
-    before_refs = {(user.id, user.origin_domain) for user in before}
+) -> tuple[DMConversation, Channel, list[User]]:
+    conversation, channel, after = await reload_group_projection(
+        session, conversation_id, conversation_domain
+    )
     after_refs = {(user.id, user.origin_domain) for user in after}
     for user in after:
         if user.origin_domain != settings.domain or not user.is_local:
@@ -155,17 +165,37 @@ async def publish_local_group_state(
             event,
             await rendered_dm_channel(session, settings, channel, user, after),
         )
-    for user in before:
-        if (
-            user.origin_domain == settings.domain
-            and user.is_local
-            and (user.id, user.origin_domain) not in after_refs
-        ):
+    for user_id, user_domain in before_refs - after_refs:
+        if user_domain == settings.domain:
             await publish_dispatch(
                 redis,
-                user_topic(settings.domain, user.id),
+                user_topic(settings.domain, user_id),
                 "CHANNEL_DELETE",
                 {"id": str(channel.id), "origin_domain": channel.origin_domain},
+            )
+    return conversation, channel, after
+
+
+async def publish_group_notice(
+    redis: Redis,
+    session: AsyncSession,
+    settings: Settings,
+    notice_ref: tuple[int, str] | None,
+    participants: list[User],
+) -> None:
+    if notice_ref is None:
+        return
+    message = await session.get(Message, notice_ref, populate_existing=True)
+    if message is None:
+        raise RuntimeError("committed group DM notice disappeared")
+    rendered = await render_message_payload(session, message)
+    for participant in participants:
+        if participant.origin_domain == settings.domain and participant.is_local:
+            await publish_dispatch(
+                redis,
+                user_topic(settings.domain, participant.id),
+                "MESSAGE_CREATE",
+                rendered,
             )
 
 
@@ -632,9 +662,15 @@ async def create_group_direct_message(
     destinations = await queue_group_state(
         session, settings, auth.user, conversation, channel, participants
     )
+    conversation_ref = (conversation.id, conversation.origin_domain)
     await session.commit()
-    await publish_local_group_state(
-        redis, session, settings, conversation, channel, [], participants, created=True
+    conversation, channel, participants = await publish_local_group_state(
+        redis,
+        session,
+        settings,
+        *conversation_ref,
+        set(),
+        created=True,
     )
     for destination in destinations:
         await enqueue_best_effort(federation_deliver, destination)
@@ -695,7 +731,10 @@ async def apply_group_mutation_response(
     session: AsyncSession,
     settings: Settings,
     payload: dict[str, object],
-) -> tuple[Channel, DMConversation, list[User]]:
+    before: list[User],
+    actor: User,
+    previous_owner: tuple[int | None, str | None],
+) -> tuple[Channel, DMConversation, list[User], Message | None]:
     raw_conversation = payload.get("conversation")
     raw_participants = payload.get("participants")
     if not isinstance(raw_conversation, dict) or not isinstance(raw_participants, list):
@@ -711,7 +750,20 @@ async def apply_group_mutation_response(
     if conversation is None or conversation.type != "group":
         raise HTTPException(status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"})
     participants = await conversation_participants(session, channel.id, channel.origin_domain)
-    return channel, conversation, participants
+    notice = None
+    if payload.get("notice") is not None:
+        notice = await replicate_group_notice(
+            session,
+            settings,
+            payload["notice"],
+            conversation,
+            channel,
+            before,
+            participants,
+            previous_owner=previous_owner,
+            expected_actor=(actor.id, actor.origin_domain),
+        )
+    return channel, conversation, participants, notice
 
 
 async def mutate_group(
@@ -721,6 +773,7 @@ async def mutate_group(
     auth: AuthenticatedUser,
     session: AsyncSession,
     redis: Redis,
+    snowflake: SnowflakeGenerator,
     settings: Settings,
     *,
     target: User | None = None,
@@ -738,6 +791,7 @@ async def mutate_group(
     if existing is None or existing.type != "group":
         raise HTTPException(status_code=404, detail={"code": "GROUP_DM_NOT_FOUND"})
     before = await conversation_participants(session, conversation_id, conversation_domain)
+    previous_owner = (existing.owner_id, existing.owner_domain)
     if action == "add" and target is not None:
         await require_group_member(session, existing, auth.user)
         await authorize_group_invitee(session, settings, auth.user, target)
@@ -800,13 +854,21 @@ async def mutate_group(
                 {"id": str(conversation_id), "origin_domain": conversation_domain},
             )
             return {"status": "left"}
-        channel, conversation, participants = await apply_group_mutation_response(
-            session, settings, remote
+        channel, conversation, participants, notice_message = await apply_group_mutation_response(
+            session, settings, remote, before, auth.user, previous_owner
         )
+        notice_ref = (
+            (notice_message.id, notice_message.origin_domain)
+            if notice_message is not None
+            else None
+        )
+        before_refs = {(user.id, user.origin_domain) for user in before}
+        conversation_ref = (conversation.id, conversation.origin_domain)
         await session.commit()
-        await publish_local_group_state(
-            redis, session, settings, conversation, channel, before, participants
+        conversation, channel, participants = await publish_local_group_state(
+            redis, session, settings, *conversation_ref, before_refs
         )
+        await publish_group_notice(redis, session, settings, notice_ref, participants)
         if action in {"leave", "remove"} and not any(
             (user.id, user.origin_domain) == (auth.user.id, auth.user.origin_domain)
             for user in participants
@@ -820,6 +882,7 @@ async def mutate_group(
         conversation_domain,
         for_update=True,
     )
+    previous_owner = (conversation.owner_id, conversation.owner_domain)
     before, participants, deleted = await apply_authoritative_group_mutation(
         session,
         settings,
@@ -830,6 +893,23 @@ async def mutate_group(
         target=target,
         name=name,
     )
+    notice_result = await create_group_mutation_notice(
+        session,
+        settings,
+        snowflake,
+        conversation,
+        channel,
+        auth.user,
+        action=action,
+        target=target,
+        previous_owner=previous_owner,
+        participants=participants,
+    )
+    notice_message = notice_result[0] if notice_result is not None else None
+    notice_payload = notice_result[1] if notice_result is not None else None
+    notice_ref = (
+        (notice_message.id, notice_message.origin_domain) if notice_message is not None else None
+    )
     destinations = await queue_group_state(
         session,
         settings,
@@ -839,10 +919,20 @@ async def mutate_group(
         participants,
         extra_domains={user.origin_domain for user in before},
         deleted=deleted,
+        notice=notice_payload,
     )
+    before_refs = {(user.id, user.origin_domain) for user in before}
+    conversation_ref = (conversation.id, conversation.origin_domain)
     await session.commit()
-    await publish_local_group_state(
-        redis, session, settings, conversation, channel, before, participants
+    conversation, channel, participants = await publish_local_group_state(
+        redis, session, settings, *conversation_ref, before_refs
+    )
+    await publish_group_notice(
+        redis,
+        session,
+        settings,
+        notice_ref,
+        participants,
     )
     for destination in destinations:
         await enqueue_best_effort(federation_deliver, destination)
@@ -862,6 +952,7 @@ async def rename_group_direct_message(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     return await mutate_group(
@@ -871,6 +962,7 @@ async def rename_group_direct_message(
         auth,
         session,
         redis,
+        snowflake,
         settings,
         name=payload.name,
     )
@@ -884,6 +976,7 @@ async def add_group_direct_message_member(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     requester_key = f"{auth.user.origin_domain}:{auth.user.id}"
@@ -895,6 +988,7 @@ async def add_group_direct_message_member(
         auth,
         session,
         redis,
+        snowflake,
         settings,
         target=target,
     )
@@ -907,6 +1001,7 @@ async def leave_group_direct_message(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     return await mutate_group(
@@ -916,6 +1011,7 @@ async def leave_group_direct_message(
         auth,
         session,
         redis,
+        snowflake,
         settings,
     )
 
@@ -928,6 +1024,7 @@ async def remove_group_direct_message_member(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     target_id, target_domain = user_ref.resolve(settings.domain)
@@ -941,6 +1038,7 @@ async def remove_group_direct_message_member(
         auth,
         session,
         redis,
+        snowflake,
         settings,
         target=target,
     )

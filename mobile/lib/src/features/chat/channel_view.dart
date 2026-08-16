@@ -1724,6 +1724,41 @@ final class _MessageTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (message.messageType >= 3 && message.messageType <= 5) {
+      final icon = switch (message.messageType) {
+        3 => Icons.person_add_alt_1_rounded,
+        4 => Icons.logout_rounded,
+        _ => Icons.person_remove_alt_1_rounded,
+      };
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(14, 5, 14, 5),
+        child: Row(
+          children: [
+            Container(
+              width: 25,
+              height: 25,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                color: Color(0xFF4B302A),
+              ),
+              child: Icon(icon, size: 14, color: KaedeColors.coral),
+            ),
+            const SizedBox(width: 9),
+            Expanded(
+              child: Text(
+                message.content ?? 'Group membership changed.',
+                style: const TextStyle(color: KaedeColors.muted, fontSize: 13),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              DateFormat.jm().format(message.createdAt.toLocal()),
+              style: const TextStyle(color: KaedeColors.muted, fontSize: 11),
+            ),
+          ],
+        ),
+      );
+    }
     final author = message.author;
     final deleted = message.deletedAt != null;
     final mediaPreview = previewMediaUrl(message.content ?? '');

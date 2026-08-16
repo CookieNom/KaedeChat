@@ -8,13 +8,21 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from app.api.dms import publish_local_group_state
 from app.chat.group_conversations import (
     apply_authoritative_group_mutation,
     group_conversation_content,
+    reload_group_projection,
 )
 from app.chat.payloads import dm_channel_payload
 from app.chat.schemas import DMGroupCreate
-from app.core.dm import group_dm_key
+from app.core.dm import (
+    GROUP_DM_MEMBER_ADDED,
+    GROUP_DM_MEMBER_LEFT,
+    GROUP_DM_MEMBER_REMOVED,
+    group_dm_key,
+    group_dm_notice_text,
+)
 from app.core.settings import Settings
 from app.db.models import Channel, DMConversation, User
 from app.voice.schemas import CallResponse
@@ -88,6 +96,110 @@ def test_group_payload_exposes_owner_and_full_state_version() -> None:
     assert rendered["conversation_type"] == "group"
     assert rendered["owner_id"] == "1"
     assert rendered["owner_domain"] == "alpha.localhost"
+
+
+def test_group_state_carries_an_authoritative_membership_notice() -> None:
+    owner = user(1)
+    peer = user(2, "beta.localhost")
+    conversation = DMConversation(
+        id=100,
+        origin_domain="alpha.localhost",
+        pair_key=group_dm_key("alpha.localhost", 100),
+        type="group",
+        authority_domain="alpha.localhost",
+        owner_id=owner.id,
+        owner_domain=owner.origin_domain,
+        state_version=2,
+    )
+    channel = Channel(
+        id=100,
+        origin_domain="alpha.localhost",
+        type=1,
+        created_floor_id=100,
+    )
+    notice = {"message": {"id": "101"}, "target": {"id": "2"}}
+
+    state = group_conversation_content(conversation, channel, [owner, peer], notice=notice)
+
+    assert state["notice"] is notice
+
+
+def test_group_membership_notices_explain_changes_and_owner_transfer() -> None:
+    assert (
+        group_dm_notice_text(GROUP_DM_MEMBER_ADDED, "Alice", "Bob")
+        == "Alice added Bob to the group."
+    )
+    assert (
+        group_dm_notice_text(GROUP_DM_MEMBER_REMOVED, "Alice", "Bob")
+        == "Alice removed Bob from the group."
+    )
+    assert (
+        group_dm_notice_text(GROUP_DM_MEMBER_LEFT, "Alice", "Alice", "Bob")
+        == "Alice left the group. Bob is now the owner."
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_projection_is_reloaded_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conversation = cast(
+        Any,
+        SimpleNamespace(id=100, origin_domain="alpha.localhost", type="group"),
+    )
+    channel = cast(Any, SimpleNamespace(id=100, origin_domain="alpha.localhost"))
+    participants = [user(1), user(2, "beta.localhost")]
+    session = SimpleNamespace(get=AsyncMock(side_effect=[conversation, channel]))
+    load_participants = AsyncMock(return_value=participants)
+    monkeypatch.setattr(
+        "app.chat.group_conversations.group_participants",
+        load_participants,
+    )
+
+    loaded = await reload_group_projection(
+        cast(Any, session),
+        conversation.id,
+        conversation.origin_domain,
+    )
+
+    assert loaded == (conversation, channel, participants)
+    assert session.get.await_args_list[0].kwargs == {"populate_existing": True}
+    assert session.get.await_args_list[1].kwargs == {"populate_existing": True}
+    load_participants.assert_awaited_once_with(session, conversation)
+
+
+@pytest.mark.asyncio
+async def test_new_local_group_member_receives_a_live_channel_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = user(1)
+    invitee = user(2)
+    conversation = cast(
+        Any,
+        SimpleNamespace(id=100, origin_domain="alpha.localhost", type="group"),
+    )
+    channel = cast(Any, SimpleNamespace(id=100, origin_domain="alpha.localhost"))
+    reload_projection = AsyncMock(return_value=(conversation, channel, [owner, invitee]))
+    render_channel = AsyncMock(return_value={"id": "100", "origin_domain": "alpha.localhost"})
+    publish = AsyncMock()
+    monkeypatch.setattr("app.api.dms.reload_group_projection", reload_projection)
+    monkeypatch.setattr("app.api.dms.rendered_dm_channel", render_channel)
+    monkeypatch.setattr("app.api.dms.publish_dispatch", publish)
+
+    loaded = await publish_local_group_state(
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        cast(Settings, SimpleNamespace(domain="alpha.localhost")),
+        conversation.id,
+        conversation.origin_domain,
+        {(owner.id, owner.origin_domain)},
+    )
+
+    assert loaded == (conversation, channel, [owner, invitee])
+    assert [call.args[2] for call in publish.await_args_list] == [
+        "CHANNEL_UPDATE",
+        "CHANNEL_CREATE",
+    ]
 
 
 @pytest.mark.asyncio

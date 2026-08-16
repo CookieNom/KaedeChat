@@ -526,6 +526,7 @@ final class KaedeMessage {
     required this.createdAt,
     this.author,
     this.content,
+    this.messageType = 0,
     this.attachments = const <KaedeAttachment>[],
     this.mentionUserRefs = const <EntityRef>[],
     this.reference,
@@ -558,6 +559,7 @@ final class KaedeMessage {
           ? KaedeUser.fromJson(Map<String, Object?>.from(author))
           : null,
       content: _string(json['content']),
+      messageType: (json['message_type'] as num?)?.toInt() ?? 0,
       attachments:
           _objects(json['attachments']).map(KaedeAttachment.fromJson).toList(),
       mentionUserRefs: (json['mention_user_refs'] as List? ?? const <Object>[])
@@ -601,6 +603,7 @@ final class KaedeMessage {
   final EntityRef authorRef;
   final KaedeUser? author;
   final String? content;
+  final int messageType;
   final List<KaedeAttachment> attachments;
   final List<EntityRef> mentionUserRefs;
   final EntityRef? reference;
@@ -621,6 +624,7 @@ final class KaedeMessage {
   KaedeMessage copyWith({
     KaedeUser? author,
     String? content,
+    int? messageType,
     bool clearContent = false,
     List<KaedeAttachment>? attachments,
     List<EntityRef>? mentionUserRefs,
@@ -647,6 +651,7 @@ final class KaedeMessage {
         authorRef: authorRef,
         author: author ?? this.author,
         content: clearContent ? null : content ?? this.content,
+        messageType: messageType ?? this.messageType,
         attachments: attachments ?? this.attachments,
         mentionUserRefs: mentionUserRefs ?? this.mentionUserRefs,
         reference: clearReference ? null : reference ?? this.reference,
@@ -678,6 +683,7 @@ final class KaedeMessage {
         'author_domain': authorRef.domain.value,
         'author': author?.toJson(),
         'content': content,
+        'message_type': messageType,
         'attachments': attachments.map((item) => item.toJson()).toList(),
         'mention_user_refs': mentionUserRefs.map((item) => item.wire).toList(),
         'referenced_message_id': reference?.id.value,

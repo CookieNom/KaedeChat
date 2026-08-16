@@ -1876,6 +1876,52 @@ progress {
   font-weight: 700;
 }
 
+.group-member-action,
+.group-leave-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--danger);
+  background: transparent;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.group-member-action {
+  min-height: 34px;
+  padding: 6px 9px;
+  opacity: 0;
+}
+
+.group-dm-member:hover .group-member-action,
+.group-member-action:focus-visible {
+  opacity: 1;
+}
+
+.group-member-action:hover,
+.group-member-action:focus-visible,
+.group-leave-button:hover,
+.group-leave-button:focus-visible {
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.group-leave-button {
+  min-height: 42px;
+  padding: 8px 13px;
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent);
+}
+
+.group-member-action:disabled,
+.group-leave-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .danger-text {
   color: var(--danger) !important;
 }
@@ -1883,6 +1929,10 @@ progress {
 @media (max-width: 560px) {
   .group-dm-setting {
     grid-template-columns: 1fr;
+  }
+
+  .group-member-action {
+    opacity: 1;
   }
 }
 
@@ -4761,6 +4811,49 @@ progress {
 .message-row.compact .message-avatar {
   height: 0;
   visibility: hidden;
+}
+
+.message-row.group-system-notice {
+  grid-template-columns: 1fr;
+  min-height: 38px;
+  padding-block: 5px;
+}
+
+.message-row.group-system-notice .message-avatar,
+.message-row.group-system-notice .message-body > header {
+  display: none;
+}
+
+.group-system-message {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.group-system-message > span:nth-child(2) {
+  overflow-wrap: anywhere;
+}
+
+.group-system-icon {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 0.72rem;
+}
+
+.group-system-message time {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 0.76rem;
+  white-space: nowrap;
 }
 
 .message-avatar {

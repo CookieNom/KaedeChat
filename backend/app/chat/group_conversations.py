@@ -3,13 +3,25 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.payloads import message_payload
 from app.chat.privacy import blocked_between, lock_relationship_pair, relationship
-from app.core.dm import MAX_GROUP_DM_PARTICIPANTS
+from app.core.dm import (
+    GROUP_DM_MEMBER_ADDED,
+    GROUP_DM_MEMBER_LEFT,
+    GROUP_DM_MEMBER_REMOVED,
+    MAX_GROUP_DM_PARTICIPANTS,
+    group_dm_notice_text,
+)
 from app.core.settings import Settings
-from app.db.models import Channel, DMConversation, DMParticipant, User
+from app.core.snowflake import SnowflakeGenerator
+from app.db.models import Channel, DMConversation, DMParticipant, Message, MessageProjection, User
+from app.federation.dm_storage import (
+    admit_federated_dm_message,
+    dm_message_storage_delta,
+)
 from app.federation.replication import profile_from_user
 
 
@@ -19,9 +31,10 @@ def group_conversation_content(
     participants: Iterable[User],
     *,
     deleted: bool = False,
+    notice: dict[str, object] | None = None,
 ) -> dict[str, object]:
     users = list(participants)
-    return {
+    content: dict[str, object] = {
         "conversation": {
             "id": str(conversation.id),
             "origin_domain": conversation.origin_domain,
@@ -37,6 +50,122 @@ def group_conversation_content(
             "deleted": deleted,
         },
         "participants": [profile_from_user(user) for user in users],
+    }
+    if notice is not None:
+        content["notice"] = notice
+    return content
+
+
+def group_notice_text(
+    message_type: int,
+    actor: User,
+    target: User,
+    new_owner: User | None = None,
+) -> str:
+    actor_name = actor.display_name or actor.username
+    target_name = target.display_name or target.username
+    owner_name = (new_owner.display_name or new_owner.username) if new_owner else None
+    return group_dm_notice_text(message_type, actor_name, target_name, owner_name)
+
+
+async def create_group_mutation_notice(
+    session: AsyncSession,
+    settings: Settings,
+    snowflake: SnowflakeGenerator,
+    conversation: DMConversation,
+    channel: Channel,
+    actor: User,
+    *,
+    action: str,
+    target: User | None,
+    previous_owner: tuple[int | None, str | None],
+    participants: list[User],
+) -> tuple[Message, dict[str, object]] | None:
+    if action == "rename":
+        return None
+    if not participants:
+        # There is no remaining audience and the conversation is being
+        # deleted, so retaining a final leave notice would only create
+        # unreachable storage on each former participant's replica.
+        return None
+    affected = actor if action == "leave" else target
+    if affected is None:
+        raise RuntimeError("group mutation notice has no affected member")
+    if action == "add":
+        message_type = GROUP_DM_MEMBER_ADDED
+    elif action == "leave":
+        message_type = GROUP_DM_MEMBER_LEFT
+    elif action == "remove":
+        message_type = GROUP_DM_MEMBER_REMOVED
+    else:
+        return None
+    new_owner = None
+    if previous_owner == (affected.id, affected.origin_domain) and participants:
+        new_owner = next(
+            (
+                user
+                for user in participants
+                if (user.id, user.origin_domain)
+                == (conversation.owner_id, conversation.owner_domain)
+            ),
+            None,
+        )
+    content = group_notice_text(message_type, actor, affected, new_owner)
+    message_id = await snowflake.mint()
+    # Membership notices are informational system messages, not mentions.  A
+    # mention projection would incorrectly notify the person who was added or
+    # removed solely because their display name appears in the notice.
+    mention_refs: list[dict[str, object]] = []
+    await admit_federated_dm_message(
+        session,
+        settings,
+        conversation,
+        message_id=message_id,
+        message_domain=settings.domain,
+        delta=dm_message_storage_delta(
+            content=content,
+            e2ee=None,
+            mention_user_refs=mention_refs,
+            attachments=[],
+        ),
+    )
+    message = (
+        await session.scalars(
+            insert(Message)
+            .values(
+                id=message_id,
+                origin_domain=settings.domain,
+                channel_id=conversation.id,
+                channel_domain=conversation.origin_domain,
+                author_id=actor.id,
+                author_domain=actor.origin_domain,
+                content=content,
+                e2ee=None,
+                message_type=message_type,
+                flags=4,
+                mention_user_refs=mention_refs,
+            )
+            .returning(Message)
+        )
+    ).one()
+    session.add(
+        MessageProjection(
+            message_id=message.id,
+            message_domain=message.origin_domain,
+            channel_id=message.channel_id,
+            channel_domain=message.channel_domain,
+            mention_user_refs=mention_refs,
+        )
+    )
+    channel.last_message_id = message.id
+    channel.last_message_domain = message.origin_domain
+    return message, {
+        "message": message_payload(message, actor, []),
+        "author": profile_from_user(actor),
+        "target": {
+            "id": str(affected.id),
+            "origin_domain": affected.origin_domain,
+        },
     }
 
 
@@ -56,6 +185,33 @@ async def group_participants(session: AsyncSession, conversation: DMConversation
             .order_by(DMParticipant.joined_at, User.origin_domain, User.id)
         )
     )
+
+
+async def reload_group_projection(
+    session: AsyncSession,
+    conversation_id: int,
+    conversation_domain: str,
+) -> tuple[DMConversation, Channel, list[User]]:
+    """Reload group state after commit before rendering gateway projections.
+
+    Async SQLAlchemy expires ORM attributes on commit.  Rendering an object
+    retained across that boundary can otherwise attempt implicit IO and raise
+    ``MissingGreenlet`` after the mutation has already succeeded.
+    """
+
+    conversation = await session.get(
+        DMConversation,
+        (conversation_id, conversation_domain),
+        populate_existing=True,
+    )
+    channel = await session.get(
+        Channel,
+        (conversation_id, conversation_domain),
+        populate_existing=True,
+    )
+    if conversation is None or channel is None or conversation.type != "group":
+        raise RuntimeError("committed group DM projection state disappeared")
+    return conversation, channel, await group_participants(session, conversation)
 
 
 async def require_group_invite_friend(session: AsyncSession, inviter: User, invitee: User) -> None:

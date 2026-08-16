@@ -38,9 +38,11 @@ from app.chat.e2ee import validate_e2ee_envelope
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.group_conversations import (
     apply_authoritative_group_mutation,
+    create_group_mutation_notice,
     group_conversation_content,
     group_participants,
     load_authoritative_group,
+    reload_group_projection,
     require_group_invite_friend,
     require_group_member,
 )
@@ -168,6 +170,7 @@ from app.federation.replication import (
     publish_replicated_dm_message,
     replicate_conversation,
     replicate_dm_message,
+    replicate_group_notice,
     replicate_message_attachments,
     upsert_remote_user,
 )
@@ -997,8 +1000,11 @@ async def process_event(
     dm_channel_recipient: User | None = None
     group_state_conversation: DMConversation | None = None
     group_state_before: list[User] = []
+    group_state_before_refs: set[tuple[int, str]] = set()
     group_state_after: list[User] = []
+    group_state_ref: tuple[int, str] | None = None
     group_state_changed = False
+    group_notice_ref: tuple[int, str] | None = None
     dm_open_rejection_target: tuple[int, str] | None = None
     dm_open_rejection_payload: dict[str, object] | None = None
     access_revocation_target: tuple[int, str] | None = None
@@ -1038,8 +1044,14 @@ async def process_event(
                 raw_conversation.get("id"), "group DM conversation id"
             )
             existing_group = await session.get(DMConversation, (conversation_id, envelope.origin))
+            previous_group_owner = (
+                (existing_group.owner_id, existing_group.owner_domain)
+                if existing_group is not None
+                else (None, None)
+            )
             if existing_group is not None:
                 group_state_before = await group_participants(session, existing_group)
+            group_state_before_refs = {(user.id, user.origin_domain) for user in group_state_before}
             prior_refs = {(str(user.id), user.origin_domain) for user in group_state_before}
             profiles = [RemoteUserProfile.model_validate(item) for item in raw_participants]
             profile_refs = {(item.id, item.origin_domain) for item in profiles}
@@ -1143,6 +1155,31 @@ async def process_event(
                     raise RuntimeError("replicated group DM disappeared")
                 group_state_after = await group_participants(session, group_state_conversation)
                 group_state_changed = not equal_group_state
+            group_state_ref = (conversation_id, envelope.origin)
+            raw_notice = envelope.content.get("notice")
+            if raw_notice is not None:
+                if group_state_conversation is None or created_dm_channel is None:
+                    raise ValueError("group DM notice has no conversation state")
+                notice_message = await replicate_group_notice(
+                    session,
+                    settings,
+                    raw_notice,
+                    group_state_conversation,
+                    created_dm_channel,
+                    group_state_before,
+                    group_state_after,
+                    previous_owner=previous_group_owner,
+                    expected_actor=(
+                        database_snowflake(envelope.actor.id, "group DM notice actor id"),
+                        envelope.actor.domain,
+                    ),
+                    event_timestamp_ms=envelope.ts,
+                )
+                if notice_message is not None:
+                    group_notice_ref = (
+                        notice_message.id,
+                        notice_message.origin_domain,
+                    )
         elif envelope.type == "dm.conversation.create":
             if not any(
                 str(item.get("id")) == envelope.actor.id
@@ -1866,7 +1903,13 @@ async def process_event(
             created_dm_channel is not None
             and group_state_conversation is not None
             and group_state_changed
+            and group_state_ref is not None
         ):
+            (
+                group_state_conversation,
+                created_dm_channel,
+                group_state_after,
+            ) = await reload_group_projection(session, *group_state_ref)
             group_history = dm_history_metadata(
                 group_state_conversation,
                 local_domain=settings.domain,
@@ -1876,7 +1919,7 @@ async def process_event(
                     local_domain=settings.domain,
                 ),
             )
-            before_refs = {(user.id, user.origin_domain) for user in group_state_before}
+            before_refs = group_state_before_refs
             after_refs = {(user.id, user.origin_domain) for user in group_state_after}
             for user in group_state_after:
                 if user.origin_domain != settings.domain or not user.is_local:
@@ -1900,21 +1943,27 @@ async def process_event(
                         history=group_history,
                     ),
                 )
-            for user in group_state_before:
-                if (
-                    user.origin_domain == settings.domain
-                    and user.is_local
-                    and (user.id, user.origin_domain) not in after_refs
-                ):
+            for user_id, user_domain in before_refs - after_refs:
+                if user_domain == settings.domain:
                     await publish_dispatch(
                         redis,
-                        user_topic(settings.domain, user.id),
+                        user_topic(settings.domain, user_id),
                         "CHANNEL_DELETE",
                         {
                             "id": str(created_dm_channel.id),
                             "origin_domain": created_dm_channel.origin_domain,
                         },
                     )
+        # Newly added users need the conversation projection before its first
+        # system message, otherwise clients can legitimately drop that message
+        # because the channel is not known yet.
+        if group_notice_ref is not None:
+            group_notice_message = await session.get(
+                Message, group_notice_ref, populate_existing=True
+            )
+            if group_notice_message is None:
+                raise RuntimeError("committed group DM notice disappeared")
+            await publish_replicated_dm_message(session, redis, settings, group_notice_message)
         if (
             relationship_application is not None
             and relationship_application.relation_type is not None
@@ -3073,6 +3122,7 @@ async def federation_group_dm_mutate(
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     await enforce_federation_route_rate_limit(
@@ -3130,6 +3180,7 @@ async def federation_group_dm_mutate(
         payload.conversation_domain,
         for_update=True,
     )
+    previous_owner = (conversation.owner_id, conversation.owner_domain)
     before, participants, deleted = await apply_authoritative_group_mutation(
         session,
         settings,
@@ -3140,13 +3191,38 @@ async def federation_group_dm_mutate(
         target=target,
         name=payload.name,
     )
-    content = group_conversation_content(conversation, channel, participants, deleted=deleted)
+    notice_result = await create_group_mutation_notice(
+        session,
+        settings,
+        snowflake,
+        conversation,
+        channel,
+        actor,
+        action=payload.action,
+        target=target,
+        previous_owner=previous_owner,
+        participants=participants,
+    )
+    notice_message = notice_result[0] if notice_result is not None else None
+    notice_payload = notice_result[1] if notice_result is not None else None
+    notice_ref = (
+        (notice_message.id, notice_message.origin_domain) if notice_message is not None else None
+    )
+    content = group_conversation_content(
+        conversation,
+        channel,
+        participants,
+        deleted=deleted,
+        notice=notice_payload,
+    )
     envelope = await build_envelope(session, settings, "dm.group.state", actor, content)
     destinations = {user.origin_domain for user in [*before, *participants]} - {settings.domain}
     for destination in destinations:
         await queue_event(session, settings, destination, envelope)
-    await session.commit()
     before_refs = {(item.id, item.origin_domain) for item in before}
+    conversation_ref = (conversation.id, conversation.origin_domain)
+    await session.commit()
+    conversation, channel, participants = await reload_group_projection(session, *conversation_ref)
     after_refs = {(item.id, item.origin_domain) for item in participants}
     for user in participants:
         if user.origin_domain != settings.domain or not user.is_local:
@@ -3169,15 +3245,24 @@ async def federation_group_dm_mutate(
                 conversation=conversation,
             ),
         )
-    for user in before:
-        if (
-            user.origin_domain == settings.domain
-            and user.is_local
-            and (user.id, user.origin_domain) not in after_refs
-        ):
+    if notice_ref is not None:
+        committed_notice = await session.get(Message, notice_ref, populate_existing=True)
+        if committed_notice is None:
+            raise RuntimeError("committed group DM notice disappeared")
+        rendered_notice = await render_message_payload(session, committed_notice)
+        for user in participants:
+            if user.origin_domain == settings.domain and user.is_local:
+                await publish_dispatch(
+                    redis,
+                    user_topic(settings.domain, user.id),
+                    "MESSAGE_CREATE",
+                    rendered_notice,
+                )
+    for user_id, user_domain in before_refs - after_refs:
+        if user_domain == settings.domain:
             await publish_dispatch(
                 redis,
-                user_topic(settings.domain, user.id),
+                user_topic(settings.domain, user_id),
                 "CHANNEL_DELETE",
                 {"id": str(channel.id), "origin_domain": channel.origin_domain},
             )

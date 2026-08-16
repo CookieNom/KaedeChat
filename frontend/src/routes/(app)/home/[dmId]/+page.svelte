@@ -2316,10 +2316,12 @@
             <small class="owner-badge">Owner</small>
           {:else if groupOwner}
             <button
-              class="text-button danger-text"
+              class="group-member-action"
               type="button"
               disabled={groupBusy}
-              onclick={() => removeGroupMember(member)}>Remove</button
+              aria-label={`Remove ${userDisplayName(member)} from the group`}
+              onclick={() => removeGroupMember(member)}
+              ><Icon name="trash" size={16} />Remove</button
             >
           {/if}
         </div>
@@ -2327,13 +2329,8 @@
     </section>
     {#if groupError}<p class="form-error" role="alert">{groupError}</p>{/if}
     <footer>
-      <button
-        class="text-button danger-text"
-        type="button"
-        disabled={groupBusy}
-        onclick={leaveGroup}
-      >
-        Leave group
+      <button class="group-leave-button" type="button" disabled={groupBusy} onclick={leaveGroup}>
+        <Icon name="logout" size={17} />Leave group
       </button>
       <button class="secondary-button" type="button" onclick={() => groupDialog?.close()}
         >Done</button

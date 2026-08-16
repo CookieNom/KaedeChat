@@ -99,6 +99,24 @@ void main() {
       expect(channel.recipients.single.handle, 'turtle@beta.example');
       expect(channel.toJson()['conversation_type'], 'group');
     });
+
+    test('retains membership notice types across local reconciliation', () {
+      final message = KaedeMessage.fromJson(<String, Object?>{
+        'id': '11',
+        'origin_domain': 'alpha.example',
+        'channel_id': '10',
+        'channel_domain': 'alpha.example',
+        'author_id': '1',
+        'author_domain': 'alpha.example',
+        'content': 'Alice added Bob to the group.',
+        'message_type': 3,
+        'created_at': '2026-08-16T12:00:00Z',
+      });
+
+      expect(message.messageType, 3);
+      expect(message.copyWith().messageType, 3);
+      expect(message.toJson()['message_type'], 3);
+    });
   });
 
   group('federated profile refresh', () {

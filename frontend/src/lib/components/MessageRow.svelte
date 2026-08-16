@@ -120,11 +120,14 @@
   let attachmentActionError = $state('');
   let menuListenersActive = false;
   const closeExclusiveMenu = (restoreFocus: boolean) => closeMenu(restoreFocus);
+  const groupSystemNotice = $derived([3, 4, 5].includes(message.message_type));
 
   const editAvailable = $derived(
-    canEdit && !message.deleted_at && !message.pending && !message.queued
+    !groupSystemNotice && canEdit && !message.deleted_at && !message.pending && !message.queued
   );
-  const menuAvailable = $derived(actionsEnabled && !message.pending && !message.queued);
+  const menuAvailable = $derived(
+    !groupSystemNotice && actionsEnabled && !message.pending && !message.queued
+  );
   const inviteReferences = $derived(
     message.content ? inviteReferencesInMessage(message.content) : []
   );
@@ -496,6 +499,7 @@
     message.delivery_status === 'retrying'}
   class:failed={message.failed || message.delivery_status === 'failed'}
   class:compact
+  class:group-system-notice={groupSystemNotice}
   class:menu-open={menuOpen}
   class="message-row"
   id={`${domIdPrefix}-${entityRef(message)}`}
@@ -591,7 +595,13 @@
     {:else}
       <span class="visually-hidden">{authorName()}, {accessibleTime()}</span>
     {/if}
-    {#if message.deleted_at}
+    {#if groupSystemNotice}
+      <div class="group-system-message">
+        <span class="group-system-icon" aria-hidden="true">✦</span>
+        <span>{message.content}</span>
+        <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
+      </div>
+    {:else if message.deleted_at}
       <p class="message-removed">Message removed</p>
     {:else if gifUrl}
       <div class="klipy-gif-wrap">

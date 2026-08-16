@@ -15,7 +15,14 @@ from app.chat.e2ee import validate_e2ee_envelope
 from app.chat.events import publish_dispatch, user_topic
 from app.chat.payloads import dm_channel_payload, render_message_payload
 from app.chat.privacy import require_can_direct_message
-from app.core.dm import MAX_GROUP_DM_PARTICIPANTS, group_dm_key
+from app.core.dm import (
+    GROUP_DM_MEMBER_ADDED,
+    GROUP_DM_MEMBER_LEFT,
+    GROUP_DM_MEMBER_REMOVED,
+    MAX_GROUP_DM_PARTICIPANTS,
+    group_dm_key,
+    group_dm_notice_text,
+)
 from app.core.settings import Settings
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
 from app.db.models import (
@@ -742,6 +749,178 @@ async def replicate_conversation(
     if stored_participants != expected_participants:
         raise ValueError("DM conversation participant set is inconsistent")
     return channel
+
+
+async def replicate_group_notice(
+    session: AsyncSession,
+    settings: Settings,
+    raw_notice: object,
+    conversation: DMConversation,
+    channel: Channel,
+    before: list[User],
+    after: list[User],
+    *,
+    previous_owner: tuple[int | None, str | None],
+    expected_actor: tuple[int, str],
+    event_timestamp_ms: int | None = None,
+) -> Message | None:
+    """Validate and retain an authority-issued group membership notice."""
+
+    if not isinstance(raw_notice, dict):
+        raise ValueError("group DM notice is malformed")
+    raw_message = raw_notice.get("message")
+    if not isinstance(raw_message, dict):
+        raise ValueError("group DM notice message is malformed")
+    author = await upsert_remote_user(
+        session,
+        settings,
+        RemoteUserProfile.model_validate(raw_notice.get("author")),
+    )
+    author_ref = (author.id, author.origin_domain)
+    if author_ref != expected_actor:
+        raise ValueError("group DM notice author does not match the state actor")
+    message_id = database_snowflake(raw_message.get("id"), "group DM notice id")
+    origin_domain = normalize_domain(str(raw_message.get("origin_domain", "")))
+    channel_id = database_snowflake(raw_message.get("channel_id"), "group DM notice channel id")
+    channel_domain = normalize_domain(str(raw_message.get("channel_domain", "")))
+    message_type = raw_message.get("message_type")
+    if isinstance(message_type, bool) or message_type not in {
+        GROUP_DM_MEMBER_ADDED,
+        GROUP_DM_MEMBER_LEFT,
+        GROUP_DM_MEMBER_REMOVED,
+    }:
+        raise ValueError("group DM notice type is invalid")
+    if (
+        origin_domain != conversation.authority_domain
+        or (channel_id, channel_domain) != (channel.id, channel.origin_domain)
+        or (raw_message.get("author_id"), raw_message.get("author_domain"))
+        != (str(author.id), author.origin_domain)
+        or raw_message.get("e2ee") is not None
+        or raw_message.get("attachments", []) != []
+        or raw_message.get("referenced_message_id") is not None
+        or raw_message.get("referenced_message_domain") is not None
+        or raw_message.get("client_nonce") is not None
+        or raw_message.get("edited_at") is not None
+        or raw_message.get("deleted_at") is not None
+        or raw_message.get("flags") != 4
+    ):
+        raise ValueError("group DM notice fields are invalid")
+    raw_mentions = raw_message.get("mention_user_refs")
+    if raw_mentions != []:
+        raise ValueError("group DM notice target is invalid")
+    raw_target = raw_notice.get("target")
+    if not isinstance(raw_target, dict):
+        raise ValueError("group DM notice target is invalid")
+    target_ref = (
+        database_snowflake(raw_target.get("id"), "group DM notice target id"),
+        normalize_domain(str(raw_target.get("origin_domain", ""))),
+    )
+    before_refs = {(user.id, user.origin_domain) for user in before}
+    after_refs = {(user.id, user.origin_domain) for user in after}
+    added = after_refs - before_refs
+    removed = before_refs - after_refs
+    if message_type == GROUP_DM_MEMBER_ADDED:
+        valid_transition = added == {target_ref} and not removed and author_ref in before_refs
+    elif message_type == GROUP_DM_MEMBER_LEFT:
+        valid_transition = removed == {target_ref} == {author_ref} and not added
+    else:
+        valid_transition = removed == {target_ref} and not added and author_ref in after_refs
+
+    existing = await session.get(Message, (message_id, origin_domain))
+    if existing is not None:
+        if (
+            existing.channel_id,
+            existing.channel_domain,
+            existing.author_id,
+            existing.author_domain,
+            existing.message_type,
+            existing.content,
+            existing.mention_user_refs,
+        ) != (
+            channel.id,
+            channel.origin_domain,
+            author.id,
+            author.origin_domain,
+            message_type,
+            raw_message.get("content"),
+            raw_mentions,
+        ):
+            raise ValueError("group DM notice conflicts with a stored message")
+        return None
+    if not valid_transition:
+        raise ValueError("group DM notice does not match the membership transition")
+    users = {(user.id, user.origin_domain): user for user in [*before, *after, author]}
+    target = users.get(target_ref)
+    if target is None:
+        raise ValueError("group DM notice target profile is missing")
+    new_owner = None
+    if (
+        previous_owner[0] is not None
+        and previous_owner[1] is not None
+        and (previous_owner[0], previous_owner[1]) == target_ref
+        and after
+    ):
+        if conversation.owner_id is None or conversation.owner_domain is None:
+            raise ValueError("group DM ownership transfer is missing an owner")
+        new_owner = users.get((conversation.owner_id, conversation.owner_domain))
+        if new_owner is None:
+            raise ValueError("group DM ownership transfer target is missing")
+    expected_content = group_dm_notice_text(
+        message_type,
+        author.display_name or author.username,
+        target.display_name or target.username,
+        (new_owner.display_name or new_owner.username) if new_owner is not None else None,
+    )
+    if raw_message.get("content") != expected_content:
+        raise ValueError("group DM notice text does not match the membership transition")
+    created_at = datetime.fromisoformat(str(raw_message.get("created_at")))
+    created_ms = int(created_at.timestamp() * 1000)
+    validate_snowflake_timestamp(
+        message_id,
+        created_at,
+        "group DM notice",
+        event_timestamp_ms=event_timestamp_ms if event_timestamp_ms is not None else created_ms,
+    )
+    mention_refs: list[dict[str, Any]] = []
+    await admit_federated_dm_message(
+        session,
+        settings,
+        conversation,
+        message_id=message_id,
+        message_domain=origin_domain,
+        delta=dm_message_storage_delta(
+            content=expected_content,
+            e2ee=None,
+            mention_user_refs=mention_refs,
+            attachments=[],
+        ),
+    )
+    message = Message(
+        id=message_id,
+        origin_domain=origin_domain,
+        channel_id=channel.id,
+        channel_domain=channel.origin_domain,
+        author_id=author.id,
+        author_domain=author.origin_domain,
+        content=expected_content,
+        e2ee=None,
+        message_type=message_type,
+        flags=4,
+        mention_user_refs=mention_refs,
+        created_at=created_at,
+    )
+    session.add(message)
+    session.add(
+        MessageProjection(
+            message_id=message.id,
+            message_domain=message.origin_domain,
+            channel_id=message.channel_id,
+            channel_domain=message.channel_domain,
+            mention_user_refs=mention_refs,
+        )
+    )
+    await advance_channel_cursor(session, channel, message.id, message.origin_domain)
+    return message
 
 
 async def replicate_dm_message(
