@@ -7,8 +7,11 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import channels as channel_api
+from app.api import federation as federation_api
+from app.core.permissions import Permission
 from app.core.types import EntityRef
 from app.federation.schemas import GuildReactionProxyRequest
+from app.federation.security import FederationPrincipal
 
 
 def reaction_request() -> dict[str, object]:
@@ -39,6 +42,79 @@ def test_guild_reaction_proxy_schema_is_strict_and_bounded() -> None:
         GuildReactionProxyRequest.model_validate({**reaction_request(), "unexpected": True})
     with pytest.raises(ValueError):
         GuildReactionProxyRequest.model_validate({**reaction_request(), "emoji": "x" * 321})
+
+
+@pytest.mark.asyncio
+async def test_guild_home_signs_remote_actor_reaction_with_local_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = GuildReactionProxyRequest.model_validate(reaction_request())
+    actor = SimpleNamespace(id=10, origin_domain="member.example", is_local=False)
+    owner = SimpleNamespace(id=11, origin_domain="guild.example", is_local=True)
+    guild = SimpleNamespace(
+        id=12,
+        origin_domain="guild.example",
+        owner_id=owner.id,
+        owner_domain=owner.origin_domain,
+    )
+    channel = SimpleNamespace(
+        id=int(payload.channel_id),
+        origin_domain="guild.example",
+        guild_id=guild.id,
+        unavailable=False,
+        type=0,
+    )
+    message_id, message_domain = payload.message_id.resolve("guild.example")
+    message = SimpleNamespace(
+        id=message_id,
+        origin_domain=message_domain,
+        channel_id=channel.id,
+        channel_domain=channel.origin_domain,
+        deleted_at=None,
+    )
+    session = AsyncMock()
+
+    async def get(model: object, key: object) -> object | None:
+        name = getattr(model, "__name__", "")
+        if name == "Channel":
+            return channel
+        if name == "Message":
+            return message
+        if name == "User":
+            return owner
+        return None
+
+    session.get.side_effect = get
+    session.scalar.return_value = message.id
+    queue_mutation = AsyncMock()
+    monkeypatch.setattr(federation_api, "upsert_remote_user", AsyncMock(return_value=actor))
+    monkeypatch.setattr(federation_api, "home_guild", AsyncMock(return_value=guild))
+    monkeypatch.setattr(
+        federation_api,
+        "require_permissions",
+        AsyncMock(return_value=Permission.ADD_REACTIONS),
+    )
+    monkeypatch.setattr(federation_api, "validate_custom_emoji_use", AsyncMock())
+    monkeypatch.setattr(federation_api, "queue_guild_mutation", queue_mutation)
+    monkeypatch.setattr(federation_api, "wake_queued_guild_federation", AsyncMock())
+    monkeypatch.setattr(federation_api, "publish_dispatch", AsyncMock())
+
+    result = await federation_api.federation_guild_reaction_proxy(
+        guild_id=guild.id,
+        payload=payload,
+        principal=FederationPrincipal("member.example", "ed25519:test"),
+        session=cast(Any, session),
+        redis=cast(Any, SimpleNamespace()),
+        settings=cast(Any, SimpleNamespace(domain="guild.example")),
+    )
+
+    assert result == {"reacted": True}
+    assert queue_mutation.await_args.args[3] is owner
+    assert queue_mutation.await_args.args[5]["user"] == {
+        "id": str(actor.id),
+        "origin_domain": actor.origin_domain,
+    }
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

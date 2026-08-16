@@ -4213,11 +4213,21 @@ async def federation_guild_reaction_proxy(
         )
         changed = inserted is not None
     if changed:
+        # Federation envelopes emitted by a guild authority must be signed by
+        # one of that authority's local users.  The remote reactor remains the
+        # semantic actor in the event content, while the local guild owner is
+        # the authority signer (the same pattern used by committed proxy
+        # messages).  Passing the remote user to queue_guild_mutation makes
+        # build_envelope correctly reject the guild home for signing on behalf
+        # of another instance.
+        owner = await session.get(User, (guild.owner_id, guild.owner_domain))
+        if owner is None or not owner.is_local or owner.origin_domain != settings.domain:
+            raise RuntimeError("local guild owner cannot sign the authoritative reaction event")
         await queue_guild_mutation(
             session,
             settings,
             guild,
-            actor,
+            owner,
             "guild.reaction.remove" if payload.remove else "guild.reaction.add",
             {
                 "message": {"id": str(message.id), "origin_domain": message.origin_domain},
