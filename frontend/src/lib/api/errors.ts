@@ -75,6 +75,28 @@ const ERROR_MESSAGES: Record<string, string> = {
   KAED_MEDIA_NOT_FOUND: 'That media is no longer available.',
   CANNOT_DM_SELF: "You can't start a direct message with yourself.",
   CANNOT_DM_USER: 'This user is not accepting direct messages from you.',
+  GROUP_DM_NOT_FOUND: 'That group conversation no longer exists or you are no longer a member.',
+  GROUP_DM_NOT_MEMBER: 'You are no longer a member of that group conversation.',
+  GROUP_DM_DUPLICATE_MEMBER: 'Choose each group member only once.',
+  GROUP_DM_INVITE_NOT_FRIEND: 'Only existing friends can be added to a group conversation.',
+  GROUP_DM_FULL: 'That group conversation already has the maximum of 10 members.',
+  GROUP_DM_ALREADY_MEMBER: 'That friend is already in the group conversation.',
+  GROUP_DM_MEMBER_NOT_FOUND: 'That person is no longer in the group conversation.',
+  GROUP_DM_OWNER_REQUIRED: 'Only the group creator can remove another member.',
+  GROUP_DM_OWNER_CANNOT_REMOVE_SELF: 'Leave the group to transfer ownership automatically.',
+  GROUP_DM_HOME_UNREACHABLE:
+    "The group conversation's home server is unavailable. Try again shortly.",
+  GROUP_DM_INVITEE_HOME_UNREACHABLE:
+    "That friend's home server could not confirm the invitation. Try again shortly.",
+  GROUP_DM_INVITEE_HOME_REJECTED: "That friend's home server did not accept the invitation.",
+  GROUP_DM_MUTATION_REJECTED: "The group conversation's home server rejected that change.",
+  GROUP_DM_HOME_INVALID_RESPONSE:
+    "The group conversation's home server returned an invalid response.",
+  KAED_GROUP_DM_INVITEE_NOT_LOCAL: 'That account is not hosted by this server.',
+  KAED_GROUP_DM_WRONG_AUTHORITY: 'That group conversation must be changed through its home server.',
+  KAED_GROUP_DM_INVITEE_HOME_UNREACHABLE:
+    "That friend's home server could not confirm the invitation. Try again shortly.",
+  KAED_GROUP_DM_INVITE_NOT_FRIEND: 'Only existing friends can be added to a group conversation.',
   DM_PRIVACY_REJECTED: 'This user’s privacy settings do not allow this direct message.',
   CANNOT_FRIEND_SELF: "You can't send a friend request to yourself.",
   CANNOT_BLOCK_SELF: "You can't block yourself.",

@@ -14,8 +14,9 @@ are allowed to see, and send writes back to the authority for validation.
 
 - Guilds with text and voice channels, roles, channel overrides, invites,
   moderation, reactions, pins, attachments, webhooks, and audit logs
-- Direct messages, friend requests, blocking, presence, unread state, and
-  two-party calls
+- Direct and group messages, friend-only group invitations, creator controls,
+  voluntary leave/ownership transfer, presence, unread state, and calls with
+  voice, video, and screen sharing
 - Federated bots: consent-based guild installs, direct target authentication,
   scoped REST and Gateway access, slash commands, bot badges, exact-instance
   policies, and E2EE-aware grants. Bots are managed through the Developer
@@ -44,6 +45,8 @@ details are in [docs/architecture.md](docs/architecture.md) and
 [bot and automation contract](docs/bots-and-automations.md) nearby. Instance
 owners and delegated staff should read the
 [administration and developer portal guide](docs/administration-and-developer-portals.md).
+Group-conversation behavior and federation ownership are described in
+[docs/group-direct-messages.md](docs/group-direct-messages.md).
 
 ## Setup
 

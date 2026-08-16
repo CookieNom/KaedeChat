@@ -24,7 +24,7 @@ from app.chat.privacy import blocked_between, require_can_direct_message
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.types import EntityRef
-from app.db.models import Channel, DMParticipant, User
+from app.db.models import Channel, DMConversation, DMParticipant, User
 from app.federation.client import signed_request
 from app.federation.network import (
     FederationNetworkError,
@@ -224,6 +224,11 @@ async def require_call_policy(
     caller = identities.get(caller_identity)
     if caller is None:
         raise HTTPException(status_code=403, detail={"code": "CALL_FORBIDDEN"})
+    conversation = await session.get(
+        DMConversation, (int(record["channel_id"]), str(record["channel_domain"]))
+    )
+    if conversation is not None and conversation.type == "group":
+        return participants
     peers = [
         participant for identity, participant in identities.items() if identity != actor_identity
     ]

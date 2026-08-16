@@ -145,8 +145,13 @@ the same batches with correlated results. It reconnects for periodic
 reauthentication and falls back to the signed HTTP inbox on connection or
 protocol failure.
 
-The lower participant domain mints a two-party DM conversation. The remote
-recipient authorizes its privacy policy and rechecks it on message ingestion.
+The lower participant domain mints a two-party DM conversation. Group DMs are
+minted by the creator's home, which remains authoritative for their name,
+owner, membership, and monotonic state version. Every invitee's home confirms
+an accepted friendship before the authority adds that person. Signed full-state
+updates let every participating home deliver messages and calls directly while
+rejecting stale or conflicting membership changes. A direct-message recipient
+authorizes its privacy policy and rechecks it on message ingestion.
 Guild homes mint message snowflakes and assign transactional event sequences
 for the registered guild mutation set. Replicas apply signed structural
 snapshots and ordered guild/channel/role/member/moderation/message/reaction/pin
@@ -202,8 +207,8 @@ services.
 The v1 ownership model permits replicated users, guilds, guild members, roles,
 channels, overwrites, messages, attachments, reactions, pins, emojis, and DM
 conversations. Federation replicates profiles, structural guild snapshots, the
-registered granular guild mutation stream, and two-party DM conversations and
-messages. Media federation replicates attachment metadata and authenticated
+registered granular guild mutation stream, and direct/group DM conversations
+and messages. Media federation replicates attachment metadata and authenticated
 access while objects stay at their origin. Voice federation adds call and
 occupancy state.
 
@@ -314,7 +319,7 @@ and traffic analysis resistance are outside the current transport capability.
 
 The production scope covers identity and authentication, single-instance chat,
 federation, media and webhooks, voice/video/screen sharing, Android and iOS
-clients, message search, and the associated operational controls. Group DMs,
-threads, MLS, and compressed gateway encoding are not currently implemented.
+clients, message search, group DMs, and the associated operational controls.
+Threads, MLS, and compressed gateway encoding are not currently implemented.
 The mobile clients use the same home-instance API and gateway boundary as the
 web and desktop clients; they never call peer federation endpoints directly.

@@ -751,6 +751,7 @@ async def identify(
                 dm_channel_payload(
                     channel,
                     recipients,
+                    conversation=conversation,
                     history=dm_history_metadata(
                         conversation,
                         local_domain=settings.domain,

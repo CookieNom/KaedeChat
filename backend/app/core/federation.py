@@ -29,6 +29,7 @@ FEDERATION_CAPABILITIES = (
     "dm-history-page/1",
     "e2ee-transport/1",
     "bot-direct-auth/1",
+    "group-dm/1",
     "guild-history-sync/1",
     "guild-history-sync/2",
     "member-self-moderation/1",

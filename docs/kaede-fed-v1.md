@@ -21,6 +21,7 @@ covers:
   "capabilities": [
     "dm-history-page/1",
     "e2ee-transport/1",
+    "group-dm/1",
     "guild-history-sync/1",
     "member-self-moderation/1",
     "message-search/1",
@@ -53,6 +54,15 @@ Capabilities are optional, bounded strings:
   composite references, and the attachment origin verifies that its durable
   attachment row belongs to that message in that conversation. Authorization
   based only on a peer participating in some other DM is forbidden.
+- `group-dm/1` advertises authority-owned group conversations, friend-confirmed
+  invitation authorization, monotonic full-state membership updates, and calls
+  with up to 10 participants. A peer that does not advertise it cannot be added
+  to a group conversation. Group state is signed by the conversation authority.
+  Its actor may belong to another participating instance when that participant
+  sent the mutation to the authority; this exception applies only to
+  `dm.group.state`. Receivers still require that actor in the prior or resulting
+  participant set, and a newly added local participant must already be the
+  actor's accepted friend.
 - `profile-by-ref/1` advertises exact composite-ID public profile proofs. It
   lets a replica resolve an opaque historical author from that user's own home
   without trusting mutable profile data relayed by a guild authority. Absence

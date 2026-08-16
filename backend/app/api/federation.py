@@ -36,6 +36,14 @@ from app.bootstrap import MAX_ADVERTISED_OLD_KEYS
 from app.chat.custom_emojis import validate_custom_emoji_use
 from app.chat.e2ee import validate_e2ee_envelope
 from app.chat.events import guild_topic, publish_dispatch, user_topic
+from app.chat.group_conversations import (
+    apply_authoritative_group_mutation,
+    group_conversation_content,
+    group_participants,
+    load_authoritative_group,
+    require_group_invite_friend,
+    require_group_member,
+)
 from app.chat.guild_revision import (
     queue_guild_access_revocation,
     queue_guild_mutation,
@@ -93,11 +101,14 @@ from app.db.models import (
     Role,
     User,
 )
+from app.federation.client import signed_request
 from app.federation.delivery import FederationOutboxCapacityExceeded
 from app.federation.dm_history import MAX_DM_HISTORY_RESPONSE_BYTES
 from app.federation.dm_storage import (
     FederatedDMQuotaExceeded,
     admit_federated_dm_conversation,
+    dm_authority_history_available,
+    dm_history_metadata,
     register_federated_dm_conversation,
 )
 from app.federation.events import build_envelope, queue_event
@@ -161,6 +172,8 @@ from app.federation.replication import (
     upsert_remote_user,
 )
 from app.federation.schemas import (
+    DMGroupAuthorizeRequest,
+    DMGroupMutationRequest,
     DMOpenFederationRequest,
     EventEnvelope,
     GuildHistoryExportRequest,
@@ -782,7 +795,9 @@ async def process_event(
     envelope: EventEnvelope,
     snowflake: SnowflakeGenerator,
 ) -> InboxResult:
-    if envelope.origin != principal.origin or envelope.actor.domain != principal.origin:
+    if envelope.origin != principal.origin or (
+        envelope.actor.domain != principal.origin and envelope.type != "dm.group.state"
+    ):
         return InboxResult(
             event_id=envelope.event_id,
             status="rejected",
@@ -980,6 +995,10 @@ async def process_event(
     rejection_payload: dict[str, object] | None = None
     created_dm_channel: Channel | None = None
     dm_channel_recipient: User | None = None
+    group_state_conversation: DMConversation | None = None
+    group_state_before: list[User] = []
+    group_state_after: list[User] = []
+    group_state_changed = False
     dm_open_rejection_target: tuple[int, str] | None = None
     dm_open_rejection_payload: dict[str, object] | None = None
     access_revocation_target: tuple[int, str] | None = None
@@ -1004,6 +1023,126 @@ async def process_event(
             )
             if relationship_application.wake_destination is not None:
                 delivery_wakes.add(relationship_application.wake_destination)
+        elif envelope.type == "dm.group.state":
+            raw_conversation = envelope.content.get("conversation")
+            raw_participants = envelope.content.get("participants")
+            if not isinstance(raw_conversation, dict) or not isinstance(raw_participants, list):
+                raise ValueError("group DM state is malformed")
+            if (
+                str(raw_conversation.get("type")) != "group"
+                or str(raw_conversation.get("origin_domain")) != envelope.origin
+                or str(raw_conversation.get("authority_domain")) != envelope.origin
+            ):
+                raise ValueError("group DM state is not owned by its authority")
+            conversation_id = database_snowflake(
+                raw_conversation.get("id"), "group DM conversation id"
+            )
+            existing_group = await session.get(DMConversation, (conversation_id, envelope.origin))
+            if existing_group is not None:
+                group_state_before = await group_participants(session, existing_group)
+            prior_refs = {(str(user.id), user.origin_domain) for user in group_state_before}
+            profiles = [RemoteUserProfile.model_validate(item) for item in raw_participants]
+            profile_refs = {(item.id, item.origin_domain) for item in profiles}
+            actor_ref = (envelope.actor.id, envelope.actor.domain)
+            incoming_state_version = database_snowflake(
+                raw_conversation.get("state_version"), "group DM state version"
+            )
+            if incoming_state_version < 1:
+                raise ValueError("group DM state version is invalid")
+            older_group_state = (
+                existing_group is not None and existing_group.state_version > incoming_state_version
+            )
+            equal_group_state = (
+                existing_group is not None
+                and existing_group.state_version == incoming_state_version
+            )
+            deleted_group_state = bool(raw_conversation.get("deleted"))
+            if older_group_state:
+                created_dm_channel = await session.get(Channel, (conversation_id, envelope.origin))
+                if created_dm_channel is None:
+                    raise ValueError("group DM channel is missing")
+                group_state_conversation = existing_group
+                group_state_after = group_state_before
+            elif equal_group_state and deleted_group_state:
+                created_dm_channel = await session.get(Channel, (conversation_id, envelope.origin))
+                if created_dm_channel is None or not created_dm_channel.unavailable or profile_refs:
+                    raise ValueError("group DM deletion conflicts with stored state")
+                group_state_conversation = existing_group
+                group_state_after = []
+            elif deleted_group_state:
+                if existing_group is None:
+                    raise ValueError("unknown group DM cannot be deleted")
+                if actor_ref not in prior_refs:
+                    raise ValueError("group DM state actor is not a participant")
+                created_dm_channel = await session.get(Channel, (conversation_id, envelope.origin))
+                if created_dm_channel is None:
+                    raise ValueError("group DM channel is missing")
+                for membership in list(
+                    await session.scalars(
+                        select(DMParticipant).where(
+                            DMParticipant.conversation_id == conversation_id,
+                            DMParticipant.conversation_domain == envelope.origin,
+                        )
+                    )
+                ):
+                    await session.delete(membership)
+                created_dm_channel.unavailable = True
+                existing_group.state_version = incoming_state_version
+                group_state_conversation = existing_group
+                group_state_after = []
+                group_state_changed = True
+            else:
+                if actor_ref not in (prior_refs or profile_refs):
+                    raise ValueError("group DM state actor is not a participant")
+                if existing_group is not None:
+                    stored_group_channel = await session.get(
+                        Channel, (conversation_id, envelope.origin)
+                    )
+                    if stored_group_channel is None:
+                        raise ValueError("group DM channel is missing")
+                    if stored_group_channel.unavailable:
+                        raise ValueError("a deleted group DM cannot be restored")
+                if not equal_group_state:
+                    added_local_profiles = [
+                        profile
+                        for profile in profiles
+                        if (profile.id, profile.origin_domain) not in prior_refs
+                        and profile.origin_domain == settings.domain
+                    ]
+                    if added_local_profiles:
+                        actor = await session.get(
+                            User,
+                            (
+                                database_snowflake(envelope.actor.id, "group DM actor id"),
+                                envelope.actor.domain,
+                            ),
+                        )
+                        if actor is None:
+                            actor_profile = next(
+                                (
+                                    profile
+                                    for profile in profiles
+                                    if (profile.id, profile.origin_domain) == actor_ref
+                                ),
+                                None,
+                            )
+                            if actor_profile is None:
+                                raise ValueError("group DM actor profile is missing")
+                            actor = await upsert_remote_user(session, settings, actor_profile)
+                        for invitee_profile in added_local_profiles:
+                            invitee = await upsert_remote_user(session, settings, invitee_profile)
+                            await require_group_invite_friend(session, actor, invitee)
+                created_dm_channel = await replicate_conversation(
+                    session, settings, raw_conversation, profiles
+                )
+                group_state_conversation = await session.get(
+                    DMConversation,
+                    (created_dm_channel.id, created_dm_channel.origin_domain),
+                )
+                if group_state_conversation is None:
+                    raise RuntimeError("replicated group DM disappeared")
+                group_state_after = await group_participants(session, group_state_conversation)
+                group_state_changed = not equal_group_state
         elif envelope.type == "dm.conversation.create":
             if not any(
                 str(item.get("id")) == envelope.actor.id
@@ -1717,8 +1856,65 @@ async def process_event(
                         if (participant.id, participant.origin_domain)
                         != (dm_channel_recipient.id, dm_channel_recipient.origin_domain)
                     ],
+                    conversation=await session.get(
+                        DMConversation,
+                        (created_dm_channel.id, created_dm_channel.origin_domain),
+                    ),
                 ),
             )
+        if (
+            created_dm_channel is not None
+            and group_state_conversation is not None
+            and group_state_changed
+        ):
+            group_history = dm_history_metadata(
+                group_state_conversation,
+                local_domain=settings.domain,
+                remote_available=await dm_authority_history_available(
+                    session,
+                    group_state_conversation,
+                    local_domain=settings.domain,
+                ),
+            )
+            before_refs = {(user.id, user.origin_domain) for user in group_state_before}
+            after_refs = {(user.id, user.origin_domain) for user in group_state_after}
+            for user in group_state_after:
+                if user.origin_domain != settings.domain or not user.is_local:
+                    continue
+                await publish_dispatch(
+                    redis,
+                    user_topic(settings.domain, user.id),
+                    (
+                        "CHANNEL_CREATE"
+                        if (user.id, user.origin_domain) not in before_refs
+                        else "CHANNEL_UPDATE"
+                    ),
+                    dm_channel_payload(
+                        created_dm_channel,
+                        [
+                            item
+                            for item in group_state_after
+                            if (item.id, item.origin_domain) != (user.id, user.origin_domain)
+                        ],
+                        conversation=group_state_conversation,
+                        history=group_history,
+                    ),
+                )
+            for user in group_state_before:
+                if (
+                    user.origin_domain == settings.domain
+                    and user.is_local
+                    and (user.id, user.origin_domain) not in after_refs
+                ):
+                    await publish_dispatch(
+                        redis,
+                        user_topic(settings.domain, user.id),
+                        "CHANNEL_DELETE",
+                        {
+                            "id": str(created_dm_channel.id),
+                            "origin_domain": created_dm_channel.origin_domain,
+                        },
+                    )
         if (
             relationship_application is not None
             and relationship_application.relation_type is not None
@@ -2456,6 +2652,8 @@ async def federation_dm_history_page(
     before_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
     before_domain: str | None = Query(default=None, min_length=1, max_length=253),
     limit: int = Query(default=50, ge=1, le=100),
+    requester_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
+    requester_domain: str | None = Query(default=None, min_length=1, max_length=253),
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
@@ -2476,12 +2674,24 @@ async def federation_dm_history_page(
     conversation = await session.get(DMConversation, (int(conversation_id), settings.domain))
     if conversation is None or conversation.authority_domain != settings.domain:
         raise HTTPException(status_code=404, detail={"code": "KAED_FED_DM_HISTORY_NOT_FOUND"})
+    if (requester_id is None) != (requester_domain is None):
+        raise HTTPException(status_code=400, detail={"code": "INVALID_REQUESTER"})
+    if conversation.type == "group" and requester_id is None:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_REQUESTER"})
+    if requester_domain is not None:
+        try:
+            requester_domain = normalize_domain(requester_domain)
+        except FederationNetworkError:
+            raise HTTPException(status_code=400, detail={"code": "INVALID_REQUESTER"}) from None
+        if requester_domain != principal.origin:
+            raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
     participates = await session.scalar(
         select(DMParticipant.user_id)
         .where(
             DMParticipant.conversation_id == conversation.id,
             DMParticipant.conversation_domain == conversation.origin_domain,
-            DMParticipant.user_domain == principal.origin,
+            DMParticipant.user_domain == (requester_domain or principal.origin),
+            *([DMParticipant.user_id == requester_id] if requester_id is not None else []),
         )
         .limit(1)
     )
@@ -2596,6 +2806,7 @@ async def _federation_media_attachment(
     *,
     expected_conversation: tuple[int, str] | None = None,
     expected_message: tuple[int, str] | None = None,
+    requester: tuple[int, str] | None = None,
 ) -> Attachment:
     """Authorize media and optionally bind it to an exact DM history assertion."""
 
@@ -2618,6 +2829,13 @@ async def _federation_media_attachment(
     )
     if message is None or message.deleted_at is not None or channel is None:
         raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    conversation = (
+        await session.get(DMConversation, (channel.id, channel.origin_domain))
+        if channel.guild_id is None
+        else None
+    )
+    if conversation is not None and conversation.type == "group" and requester is None:
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
     if (expected_conversation is not None or expected_message is not None) and (
         expected_conversation is None
         or expected_message is None
@@ -2634,7 +2852,9 @@ async def _federation_media_attachment(
                 .where(
                     DMParticipant.conversation_id == channel.id,
                     DMParticipant.conversation_domain == channel.origin_domain,
-                    DMParticipant.user_domain == principal.origin,
+                    DMParticipant.user_domain
+                    == (requester[1] if requester is not None else principal.origin),
+                    *([DMParticipant.user_id == requester[0]] if requester is not None else []),
                 )
                 .limit(1)
             )
@@ -2693,6 +2913,8 @@ async def federation_dm_history_media_authorize(
     conversation_domain: str | None = Query(default=None, min_length=1, max_length=253),
     message_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
     message_domain: str | None = Query(default=None, min_length=1, max_length=253),
+    requester_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
+    requester_domain: str | None = Query(default=None, min_length=1, max_length=253),
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
@@ -2716,6 +2938,17 @@ async def federation_dm_history_media_authorize(
     )
     if scope is None:
         raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    if (requester_id is None) != (requester_domain is None):
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    requester = None
+    if requester_id is not None and requester_domain is not None:
+        try:
+            normalized_requester_domain = normalize_domain(requester_domain)
+        except FederationNetworkError:
+            raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"}) from None
+        if normalized_requester_domain != principal.origin:
+            raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+        requester = (requester_id, normalized_requester_domain)
     await _federation_media_attachment(
         session,
         redis,
@@ -2725,6 +2958,7 @@ async def federation_dm_history_media_authorize(
         variant,
         expected_conversation=scope[0],
         expected_message=scope[1],
+        requester=requester,
     )
     return Response(status_code=204)
 
@@ -2737,6 +2971,8 @@ async def federation_media_get(
     conversation_domain: str | None = Query(default=None, min_length=1, max_length=253),
     message_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
     message_domain: str | None = Query(default=None, min_length=1, max_length=253),
+    requester_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
+    requester_domain: str | None = Query(default=None, min_length=1, max_length=253),
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
@@ -2758,6 +2994,17 @@ async def federation_media_get(
         message_id=message_id,
         message_domain=message_domain,
     )
+    if (requester_id is None) != (requester_domain is None):
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    requester = None
+    if requester_id is not None and requester_domain is not None:
+        try:
+            normalized_requester_domain = normalize_domain(requester_domain)
+        except FederationNetworkError:
+            raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"}) from None
+        if normalized_requester_domain != principal.origin:
+            raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+        requester = (requester_id, normalized_requester_domain)
     attachment = await _federation_media_attachment(
         session,
         redis,
@@ -2767,6 +3014,7 @@ async def federation_media_get(
         variant,
         expected_conversation=scope[0] if scope is not None else None,
         expected_message=scope[1] if scope is not None else None,
+        requester=requester,
     )
     bucket = settings.media_attachments_bucket
     key = attachment.object_key
@@ -2795,6 +3043,147 @@ async def federation_media_get(
         media_type=content_type,
         headers=headers,
     )
+
+
+@router.post("/_kaede/v1/dm/groups/authorize", status_code=204)
+async def federation_group_dm_authorize(
+    payload: DMGroupAuthorizeRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    await enforce_federation_route_rate_limit(
+        redis, principal.origin, "dm-group-authorize", capacity=120, refill_per_minute=120
+    )
+    if payload.inviter.origin_domain != principal.origin:
+        raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
+    inviter = await upsert_remote_user(session, settings, payload.inviter)
+    invitee = await upsert_remote_user(session, settings, payload.invitee)
+    if invitee.origin_domain != settings.domain or not invitee.is_local:
+        raise HTTPException(status_code=400, detail={"code": "KAED_GROUP_DM_INVITEE_NOT_LOCAL"})
+    await require_group_invite_friend(session, inviter, invitee)
+    await session.commit()
+    return Response(status_code=204)
+
+
+@router.post("/_kaede/v1/dm/groups/mutate")
+async def federation_group_dm_mutate(
+    payload: DMGroupMutationRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    await enforce_federation_route_rate_limit(
+        redis, principal.origin, "dm-group-mutate", capacity=180, refill_per_minute=180
+    )
+    if payload.actor.origin_domain != principal.origin:
+        raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
+    if payload.conversation_domain != settings.domain:
+        raise HTTPException(status_code=409, detail={"code": "KAED_GROUP_DM_WRONG_AUTHORITY"})
+    actor = await upsert_remote_user(session, settings, payload.actor)
+    target = (
+        await upsert_remote_user(session, settings, payload.target)
+        if payload.target is not None
+        else None
+    )
+    if payload.action == "add" and target is not None:
+        unlocked_conversation, _ = await load_authoritative_group(
+            session,
+            settings,
+            int(payload.conversation_id),
+            payload.conversation_domain,
+        )
+        await require_group_member(session, unlocked_conversation, actor)
+        if target.origin_domain == settings.domain:
+            await require_group_invite_friend(session, actor, target)
+        elif actor.origin_domain == settings.domain:
+            try:
+                authorization = await signed_request(
+                    session,
+                    settings,
+                    "POST",
+                    target.origin_domain,
+                    "/_kaede/v1/dm/groups/authorize",
+                    payload={
+                        "inviter": profile_from_user(actor),
+                        "invitee": profile_from_user(target),
+                    },
+                    request_timeout=8,
+                    max_response_bytes=16 * 1024,
+                )
+            except FederationNetworkError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "KAED_GROUP_DM_INVITEE_HOME_UNREACHABLE"},
+                ) from exc
+            if authorization.status_code != 204:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"code": "KAED_GROUP_DM_INVITE_NOT_FRIEND"},
+                )
+    conversation, channel = await load_authoritative_group(
+        session,
+        settings,
+        int(payload.conversation_id),
+        payload.conversation_domain,
+        for_update=True,
+    )
+    before, participants, deleted = await apply_authoritative_group_mutation(
+        session,
+        settings,
+        conversation,
+        channel,
+        actor,
+        action=payload.action,
+        target=target,
+        name=payload.name,
+    )
+    content = group_conversation_content(conversation, channel, participants, deleted=deleted)
+    envelope = await build_envelope(session, settings, "dm.group.state", actor, content)
+    destinations = {user.origin_domain for user in [*before, *participants]} - {settings.domain}
+    for destination in destinations:
+        await queue_event(session, settings, destination, envelope)
+    await session.commit()
+    before_refs = {(item.id, item.origin_domain) for item in before}
+    after_refs = {(item.id, item.origin_domain) for item in participants}
+    for user in participants:
+        if user.origin_domain != settings.domain or not user.is_local:
+            continue
+        await publish_dispatch(
+            redis,
+            user_topic(settings.domain, user.id),
+            (
+                "CHANNEL_CREATE"
+                if (user.id, user.origin_domain) not in before_refs
+                else "CHANNEL_UPDATE"
+            ),
+            dm_channel_payload(
+                channel,
+                [
+                    item
+                    for item in participants
+                    if (item.id, item.origin_domain) != (user.id, user.origin_domain)
+                ],
+                conversation=conversation,
+            ),
+        )
+    for user in before:
+        if (
+            user.origin_domain == settings.domain
+            and user.is_local
+            and (user.id, user.origin_domain) not in after_refs
+        ):
+            await publish_dispatch(
+                redis,
+                user_topic(settings.domain, user.id),
+                "CHANNEL_DELETE",
+                {"id": str(channel.id), "origin_domain": channel.origin_domain},
+            )
+    for destination in destinations:
+        await enqueue_best_effort(federation_deliver, destination)
+    return content
 
 
 @router.post("/_kaede/v1/dm/open")
@@ -2846,6 +3235,7 @@ async def federation_dm_open(
                     if (user.id, user.origin_domain)
                     != (local_recipient.id, local_recipient.origin_domain)
                 ],
+                conversation=conversation,
             ),
         )
     return {

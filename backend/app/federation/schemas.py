@@ -140,6 +140,38 @@ class DMOpenFederationRequest(BaseModel):
         return value
 
 
+class DMGroupAuthorizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    inviter: RemoteUserProfile
+    invitee: RemoteUserProfile
+
+
+class DMGroupMutationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["add", "rename", "leave", "remove"]
+    conversation_id: SnowflakeString
+    conversation_domain: FederationDomain
+    actor: RemoteUserProfile
+    target: RemoteUserProfile | None = None
+    name: str | None = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def coherent_mutation(self) -> DMGroupMutationRequest:
+        if self.action in {"add", "remove"} and self.target is None:
+            raise ValueError("member mutation requires a target")
+        if self.action not in {"add", "remove"} and self.target is not None:
+            raise ValueError("target is not valid for this mutation")
+        if self.action == "rename":
+            self.name = self.name.strip() if self.name is not None else None
+            if self.name == "":
+                self.name = None
+        elif self.name is not None:
+            raise ValueError("name is only valid for rename")
+        return self
+
+
 class InviteResolveRequest(BaseModel):
     code: str = Field(pattern=r"^[A-Za-z0-9]{8}$")
 

@@ -6,6 +6,7 @@
   import { firstNavigableChannel } from '$lib/chat/channels';
   import { invitedChannel, loadInvitePreview } from '$lib/chat/invite-preview';
   import { filterDmFriends, friendsWithoutVisibleDm } from '$lib/chat/dm-picker';
+  import { dmTitle, isGroupDm } from '$lib/chat/direct-messages';
   import { normalizeInviteReference } from '$lib/chat/invites';
   import { entityKey, entityRef, sameEntity } from '$lib/chat/refs';
   import type {
@@ -57,6 +58,9 @@
   let messageDialog = $state<HTMLDialogElement | null>(null);
   let messageSearchOpen = $state(false);
   let messageDialogError = $state('');
+  let messageMode = $state<'direct' | 'group'>('direct');
+  let groupName = $state('');
+  let groupMemberKeys = $state<string[]>([]);
   let profilePopover = $state<{ user: UserSummary; x: number; y: number } | null>(null);
   let loadGeneration = 0;
   let snapshotGeneration = 0;
@@ -71,6 +75,8 @@
   const blockedUsers = $derived(relationships.filter((item) => item.type === 'blocked'));
   const newDmFriends = $derived(friendsWithoutVisibleDm(relationships, directMessages));
   const filteredNewDmFriends = $derived(filterDmFriends(newDmFriends, handle));
+  const groupFriends = $derived(friends.map((item) => item.user));
+  const filteredGroupFriends = $derived(filterDmFriends(groupFriends, handle));
   const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
 
   function openNavigation() {
@@ -145,6 +151,18 @@
         directMessages = [channel, ...directMessages];
         notice = 'Your direct-message request is ready.';
       }
+    } else if (dispatch.t === 'CHANNEL_UPDATE') {
+      const channel = dispatch.d as Channel;
+      if (channel.type === 1) {
+        const existing = directMessages.findIndex((item) => sameEntity(item, channel));
+        directMessages =
+          existing === -1
+            ? [channel, ...directMessages]
+            : directMessages.map((item, index) => (index === existing ? channel : item));
+      }
+    } else if (dispatch.t === 'CHANNEL_DELETE') {
+      const channel = dispatch.d as Pick<Channel, 'id' | 'origin_domain'>;
+      directMessages = directMessages.filter((item) => !sameEntity(item, channel));
     } else if (dispatch.t === 'DM_OPEN_REJECTED') {
       const rejected = dispatch.d as { code?: string };
       notice = '';
@@ -428,11 +446,52 @@
     }
   }
 
+  async function createGroupMessage() {
+    if (busy || groupMemberKeys.length < 2) return;
+    const generation = loadGeneration;
+    busy = true;
+    error = '';
+    messageDialogError = '';
+    notice = '';
+    try {
+      const handles = groupFriends
+        .filter((friend) => groupMemberKeys.includes(entityKey(friend)))
+        .map(userPublicHandle)
+        .filter((value): value is string => Boolean(value));
+      const result = await api<Channel>('/users/@me/channels/group', {
+        method: 'POST',
+        body: JSON.stringify({ handles, name: groupName.trim() || null })
+      });
+      if (generation !== loadGeneration) return;
+      messageDialog?.close();
+      window.location.assign(directMessagePath(result));
+    } catch (caught) {
+      if (generation !== loadGeneration) return;
+      messageDialogError = userErrorMessage(
+        caught,
+        'Could not create the group conversation. Check the selected friends and try again.'
+      );
+    } finally {
+      if (generation === loadGeneration) busy = false;
+    }
+  }
+
   function showNewMessageDialog() {
     handle = '';
+    groupName = '';
+    groupMemberKeys = [];
+    messageMode = 'direct';
     messageDialogError = '';
     messageDialog?.showModal();
     void tick().then(() => messageDialog?.querySelector<HTMLInputElement>('input')?.focus());
+  }
+
+  function toggleGroupFriend(user: UserSummary) {
+    const key = entityKey(user);
+    groupMemberKeys = groupMemberKeys.includes(key)
+      ? groupMemberKeys.filter((item) => item !== key)
+      : [...groupMemberKeys, key];
+    messageDialogError = '';
   }
 
   function selectMessageFriend(user: UserSummary) {
@@ -624,7 +683,9 @@
         {@const recipient = channel.recipients?.[0]}
         <a href={directMessagePath(channel)} onclick={() => closeNavigation(false)}>
           <span class="avatar avatar-small">
-            {#if recipient?.avatar_hash}
+            {#if isGroupDm(channel)}
+              <Icon name="users" size={16} />
+            {:else if recipient?.avatar_hash}
               <img src={assetUrl(recipient.avatar_hash, 'thumbnail_128', recipient)} alt="" />
             {:else}
               {recipient?.profile_resolved === false
@@ -632,7 +693,7 @@
                 : (recipient?.username.slice(0, 1).toUpperCase() ?? '?')}
             {/if}
           </span>
-          <strong>{recipient ? userDisplayName(recipient) : 'Conversation'}</strong>
+          <strong>{dmTitle(channel)}</strong>
           {#if unreadFor(channel)?.unread}
             <small class="unread-badge">{Math.max(1, unreadFor(channel)?.mention_count ?? 0)}</small
             >
@@ -1002,6 +1063,9 @@
   class="action-dialog dm-picker-dialog"
   onclose={() => {
     handle = '';
+    groupName = '';
+    groupMemberKeys = [];
+    messageMode = 'direct';
     messageDialogError = '';
   }}
 >
@@ -1009,13 +1073,14 @@
     method="dialog"
     onsubmit={(event) => {
       event.preventDefault();
-      void openDirectMessage();
+      if (messageMode === 'group') void createGroupMessage();
+      else void openDirectMessage();
     }}
   >
     <header>
       <div>
-        <p class="eyebrow">Direct message</p>
-        <h2>Start a conversation</h2>
+        <p class="eyebrow">New conversation</p>
+        <h2>{messageMode === 'group' ? 'Create a group DM' : 'Start a conversation'}</h2>
       </div>
       <button
         class="icon-button"
@@ -1024,33 +1089,81 @@
         onclick={() => messageDialog?.close()}>×</button
       >
     </header>
+    <div class="dm-mode-tabs" role="tablist" aria-label="Conversation type">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={messageMode === 'direct'}
+        class:active={messageMode === 'direct'}
+        onclick={() => {
+          messageMode = 'direct';
+          groupMemberKeys = [];
+          messageDialogError = '';
+        }}>Direct message</button
+      >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={messageMode === 'group'}
+        class:active={messageMode === 'group'}
+        onclick={() => {
+          messageMode = 'group';
+          handle = '';
+          messageDialogError = '';
+        }}>Group DM</button
+      >
+    </div>
+    {#if messageMode === 'group'}
+      <label class="form-field">
+        <span>Group name <small>Optional</small></span>
+        <input bind:value={groupName} maxlength="100" placeholder="Weekend plans" />
+      </label>
+    {/if}
     <label class="form-field">
-      <span>Username or friend</span>
+      <span>{messageMode === 'group' ? 'Find friends' : 'Username or friend'}</span>
       <input
         bind:value={handle}
         placeholder="@friend@example.net"
         autocomplete="off"
         aria-controls="new-dm-friends"
         oninput={() => (messageDialogError = '')}
-        required
+        required={messageMode === 'direct'}
       />
-      <small>Enter a complete federated username, or select a friend below.</small>
+      <small>
+        {messageMode === 'group'
+          ? `Select 2–9 friends. ${groupMemberKeys.length} selected.`
+          : 'Enter a complete federated username, or select a friend below.'}
+      </small>
     </label>
     <section class="dm-friend-picker" aria-labelledby="dm-friend-picker-heading">
       <div class="dm-friend-picker-heading">
-        <strong id="dm-friend-picker-heading">Friends without a visible conversation</strong>
-        <small>{filteredNewDmFriends.length}</small>
+        <strong id="dm-friend-picker-heading">
+          {messageMode === 'group' ? 'Friends' : 'Friends without a visible conversation'}
+        </strong>
+        <small
+          >{messageMode === 'group'
+            ? filteredGroupFriends.length
+            : filteredNewDmFriends.length}</small
+        >
       </div>
       <div id="new-dm-friends" class="dm-friend-results">
-        {#each filteredNewDmFriends as friend (entityKey(friend))}
+        {#each messageMode === 'group' ? filteredGroupFriends : filteredNewDmFriends as friend (entityKey(friend))}
           <button
             type="button"
-            class:selected={handle.trim().replace(/^@/, '').toLocaleLowerCase() ===
-              userPublicHandle(friend)?.replace(/^@/, '').toLocaleLowerCase()}
-            aria-pressed={handle.trim().replace(/^@/, '').toLocaleLowerCase() ===
-              userPublicHandle(friend)?.replace(/^@/, '').toLocaleLowerCase()}
-            disabled={!userPublicHandle(friend)}
-            onclick={() => selectMessageFriend(friend)}
+            class:selected={messageMode === 'group'
+              ? groupMemberKeys.includes(entityKey(friend))
+              : handle.trim().replace(/^@/, '').toLocaleLowerCase() ===
+                userPublicHandle(friend)?.replace(/^@/, '').toLocaleLowerCase()}
+            aria-pressed={messageMode === 'group'
+              ? groupMemberKeys.includes(entityKey(friend))
+              : handle.trim().replace(/^@/, '').toLocaleLowerCase() ===
+                userPublicHandle(friend)?.replace(/^@/, '').toLocaleLowerCase()}
+            disabled={!userPublicHandle(friend) ||
+              (messageMode === 'group' &&
+                groupMemberKeys.length >= 9 &&
+                !groupMemberKeys.includes(entityKey(friend)))}
+            onclick={() =>
+              messageMode === 'group' ? toggleGroupFriend(friend) : selectMessageFriend(friend)}
           >
             <span class="avatar avatar-small">
               {#if friend.avatar_hash}
@@ -1073,11 +1186,19 @@
                   : 'Profile unavailable'}</small
               >
             </span>
-            <Icon name="message" size={17} />
+            <Icon
+              name={messageMode === 'group' && groupMemberKeys.includes(entityKey(friend))
+                ? 'check'
+                : 'message'}
+              size={17}
+            />
           </button>
         {:else}
           <div class="dm-friend-empty">
-            {#if handle.trim()}
+            {#if messageMode === 'group'}
+              <strong>No friends match that search.</strong>
+              <small>Only existing friends can be added automatically.</small>
+            {:else if handle.trim()}
               <strong>No friends match that search.</strong>
               <small>You can still message the complete federated username above.</small>
             {:else if newDmFriends.length === 0}
@@ -1095,7 +1216,12 @@
       <button class="secondary-button" type="button" onclick={() => messageDialog?.close()}
         >Cancel</button
       >
-      <button class="primary-button" disabled={busy}>{busy ? 'Opening…' : 'Message'}</button>
+      <button
+        class="primary-button"
+        disabled={busy || (messageMode === 'group' && groupMemberKeys.length < 2)}
+      >
+        {busy ? 'Opening…' : messageMode === 'group' ? 'Create group' : 'Message'}
+      </button>
     </footer>
   </form>
 </dialog>

@@ -51,21 +51,23 @@ String? _knownVoiceParticipantName(MobileState state, String identity) {
 /// LiveKit owns capture and playback on mobile so the operating system's AEC,
 /// noise suppression, audio routing and call lifecycle remain coherent.
 final class VoiceRoom extends ConsumerWidget {
-  const VoiceRoom({required this.channel, super.key});
+  const VoiceRoom({required this.channel, this.callRef, super.key});
 
   final KaedeChannel channel;
+  final EntityRef? callRef;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final session = ref.watch(voiceSessionProvider);
     final mobile = ref.watch(mobileControllerProvider);
     final guild = mobile.activeGuild;
-    final canConnect = channel.allows(Permission.connect);
-    final thisRoom = session.channel?.ref == channel.ref;
+    final canConnect = callRef != null || channel.allows(Permission.connect);
+    final thisRoom =
+        session.channel?.ref == channel.ref && session.callRef == callRef;
     final connected = thisRoom && session.connected;
     final participants =
         connected ? session.participants : const <Participant>[];
-    if (thisRoom) {
+    if (thisRoom && callRef == null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         session.reconcilePermissions(channel);
       });
@@ -87,7 +89,9 @@ final class VoiceRoom extends ConsumerWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(channel.name ?? 'Voice channel',
+                      Text(
+                          channel.name ??
+                              (callRef == null ? 'Voice channel' : 'Call'),
                           style: Theme.of(context).textTheme.titleLarge),
                       Text(
                         connected
@@ -101,7 +105,7 @@ final class VoiceRoom extends ConsumerWidget {
                 if (!connected)
                   FilledButton.icon(
                     onPressed: canConnect && !session.connecting
-                        ? () => session.connect(channel)
+                        ? () => session.connect(channel, callRef: callRef)
                         : null,
                     icon: session.connecting && thisRoom
                         ? const SizedBox.square(

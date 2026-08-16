@@ -1740,6 +1740,29 @@ progress {
   gap: 18px;
 }
 
+.dm-mode-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 12px;
+  background: var(--surface-sunken);
+}
+
+.dm-mode-tabs button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--text-muted);
+  background: transparent;
+  font-weight: 700;
+}
+
+.dm-mode-tabs button.active {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
 .dm-friend-picker {
   display: grid;
   min-height: 0;
@@ -1795,6 +1818,72 @@ progress {
   background: transparent;
   text-align: left;
   cursor: pointer;
+}
+
+.group-dm-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.group-dm-setting {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.group-dm-setting > button {
+  min-height: 44px;
+}
+
+.group-dm-members {
+  display: grid;
+  max-height: min(300px, 38vh);
+  gap: 4px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.group-dm-member {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  border-radius: 10px;
+  padding: 6px 8px;
+}
+
+.group-dm-member:hover {
+  background: var(--surface-hover);
+}
+
+.group-dm-member > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+}
+
+.group-dm-member small {
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+}
+
+.owner-badge {
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: var(--accent-soft);
+  color: var(--accent) !important;
+  font-weight: 700;
+}
+
+.danger-text {
+  color: var(--danger) !important;
+}
+
+@media (max-width: 560px) {
+  .group-dm-setting {
+    grid-template-columns: 1fr;
+  }
 }
 
 .dm-friend-results > button:hover,

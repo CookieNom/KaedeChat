@@ -108,6 +108,7 @@ def test_remote_member_payload_zeros_legacy_private_voice_flags() -> None:
         custom_status=None,
         profile_version=1,
         profile_resolved=True,
+        account_type="user",
         updated_at=datetime.now(UTC),
     )
     payload = member_payload(cast(Any, remote_member), cast(Any, user))

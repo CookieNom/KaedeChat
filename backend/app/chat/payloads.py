@@ -204,12 +204,22 @@ def dm_channel_payload(
     channel: Channel,
     recipients: list[User],
     *,
+    conversation: object | None = None,
     history: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         **channel_payload(channel),
         "recipients": [user_payload(user) for user in recipients],
     }
+    if conversation is not None:
+        owner_id = getattr(conversation, "owner_id", None)
+        payload.update(
+            {
+                "conversation_type": str(getattr(conversation, "type", "direct")),
+                "owner_id": str(owner_id) if owner_id is not None else None,
+                "owner_domain": getattr(conversation, "owner_domain", None),
+            }
+        )
     if history is not None:
         payload.update(history)
     return payload

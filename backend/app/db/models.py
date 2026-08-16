@@ -1605,6 +1605,9 @@ class DMConversation(Base, FederatedIdMixin, TimestampMixin):
     pair_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     type: Mapped[str] = mapped_column(String(16), server_default="direct")
     authority_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    owner_id: Mapped[int | None] = mapped_column(BigInteger)
+    owner_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    state_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     channel_type: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
     history_truncated: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
@@ -1616,6 +1619,11 @@ class DMConversation(Base, FederatedIdMixin, TimestampMixin):
     __table_args__ = (
         PrimaryKeyConstraint("id", "origin_domain"),
         ForeignKeyConstraint(["authority_domain"], ["instances.domain"]),
+        ForeignKeyConstraint(
+            ["owner_id", "owner_domain"],
+            ["users.id", "users.origin_domain"],
+            ondelete="RESTRICT",
+        ),
         ForeignKeyConstraint(
             ["id", "origin_domain", "channel_type"],
             ["channels.id", "channels.origin_domain", "channels.type"],
@@ -1629,6 +1637,11 @@ class DMConversation(Base, FederatedIdMixin, TimestampMixin):
         CheckConstraint("channel_type = 1", name="channel_type"),
         CheckConstraint("origin_domain = authority_domain", name="origin_is_authority"),
         CheckConstraint("pair_key ~ '^[0-9a-f]{64}$'", name="pair_key_format"),
+        CheckConstraint(
+            "(type = 'direct' AND owner_id IS NULL AND owner_domain IS NULL) OR "
+            "(type = 'group' AND owner_id IS NOT NULL AND owner_domain IS NOT NULL)",
+            name="owner_matches_type",
+        ),
         CheckConstraint(
             "(history_truncated_before_id IS NULL) = (history_truncated_before_domain IS NULL)",
             name="history_truncated_before_ref_complete",

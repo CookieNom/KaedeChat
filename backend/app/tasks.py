@@ -1066,6 +1066,7 @@ async def federation_dm_cache_sweep() -> int:
                                     if (user.id, user.origin_domain)
                                     != (local_user.id, local_user.origin_domain)
                                 ],
+                                conversation=conversation,
                                 history=history,
                             ),
                         )

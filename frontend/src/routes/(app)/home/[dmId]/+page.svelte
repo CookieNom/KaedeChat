@@ -13,6 +13,7 @@
   } from '$lib/chat/emojis';
   import { autosizeTextarea } from '$lib/ui/autosize';
   import { firstNavigableChannel } from '$lib/chat/channels';
+  import { dmTitle, groupDmSubtitle, isGroupDm, ownsGroupDm } from '$lib/chat/direct-messages';
   import { completionAt, replaceCompletion } from '$lib/chat/completion';
   import { mentionsUser } from '$lib/chat/mentions';
   import {
@@ -160,6 +161,11 @@
   let profile = $state<{ user: UserSummary; x: number; y: number } | null>(null);
   let presencePreference = $state<'online' | 'idle' | 'dnd' | 'invisible'>('online');
   let readStateWarning = $state('');
+  let groupDialog = $state<HTMLDialogElement | null>(null);
+  let groupName = $state('');
+  let groupInviteHandle = $state('');
+  let groupError = $state('');
+  let groupBusy = $state(false);
   const uploadControllers = new SvelteMap<string, AbortController>();
   const pendingSends = new SvelteMap<string, PendingMessageSend>();
   const deliveryRecoveries = new SvelteSet<string>();
@@ -255,6 +261,9 @@
     directMessages.find((item) => matchesEntityRef(dmId, item, localDomain)) ?? null
   );
   const recipient = $derived(channel?.recipients?.[0] ?? null);
+  const conversationTitle = $derived(dmTitle(channel));
+  const groupConversation = $derived(isGroupDm(channel));
+  const groupOwner = $derived(Boolean(channel && ownsGroupDm(channel, currentUser)));
   const currentReadState = $derived(channel ? unreadFor(channel) : undefined);
   const timeline = $derived(
     buildTimeline(
@@ -1355,6 +1364,91 @@
     }
   }
 
+  function openGroupSettings() {
+    if (!channel || !groupConversation) return;
+    groupName = channel.name ?? '';
+    groupInviteHandle = '';
+    groupError = '';
+    groupDialog?.showModal();
+  }
+
+  async function updateGroupName() {
+    if (!channel || groupBusy) return;
+    groupBusy = true;
+    groupError = '';
+    try {
+      const updated = await api<Channel>(
+        `/users/@me/channels/${encodeURIComponent(entityRef(channel))}/group`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ name: groupName.trim() || null })
+        }
+      );
+      entities.channels.upsert(updated);
+    } catch (caught) {
+      groupError = userErrorMessage(caught, 'Could not rename this group. Try again.');
+    } finally {
+      groupBusy = false;
+    }
+  }
+
+  async function addGroupMember() {
+    if (!channel || groupBusy || !groupInviteHandle.trim()) return;
+    groupBusy = true;
+    groupError = '';
+    try {
+      const updated = await api<Channel>(
+        `/users/@me/channels/${encodeURIComponent(entityRef(channel))}/group/recipients`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ handle: groupInviteHandle.trim() })
+        }
+      );
+      entities.channels.upsert(updated);
+      groupInviteHandle = '';
+    } catch (caught) {
+      groupError = userErrorMessage(
+        caught,
+        'Could not add that friend. They must be friends with the inviter and able to join.'
+      );
+    } finally {
+      groupBusy = false;
+    }
+  }
+
+  async function removeGroupMember(user: UserSummary) {
+    if (!channel || groupBusy) return;
+    groupBusy = true;
+    groupError = '';
+    try {
+      const updated = await api<Channel>(
+        `/users/@me/channels/${encodeURIComponent(entityRef(channel))}/group/recipients/${encodeURIComponent(entityRef(user))}`,
+        { method: 'DELETE' }
+      );
+      entities.channels.upsert(updated);
+    } catch (caught) {
+      groupError = userErrorMessage(caught, 'Could not remove that member. Try again.');
+    } finally {
+      groupBusy = false;
+    }
+  }
+
+  async function leaveGroup() {
+    if (!channel || groupBusy) return;
+    groupBusy = true;
+    groupError = '';
+    try {
+      await api(`/users/@me/channels/${encodeURIComponent(entityRef(channel))}/group/leave`, {
+        method: 'POST'
+      });
+      groupDialog?.close();
+      window.location.assign(resolve('/home'));
+    } catch (caught) {
+      groupError = userErrorMessage(caught, 'Could not leave this group. Try again.');
+      groupBusy = false;
+    }
+  }
+
   function composerPaste(event: ClipboardEvent) {
     if (editingMessage) return;
     if (event.clipboardData?.files.length) void queueFiles(event.clipboardData.files);
@@ -1614,10 +1708,7 @@
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- authenticated media URLs are API resources, not Svelte routes -->
 
-<svelte:head
-  ><title>{recipient ? userDisplayName(recipient) : 'Direct message'} · Kaede Chat</title
-  ></svelte:head
->
+<svelte:head><title>{conversationTitle} · Kaede Chat</title></svelte:head>
 <svelte:window
   onkeydown={(event) => {
     if (mobileNavigationOpen) mobileNavigationKeydown(event);
@@ -1713,7 +1804,9 @@
           onclick={() => closeMobileNavigation(false)}
         >
           <span class="avatar avatar-small">
-            {#if itemRecipient?.avatar_hash}
+            {#if isGroupDm(item)}
+              <Icon name="users" size={16} />
+            {:else if itemRecipient?.avatar_hash}
               <img
                 src={assetUrl(itemRecipient.avatar_hash, 'thumbnail_128', itemRecipient)}
                 alt=""
@@ -1725,7 +1818,7 @@
             {/if}
           </span>
           <span>
-            {itemRecipient ? userDisplayName(itemRecipient) : 'Conversation'}
+            {dmTitle(item)}
           </span>
           {#if unreadFor(item)?.unread}<small class="unread-badge"
               >{Math.max(1, unreadFor(item)?.mention_count ?? 0)}</small
@@ -1776,9 +1869,13 @@
           </svg>
         </button>
         <div class="channel-title">
-          <span class="channel-mark direct" aria-hidden="true">@</span>
+          <span class="channel-mark direct" aria-hidden="true">
+            {groupConversation ? '✦' : '@'}
+          </span>
           <div>
-            {#if recipient}
+            {#if groupConversation}
+              <strong>{conversationTitle}</strong>
+            {:else if recipient}
               <button
                 class="profile-title-button"
                 type="button"
@@ -1788,7 +1885,9 @@
             {:else}
               <strong>Conversation</strong>
             {/if}
-            {#if recipient}
+            {#if groupConversation && channel}
+              <span>{groupDmSubtitle(channel)}</span>
+            {:else if recipient}
               <span
                 >{recipient.profile_resolved === false
                   ? 'Profile unavailable'
@@ -1799,6 +1898,17 @@
         </div>
       </div>
       <div class="channel-header-actions">
+        {#if groupConversation}
+          <button
+            class="icon-button"
+            type="button"
+            aria-label="Group settings"
+            title="Group settings"
+            onclick={openGroupSettings}
+          >
+            <Icon name="users" size={19} />
+          </button>
+        {/if}
         <button
           class:active={pinsOpen}
           class="icon-button"
@@ -1838,7 +1948,9 @@
     >
       {#if activeCall && !callJoined}
         <div class="call-ringing dm-call-region" role="status">
-          <strong>{recipient ? userDisplayName(recipient) : 'Someone'} is calling</strong>
+          <strong
+            >{groupConversation ? 'Group call incoming' : `${conversationTitle} is calling`}</strong
+          >
           <button disabled={callBusy} onclick={() => callAction('accept')}>Accept</button>
           <button disabled={callBusy} class="decline" onclick={() => callAction('decline')}
             >Decline</button
@@ -1869,8 +1981,10 @@
             {:else}
               <section class="channel-welcome">
                 <span class="welcome-mark direct" aria-hidden="true">@</span>
-                <h2>{recipient ? userDisplayName(recipient) : 'New conversation'}</h2>
-                <p>This is the beginning of your direct conversation.</p>
+                <h2>{conversationTitle}</h2>
+                <p>
+                  This is the beginning of your {groupConversation ? 'group' : 'direct'} conversation.
+                </p>
               </section>
             {/if}
           {/if}
@@ -2021,7 +2135,7 @@
             ? `dm-message-suggestions-option-${completionActive}`
             : undefined}
           aria-label="Direct message"
-          placeholder={`Message ${recipient ? userDisplayName(recipient) : 'this conversation'}`}
+          placeholder={`Message ${conversationTitle}`}
           rows="1"
           maxlength="4000"
         ></textarea>
@@ -2121,3 +2235,102 @@
     onClose={() => (profile = null)}
   />
 {/if}
+
+<dialog bind:this={groupDialog} class="action-dialog group-dm-dialog">
+  <form method="dialog" onsubmit={(event) => event.preventDefault()}>
+    <header>
+      <div>
+        <p class="eyebrow">Group conversation</p>
+        <h2>{conversationTitle}</h2>
+      </div>
+      <button
+        class="icon-button"
+        type="button"
+        aria-label="Close"
+        onclick={() => groupDialog?.close()}>×</button
+      >
+    </header>
+
+    <section class="group-dm-setting">
+      <label class="form-field">
+        <span>Group name</span>
+        <input bind:value={groupName} maxlength="100" placeholder="Optional group name" />
+      </label>
+      <button class="secondary-button" type="button" disabled={groupBusy} onclick={updateGroupName}>
+        Save name
+      </button>
+    </section>
+
+    <section class="group-dm-setting">
+      <label class="form-field">
+        <span>Add a friend</span>
+        <input
+          bind:value={groupInviteHandle}
+          placeholder="@friend@example.net"
+          autocomplete="off"
+        />
+        <small>Any member can invite one of their existing friends.</small>
+      </label>
+      <button
+        class="secondary-button"
+        type="button"
+        disabled={groupBusy || !groupInviteHandle.trim()}
+        onclick={addGroupMember}>Add</button
+      >
+    </section>
+
+    <section class="group-dm-members" aria-labelledby="group-members-heading">
+      <div class="dm-friend-picker-heading">
+        <strong id="group-members-heading">Members</strong>
+        <small>{channel ? (channel.recipients?.length ?? 0) + 1 : 0}</small>
+      </div>
+      {#if currentUser}
+        <div class="group-dm-member">
+          <span class="avatar avatar-small">
+            {#if currentUser.avatar_hash}
+              <img src={assetUrl(currentUser.avatar_hash, 'thumbnail_128', currentUser)} alt="" />
+            {:else}{currentUser.username.slice(0, 1).toUpperCase()}{/if}
+          </span>
+          <span><strong>{userDisplayName(currentUser)}</strong><small>You</small></span>
+          {#if channel?.owner_id === currentUser.id && channel.owner_domain === currentUser.origin_domain}
+            <small class="owner-badge">Owner</small>
+          {/if}
+        </div>
+      {/if}
+      {#each channel?.recipients ?? [] as member (entityKey(member))}
+        <div class="group-dm-member">
+          <span class="avatar avatar-small">
+            {#if member.avatar_hash}
+              <img src={assetUrl(member.avatar_hash, 'thumbnail_128', member)} alt="" />
+            {:else}{member.username.slice(0, 1).toUpperCase()}{/if}
+          </span>
+          <span><strong>{userDisplayName(member)}</strong><small>{member.handle}</small></span>
+          {#if channel?.owner_id === member.id && channel.owner_domain === member.origin_domain}
+            <small class="owner-badge">Owner</small>
+          {:else if groupOwner}
+            <button
+              class="text-button danger-text"
+              type="button"
+              disabled={groupBusy}
+              onclick={() => removeGroupMember(member)}>Remove</button
+            >
+          {/if}
+        </div>
+      {/each}
+    </section>
+    {#if groupError}<p class="form-error" role="alert">{groupError}</p>{/if}
+    <footer>
+      <button
+        class="text-button danger-text"
+        type="button"
+        disabled={groupBusy}
+        onclick={leaveGroup}
+      >
+        Leave group
+      </button>
+      <button class="secondary-button" type="button" onclick={() => groupDialog?.close()}
+        >Done</button
+      >
+    </footer>
+  </form>
+</dialog>

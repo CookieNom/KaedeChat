@@ -14,6 +14,7 @@ import 'package:kaede_mobile/src/features/chat/message_search_screen.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
+import 'package:kaede_mobile/src/features/voice/voice_room.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -335,7 +336,7 @@ final class _SectionScreen extends StatelessWidget {
       );
 }
 
-final class _ConversationScreen extends StatelessWidget {
+final class _ConversationScreen extends ConsumerStatefulWidget {
   const _ConversationScreen({
     required this.channel,
     required this.onBack,
@@ -347,17 +348,125 @@ final class _ConversationScreen extends StatelessWidget {
   final VoidCallback? onMembers;
 
   @override
+  ConsumerState<_ConversationScreen> createState() =>
+      _ConversationScreenState();
+}
+
+final class _ConversationScreenState
+    extends ConsumerState<_ConversationScreen> {
+  Map<String, Object?>? _activeCall;
+  var _callBusy = false;
+
+  bool get _isGroup => widget.channel.conversationType == 'group';
+
+  String get _title {
+    if (_isGroup && widget.channel.name?.trim().isNotEmpty == true) {
+      return widget.channel.name!.trim();
+    }
+    final names = widget.channel.recipients.map((user) => user.name).toList();
+    if (names.isEmpty) return _isGroup ? 'Group conversation' : 'Conversation';
+    return names.take(3).join(', ') +
+        (names.length > 3 ? ' +${names.length - 3}' : '');
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadCall());
+  }
+
+  @override
+  void didUpdateWidget(covariant _ConversationScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.channel.ref != widget.channel.ref ||
+        !identical(oldWidget.channel, widget.channel)) {
+      unawaited(_loadCall());
+    }
+  }
+
+  Future<void> _loadCall() async {
+    if (widget.channel.type != ChannelType.dm) return;
+    try {
+      final result = await ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .activeCall(widget.channel.ref);
+      if (!mounted) return;
+      setState(() => _activeCall = result['call'] is Map
+          ? Map<String, Object?>.from(result['call']! as Map)
+          : null);
+    } on Object {
+      // Chat remains usable if call presence cannot be loaded.
+    }
+  }
+
+  EntityRef? get _callRef {
+    final call = _activeCall;
+    if (call == null) return null;
+    final id = '${call['id'] ?? ''}';
+    final domain = '${call['authority_domain'] ?? ''}';
+    if (id.isEmpty || domain.isEmpty) return null;
+    return EntityRef(Snowflake(id), Domain(domain));
+  }
+
+  Future<void> _startOrJoinCall() async {
+    if (_callBusy) return;
+    setState(() => _callBusy = true);
+    try {
+      var callRef = _callRef;
+      if (callRef == null) {
+        final created = await ref
+            .read(mobileControllerProvider.notifier)
+            .repository
+            .startCall(widget.channel.ref);
+        if (!mounted) return;
+        setState(() => _activeCall = created);
+        callRef = _callRef;
+      } else {
+        final accepted = await ref
+            .read(mobileControllerProvider.notifier)
+            .repository
+            .callAction(callRef, 'accept');
+        if (!mounted) return;
+        setState(() => _activeCall = accepted);
+      }
+      if (callRef == null || !mounted) return;
+      await Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => _DmCallRoom(channel: widget.channel, callRef: callRef!),
+      ));
+      await _loadCall();
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(userFacingError(error))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _callBusy = false);
+    }
+  }
+
+  Future<void> _showGroupSettings() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _GroupDmSettings(channel: widget.channel),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final recipient =
-        channel.recipients.isEmpty ? null : channel.recipients.first;
+    final recipient = widget.channel.recipients.isEmpty
+        ? null
+        : widget.channel.recipients.first;
     return Column(
       children: [
         _CompactHeader(
           leading: IconButton(
-            onPressed: onBack,
+            onPressed: widget.onBack,
             icon: const Icon(Icons.arrow_back_rounded),
           ),
-          avatar: recipient == null
+          avatar: recipient == null || _isGroup
               ? null
               : GestureDetector(
                   onTap: () => showUserProfile(
@@ -367,14 +476,24 @@ final class _ConversationScreen extends StatelessWidget {
                   ),
                   child: UserAvatar(user: recipient),
                 ),
-          title: channel.name ?? recipient?.name ?? 'Conversation',
-          subtitle: channel.topic,
+          title: _title,
+          subtitle: _isGroup
+              ? '${widget.channel.recipients.length + 1} members'
+              : widget.channel.topic,
           actions: [
-            if (channel.type == ChannelType.dm)
+            if (_isGroup)
               IconButton(
-                tooltip: 'Start voice call',
-                onPressed: null,
-                icon: const Icon(Icons.call_outlined),
+                tooltip: 'Group settings',
+                onPressed: _showGroupSettings,
+                icon: const Icon(Icons.group_outlined),
+              ),
+            if (widget.channel.type == ChannelType.dm)
+              IconButton(
+                tooltip: _activeCall == null ? 'Start call' : 'Join call',
+                onPressed: _callBusy ? null : _startOrJoinCall,
+                icon: Icon(_activeCall == null
+                    ? Icons.call_outlined
+                    : Icons.call_rounded),
               ),
             IconButton(
               tooltip: 'Search',
@@ -384,9 +503,10 @@ final class _ConversationScreen extends StatelessWidget {
                     repository: ProviderScope.containerOf(context)
                         .read(mobileControllerProvider.notifier)
                         .repository,
-                    scope: channel.guildRef == null ? 'channel' : 'guild',
-                    scopeRef: channel.guildRef ?? channel.ref,
-                    channel: channel,
+                    scope:
+                        widget.channel.guildRef == null ? 'channel' : 'guild',
+                    scopeRef: widget.channel.guildRef ?? widget.channel.ref,
+                    channel: widget.channel,
                     accountRef: ProviderScope.containerOf(context)
                         .read(mobileControllerProvider.notifier)
                         .api
@@ -413,16 +533,234 @@ final class _ConversationScreen extends StatelessWidget {
               ),
               icon: const Icon(Icons.search_rounded),
             ),
-            if (onMembers != null)
+            if (widget.onMembers != null)
               IconButton(
                 tooltip: 'Member list',
-                onPressed: onMembers,
+                onPressed: widget.onMembers,
                 icon: const Icon(Icons.people_alt_outlined),
               ),
           ],
         ),
         const Expanded(child: ChannelView()),
       ],
+    );
+  }
+}
+
+final class _DmCallRoom extends ConsumerWidget {
+  const _DmCallRoom({required this.channel, required this.callRef});
+
+  final KaedeChannel channel;
+  final EntityRef callRef;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => Scaffold(
+        appBar: AppBar(
+          title: Text(channel.name ?? 'Conversation call'),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                try {
+                  await ref
+                      .read(mobileControllerProvider.notifier)
+                      .repository
+                      .callAction(callRef, 'end');
+                  await ref.read(voiceSessionProvider).leave();
+                  if (context.mounted) Navigator.of(context).pop();
+                } on Object catch (error) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(userFacingError(error))),
+                    );
+                  }
+                }
+              },
+              child: const Text('End call'),
+            ),
+          ],
+        ),
+        body: VoiceRoom(channel: channel, callRef: callRef),
+      );
+}
+
+final class _GroupDmSettings extends ConsumerStatefulWidget {
+  const _GroupDmSettings({required this.channel});
+
+  final KaedeChannel channel;
+
+  @override
+  ConsumerState<_GroupDmSettings> createState() => _GroupDmSettingsState();
+}
+
+final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
+  late final TextEditingController _name;
+  final _invite = TextEditingController();
+  var _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _name = TextEditingController(text: widget.channel.name ?? '');
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _invite.dispose();
+    super.dispose();
+  }
+
+  Future<void> _run(Future<void> Function() action) async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await action();
+      await ref.read(mobileControllerProvider.notifier).refreshNavigation();
+    } on Object catch (error) {
+      if (mounted) setState(() => _error = userFacingError(error));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final mobile = ref.watch(mobileControllerProvider);
+    var channel = widget.channel;
+    for (final candidate in mobile.dms) {
+      if (candidate.ref == widget.channel.ref) {
+        channel = candidate;
+        break;
+      }
+    }
+    final current = mobile.user;
+    final isOwner = current?.ref == channel.ownerRef;
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          18,
+          20,
+          MediaQuery.viewInsetsOf(context).bottom + 20,
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('Group settings',
+                  style: Theme.of(context).textTheme.headlineSmall),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _name,
+                maxLength: 100,
+                decoration: const InputDecoration(labelText: 'Group name'),
+              ),
+              FilledButton.tonal(
+                onPressed: _busy
+                    ? null
+                    : () => _run(() async {
+                          await ref
+                              .read(mobileControllerProvider.notifier)
+                              .repository
+                              .renameGroupDm(
+                                channel.ref,
+                                _name.text.trim().isEmpty
+                                    ? null
+                                    : _name.text.trim(),
+                              );
+                        }),
+                child: const Text('Save name'),
+              ),
+              const SizedBox(height: 18),
+              TextField(
+                controller: _invite,
+                onChanged: (_) => setState(() {}),
+                decoration: const InputDecoration(
+                  labelText: 'Add a friend',
+                  hintText: '@friend@example.net',
+                  helperText: 'Any member can invite an existing friend.',
+                ),
+              ),
+              FilledButton.tonal(
+                onPressed: _busy || _invite.text.trim().isEmpty
+                    ? null
+                    : () => _run(() async {
+                          await ref
+                              .read(mobileControllerProvider.notifier)
+                              .repository
+                              .addGroupDmMember(
+                                  channel.ref, _invite.text.trim());
+                          _invite.clear();
+                        }),
+                child: const Text('Add member'),
+              ),
+              const SizedBox(height: 18),
+              Text('Members', style: Theme.of(context).textTheme.titleMedium),
+              if (current != null)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: UserAvatar(user: current),
+                  title: Text(current.name),
+                  subtitle: const Text('You'),
+                  trailing: current.ref == channel.ownerRef
+                      ? const Chip(label: Text('Owner'))
+                      : null,
+                ),
+              for (final member in channel.recipients)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: UserAvatar(user: member),
+                  title: Text(member.name),
+                  subtitle: Text(member.handle),
+                  trailing: member.ref == channel.ownerRef
+                      ? const Chip(label: Text('Owner'))
+                      : isOwner
+                          ? IconButton(
+                              tooltip: 'Remove member',
+                              onPressed: _busy
+                                  ? null
+                                  : () => _run(() => ref
+                                      .read(mobileControllerProvider.notifier)
+                                      .repository
+                                      .removeGroupDmMember(
+                                        channel.ref,
+                                        member.ref,
+                                      )),
+                              icon: const Icon(Icons.person_remove_outlined),
+                            )
+                          : null,
+                ),
+              if (_error case final error?)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(error,
+                      style: const TextStyle(color: KaedeColors.coral)),
+                ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _busy
+                    ? null
+                    : () => _run(() async {
+                          await ref
+                              .read(mobileControllerProvider.notifier)
+                              .repository
+                              .leaveGroupDm(channel.ref);
+                          if (context.mounted) {
+                            Navigator.of(context).pop();
+                          }
+                        }),
+                icon: const Icon(Icons.logout_rounded),
+                label: const Text('Leave group'),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1097,23 +1435,11 @@ final class _DirectMessageBrowser extends ConsumerWidget {
                     tooltip: 'New message',
                     icon: Icons.add_rounded,
                     filled: true,
-                    onTap: () => _textAction(
+                    onTap: () => _newConversationAction(
                       context,
-                      'New message',
-                      '@friend@example.net',
-                      (handle) async {
-                        final dm = await ref
-                            .read(mobileControllerProvider.notifier)
-                            .repository
-                            .openDm(handle);
-                        await ref
-                            .read(mobileControllerProvider.notifier)
-                            .refreshNavigation();
-                        onOpenChannel();
-                        unawaited(ref
-                            .read(mobileControllerProvider.notifier)
-                            .selectDm(dm));
-                      },
+                      ref,
+                      state,
+                      onOpenChannel,
                     ),
                   ),
                 ],
@@ -1159,7 +1485,14 @@ final class _DirectMessageBrowser extends ConsumerWidget {
                             .toList();
                         final title = users.isEmpty
                             ? 'Conversation'
-                            : users.map((user) => user.name).join(', ');
+                            : dm.conversationType == 'group'
+                                ? (dm.name?.trim().isNotEmpty == true
+                                    ? dm.name!.trim()
+                                    : users
+                                        .map((user) => user.name)
+                                        .take(3)
+                                        .join(', '))
+                                : users.first.name;
                         final person = users.isEmpty ? null : users.first;
                         return _ConversationRow(
                           avatar: _DmAvatar(channel: dm, self: state.user),
@@ -2448,11 +2781,153 @@ final class _DmAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (channel.conversationType == 'group') {
+      return const CircleAvatar(child: Icon(Icons.group_rounded));
+    }
     final recipients = channel.recipients
         .where((user) => self == null || user.ref != self!.ref)
         .toList();
     if (recipients.isNotEmpty) return UserAvatar(user: recipients.first);
     return const CircleAvatar(child: Icon(Icons.group_rounded));
+  }
+}
+
+Future<void> _newConversationAction(
+  BuildContext context,
+  WidgetRef ref,
+  MobileState state,
+  VoidCallback onOpenChannel,
+) async {
+  final mode = await showModalBottomSheet<String>(
+    context: context,
+    builder: (context) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.person_outline_rounded),
+            title: const Text('Direct message'),
+            subtitle:
+                const Text('Start a private conversation with one person'),
+            onTap: () => Navigator.pop(context, 'direct'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.group_outlined),
+            title: const Text('Create group DM'),
+            subtitle: const Text('Choose two or more friends'),
+            onTap: () => Navigator.pop(context, 'group'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (!context.mounted || mode == null) return;
+  if (mode == 'direct') {
+    await _textAction(context, 'New message', '@friend@example.net',
+        (handle) async {
+      final dm = await ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .openDm(handle);
+      await ref.read(mobileControllerProvider.notifier).refreshNavigation();
+      onOpenChannel();
+      unawaited(ref.read(mobileControllerProvider.notifier).selectDm(dm));
+    });
+    return;
+  }
+  final friends = state.relationships
+      .where((item) => '${item['type']}' == 'friend' && item['user'] is Map)
+      .map((item) => KaedeUser.fromJson(
+            Map<String, Object?>.from(item['user']! as Map),
+          ))
+      .toList();
+  final name = TextEditingController();
+  final selected = <EntityRef>{};
+  final submitted = await showDialog<bool>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: const Text('Create group DM'),
+        content: SizedBox(
+          width: 440,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: name,
+                maxLength: 100,
+                decoration: const InputDecoration(
+                  labelText: 'Group name',
+                  hintText: 'Optional',
+                ),
+              ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text('${selected.length} of 9 friends selected'),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                height: 320,
+                child: ListView(
+                  children: [
+                    for (final friend in friends)
+                      CheckboxListTile(
+                        value: selected.contains(friend.ref),
+                        secondary: UserAvatar(user: friend),
+                        title: Text(friend.name),
+                        subtitle: Text(friend.handle),
+                        onChanged: selected.length >= 9 &&
+                                !selected.contains(friend.ref)
+                            ? null
+                            : (_) => setDialogState(() {
+                                  if (!selected.add(friend.ref)) {
+                                    selected.remove(friend.ref);
+                                  }
+                                }),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed:
+                selected.length < 2 ? null : () => Navigator.pop(context, true),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (submitted != true || !context.mounted) return;
+  try {
+    final handles = friends
+        .where((friend) => selected.contains(friend.ref))
+        .map((friend) => friend.handle)
+        .toList();
+    final dm = await ref
+        .read(mobileControllerProvider.notifier)
+        .repository
+        .createGroupDm(
+          handles,
+          name: name.text.trim().isEmpty ? null : name.text.trim(),
+        );
+    await ref.read(mobileControllerProvider.notifier).refreshNavigation();
+    onOpenChannel();
+    unawaited(ref.read(mobileControllerProvider.notifier).selectDm(dm));
+  } on Object catch (error) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(userFacingError(error))),
+      );
+    }
+  } finally {
+    name.dispose();
   }
 }
 

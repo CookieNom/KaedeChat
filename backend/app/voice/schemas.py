@@ -152,7 +152,7 @@ class CallResponse(BaseModel):
     created_at: int = Field(ge=0)
     ended_at: int | None = Field(default=None, ge=0)
     caller: str = Field(min_length=3, max_length=286)
-    participants: list[str] = Field(min_length=2, max_length=2)
+    participants: list[str] = Field(min_length=2, max_length=10)
 
     @model_validator(mode="after")
     def coherent_call_state(self) -> CallResponse:

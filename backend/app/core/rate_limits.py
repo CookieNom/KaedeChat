@@ -23,6 +23,8 @@ CLIENT_RATE_LIMITS = {
     "message_send": ClientRateLimit("message-send", 5, 5),
     "typing": ClientRateLimit("typing", 2, 10),
     "dm_open": ClientRateLimit("dm-open", 5, 60),
+    "dm_group_create": ClientRateLimit("dm-group-create", 5, 60),
+    "dm_group_mutate": ClientRateLimit("dm-group-mutate", 20, 60),
     "friend_request": ClientRateLimit("friend-request", 10, 60),
     "reaction": ClientRateLimit("reaction", 10, 10),
     "invite_create": ClientRateLimit("invite-create", 5, 60),

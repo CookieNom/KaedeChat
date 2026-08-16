@@ -56,6 +56,8 @@ def test_rate_limit_matrix_covers_every_normative_expensive_route() -> None:
         "message_send",
         "typing",
         "dm_open",
+        "dm_group_create",
+        "dm_group_mutate",
         "friend_request",
         "reaction",
         "invite_create",
@@ -69,5 +71,7 @@ def test_rate_limit_matrix_covers_every_normative_expensive_route() -> None:
         "gif_search",
         "link_preview",
         "link_preview_media",
+        "message_search",
+        "self_moderation_status",
     }
     assert all(item.limit > 0 and item.period_seconds > 0 for item in CLIENT_RATE_LIMITS.values())

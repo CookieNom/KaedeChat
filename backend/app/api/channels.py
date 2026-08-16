@@ -182,6 +182,11 @@ async def slowmode_retry_after_ms(redis: Redis, key: str) -> int:
 async def require_dm_send(session: AsyncSession, access: ChannelAccess, actor: User) -> None:
     if access.guild is not None:
         return
+    conversation = await session.get(
+        DMConversation, (access.channel.id, access.channel.origin_domain)
+    )
+    if conversation is not None and conversation.type == "group":
+        return
     for participant in access.participants:
         if (participant.id, participant.origin_domain) != (actor.id, actor.origin_domain):
             await lock_relationship_pair(session, actor, participant)
@@ -615,7 +620,11 @@ async def list_messages(
             # authority body. Advance through a bounded number of signed pages
             # to fill the client page without permitting a cursor loop.
             for _ in range(4):
-                remote_query = {"limit": str(remote_limit)}
+                remote_query = {
+                    "limit": str(remote_limit),
+                    "requester_id": str(auth.user.id),
+                    "requester_domain": auth.user.origin_domain,
+                }
                 if cursor is not None:
                     remote_query.update(
                         {
@@ -1255,6 +1264,7 @@ async def create_message(
                             if (user.id, user.origin_domain)
                             != (participant.id, participant.origin_domain)
                         ],
+                        conversation=dm_conversation,
                         history=history,
                     ),
                 )

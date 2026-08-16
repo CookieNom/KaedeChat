@@ -377,3 +377,42 @@ class ProfilePatch(RequestModel):
 
 class DMOpenRequest(RequestModel):
     handle: str = Field(min_length=4, max_length=286)
+
+
+class DMGroupCreate(RequestModel):
+    handles: list[str] = Field(min_length=2, max_length=9)
+    name: str | None = Field(default=None, max_length=100)
+
+    @field_validator("handles")
+    @classmethod
+    def unique_handles(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip().lower() for item in value]
+        if any(not item or len(item) > 286 for item in normalized):
+            raise ValueError("group members require valid handles")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("group members must be unique")
+        return [item.strip() for item in value]
+
+    @field_validator("name")
+    @classmethod
+    def clean_group_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+
+class DMGroupUpdate(RequestModel):
+    name: str | None = Field(default=None, max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def clean_group_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+
+class DMGroupMemberAdd(RequestModel):
+    handle: str = Field(min_length=4, max_length=286)

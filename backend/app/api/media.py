@@ -831,6 +831,7 @@ async def cache_remote_media(
     attachment_id: int,
     variant: str,
     dm_history_scope: tuple[tuple[int, str], tuple[int, str]] | None = None,
+    dm_history_requester: tuple[int, str] | None = None,
 ) -> RemoteMediaCache:
     if await session.get(RemoteMediaTombstone, (origin_domain, attachment_id)) is not None:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
@@ -857,6 +858,14 @@ async def cache_remote_media(
                         "conversation_domain": dm_history_scope[0][1],
                         "message_id": str(dm_history_scope[1][0]),
                         "message_domain": dm_history_scope[1][1],
+                        **(
+                            {
+                                "requester_id": str(dm_history_requester[0]),
+                                "requester_domain": dm_history_requester[1],
+                            }
+                            if dm_history_requester is not None
+                            else {}
+                        ),
                     }
                     if dm_history_scope is not None
                     else None
@@ -1294,6 +1303,8 @@ async def authorized_dm_history_media(
                 "conversation_domain": conversation_key[1],
                 "message_id": str(message_key[0]),
                 "message_domain": message_key[1],
+                "requester_id": str(auth.user.id),
+                "requester_domain": auth.user.origin_domain,
             },
             request_timeout=10,
             max_response_bytes=4_096,
@@ -1342,6 +1353,7 @@ async def authorized_dm_history_media(
                         attachment_id=attachment_id,
                         variant=variant,
                         dm_history_scope=(conversation_key, message_key),
+                        dm_history_requester=(auth.user.id, auth.user.origin_domain),
                     )
     if cached is None:
         raise RuntimeError("remote history media cache write did not converge")

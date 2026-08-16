@@ -1,4 +1,11 @@
+from __future__ import annotations
+
 import hashlib
+
+# Group membership is a wire-level invariant. Keeping this fixed prevents two
+# federated homes with different operator settings from accepting different
+# authoritative states for the same conversation.
+MAX_GROUP_DM_PARTICIPANTS = 10
 
 
 def normalize_handle(handle: str) -> str:
@@ -23,3 +30,10 @@ def dm_authority_domain(first: str, second: str) -> str:
         )
     )
     return domains[0]
+
+
+def group_dm_key(authority_domain: str, conversation_id: int) -> str:
+    """Return the stable unique lookup key for an authority-owned group DM."""
+
+    authority = authority_domain.rstrip(".").lower()
+    return hashlib.sha256(f"group\n{authority}\n{conversation_id}".encode()).hexdigest()

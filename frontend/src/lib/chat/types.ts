@@ -38,6 +38,9 @@ export interface Channel {
   last_message_id: string | null;
   last_message_domain: string | null;
   recipients?: UserSummary[];
+  conversation_type?: 'direct' | 'group';
+  owner_id?: string | null;
+  owner_domain?: string | null;
   version?: string | null;
   /** Whether this instance retained only the newest part of a remote DM. */
   history_truncated?: boolean;

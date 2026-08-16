@@ -68,6 +68,39 @@ void main() {
     });
   });
 
+  group('group direct-message models', () {
+    test('round-trips group ownership and recipients', () {
+      final channel = KaedeChannel.fromJson(<String, Object?>{
+        'id': '10',
+        'origin_domain': 'alpha.example',
+        'guild_id': null,
+        'guild_domain': null,
+        'type': 1,
+        'name': 'Weekend plans',
+        'position': 0,
+        'conversation_type': 'group',
+        'owner_id': '1',
+        'owner_domain': 'alpha.example',
+        'recipients': <Object?>[
+          <String, Object?>{
+            'id': '2',
+            'origin_domain': 'beta.example',
+            'username': 'turtle',
+            'handle': 'turtle@beta.example',
+            'display_name': 'Turtle',
+            'avatar_hash': null,
+          },
+        ],
+      });
+
+      expect(channel.conversationType, 'group');
+      expect(
+          channel.ownerRef, EntityRef(Snowflake('1'), Domain('alpha.example')));
+      expect(channel.recipients.single.handle, 'turtle@beta.example');
+      expect(channel.toJson()['conversation_type'], 'group');
+    });
+  });
+
   group('federated profile refresh', () {
     test(
         'resolved profile cache immediately labels an otherwise unknown mention',

@@ -119,7 +119,7 @@ async def test_call_policy_rechecks_blocks_before_transition(
 
     with pytest.raises(HTTPException) as error:
         await require_call_policy(
-            cast(AsyncSession, object()),
+            cast(AsyncSession, SimpleNamespace(get=AsyncMock(return_value=None))),
             cast(Settings, SimpleNamespace(domain="alpha.localhost")),
             {
                 "channel_id": "30",
@@ -147,8 +147,15 @@ async def test_remote_dm_send_serializes_and_rechecks_local_block(
 
     with pytest.raises(HTTPException) as error:
         await require_dm_send(
-            cast(AsyncSession, object()),
-            cast(ChannelAccess, SimpleNamespace(guild=None, participants=[actor, remote])),
+            cast(AsyncSession, SimpleNamespace(get=AsyncMock(return_value=None))),
+            cast(
+                ChannelAccess,
+                SimpleNamespace(
+                    guild=None,
+                    channel=SimpleNamespace(id=30, origin_domain="alpha.localhost"),
+                    participants=[actor, remote],
+                ),
+            ),
             actor,
         )
 

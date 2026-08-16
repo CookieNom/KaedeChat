@@ -176,6 +176,16 @@ pub struct Channel {
     pub version: Option<ResourceVersion>,
     #[serde(default)]
     pub recipients: Vec<User>,
+    #[serde(default = "default_conversation_type")]
+    pub conversation_type: String,
+    #[serde(default)]
+    pub owner_id: Option<Snowflake>,
+    #[serde(default)]
+    pub owner_domain: Option<Domain>,
+}
+
+fn default_conversation_type() -> String {
+    "direct".to_owned()
 }
 
 impl Channel {
@@ -607,12 +617,10 @@ mod tests {
         let Ok(attachment) = serde_json::from_value::<Attachment>(payload) else {
             panic!("history attachment should deserialize");
         };
-        assert!(
-            attachment
-                .history_media_url
-                .as_deref()
-                .is_some_and(|path| path.starts_with("/api/v1/dms/"))
-        );
+        assert!(attachment
+            .history_media_url
+            .as_deref()
+            .is_some_and(|path| path.starts_with("/api/v1/dms/")));
     }
 
     #[test]

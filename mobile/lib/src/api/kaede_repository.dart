@@ -812,9 +812,44 @@ final class KaedeRepository {
       );
   Future<Map<String, Object?>> startCall(EntityRef channel) =>
       api.sendJson('POST', '/api/v1/channels/${channel.wire}/calls');
+  Future<Map<String, Object?>> activeCall(EntityRef channel) =>
+      api.getJson('/api/v1/channels/${channel.wire}/calls/active');
   Future<Map<String, Object?>> callAction(EntityRef call, String action) =>
       api.sendJson('POST', '/api/v1/calls/${call.wire}',
           data: <String, Object?>{'action': action});
+  Future<Map<String, Object?>> callVoiceToken(EntityRef call) => api.sendJson(
+        'POST',
+        '/api/v1/calls/${call.wire}/voice/token',
+      );
+  Future<KaedeChannel> createGroupDm(List<String> handles,
+          {String? name}) async =>
+      KaedeChannel.fromJson(await api.sendJson(
+        'POST',
+        '/api/v1/users/@me/channels/group',
+        data: <String, Object?>{'handles': handles, 'name': name},
+      ));
+  Future<KaedeChannel> renameGroupDm(EntityRef channel, String? name) async =>
+      KaedeChannel.fromJson(await api.sendJson(
+        'PATCH',
+        '/api/v1/users/@me/channels/${channel.wire}/group',
+        data: <String, Object?>{'name': name},
+      ));
+  Future<KaedeChannel> addGroupDmMember(
+          EntityRef channel, String handle) async =>
+      KaedeChannel.fromJson(await api.sendJson(
+        'POST',
+        '/api/v1/users/@me/channels/${channel.wire}/group/recipients',
+        data: <String, Object?>{'handle': handle},
+      ));
+  Future<void> leaveGroupDm(EntityRef channel) => api.sendJson(
+        'POST',
+        '/api/v1/users/@me/channels/${channel.wire}/group/leave',
+      );
+  Future<void> removeGroupDmMember(EntityRef channel, EntityRef user) =>
+      api.sendJson(
+        'DELETE',
+        '/api/v1/users/@me/channels/${channel.wire}/group/recipients/${user.wire}',
+      );
 
   Future<Map<String, Object?>> createAttachmentTicket({
     required EntityRef channel,

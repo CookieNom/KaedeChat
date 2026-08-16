@@ -15,6 +15,7 @@ from app.chat.e2ee import validate_e2ee_envelope
 from app.chat.events import publish_dispatch, user_topic
 from app.chat.payloads import dm_channel_payload, render_message_payload
 from app.chat.privacy import require_can_direct_message
+from app.core.dm import MAX_GROUP_DM_PARTICIPANTS, group_dm_key
 from app.core.settings import Settings
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
 from app.db.models import (
@@ -573,6 +574,7 @@ async def replicate_conversation(
 ) -> Channel:
     origin = str(conversation["origin_domain"])
     pair_key = str(conversation["pair_key"])
+    conversation_type = str(conversation.get("type", "direct"))
     authority_domain = str(conversation["authority_domain"])
     participant_domains = {profile.origin_domain for profile in participant_profiles}
     federated = await admit_federated_dm_conversation(
@@ -586,18 +588,52 @@ async def replicate_conversation(
         if origin == settings.domain:
             raise RuntimeError("self instance is not bootstrapped")
         await ensure_remote_instance_record(session, settings, origin)
+    if conversation_type not in {"direct", "group"}:
+        raise ValueError("unsupported DM conversation type")
     participants = [
         await upsert_remote_user(session, settings, profile) for profile in participant_profiles
     ]
+    participant_refs = {(participant.id, participant.origin_domain) for participant in participants}
+    if len(participant_refs) != len(participants):
+        raise ValueError("DM conversation participants must be unique")
     conversation_id = database_snowflake(conversation.get("id"), "conversation id")
+    owner_id: int | None = None
+    owner_domain: str | None = None
+    state_version = 0
+    channel_name: str | None = None
+    if conversation_type == "group":
+        if authority_domain != origin or not (1 <= len(participants) <= MAX_GROUP_DM_PARTICIPANTS):
+            raise ValueError("group DM authority or participant count is invalid")
+        if pair_key != group_dm_key(authority_domain, conversation_id):
+            raise ValueError("group DM lookup key is invalid")
+        owner = conversation.get("owner")
+        if not isinstance(owner, dict):
+            raise ValueError("group DM owner is missing")
+        owner_id = database_snowflake(owner.get("id"), "group DM owner id")
+        owner_domain = normalize_domain(str(owner.get("origin_domain", "")))
+        if (owner_id, owner_domain) not in participant_refs:
+            raise ValueError("group DM owner is not a participant")
+        raw_name = conversation.get("name")
+        if raw_name is not None:
+            if not isinstance(raw_name, str) or not 1 <= len(raw_name.strip()) <= 100:
+                raise ValueError("group DM name is invalid")
+            channel_name = raw_name.strip()
+        state_version = database_snowflake(
+            conversation.get("state_version"), "group DM state version"
+        )
+        if state_version < 1:
+            raise ValueError("group DM state version is invalid")
     await session.scalar(
         pg_insert(DMConversation)
         .values(
             id=conversation_id,
             origin_domain=origin,
             pair_key=pair_key,
-            type="direct",
+            type=conversation_type,
             authority_domain=authority_domain,
+            owner_id=owner_id,
+            owner_domain=owner_domain,
+            state_version=0,
         )
         .on_conflict_do_nothing(index_elements=["pair_key"])
         .returning(DMConversation.id)
@@ -611,7 +647,7 @@ async def replicate_conversation(
         (existing.id, existing.origin_domain) != (conversation_id, origin)
         or existing.pair_key != pair_key
         or existing.authority_domain != authority_domain
-        or existing.type != "direct"
+        or existing.type != conversation_type
     ):
         raise ValueError("DM conversation identity conflicts with an existing conversation")
     if federated:
@@ -622,6 +658,7 @@ async def replicate_conversation(
             participant_domains=participant_domains,
         )
     channel = await session.get(Channel, (conversation_id, origin))
+    stored_channel_name = channel.name if channel is not None else None
     if channel is None:
         channel = Channel(
             id=conversation_id,
@@ -629,7 +666,7 @@ async def replicate_conversation(
             guild_id=None,
             guild_domain=None,
             type=1,
-            name=None,
+            name=channel_name,
             position=0,
             rate_limit_per_user=0,
             created_floor_id=conversation_id,
@@ -638,6 +675,34 @@ async def replicate_conversation(
         await session.flush()
     elif channel.guild_id is not None or channel.type != 1:
         raise ValueError("DM conversation ID conflicts with a non-DM channel")
+    if conversation_type == "group":
+        stored_participants = set(
+            (
+                await session.execute(
+                    select(DMParticipant.user_id, DMParticipant.user_domain).where(
+                        DMParticipant.conversation_id == conversation_id,
+                        DMParticipant.conversation_domain == origin,
+                    )
+                )
+            ).tuples()
+        )
+        expected_participants = participant_refs
+        if existing.state_version > state_version:
+            return channel
+        if existing.state_version == state_version and existing.state_version > 0:
+            if (
+                existing.owner_id,
+                existing.owner_domain,
+                stored_channel_name,
+            ) != (owner_id, owner_domain, channel_name):
+                raise ValueError("group DM state version conflicts with stored state")
+            if stored_participants != expected_participants:
+                raise ValueError("group DM state version conflicts with stored participants")
+            return channel
+        existing.owner_id = owner_id
+        existing.owner_domain = owner_domain
+        existing.state_version = state_version
+        channel.name = channel_name
     for participant in participants:
         existing_participant = await session.get(
             DMParticipant,
@@ -663,9 +728,17 @@ async def replicate_conversation(
             )
         ).tuples()
     )
-    expected_participants = {
-        (participant.id, participant.origin_domain) for participant in participants
-    }
+    expected_participants = participant_refs
+    if conversation_type == "group":
+        for user_id, user_domain in stored_participants - expected_participants:
+            membership = await session.get(
+                DMParticipant,
+                (conversation_id, origin, user_id, user_domain),
+            )
+            if membership is not None:
+                await session.delete(membership)
+        await session.flush()
+        stored_participants = expected_participants
     if stored_participants != expected_participants:
         raise ValueError("DM conversation participant set is inconsistent")
     return channel
@@ -743,7 +816,7 @@ async def replicate_dm_message(
     if channel is None or channel.guild_id is not None or channel.type != 1:
         raise ValueError("DM channel is not replicated")
     conversation = await session.get(DMConversation, (channel.id, channel.origin_domain))
-    if conversation is None or conversation.type != "direct":
+    if conversation is None or conversation.type not in {"direct", "group"}:
         raise ValueError("DM conversation is not replicated")
     await lock_federated_dm_authority(session, conversation.authority_domain)
     author_participates = await session.get(
@@ -813,8 +886,9 @@ async def replicate_dm_message(
             )
         )
     )
-    for recipient in local_recipients:
-        await require_can_direct_message(session, author, recipient)
+    if conversation.type == "direct":
+        for recipient in local_recipients:
+            await require_can_direct_message(session, author, recipient)
     await admit_federated_dm_message(
         session,
         settings,
@@ -977,6 +1051,7 @@ async def publish_replicated_dm_message(
                         if (user.id, user.origin_domain)
                         != (participant.id, participant.origin_domain)
                     ],
+                    conversation=conversation,
                     history=history,
                 ),
             )

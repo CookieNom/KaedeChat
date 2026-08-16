@@ -15,15 +15,28 @@ from app.api.dependencies import (
     require_user,
 )
 from app.chat.events import publish_dispatch, user_topic
+from app.chat.group_conversations import (
+    apply_authoritative_group_mutation,
+    group_conversation_content,
+    load_authoritative_group,
+    require_group_invite_friend,
+    require_group_member,
+)
 from app.chat.payloads import dm_channel_payload
 from app.chat.privacy import blocked_between, require_can_direct_message
-from app.chat.schemas import DMOpenRequest
-from app.core.dm import dm_authority_domain, dm_pair_key
+from app.chat.schemas import DMGroupCreate, DMGroupMemberAdd, DMGroupUpdate, DMOpenRequest
+from app.core.dm import (
+    MAX_GROUP_DM_PARTICIPANTS,
+    dm_authority_domain,
+    dm_pair_key,
+    group_dm_key,
+)
 from app.core.errors import parse_upstream_error
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
+from app.core.types import EntityRef
 from app.db.models import Channel, DMConversation, DMParticipant, User
 from app.federation.client import signed_request
 from app.federation.dm_storage import (
@@ -44,6 +57,116 @@ from app.federation.users import resolve_handle
 from app.tasks import federation_deliver
 
 router = APIRouter(prefix="/api/v1/users/@me/channels", tags=["direct messages"])
+
+
+async def authorize_group_invitee(
+    session: AsyncSession,
+    settings: Settings,
+    inviter: User,
+    invitee: User,
+) -> None:
+    await require_group_invite_friend(session, inviter, invitee)
+    if invitee.origin_domain == settings.domain:
+        return
+    try:
+        response = await signed_request(
+            session,
+            settings,
+            "POST",
+            invitee.origin_domain,
+            "/_kaede/v1/dm/groups/authorize",
+            payload={
+                "inviter": profile_from_user(inviter),
+                "invitee": profile_from_user(invitee),
+            },
+            request_timeout=8,
+            max_response_bytes=16 * 1024,
+        )
+    except FederationNetworkError as exc:
+        raise HTTPException(
+            status_code=503, detail={"code": "GROUP_DM_INVITEE_HOME_UNREACHABLE"}
+        ) from exc
+    if response.status_code != 204:
+        raise HTTPException(
+            status_code=403 if response.status_code == 403 else 502,
+            detail={
+                "code": (
+                    "GROUP_DM_INVITE_NOT_FRIEND"
+                    if response.status_code == 403
+                    else "GROUP_DM_INVITEE_HOME_REJECTED"
+                )
+            },
+        )
+
+
+async def queue_group_state(
+    session: AsyncSession,
+    settings: Settings,
+    actor: User,
+    conversation: DMConversation,
+    channel: Channel,
+    participants: list[User],
+    *,
+    extra_domains: set[str] | None = None,
+    deleted: bool = False,
+) -> set[str]:
+    envelope = await build_envelope(
+        session,
+        settings,
+        "dm.group.state",
+        actor,
+        group_conversation_content(conversation, channel, participants, deleted=deleted),
+    )
+    destinations = {
+        participant.origin_domain
+        for participant in participants
+        if participant.origin_domain != settings.domain
+    } | (extra_domains or set())
+    destinations.discard(settings.domain)
+    for destination in destinations:
+        await queue_event(session, settings, destination, envelope)
+    return destinations
+
+
+async def publish_local_group_state(
+    redis: Redis,
+    session: AsyncSession,
+    settings: Settings,
+    conversation: DMConversation,
+    channel: Channel,
+    before: list[User],
+    after: list[User],
+    *,
+    created: bool = False,
+) -> None:
+    before_refs = {(user.id, user.origin_domain) for user in before}
+    after_refs = {(user.id, user.origin_domain) for user in after}
+    for user in after:
+        if user.origin_domain != settings.domain or not user.is_local:
+            continue
+        event = (
+            "CHANNEL_CREATE"
+            if created or (user.id, user.origin_domain) not in before_refs
+            else "CHANNEL_UPDATE"
+        )
+        await publish_dispatch(
+            redis,
+            user_topic(settings.domain, user.id),
+            event,
+            await rendered_dm_channel(session, settings, channel, user, after),
+        )
+    for user in before:
+        if (
+            user.origin_domain == settings.domain
+            and user.is_local
+            and (user.id, user.origin_domain) not in after_refs
+        ):
+            await publish_dispatch(
+                redis,
+                user_topic(settings.domain, user.id),
+                "CHANNEL_DELETE",
+                {"id": str(channel.id), "origin_domain": channel.origin_domain},
+            )
 
 
 async def conversation_participants(
@@ -90,6 +213,7 @@ async def rendered_dm_channel(
     return dm_channel_payload(
         channel,
         recipients_for(actor, participants),
+        conversation=conversation,
         history=dm_history_metadata(
             conversation,
             local_domain=settings.domain,
@@ -415,3 +539,408 @@ async def open_direct_message(
         if target.origin_domain != settings.domain:
             await enqueue_best_effort(federation_deliver, target.origin_domain)
     return result
+
+
+@router.post("/group", status_code=status.HTTP_201_CREATED)
+async def create_group_direct_message(
+    payload: DMGroupCreate,
+    response_status: Response,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    await enforce_client_rate_limit(
+        redis,
+        response_status,
+        CLIENT_RATE_LIMITS["dm_group_create"],
+        user_id=auth.user.id,
+        user_domain=auth.user.origin_domain,
+    )
+    requester_key = f"{auth.user.origin_domain}:{auth.user.id}"
+    targets: list[User] = []
+    seen = {(auth.user.id, auth.user.origin_domain)}
+    for handle in payload.handles:
+        target = await resolve_handle(session, settings, redis, requester_key, handle)
+        ref = (target.id, target.origin_domain)
+        if ref in seen:
+            raise HTTPException(status_code=400, detail={"code": "GROUP_DM_DUPLICATE_MEMBER"})
+        seen.add(ref)
+        await authorize_group_invitee(session, settings, auth.user, target)
+        targets.append(target)
+    if len(targets) + 1 > MAX_GROUP_DM_PARTICIPANTS:
+        raise HTTPException(status_code=409, detail={"code": "GROUP_DM_FULL"})
+    conversation_id = await snowflake.mint()
+    lookup_key = group_dm_key(settings.domain, conversation_id)
+    participant_domains = {auth.user.origin_domain, *(item.origin_domain for item in targets)}
+    try:
+        federated = await admit_federated_dm_conversation(
+            session,
+            settings,
+            authority_domain=settings.domain,
+            pair_key=lookup_key,
+            participant_domains=participant_domains,
+        )
+    except FederatedDMQuotaExceeded as exc:
+        raise HTTPException(status_code=507, detail=exc.detail()) from exc
+    conversation = DMConversation(
+        id=conversation_id,
+        origin_domain=settings.domain,
+        pair_key=lookup_key,
+        type="group",
+        authority_domain=settings.domain,
+        owner_id=auth.user.id,
+        owner_domain=auth.user.origin_domain,
+        state_version=1,
+    )
+    channel = Channel(
+        id=conversation_id,
+        origin_domain=settings.domain,
+        guild_id=None,
+        guild_domain=None,
+        type=1,
+        name=payload.name,
+        topic=None,
+        position=0,
+        parent_id=None,
+        parent_domain=None,
+        rate_limit_per_user=0,
+        created_floor_id=conversation_id,
+    )
+    session.add_all([conversation, channel])
+    await session.flush()
+    participants = [auth.user, *targets]
+    session.add_all(
+        [
+            DMParticipant(
+                conversation_id=conversation_id,
+                conversation_domain=settings.domain,
+                user_id=user.id,
+                user_domain=user.origin_domain,
+            )
+            for user in participants
+        ]
+    )
+    if federated:
+        await register_federated_dm_conversation(
+            session,
+            settings,
+            conversation,
+            participant_domains=participant_domains,
+        )
+    destinations = await queue_group_state(
+        session, settings, auth.user, conversation, channel, participants
+    )
+    await session.commit()
+    await publish_local_group_state(
+        redis, session, settings, conversation, channel, [], participants, created=True
+    )
+    for destination in destinations:
+        await enqueue_best_effort(federation_deliver, destination)
+    return await rendered_dm_channel(session, settings, channel, auth.user, participants)
+
+
+async def proxy_group_mutation(
+    session: AsyncSession,
+    settings: Settings,
+    conversation: DMConversation,
+    actor: User,
+    *,
+    action: str,
+    target: User | None = None,
+    name: str | None = None,
+) -> dict[str, object]:
+    try:
+        response = await signed_request(
+            session,
+            settings,
+            "POST",
+            conversation.authority_domain,
+            "/_kaede/v1/dm/groups/mutate",
+            payload={
+                "action": action,
+                "conversation_id": str(conversation.id),
+                "conversation_domain": conversation.origin_domain,
+                "actor": profile_from_user(actor),
+                "target": profile_from_user(target) if target is not None else None,
+                "name": name,
+            },
+            request_timeout=10,
+            max_response_bytes=256 * 1024,
+        )
+    except FederationNetworkError as exc:
+        raise HTTPException(status_code=503, detail={"code": "GROUP_DM_HOME_UNREACHABLE"}) from exc
+    if response.status_code != 200:
+        try:
+            error = decode_federation_response_json(response)
+        except FederationNetworkError:
+            error = None
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=parse_upstream_error(error, "GROUP_DM_MUTATION_REJECTED"),
+        )
+    try:
+        decoded = decode_federation_response_json(response)
+    except FederationNetworkError as exc:
+        raise HTTPException(
+            status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"}
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise HTTPException(status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"})
+    return decoded
+
+
+async def apply_group_mutation_response(
+    session: AsyncSession,
+    settings: Settings,
+    payload: dict[str, object],
+) -> tuple[Channel, DMConversation, list[User]]:
+    raw_conversation = payload.get("conversation")
+    raw_participants = payload.get("participants")
+    if not isinstance(raw_conversation, dict) or not isinstance(raw_participants, list):
+        raise HTTPException(status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"})
+    try:
+        profiles = [RemoteUserProfile.model_validate(item) for item in raw_participants]
+        channel = await replicate_conversation(session, settings, raw_conversation, profiles)
+    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"}
+        ) from exc
+    conversation = await session.get(DMConversation, (channel.id, channel.origin_domain))
+    if conversation is None or conversation.type != "group":
+        raise HTTPException(status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"})
+    participants = await conversation_participants(session, channel.id, channel.origin_domain)
+    return channel, conversation, participants
+
+
+async def mutate_group(
+    channel_ref: EntityRef,
+    action: str,
+    response_status: Response,
+    auth: AuthenticatedUser,
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+    *,
+    target: User | None = None,
+    name: str | None = None,
+) -> dict[str, object]:
+    await enforce_client_rate_limit(
+        redis,
+        response_status,
+        CLIENT_RATE_LIMITS["dm_group_mutate"],
+        user_id=auth.user.id,
+        user_domain=auth.user.origin_domain,
+    )
+    conversation_id, conversation_domain = channel_ref.resolve(settings.domain)
+    existing = await session.get(DMConversation, (conversation_id, conversation_domain))
+    if existing is None or existing.type != "group":
+        raise HTTPException(status_code=404, detail={"code": "GROUP_DM_NOT_FOUND"})
+    before = await conversation_participants(session, conversation_id, conversation_domain)
+    if action == "add" and target is not None:
+        await require_group_member(session, existing, auth.user)
+        await authorize_group_invitee(session, settings, auth.user, target)
+    if existing.authority_domain != settings.domain:
+        remote = await proxy_group_mutation(
+            session,
+            settings,
+            existing,
+            auth.user,
+            action=action,
+            target=target,
+            name=name,
+        )
+        remote_conversation = remote.get("conversation")
+        remote_participants = remote.get("participants")
+        if not isinstance(remote_participants, list):
+            raise HTTPException(status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"})
+        try:
+            remote_refs = {
+                (int(profile.id), profile.origin_domain)
+                for profile in (
+                    RemoteUserProfile.model_validate(item) for item in remote_participants
+                )
+            }
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"}
+            ) from exc
+        before_refs = {(user.id, user.origin_domain) for user in before}
+        expected_refs = set(before_refs)
+        if action == "add" and target is not None:
+            expected_refs.add((target.id, target.origin_domain))
+        elif action == "leave":
+            expected_refs.discard((auth.user.id, auth.user.origin_domain))
+        elif action == "remove" and target is not None:
+            expected_refs.discard((target.id, target.origin_domain))
+        if remote_refs != expected_refs:
+            raise HTTPException(status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"})
+        remote_deleted = (
+            bool(remote_conversation.get("deleted"))
+            if isinstance(remote_conversation, dict)
+            else False
+        )
+        if remote_deleted:
+            if action != "leave" or expected_refs:
+                raise HTTPException(
+                    status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"}
+                )
+            membership = await session.get(
+                DMParticipant,
+                (conversation_id, conversation_domain, auth.user.id, auth.user.origin_domain),
+            )
+            if membership is not None:
+                await session.delete(membership)
+            await session.commit()
+            await publish_dispatch(
+                redis,
+                user_topic(settings.domain, auth.user.id),
+                "CHANNEL_DELETE",
+                {"id": str(conversation_id), "origin_domain": conversation_domain},
+            )
+            return {"status": "left"}
+        channel, conversation, participants = await apply_group_mutation_response(
+            session, settings, remote
+        )
+        await session.commit()
+        await publish_local_group_state(
+            redis, session, settings, conversation, channel, before, participants
+        )
+        if action in {"leave", "remove"} and not any(
+            (user.id, user.origin_domain) == (auth.user.id, auth.user.origin_domain)
+            for user in participants
+        ):
+            return {"status": "left"}
+        return await rendered_dm_channel(session, settings, channel, auth.user, participants)
+    conversation, channel = await load_authoritative_group(
+        session,
+        settings,
+        conversation_id,
+        conversation_domain,
+        for_update=True,
+    )
+    before, participants, deleted = await apply_authoritative_group_mutation(
+        session,
+        settings,
+        conversation,
+        channel,
+        auth.user,
+        action=action,
+        target=target,
+        name=name,
+    )
+    destinations = await queue_group_state(
+        session,
+        settings,
+        auth.user,
+        conversation,
+        channel,
+        participants,
+        extra_domains={user.origin_domain for user in before},
+        deleted=deleted,
+    )
+    await session.commit()
+    await publish_local_group_state(
+        redis, session, settings, conversation, channel, before, participants
+    )
+    for destination in destinations:
+        await enqueue_best_effort(federation_deliver, destination)
+    if deleted or not any(
+        (user.id, user.origin_domain) == (auth.user.id, auth.user.origin_domain)
+        for user in participants
+    ):
+        return {"status": "left"}
+    return await rendered_dm_channel(session, settings, channel, auth.user, participants)
+
+
+@router.patch("/{channel_ref}/group")
+async def rename_group_direct_message(
+    channel_ref: EntityRef,
+    payload: DMGroupUpdate,
+    response_status: Response,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    return await mutate_group(
+        channel_ref,
+        "rename",
+        response_status,
+        auth,
+        session,
+        redis,
+        settings,
+        name=payload.name,
+    )
+
+
+@router.post("/{channel_ref}/group/recipients")
+async def add_group_direct_message_member(
+    channel_ref: EntityRef,
+    payload: DMGroupMemberAdd,
+    response_status: Response,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    requester_key = f"{auth.user.origin_domain}:{auth.user.id}"
+    target = await resolve_handle(session, settings, redis, requester_key, payload.handle)
+    return await mutate_group(
+        channel_ref,
+        "add",
+        response_status,
+        auth,
+        session,
+        redis,
+        settings,
+        target=target,
+    )
+
+
+@router.post("/{channel_ref}/group/leave")
+async def leave_group_direct_message(
+    channel_ref: EntityRef,
+    response_status: Response,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    return await mutate_group(
+        channel_ref,
+        "leave",
+        response_status,
+        auth,
+        session,
+        redis,
+        settings,
+    )
+
+
+@router.delete("/{channel_ref}/group/recipients/{user_ref}")
+async def remove_group_direct_message_member(
+    channel_ref: EntityRef,
+    user_ref: EntityRef,
+    response_status: Response,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    target_id, target_domain = user_ref.resolve(settings.domain)
+    target = await session.get(User, (target_id, target_domain))
+    if target is None:
+        raise HTTPException(status_code=404, detail={"code": "GROUP_DM_MEMBER_NOT_FOUND"})
+    return await mutate_group(
+        channel_ref,
+        "remove",
+        response_status,
+        auth,
+        session,
+        redis,
+        settings,
+        target=target,
+    )

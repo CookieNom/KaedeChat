@@ -606,6 +606,8 @@ async def test_expired_history_media_is_reauthorized_and_returns_fresh_scoped_pa
         "conversation_domain": "authority.example",
         "message_id": "2",
         "message_domain": "authority.example",
+        "requester_id": "9",
+        "requester_domain": configured.domain,
     }
 
 

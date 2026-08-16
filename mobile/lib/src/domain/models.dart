@@ -130,6 +130,8 @@ final class KaedeChannel {
     this.parentRef,
     this.lastMessageRef,
     this.recipients = const <KaedeUser>[],
+    this.conversationType = 'direct',
+    this.ownerRef,
     this.slowModeSeconds = 0,
     this.permissionsSynced = false,
     this.historyTruncated = false,
@@ -150,6 +152,8 @@ final class KaedeChannel {
     final parentDomain = _string(json['parent_domain']);
     final lastId = _string(json['last_message_id']);
     final lastDomain = _string(json['last_message_domain']);
+    final ownerId = _string(json['owner_id']);
+    final ownerDomain = _string(json['owner_domain']);
     return KaedeChannel(
       ref: EntityRef(Snowflake(json['id']! as String), domain),
       guildRef: guildId == null || guildDomain == null
@@ -168,6 +172,10 @@ final class KaedeChannel {
           ? null
           : EntityRef(Snowflake(lastId), Domain(lastDomain)),
       recipients: _objects(json['recipients']).map(KaedeUser.fromJson).toList(),
+      conversationType: _string(json['conversation_type']) ?? 'direct',
+      ownerRef: ownerId == null || ownerDomain == null
+          ? null
+          : EntityRef(Snowflake(ownerId), Domain(ownerDomain)),
       slowModeSeconds: _integer(json['rate_limit_per_user']),
       permissionsSynced: _boolean(json['permissions_synced']),
       historyTruncated: _boolean(json['history_truncated']),
@@ -192,6 +200,8 @@ final class KaedeChannel {
   final BigInt permissions;
   final EntityRef? lastMessageRef;
   final List<KaedeUser> recipients;
+  final String conversationType;
+  final EntityRef? ownerRef;
   final int slowModeSeconds;
   final bool permissionsSynced;
   final bool historyTruncated;
@@ -227,6 +237,9 @@ final class KaedeChannel {
         'last_message_id': lastMessageRef?.id.value,
         'last_message_domain': lastMessageRef?.domain.value,
         'recipients': recipients.map((user) => user.toJson()).toList(),
+        'conversation_type': conversationType,
+        'owner_id': ownerRef?.id.value,
+        'owner_domain': ownerRef?.domain.value,
         'rate_limit_per_user': slowModeSeconds,
         'permissions_synced': permissionsSynced,
         'history_truncated': historyTruncated,

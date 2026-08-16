@@ -52,6 +52,7 @@ final class VoiceSession extends ChangeNotifier {
   Room? _room;
   EventsListener<RoomEvent>? _events;
   KaedeChannel? _channel;
+  EntityRef? _callRef;
   var _generation = 0;
   var _connecting = false;
   var _muted = false;
@@ -73,6 +74,7 @@ final class VoiceSession extends ChangeNotifier {
   String? _error;
 
   KaedeChannel? get channel => _channel;
+  EntityRef? get callRef => _callRef;
   Room? get room => _room;
   bool get connecting => _connecting;
   bool get connected => _room?.connectionState == ConnectionState.connected;
@@ -101,24 +103,34 @@ final class VoiceSession extends ChangeNotifier {
     ];
   }
 
-  Future<void> connect(KaedeChannel target, {bool force = false}) async {
-    if (!force && (_connecting || connected) && _channel?.ref == target.ref) {
+  Future<void> connect(
+    KaedeChannel target, {
+    EntityRef? callRef,
+    bool force = false,
+  }) async {
+    if (!force &&
+        (_connecting || connected) &&
+        _channel?.ref == target.ref &&
+        _callRef == callRef) {
       return;
     }
     final generation = ++_generation;
     await _disposeRoom(notify: false);
     if (generation != _generation) return;
     _channel = target;
+    _callRef = callRef;
     _connecting = true;
     _error = null;
-    _canUseVad = target.allows(Permission.useVad);
+    _canUseVad = callRef != null || target.allows(Permission.useVad);
     if (!_canUseVad) _pushToTalk = true;
     notifyListeners();
 
     Room? candidate;
     EventsListener<RoomEvent>? candidateEvents;
     try {
-      final grant = await _repository.voiceToken(target.ref);
+      final grant = callRef == null
+          ? await _repository.voiceToken(target.ref)
+          : await _repository.callVoiceToken(callRef);
       if (generation != _generation) return;
       final url = '${grant['url'] ?? ''}';
       final token = '${grant['token'] ?? ''}';
@@ -175,21 +187,24 @@ final class VoiceSession extends ChangeNotifier {
 
       await room.connect(url, token);
       if (generation != _generation) return;
-      _canSpeak = grant['can_speak'] == true && target.allows(Permission.speak);
-      _canStream =
-          grant['can_stream'] == true && target.allows(Permission.stream);
+      _canSpeak = grant['can_speak'] == true &&
+          (callRef != null || target.allows(Permission.speak));
+      _canStream = grant['can_stream'] == true &&
+          (callRef != null || target.allows(Permission.stream));
       await selectAudioRoute(_audioRoute);
       _room = room;
       _events = events;
       candidate = null;
       candidateEvents = null;
       room.addListener(_notifyRoomChanged);
-      await refreshOccupancy();
-      _occupancyTimer?.cancel();
-      _occupancyTimer = Timer.periodic(
-        const Duration(seconds: 10),
-        (_) => unawaited(refreshOccupancy()),
-      );
+      if (callRef == null) {
+        await refreshOccupancy();
+        _occupancyTimer?.cancel();
+        _occupancyTimer = Timer.periodic(
+          const Duration(seconds: 10),
+          (_) => unawaited(refreshOccupancy()),
+        );
+      }
 
       if (_canSpeak) {
         final microphone = await permissions.Permission.microphone.request();
@@ -220,6 +235,7 @@ final class VoiceSession extends ChangeNotifier {
 
   /// Applies a fresh effective-permission payload to an existing connection.
   Future<void> reconcilePermissions(KaedeChannel fresh) async {
+    if (_callRef != null) return;
     if (_channel?.ref != fresh.ref) return;
     if (_channel?.permissions == fresh.permissions) return;
     _channel = fresh;
@@ -362,7 +378,7 @@ final class VoiceSession extends ChangeNotifier {
 
   Future<void> refreshOccupancy() async {
     final target = _channel;
-    if (target == null || !connected) return;
+    if (target == null || !connected || _callRef != null) return;
     try {
       final snapshot = await _repository.voiceOccupancy(target.ref);
       if (_channel?.ref != target.ref || !connected) return;
@@ -459,6 +475,7 @@ final class VoiceSession extends ChangeNotifier {
     _generation += 1;
     await _disposeRoom(notify: false);
     _channel = null;
+    _callRef = null;
     _connecting = false;
     _muted = false;
     _deafened = false;
