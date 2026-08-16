@@ -1,11 +1,13 @@
 # Kaede Chat desktop
 
 The supported desktop application is a Tauri 2 shell around Kaede's static
-Svelte build. It keeps the web and desktop feature surfaces aligned while Rust
-provides the parts that browsers cannot provide reliably: secure credential
-storage, a resumable gateway, native device selection, CPAL audio, LiveKit,
-global push to talk, voice activity, local speech processing, notifications,
-camera capture, screen capture, and safe object uploads.
+Svelte build. This keeps the web and desktop feature surfaces aligned. Rust
+covers the parts that browsers cannot provide reliably:
+
+- secure credential storage and a resumable gateway
+- native device selection, CPAL audio, and LiveKit
+- global push to talk, voice activity, and local speech processing
+- notifications, camera capture, screen capture, and safe object uploads
 
 The previous Slint client is preserved in `legacy-slint/`. It is not built by
 the normal Make targets or release workflow.
@@ -22,9 +24,9 @@ make desktop-check desktop-test
 cargo +1.92.0 run --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
 ```
 
-For live frontend development, run `make desktop-dev`. A release binary can be
-compiled with `make desktop-build`; installers are produced by the desktop
-release workflow and must pass the signing/notarization approval described in
+For live frontend development, run `make desktop-dev`. Compile a release
+binary with `make desktop-build`. Installers come from the desktop release
+workflow and must pass the signing/notarization approval described in
 [releasing](docs/releasing.md) before publication.
 
 ## Security boundary

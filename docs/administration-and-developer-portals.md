@@ -28,7 +28,7 @@ docker compose exec api kaede admin-revoke bob --role trust_safety
 
 Accepted roles are `owner`, `administrator`, `trust_safety`, `bot_reviewer`,
 `operations`, and `auditor`. The command accepts a local `username` or
-`username@this-instance`; remote and bot accounts are rejected. Grant and revoke
+`username@this-instance`. Remote and bot accounts are rejected. Grant and revoke
 operations are idempotent and use a database advisory lock.
 
 Owner grants and removals remain CLI-only. An owner can delegate or revoke every
@@ -51,34 +51,35 @@ expired or revoked grants, remote users, and bot users are rejected.
 | Auditor        | Read-only reports and audit log                       |
 
 `GET /api/v1/administration/@me` returns the caller's roles and effective
-capabilities. The panel hides mutation controls the caller cannot use, while the
-API repeats every authorization check.
+capabilities. The panel hides mutation controls the caller cannot use, but the
+API still repeats every authorization check.
 
 ### Panel sections
 
-Overview shows counts for local users, known instances, bot applications, active
-bot installations, open reports, and blocked instances.
+**Overview** shows counts for local users, known instances, bot applications,
+active bot installations, open reports, and blocked instances.
 
-Users supports bounded local-username search and account disable/enable actions.
-An administrator cannot disable their own account through this endpoint.
+**Users** supports bounded local-username search and lets staff disable or
+enable accounts. An administrator cannot disable their own account through this
+endpoint.
 
-Applications lists known local and federated bot applications. Staff with
+**Applications** lists known local and federated bot applications. Staff with
 `bots.manage` can suspend an application. Suspension advances its revocation
 generation and suspends active installations. Re-enabling the application does
-not silently restore guild grants; guild administrators retain control of bot
+not silently restore guild grants; guild administrators keep control of bot
 membership and installation state.
 
-Instances manages exact-domain `silence` and `suspend` rules using Kaede's
+**Instances** manages exact-domain `silence` and `suspend` rules using Kaede's
 existing `InstanceBlock` enforcement. Subdomains are included only when the
-operator selects that option. Policy changes use the existing lock and
+operator selects that option. Policy changes go through the existing lock and
 reconciliation path, so queues and replicas observe the new rule consistently.
 
-Operators lists active grants. Owners can add or revoke non-owner roles. Owner
-rows are visible but remain CLI managed.
+**Operators** lists active grants. Owners can add or revoke non-owner roles.
+Owner rows are visible but remain CLI managed.
 
-Audit lists recent instance actions with actor, action, target, safe metadata,
-and timestamp. Sensitive secrets and message bodies are not written to audit
-metadata.
+**Audit** lists recent instance actions with actor, action, target, safe
+metadata, and timestamp. Sensitive secrets and message bodies are not written
+to audit metadata.
 
 ### Reports and Trust & Safety
 
@@ -96,17 +97,17 @@ the status of their own reports at `/reports`. Categories are fixed in code:
 - malware or phishing
 - other
 
-When a report is submitted, the server rechecks the reporter's channel access
-and copies the message content, author reference, channel reference, and message
-timestamp into the case. This prevents later edits or deletion from erasing the
+When a report is submitted, the server rechecks the reporter's channel access.
+It then copies the message content, author reference, channel reference, and
+message timestamp into the case, so later edits or deletion cannot erase the
 review record. The reporter cannot read the evidence snapshot, assignee, or
 internal resolution.
 
-E2EE message reports are disabled because the server cannot verify or safely
-copy plaintext it does not possess. Kaede does not ask a client to upload
+E2EE message reports are disabled. The server cannot verify or safely copy
+plaintext it does not possess, and Kaede does not ask a client to upload
 locally decrypted content as server-trusted evidence.
 
-The Trust & Safety queue is instance-level. Guild moderators do not receive it.
+The Trust & Safety queue is instance-level; guild moderators do not receive it.
 Authorized staff can triage, review, request more information, record action or
 no action, mark duplicates, and reopen cases. Report creation is rate limited to
 10 per local user per hour.
@@ -134,8 +135,8 @@ no action, mark duplicates, and reopen cases. Report creation is rate limited to
 
 Every active local human user may create applications. Opening `/developers`
 provisions a protected **Personal** team if the account does not have one yet.
-Personal is always available, stays private to that account, and owns new
-applications by default even when the user also belongs to shared teams. Users
+Personal is always available and stays private to that account. It owns new
+applications by default, even when the user also belongs to shared teams. Users
 may create named teams and add other local users to those shared workspaces.
 
 Developer-team roles are separate from instance-administrator roles:
@@ -171,14 +172,14 @@ An application page manages:
 - exact-instance allow and deny rules
 - active and suspended installations
 
-Control credentials are shown once, stored as hashes, and have only
+Control credentials are shown once and stored as hashes. They carry only
 `workers.manage` and `commands.manage`. They cannot authenticate a user session,
 a bot REST request, or a Gateway connection. Revocation is immediate for future
 control operations.
 
 Workers generate their Ed25519 private key locally. Only the public key is
-enrolled. A worker exchanges a short assertion for an eight-minute target token,
-and every REST or Gateway request carries a nonce-based DPoP proof bound to the
+enrolled. A worker exchanges a short assertion for an eight-minute target token.
+Every REST or Gateway request carries a nonce-based DPoP proof bound to the
 HTTP method, path, query, token, and worker key.
 
 ### Guild installation
@@ -196,10 +197,11 @@ Administrator. The authoritative guild home rechecks that permission before
 committing the installation.
 
 The same link works for a guild on another Kaede instance. The target retrieves
-a signed manifest from the application home, applies both operators' federation
-policy, creates the bot member and role at the guild authority, and stores the
-installation grant. Bot workers then connect directly to that target instance;
-runtime traffic is not proxied through the application home.
+a signed manifest from the application home and applies both operators'
+federation policy. It then creates the bot member and role at the guild
+authority and stores the installation grant. Bot workers connect directly to
+that target instance; runtime traffic is not proxied through the application
+home.
 
 Guild administrators manage installed bots at
 `/g/{guild-ref}/integrations`. Removal revokes future access, removes the bot
@@ -218,14 +220,14 @@ permission checked by the authoritative guild home and delivered over the bot's
 direct Gateway. A bot can respond immediately or defer within the 15-minute
 interaction lifetime.
 
-In plaintext channels, content and history require their own scope and
+In plaintext channels, content and history require their own scope and the
 `message_content` intent. In an E2EE channel, server-side content and history
 remain unavailable. `interaction_only` accepts only the encrypted command
-payload deliberately submitted by the user. `participant` reserves the
-permission boundary for the forthcoming device/key protocol; until a verified
-bot device is admitted, encrypted payloads remain opaque and no API falls back
-to plaintext. A bot operator that later receives room keys becomes a recipient
-and may retain anything the bot decrypts.
+payload a user submits with the command; nothing arrives ambiently.
+`participant` reserves the permission boundary for the forthcoming device/key
+protocol. Until a verified bot device is admitted, encrypted payloads remain
+opaque and no API falls back to plaintext. A bot operator that later receives
+room keys becomes a recipient and may retain anything the bot decrypts.
 
 ### Developer API
 
@@ -261,7 +263,7 @@ and reports. Bot users reuse the existing user/member/message payloads with an
 explicit bot discriminator, so badges work in rosters and beside message authors
 without a separate identity system.
 
-Secrets are never stored in plaintext. Control and target tokens are hash-only;
-worker private keys remain outside Kaede. Installation, token, interaction,
+Secrets are never stored in plaintext. Control and target tokens are hash-only,
+and worker private keys stay outside Kaede. Installation, token, interaction,
 report, and federation paths have explicit count, byte, time, replay, and rate
 bounds.

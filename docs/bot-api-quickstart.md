@@ -1,15 +1,17 @@
 # Python bot API quickstart
 
-The `kaede-bot` package connects a worker directly to every Kaede instance where the application is installed. The application home manages identity and configuration; it is not a traffic proxy.
+The `kaede-bot` package connects your worker directly to every Kaede instance where your application is installed. The application home only manages identity and configuration. It never proxies traffic.
 
 ## Create the application
 
-Open **User settings → Developer Portal**, create an application, and select the scopes and Gateway intents it needs. Create an invite template and use its link to install the bot in a guild. Remote guilds work through the same consent page.
+Open **User settings → Developer Portal** and create an application. Pick the scopes and Gateway intents it needs. Then create an invite template and use its link to install the bot in a guild. Remote guilds go through the same consent page.
 
-Message content is a separate scope and intent. Do not request it for command-only bots. In E2EE channels, `interaction_only` accepts only encrypted command payloads deliberately submitted to the bot. `participant` reserves the permission boundary for Kaede's forthcoming bot-device key protocol; until a verified device is admitted, the SDK receives opaque encrypted envelopes and no plaintext history.
+Message content is a separate scope and intent. Don't request it for a command-only bot.
 
-Create a control credential in the application page and store it as
-`KAEDE_BOT_CONTROL_TOKEN`. The token is shown once and can only enroll workers
+E2EE channels have two modes you should understand before choosing one. `interaction_only` accepts only encrypted command payloads that a user submits to the bot on purpose. `participant` reserves the permission boundary for Kaede's forthcoming bot-device key protocol; until a verified device is admitted, the SDK receives opaque encrypted envelopes and no plaintext history.
+
+Create a control credential on the application page and store it as
+`KAEDE_BOT_CONTROL_TOKEN`. The token is shown once. It can only enroll workers
 and publish commands.
 
 ## Enroll a worker once
@@ -43,7 +45,7 @@ async def enroll() -> None:
 asyncio.run(enroll())
 ```
 
-Keep `KAEDE_BOT_CONTROL_TOKEN` in the deployment secret store and rotate it from the Developer Portal when needed. The bot never uses a human session during normal operation.
+Keep `KAEDE_BOT_CONTROL_TOKEN` in your deployment secret store, and rotate it from the Developer Portal when needed. Your bot never uses a human session during normal operation.
 
 ## Run the bot
 
@@ -64,11 +66,11 @@ async def ping(interaction: kaede.Interaction) -> None:
 asyncio.run(bot.start("https://chat.example", "https://community.example"))
 ```
 
-Call `sync_commands(application_home=..., control_token=...)` from a controlled deployment job when command definitions change. It is not needed on every process start.
+When your command definitions change, call `sync_commands(application_home=..., control_token=...)` from a controlled deployment job. You don't need to run it on every process start.
 
 ## IDs and usernames
 
-Kaede resources use composite references such as `987654321@chat.example`. A snowflake is an opaque database and ordering identifier; it cannot be decoded into a username. Fetch the user once and use the returned handle:
+Kaede resources use composite references such as `987654321@chat.example`. A snowflake is an opaque database and ordering identifier; it can't be decoded into a username. Fetch the user once and use the returned handle:
 
 ```python
 ref = kaede.EntityRef.parse("987654321@chat.example")
@@ -77,10 +79,10 @@ print(user.handle)   # regular username@instance formatting
 print(user.mention)  # <@987654321@chat.example>
 ```
 
-Always retain the full composite reference. Two instances may issue the same numeric snowflake.
+Always keep the full composite reference. Two instances may issue the same numeric snowflake.
 
 ## Rate limits and reconnects
 
-The SDK reads `Retry-After`, obtains short-lived target tokens, signs every request with the enrolled worker key, sends Gateway heartbeats, and resumes from per-topic sequence cursors. Event delivery is at least once; persistent bots should make handlers idempotent.
+The SDK handles the connection plumbing for you. It reads `Retry-After`, obtains short-lived target tokens, and signs every request with the enrolled worker key. It also sends Gateway heartbeats and resumes from per-topic sequence cursors. Event delivery is at least once, so persistent bots should make their handlers idempotent.
 
-Kaede never forwards bot tokens between instances. Revoke a worker in the Developer Portal to stop future token issuance and Gateway sessions at every target after their short token lifetime.
+Kaede never forwards bot tokens between instances. To cut off a worker, revoke it in the Developer Portal; token issuance and Gateway sessions stop at every target once the short token lifetime runs out.

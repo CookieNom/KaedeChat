@@ -2,11 +2,11 @@
 
 Kaede separates chat federation from mobile push identity. The official mobile
 app can connect to any compatible home, while its closed-app notifications use
-the Kaede-operated relay at `push.kaede.chat`. A home does not need the official
-Firebase or APNs credentials.
+the Kaede-operated relay at `push.kaede.chat`. Your home does not need the
+official Firebase or APNs credentials.
 
-Push is a wake mechanism, not a message transport. Chat and federation continue
-to work when the relay or a platform provider is unavailable.
+Push is a wake mechanism, not a message transport. Chat and federation keep
+working when the relay or a platform provider is unavailable.
 
 ## Delivery choices
 
@@ -32,18 +32,18 @@ application ID at build time. A home cannot redirect its provider token.
 2. The app creates a random route ID, wake-authentication secret, and relay
    management secret in Android Keystore or iOS Keychain.
 3. The authenticated app asks its home for a five-minute enrollment grant. The
-   home signs the relay audience, app ID, platform, and route ID. It includes no
-   Kaede user or room identifier.
-4. The app sends that grant and its FCM/APNs-via-FCM token directly to the pinned
-   relay. The relay verifies the home's federation key and stores the provider
-   token encrypted.
-5. The relay returns an opaque subscription and signed receipt. The app gives
+   home signs the relay audience, app ID, platform, and route ID. The grant
+   includes no Kaede user or room identifier.
+4. The app sends that grant and its FCM/APNs-via-FCM token directly to the
+   pinned relay. The relay verifies the home's federation key and stores the
+   provider token encrypted.
+5. The relay returns an opaque subscription and a signed receipt. The app gives
    only that receipt, subscription, route ID, and wake secret to its home.
 6. The home verifies the relay receipt and stores the subscription and wake
    secret. It never receives the official provider token.
 
 Provider-token refresh repeats enrollment. The relay permits separate opaque
-routes for the same provider token so a future multi-account session vault can
+routes for the same provider token, so a future multi-account session vault can
 deliver to more than one home without changing the wire protocol. The current
 mobile app keeps one active account at a time. Logout removes that home binding
 and attempts both device-authorized and signed-home revocation; subscriptions
@@ -76,15 +76,15 @@ The relay forwards a version 2 data payload containing only:
 }
 ```
 
-The relay never receives the wake secret and therefore cannot invent a wake
-that the app accepts. The app verifies the route, expiry, and constant-time HMAC
-before contacting the home or showing a fallback. It then redeems the
-single-use event token over its authenticated home session. The home rechecks
-device ownership, current room access, blocks, read state, DND, guild settings,
-message deletion, and self-authorship before returning display details.
+The relay never receives the wake secret, so it cannot invent a wake the app
+will accept. The app verifies the route, expiry, and constant-time HMAC before
+contacting the home or showing a fallback. It then redeems the single-use event
+token over its authenticated home session. Before returning display details,
+the home rechecks device ownership, current room access, blocks, read state,
+DND, guild settings, message deletion, and self-authorship.
 
 An already-used, expired, suppressed, malformed, or unauthenticated wake is
-silent. A generic local fallback is shown only for an authentic wake whose home
+silent. A generic local fallback appears only for an authentic wake whose home
 temporarily cannot be reached.
 
 ## Privacy
@@ -97,25 +97,26 @@ temporarily cannot be reached.
 | Remote sender or guild | No device, provider, or relay information |
 | Device | Details fetched from its authenticated home; E2EE plaintext only after local decryption |
 
-Relay subscription and delivery tables do not contain Kaede account, guild,
-channel, or message IDs.
-Provider tokens are encrypted at rest. Application logs must redact provider
-tokens, subscriptions, enrollment grants, receipts, wake fields, and device
-secrets. Completed provider outcomes are retained for one day for idempotency;
-expired subscriptions and queued wakes are purged by retention jobs.
+Relay subscription and delivery tables contain no Kaede account, guild,
+channel, or message IDs. Provider tokens are encrypted at rest. Application
+logs must redact provider tokens, subscriptions, enrollment grants, receipts,
+wake fields, and device secrets. Completed provider outcomes are retained for
+one day for idempotency; retention jobs purge expired subscriptions and queued
+wakes.
 
 ## End-to-end encrypted rooms
 
 The relay path is unchanged for E2EE because it carries only an opaque wake.
-The home returns the generic text `New encrypted message` and no sender profile
-when it cannot safely produce plaintext. A device may replace that with a local
-preview only after retrieving ciphertext and decrypting with device-held keys.
+When the home cannot safely produce plaintext, it returns the generic text
+`New encrypted message` and no sender profile. A device may replace that with a
+local preview only after retrieving ciphertext and decrypting with device-held
+keys.
 
 Kaede's current encrypted envelope may include explicit recipient mention
 references for notification routing. Those references are visible to the
-participating homes, but never enter the relay or provider payload. A future
-metadata-private encryption mode will need an authenticated per-recipient hint;
-without one it can offer generic all-message wakes or no closed-app wakes, not
+participating homes but never enter the relay or provider payload. A future
+metadata-private encryption mode will need an authenticated per-recipient hint.
+Without one it can offer generic all-message wakes or no closed-app wakes, not
 mention-only delivery.
 
 ## Home configuration
@@ -138,17 +139,17 @@ KAEDE_PUSH_RELAY_SERVICE_ENABLED=true
 KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64=<base64 service-account JSON>
 ```
 
-Only relay workers receive that credential. Ordinary homes do
-not set it. A custom build can instead use `KAEDE_PUSH_ENABLED=true` with
+Only relay workers receive that credential. Don't set it on an ordinary home.
+A custom build can instead use `KAEDE_PUSH_ENABLED=true` with
 `KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64`, but that legacy/direct transport is not
 compatible with the official store app.
 
 ## Existing deployment conversion
 
 1. Apply the Alembic migration. Existing `push_devices` become `direct_fcm`
-   devices and continue working during the client transition.
-2. Enable the relay variables on each home and restart API, worker, scheduler,
-   and preflight services.
+   devices and keep working during the client transition.
+2. Enable the relay variables on each home and restart the API, worker,
+   scheduler, and preflight services.
 3. Configure the Firebase credential only on the relay operator.
 4. Ship an official app containing its matching Firebase client file and relay
    pin. When users next enable or refresh notifications, the app registers with
@@ -161,7 +162,8 @@ No chat data migration or federation outage is required.
 ## Failure and abuse handling
 
 - Relay failure never rolls back a message or federation transaction.
-- A `410` disables the stale device binding; users can re-enable it in settings.
+- A `410` disables the stale device binding; users can re-enable it in
+  settings.
 - A `429` includes `Retry-After`; the home keeps the same idempotency key.
 - Registration and wakes are limited by source, authenticated home, strict
   payload size, and relay capacity.
@@ -170,11 +172,10 @@ No chat data migration or federation outage is required.
 - Calls require a separate urgent lane before call push is enabled.
 - Metrics use aggregate/status labels rather than unbounded home domains.
 
-Operators should monitor home outbox age, relay queue age, provider status,
-invalid-token rates, signature/replay rejection, `429` responses, and key/
-certificate expiry. Closed-app delivery failures should be visible in mobile
-settings but must not become persistent warnings when a user intentionally
-disabled push.
+Monitor home outbox age, relay queue age, provider status, invalid-token rates,
+signature/replay rejection, `429` responses, and key/certificate expiry.
+Closed-app delivery failures should be visible in mobile settings, but must not
+become persistent warnings when a user intentionally disabled push.
 
 ## User controls
 

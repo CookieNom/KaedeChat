@@ -1,9 +1,9 @@
 # Bots and automations
 
 Kaede applications provide bot accounts, commands, interactive components, and
-event-driven automation across local and federated guilds. The API should feel
-familiar to Discord bot developers, but authority stays with the instance that
-owns each guild or conversation.
+event-driven automation. They work in local and federated guilds alike. If
+you've written Discord bots, the API should feel familiar, but authority always
+stays with the instance that owns each guild or conversation.
 
 The management interfaces for application owners and instance operators are
 covered in [Instance Administration and Developer Portal](administration-and-developer-portals.md).
@@ -32,8 +32,8 @@ guild, permissions, event intents, data access, channel restrictions, E2EE mode,
 and grant revision.
 
 A **worker** is a bot runtime or deployment identity. Workers have separate
-asymmetric keys and can be limited to particular target domains, scopes,
-intents, and concurrent Gateway sessions.
+asymmetric keys. Each worker can be limited to particular target domains,
+scopes, intents, and concurrent Gateway sessions.
 
 ```text
                                 REST + Bot Gateway
@@ -49,11 +49,11 @@ Application home:
 ```
 
 One worker normally opens one multiplexed Gateway connection per target, not
-one connection per guild. Removing the application home from the data path also
-keeps an unavailable home from interrupting established installations.
+one connection per guild. Because the application home sits outside the data
+path, an unavailable home does not interrupt established installations.
 
 The target remains authoritative. A signed application manifest proves who
-published it; it does not prove that a bot is installed or permitted to act.
+published it. It does not prove that a bot is installed or permitted to act.
 
 ## Automation types
 
@@ -77,24 +77,24 @@ worker authorizations. It is not a proxy for normal bot traffic.
 The application home publishes a manifest in Kaede's existing signed federation
 envelope. The manifest includes:
 
-- the application and bot-account composite references;
-- the public profile, active status, scopes, intents, and permission ceiling;
-- exact allow or deny rules for target instances;
-- active install templates and command definitions;
-- active worker public keys and their authorization ceilings; and
-- manifest and command generations.
+- the application and bot-account composite references
+- the public profile, active status, scopes, intents, and permission ceiling
+- exact allow or deny rules for target instances
+- active install templates and command definitions
+- active worker public keys and their authorization ceilings
+- manifest and command generations
 
-Targets verify the application home's instance signature, bind every referenced
-identity to that origin, enforce strict schemas and size limits, and cache only
-the records needed for an active installation. A target refreshes worker
-authorization directly from the application home before accepting an unknown or
-stale worker.
+Targets verify the application home's instance signature and bind every
+referenced identity to that origin. They enforce strict schemas and size
+limits, and cache only the records needed for an active installation. Before
+accepting an unknown or stale worker, a target refreshes worker authorization
+directly from the application home.
 
-A developer creates a hash-only `kb1_ctl_` control credential in the Developer
-Portal. During one-time enrollment, the Python wrapper generates an Ed25519
-worker key locally and submits only its public key. The private key is written to
-an owner-only state directory and is used for target assertions and DPoP
-proofs. Control credentials can enroll workers and publish commands; they cannot
+You create a hash-only `kb1_ctl_` control credential in the Developer Portal.
+During one-time enrollment, the Python wrapper generates an Ed25519 worker key
+locally and submits only its public key. The private key is written to an
+owner-only state directory and is used for target assertions and DPoP proofs.
+Control credentials can enroll workers and publish commands. They cannot
 connect as the bot, call runtime routes, or authenticate a human session.
 
 E2EE device keys are a separate concern from the worker API key. The current API
@@ -129,16 +129,16 @@ random-single-use-value
 ```
 
 The request body carries those fields plus the URL-safe Ed25519 signature. The
-target checks the exact application reference, worker ID, audience, 60-second
-maximum assertion lifetime, worker validity and target allowlist, current
-installation, and a single-use nonce.
+target checks each one: the exact application reference, worker ID, audience,
+60-second maximum assertion lifetime, worker validity and target allowlist,
+current installation, and a single-use nonce.
 
 Access tokens are random opaque values stored as hashes. A token is bound to:
 
-- application, bot user, worker, and target issuer;
-- the intersection of application and worker scope and intent ceilings;
-- the enrolled worker public-key thumbprint; and
-- creation, eight-minute expiry, last use, and revocation.
+- the application, bot user, worker, and target issuer
+- the intersection of application and worker scope and intent ceilings
+- the enrolled worker public-key thumbprint
+- creation, eight-minute expiry, last use, and revocation
 
 The target-token lifetime is eight minutes. Workers obtain another token with
 their key rather than keeping a permanent target secret. Tokens never appear in
@@ -161,14 +161,15 @@ guild.
    transaction.
 6. An enrolled worker then authenticates and connects directly to that target.
 
-The install link uses the user's existing Kaede session; bot tokens and control
+The install link uses the user's existing Kaede session. Bot tokens and control
 credentials never enter the browser flow. A remote guild selected from a local
 replica sends the install request to the authoritative guild home for the final
 permission check and commit.
 
 Uninstall is authoritative and immediate. It marks the installation revoked,
-revokes target tokens, removes the managed role and bot membership, publishes
-the guild changes, and does not wait for the application home to be online.
+revokes target tokens, removes the managed role and bot membership, and
+publishes the guild changes. It does not wait for the application home to be
+online.
 
 ## Portable invite links
 
@@ -180,9 +181,8 @@ https://apps.example/applications/123/install/moderation
 
 The last path component is a signed template ID. A template defines requested
 scopes, intents, permissions, supported contexts, optional channel restrictions,
-and default E2EE mode. Developers can provide separate `commands-only`,
-`moderation`, and `workflow` links without placing mutable permission bitfields
-in the URL.
+and default E2EE mode. You can publish separate `commands-only`, `moderation`,
+and `workflow` links without placing mutable permission bitfields in the URL.
 
 Invite links contain no access token, worker key, receipt, reusable code, or
 unsigned permission override. Locale and a suggested guild ID may be carried as
@@ -199,7 +199,7 @@ For a remote guild, the user's home sends a signed, actor-bound install intent
 to the guild home. The guild home rechecks the user, membership, `MANAGE_GUILD`,
 template revision, and its local policies. It returns a short-lived consent
 challenge bound to the user, guild, application, grants, and expiry. The user
-confirms that exact challenge through their existing home instance; a second
+confirms that exact challenge through their existing home instance. A second
 account on the guild home is not required.
 
 If the authority is offline, lacks the capability, or rejects the application,
@@ -235,7 +235,7 @@ application ID to the relevant instance but never shares room content or keys.
 
 Deleting a template disables new installs without changing existing grants.
 Expanding a template also never expands an existing installation. Invite
-resolution is cached within bounded limits and rate-limited by user, source,
+resolution is cached within bounded limits. It is rate-limited by user, source,
 application, origin, and target.
 
 ## Federation policy
@@ -249,10 +249,10 @@ Application target policy supports:
 - `blocklist`
 - `local_only`
 
-An instance operator can disable remote applications, require review, allow or
-block exact origins/applications, and suspend an application, publisher, key, or
-origin. A guild can be stricter than its instance. A worker can also refuse
-targets that the developer does not trust.
+An instance operator can disable remote applications, require review, or allow
+and block exact origins and applications. The operator can also suspend an
+application, publisher, key, or origin. A guild can be stricter than its
+instance, and a worker can refuse targets that the developer does not trust.
 
 Rules match only exact canonical HTTPS issuers or exact composite
 application IDs. Wildcard and suffix rules are not supported. An explicit
@@ -320,7 +320,7 @@ outside this contract, and there is no direct-message event intent.
 ## REST API
 
 Bot endpoints use `/api/v1` and reuse the existing resource schemas and business
-logic. Only handlers that intentionally accept an `ActorPrincipal` admit a bot
+logic. Only handlers written to accept an `ActorPrincipal` admit a bot
 principal.
 
 ### Developer management
@@ -383,8 +383,9 @@ message access. Kaede supports:
 - User and message context commands.
 - Immediate responses and deferred responses within the interaction lifetime.
 
-Commands are application-global and become
-available after authoritative registration. Each atomic command replacement increments the signed application command generation.
+Commands are application-global and become available after authoritative
+registration. Each atomic command replacement increments the signed application
+command generation.
 
 Example command definition:
 
@@ -426,12 +427,17 @@ counts, nesting, and total bytes are bounded and validated by the authority.
 
 ### Delivery
 
-An interaction includes its ID, application and installation references, guild and channel references, invoking user, command definition, bounded options, encryption payload when required, and expiry time.
+An interaction carries everything a handler needs: its ID, application and
+installation references, guild and channel references, the invoking user, the
+command definition, bounded options, an encryption payload when required, and
+an expiry time.
 
-Delivery uses the direct Bot Gateway. Events are at-least-once and carry a stable
-interaction ID, so handlers must be idempotent.
+Delivery uses the direct Bot Gateway. Events are at-least-once and carry a
+stable interaction ID, so handlers must be idempotent.
 
-An interaction remains valid for fifteen minutes. A bot may respond immediately or defer before sending its one channel response. E2EE responses must carry an encrypted message envelope.
+An interaction remains valid for fifteen minutes. A bot may respond immediately
+or defer before sending its one channel response. E2EE responses must carry an
+encrypted message envelope.
 
 ## Bot Gateway
 
@@ -442,25 +448,26 @@ connections. A worker obtains an eight-minute target token, connects to
 The target sends a heartbeat interval. The worker identifies with its token,
 proof, and last per-topic cursors. `READY` lists active installations visible
 to that worker. Event frames carry a type, topic, topic sequence, and filtered
-payload. The server retains a bounded topic backlog; a cursor older than that
+payload. The server retains a bounded topic backlog. A cursor older than that
 backlog receives an explicit `GAP` event instead of silently missing data.
 
-Intent selection controls delivery, while scopes and current installation
-grants control fields and actions. Message content and attachments are removed
-unless both the worker and installation have the content grant. Gateway session
-counts are atomically limited per worker, token expiry is checked while the
-connection is open, frames are capped at 1 MiB, and heartbeats keep the session
-lease alive.
+Intent selection controls delivery. Scopes and current installation grants
+control fields and actions. Message content and attachments are removed unless
+both the worker and installation have the content grant.
+
+Sessions have hard limits. Gateway session counts are atomically limited per
+worker, token expiry is checked while the connection is open, and frames are
+capped at 1 MiB. Heartbeats keep the session lease alive.
 
 ## Rate limits and backpressure
 
 Runtime REST requests consume shared Dragonfly token buckets for both the
 application and worker. The defaults allow 1,200 requests per application and
-600 per worker each minute on a target. Token issuance, control operations,
-application creation, invite resolution, interaction creation, and federated
-install routes have their own smaller buckets. Message sends, reactions,
-uploads, slow mode, mention limits, and other reused chat actions keep their
-ordinary per-resource limits.
+600 per worker each minute on a target. Some routes have their own smaller
+buckets: token issuance, control operations, application creation, invite
+resolution, interaction creation, and federated installs. Message sends,
+reactions, uploads, slow mode, mention limits, and other reused chat actions
+keep their ordinary per-resource limits.
 
 A limited request returns `429`, `Retry-After`, and the standard
 `X-RateLimit-*` headers. The response body has the stable `RATE_LIMITED` code
@@ -489,26 +496,33 @@ The current server, federation, UI, and Python model preserve those mode and
 payload boundaries so the forthcoming device/key-distribution protocol can be
 added without changing the Bot API contract. Until that protocol supplies and
 verifies bot device keys, applications must treat encrypted payloads as opaque
-ciphertext; no route falls back to plaintext.
+ciphertext. No route falls back to plaintext.
 
 Once a bot is deliberately made a cryptographic participant, its operator is a
 recipient and can retain anything it decrypts. Removing access can stop future
-delivery but cannot erase data already copied by that operator. Pre-install
+delivery, but it cannot erase data already copied by that operator. Pre-install
 history remains excluded by default.
 
 ## Storage model
 
-The two bot migrations add durable PostgreSQL records for developer teams and
-members, applications and bot identities, hash-only control credentials,
-workers and public keys, exact target rules, install templates, commands,
-installations, short-lived target-token digests, interactions, instance
-administrator grants and audit events, and Trust & Safety reports.
+The two bot migrations add durable PostgreSQL records for:
+
+- developer teams and members
+- applications and bot identities
+- hash-only control credentials
+- workers and public keys
+- exact target rules, install templates, and commands
+- installations and short-lived target-token digests
+- interactions
+- instance administrator grants and audit events
+- Trust & Safety reports
 
 Composite references retain both snowflake and origin. Database constraints
-bind bot users to applications, enforce fixed role and state values, keep grants
-non-negative, prevent duplicate installations and command names, and preserve
-complete foreign references. Deleting an application cascades its private
-control records; report and audit records follow their own retention policy.
+bind bot users to applications and enforce fixed role and state values. They
+keep grants non-negative, prevent duplicate installations and command names,
+and preserve complete foreign references. Deleting an application cascades its
+private control records. Report and audit records follow their own retention
+policy.
 
 Dragonfly stores request nonces, DPoP replay markers, rate buckets, Gateway
 session counts, topic cursors, and bounded event backlogs. Raw control tokens,
@@ -547,43 +561,42 @@ asyncio.run(bot.start("https://chat.example", "https://community.example"))
 The package provides:
 
 - `WorkerState.enroll`, safe local key persistence, and control-token command
-  synchronization;
-- direct multi-target token exchange, DPoP signing, heartbeat, cursor resume,
-  bounded reconnect, and `Retry-After` handling;
-- `Client.event` and `Client.command` decorators;
-- typed `EntityRef`, `User`, `Message`, `Interaction`, and error classes;
+  synchronization
+- direct multi-target token exchange and DPoP signing
+- heartbeat, cursor resume, bounded reconnect, and `Retry-After` handling
+- `Client.event` and `Client.command` decorators
+- typed `EntityRef`, `User`, `Message`, `Interaction`, and error classes
 - message send/edit/delete, history iteration primitives, reactions, and user
-  lookup; and
-- explicit `content_unavailable`, encrypted payload, and composite-reference
-  handling.
+  lookup
+- `content_unavailable`, encrypted payload, and composite-reference handling
 
 A snowflake is never converted into a username. `fetch_user(EntityRef)`
-resolves the authoritative profile, and `User.handle` returns normal
-`username@instance` formatting while `User.mention` retains the full
+resolves the authoritative profile. `User.handle` returns normal
+`username@instance` formatting, while `User.mention` retains the full
 composite reference.
 
 ## User-facing behavior
 
 User settings links to the responsive Developer Portal. Every active local user
-may create applications. The portal manages personal or shared teams,
-application profile and defaults, commands, hash-only control credentials,
-worker public keys, install templates, exact instance policy rules, and current
-installations. Secrets are shown once.
+may create applications. The portal manages personal or shared teams, the
+application profile and defaults, commands, and hash-only control credentials.
+It also manages worker public keys, install templates, exact instance policy
+rules, and current installations. Secrets are shown once.
 
 Portable invite links open a native consent card. The guild chooser lists only
-guilds where the user can manage the guild, including federated replicas. It
-shows requested API scopes, Gateway intents, permission bits, E2EE behavior,
-application origin, support and privacy links, and the third-party retention
-warning. Guild settings has a separate Integrations page for installed bots and
-immediate revocation.
+guilds where the user can manage the guild, including federated replicas. The
+card shows requested API scopes, Gateway intents, permission bits, E2EE
+behavior, application origin, support and privacy links, and the third-party
+retention warning. Guild settings has a separate Integrations page for
+installed bots and immediate revocation.
 
 Bot users have an authoritative `account_type=bot` discriminator and
 application reference. Member lists and bot-authored messages render an
 accessible `BOT` badge next to the name. The badge comes from trusted account
-data, not a nickname, role, embed, webhook name, or remote HTML. Bot usernames
-use ordinary account formatting with a collision-resistant numeric suffix, and
-API payloads include the readable `username@instance` handle alongside the
-composite snowflake reference.
+data, never from a nickname, role, embed, webhook name, or remote HTML. Bot
+usernames use ordinary account formatting with a collision-resistant numeric
+suffix. API payloads include the readable `username@instance` handle alongside
+the composite snowflake reference.
 
 ## Operational rules
 

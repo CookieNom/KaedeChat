@@ -1,8 +1,14 @@
 # kaede-fed/1
 
-This is the versioned protocol contract for discovery, signed HTTP and hot-link
-transport, durable DMs, guild synchronization, remote writes, authenticated
-remote media, voice token brokering, occupancy, and call signaling.
+This document is the versioned protocol contract between Kaede instances. It
+covers:
+
+- discovery and versioning
+- signed HTTP and hot-link transport
+- durable DMs
+- guild synchronization and remote writes
+- authenticated remote media
+- voice token brokering, occupancy, and call signaling
 
 ## 1. Discovery and versions
 
@@ -26,45 +32,52 @@ remote media, voice token brokering, occupancy, and call signaling.
 
 The server value is a public hostname, not a URL. Clients connect only to port
 443 after resolving and pinning a public IP. Version 1 requests include
-`X-Kaede-Version: 1`. Peers advertising `request-nonce/1` use the replay-protected
-version 2 signing form below. No mutually supported version is
-`KAED_FED_UNSUPPORTED_VERSION`.
-Capabilities are optional, bounded strings. `guild-history-sync/1` advertises the
-permission-bound retained-history transfer in section 5.1. A peer MUST NOT call
-that extension when it is absent. `e2ee-transport/1` advertises only bounded opaque
-encrypted-message storage and relay as described in section 6.1. It does not claim
-that the instance or its clients implement key management, MLS, device verification,
-or an end-to-end encryption user experience.
-`dm-history-page/1` advertises signed, participant-authorized, bounded DM
-history paging. A non-authoritative home MUST NOT evict older remote-authored
-cache rows until the conversation authority advertises this capability. Media
-referenced by an on-demand page uses the same capability: every signed media
-authorization and byte request carries the exact conversation and message
-composite references, and the attachment origin verifies that its durable
-attachment row belongs to that message in that conversation. Authorization
-based only on a peer participating in some other DM is forbidden.
-`profile-by-ref/1` advertises exact composite-ID public profile proofs. It lets a
-replica resolve an opaque historical author from that user's own home without
-trusting mutable profile data relayed by a guild authority. Absence of the
-capability, an unavailable home, or an unknown user leaves a non-blocking generic
-identity and never invalidates the surrounding guild snapshot or history import.
-`member-self-moderation/1` advertises the affected-user-only timeout status
-lookup in section 5. Its response is never part of a guild replica or broadcast.
-`message-search/1` advertises the signed, permission-bound search endpoint in
-section 7. A user home never receives or shares the authority's search-engine
-credentials. Encrypted channels are excluded and a missing capability degrades
-to explicitly partial local-cache results.
+`X-Kaede-Version: 1`; peers advertising `request-nonce/1` use the
+replay-protected version 2 signing form below. When there is no mutually
+supported version, the failure code is `KAED_FED_UNSUPPORTED_VERSION`.
+
+Capabilities are optional, bounded strings:
+
+- `guild-history-sync/1` advertises the permission-bound retained-history
+  transfer in section 5.1. A peer MUST NOT call that extension when it is
+  absent.
+- `e2ee-transport/1` advertises only bounded opaque encrypted-message storage
+  and relay as described in section 6.1. It does not claim that the instance or
+  its clients implement key management, MLS, device verification, or an
+  end-to-end encryption user experience.
+- `dm-history-page/1` advertises signed, participant-authorized, bounded DM
+  history paging. A non-authoritative home MUST NOT evict older remote-authored
+  cache rows until the conversation authority advertises this capability. Media
+  referenced by an on-demand page uses the same capability: every signed media
+  authorization and byte request carries the exact conversation and message
+  composite references, and the attachment origin verifies that its durable
+  attachment row belongs to that message in that conversation. Authorization
+  based only on a peer participating in some other DM is forbidden.
+- `profile-by-ref/1` advertises exact composite-ID public profile proofs. It
+  lets a replica resolve an opaque historical author from that user's own home
+  without trusting mutable profile data relayed by a guild authority. Absence
+  of the capability, an unavailable home, or an unknown user leaves a
+  non-blocking generic identity and never invalidates the surrounding guild
+  snapshot or history import.
+- `member-self-moderation/1` advertises the affected-user-only timeout status
+  lookup in section 5. Its response is never part of a guild replica or
+  broadcast.
+- `message-search/1` advertises the signed, permission-bound search endpoint in
+  section 7. A user home never receives or shares the authority's search-engine
+  credentials. Encrypted channels are excluded, and a missing capability
+  degrades to explicitly partial local-cache results.
+- `request-nonce/1`, once observed for a peer, is pinned: a later discovery
+  document cannot silently remove it and downgrade that relationship.
+
 Rendered same-origin media paths carry a 15-minute HMAC. After expiry, the
 user's home MAY renew that exact signed tuple only after authenticating the
 user, confirming current conversation participation, and repeating the
 origin's exact conversation/message/attachment authorization. An expired or
 tampered path is never itself sufficient to fetch bytes.
-Once `request-nonce/1` has been observed for a peer it is pinned: a later
-discovery document cannot silently remove it and downgrade that relationship.
 
 `GET /_kaede/v1/keys` returns `verify_keys` and `old_verify_keys`, keyed by key ID.
 Rotation adds the former current key to `old_verify_keys`. Senders MUST continue
-advertising old keys while retained events may reference them; consumers refresh
+advertising old keys while retained events may reference them. Consumers refresh
 cached sets at least hourly and mark a previously known key expired when it is
 omitted from a later authoritative response.
 
@@ -159,19 +172,21 @@ strings. Envelopes from the future beyond the negotiated HTTP clock skew or olde
 than the receiver's configured event-retention window are rejected, preventing an
 idempotency record that has aged out from enabling an indefinite replay. Unknown
 optional content keys are ignored; missing required keys reject only that event.
+
 Before signature canonicalization, a decoded envelope is also limited to 24 nested
 levels, 16,384 JSON values, 1,024 members per object, 4,096 items per array, and
 256 UTF-8 bytes per object key. Strings remain bounded by the 1 MiB frame/request
 limit. NUL, floating-point numbers, non-JSON values, and integers outside the
-interoperable range `-(2^53-1)` through `2^53-1` are rejected. Larger identifiers
+interoperable range `-(2^53-1)` through `2^53-1` are rejected; larger identifiers
 and counters use decimal strings. Requiring integer or string numeric projections
-avoids Python/JavaScript number serialization differences in signed bytes.
-These structural limits apply equally to unknown
-signed extension members and prevent extension data from becoming a parser, stack,
-or canonicalization resource-exhaustion surface.
+avoids Python/JavaScript number serialization differences in signed bytes. The
+same structural limits apply to unknown signed extension members, which keeps
+extension data from becoming a parser, stack, or canonicalization
+resource-exhaustion surface.
+
 JSON object names must be unique at every level. Receivers reject duplicate-key,
 non-finite, floating-point, out-of-range integer, or pathologically nested request
-JSON before route validation so independent implementations cannot interpret the
+JSON before route validation, so independent implementations cannot interpret the
 same signed bytes differently.
 
 ### Durable event registry
@@ -342,6 +357,7 @@ equivalent request/response form. In either form, the user domain must match the
 signing origin. The guild home removes membership before emitting the sequenced
 member removal and target-specific access revocation. Guild owners cannot leave
 through this operation.
+
 The member's home instance revokes local access and durably records the composite
 `(guild_id,guild_origin,user_id,user_origin)` departure before delivering the
 leave request. A delayed authority-signed member-add event or snapshot is still
@@ -350,6 +366,7 @@ Only a new explicit local invite/join flow may transition the record to pending;
 the record is removed only after an authoritative snapshot containing that member
 has applied successfully. The departure record intentionally survives deletion of
 the cached guild replica.
+
 Kicks and user bans additionally send a direct target-specific access revocation.
 An instance ban sends a direct origin-wide revocation even after every member from
 that origin has been removed from the authoritative membership set. It also emits
@@ -399,11 +416,12 @@ expiry and reason and a false indefinite marker. The user home exposes this only
 through its authenticated `members/@me/moderation-status` API and MUST NOT persist
 the reason in its guild replica or publish it to guild subscribers. It may fetch
 the response on demand after an ordinary member-state invalidation. Existing
-replicas continue to provide the non-private timeout timing during rolling upgrades;
-when the capability is absent or temporarily unreachable, clients show that timing
-with an unavailable reason and `details_available: false`; authoritative enforcement
-remains at the guild home. A user home may perform deduplicated domain-only capability
-rediscovery and clients automatically retry that private lookup without a user click.
+replicas continue to provide the non-private timeout timing during rolling
+upgrades. When the capability is absent or temporarily unreachable, clients show
+that timing with an unavailable reason and `details_available: false`;
+authoritative enforcement remains at the guild home. A user home may perform
+deduplicated domain-only capability rediscovery, and clients automatically retry
+that private lookup without a user click.
 
 When home is unavailable, replicas stay mounted and readable and emit availability
 and peer-status updates. Writes remain visibly pending. Unavailability never means
@@ -594,7 +612,9 @@ The media path accepts only `original`, `thumbnail_128`, `thumbnail_512`,
 `thumbnail_1024`, or `poster`. The authenticated peer receives bytes only when it
 has a DM participant on that origin or at least one guild member with visibility
 for the attachment's channel. Origins expose only locally owned, clean,
-message-bound media. Consumers bound the response by their configured attachment
+message-bound media.
+
+Consumers bound the response by their configured attachment
 limit, sniff its bytes, reject active/executable content, scan it through local
 ClamAV, and only then write the private remote cache. Cache entries default to a
 30-day TTL and a 100 GiB LRU ceiling. Downloads are streamed through bounded spool
@@ -602,7 +622,9 @@ files rather than retained as complete byte arrays. Per-process concurrency plus
 atomic per-origin and instance-wide in-flight byte reservations prevent a group of
 slow or large peers from exhausting memory or download capacity. Cache admission
 is serialized against eviction and refuses writes over the configured byte
-ceiling. A requested derivative that does not exist returns 404; it never silently
+ceiling.
+
+A requested derivative that does not exist returns 404; it never silently
 substitutes arbitrary or unscanned content. For compatibility with older clean
 image attachments that predate derivative generation, an authority may return the
 already-scanned bounded original image instead. A `media.delete` envelope must name the
@@ -635,11 +657,15 @@ treated as an authoritative handle; `profile_resolved=false` is the sole marker.
 
 ### Federated message search
 
-`POST /_kaede/v1/search/messages` accepts a structured query (maximum 512
-characters), exactly one `channel`, `guild`, or account-DM scope, bounded author,
-mention, content-type, date, pin, and author-type filters, sort order, opaque
-cursor, and an `actor_ref`. The actor origin must equal the authenticated signing
-origin. The authority rechecks current membership and `VIEW_CHANNEL` plus
+`POST /_kaede/v1/search/messages` accepts:
+
+- a structured query (maximum 512 characters);
+- exactly one `channel`, `guild`, or account-DM scope;
+- bounded author, mention, content-type, date, pin, and author-type filters;
+- a sort order and an opaque cursor; and
+- an `actor_ref`.
+
+The actor origin must equal the authenticated signing origin. The authority rechecks current membership and `VIEW_CHANNEL` plus
 `READ_MESSAGE_HISTORY` for every candidate. Requests and responses have fixed
 size, result-count, cursor, string, and JSON limits and consume a per-origin
 search rate budget.

@@ -3,11 +3,11 @@
 Client releases use `vMAJOR.MINOR.PATCH` or the older
 `desktop-vMAJOR.MINOR.PATCH` tag format. Pushing either tag starts the only
 release workflow. It builds x86-64 Windows and Linux clients, ARM64 and Intel
-macOS clients, and a signed Android APK, then publishes all artifacts and their
-SHA-256 checksums to one GitHub Release. A branch push, pull request, or manual
-workflow dispatch cannot publish a release.
+macOS clients, and a signed Android APK. All artifacts and their SHA-256
+checksums are published to one GitHub Release. A branch push, pull request, or
+manual workflow dispatch cannot publish a release.
 
-Before tagging:
+Before tagging, run:
 
 ```sh
 pnpm --dir frontend install --frozen-lockfile
@@ -20,11 +20,15 @@ make desktop-check desktop-lint desktop-test
 
 Windows releases require the configured code-signing certificate. macOS
 releases require a Developer ID Application identity and notarization secrets.
-Linux AppImage and Debian packages should be tested on a clean supported
-distribution. Release testing must cover login and adaptive Turnstile, secure
-session restart, upload, gateway resume, native device selection, PTT while
-minimized, VAD, echo reference, two-user voice, camera/screen permissions,
-sleep/resume, device unplug, and a federated remote guild.
+Test Linux AppImage and Debian packages on a clean supported distribution.
+Release testing must cover:
+
+- login and adaptive Turnstile, secure session restart, upload, and gateway
+  resume;
+- native device selection, PTT while minimized, VAD, echo reference, and
+  two-user voice;
+- camera/screen permissions, sleep/resume, device unplug, and a federated
+  remote guild.
 
 The release repository must configure these GitHub Actions secrets before a tag
 is pushed:

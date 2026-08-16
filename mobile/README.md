@@ -1,6 +1,6 @@
 # Kaede mobile
 
-Kaede's Android and iOS clients use one Flutter presentation and domain layer while retaining native platform integrations for credentials, biometrics, notifications, media capture, and LiveKit voice/video. The layouts are mobile-first rather than scaled versions of the desktop shell.
+Kaede's Android and iOS clients share one Flutter presentation and domain layer. Native platform integrations remain for credentials, biometrics, notifications, media capture, and LiveKit voice/video. The layouts are mobile-first rather than scaled versions of the desktop shell.
 
 The client connects only to the account's home instance. That instance brokers federation, remote media authorization, presence, history import, direct messages, and voice grants. A mobile client must never call peer federation endpoints directly.
 
@@ -8,8 +8,8 @@ The client connects only to the account's home instance. That instance brokers f
 
 - registration, email verification, password recovery, MFA, rotating sessions, optional biometric/PIN device lock;
 - home-instance discovery, guilds, federated guilds, direct messages, friends and blocks;
-- paginated chat history, replies, pins, reactions, mentions, custom emoji, attachments, image viewing, video playback, GIFs, typing, read state, and offline snapshots;
-- complete guild administration for overview, channels/categories, synchronized permission overwrites, roles and hierarchy, members, moderation, bans, instance bans, invites, emoji, webhooks, audit records, ownership transfer, leave, and deletion;
+- paginated chat history with replies, pins, reactions, mentions, and custom emoji; attachments, image viewing, video playback, and GIFs; typing, read state, and offline snapshots;
+- complete guild administration: overview, channels/categories, synchronized permission overwrites, and roles and hierarchy; members, moderation, bans, and instance bans; invites, emoji, webhooks, and audit records; ownership transfer, leave, and deletion;
 - LiveKit guild voice and DM calls with native WebRTC echo cancellation, noise suppression, automatic gain control, push-to-talk, voice activity, mute/deafen, camera, screen sharing, and route selection;
 - Android notification channels for DMs, mentions, guild messages, calls, and account/moderation events, with equivalent iOS notification categories;
 - adaptive network behavior: cached navigation and recent messages, small first pages, retryable writes, and deferred full-resolution media.
@@ -18,7 +18,8 @@ All snowflakes and permission masks remain decimal strings on the wire. Entity c
 
 ## Development
 
-Flutter is pinned to `3.41.4` in `.fvmrc`.
+Flutter is pinned to `3.41.4` in `.fvmrc`. Fetch dependencies and run the
+checks:
 
 ```sh
 cd mobile
@@ -43,7 +44,7 @@ flutter build ios --release
 
 ## Android release signing
 
-Generate or provision an upload key outside the repository. Copy `android/key.properties.example` to `android/key.properties`, fill in the four values, and keep both files private. Release builds deliberately do not fall back to the shared debug signing key.
+Generate or provision an upload key outside the repository. Copy `android/key.properties.example` to `android/key.properties`, fill in the four values, and keep both files private. Release builds never fall back to the shared debug signing key.
 
 ```sh
 flutter build appbundle --release
@@ -62,9 +63,9 @@ application updates.
 ## Background notification builds
 
 Official releases use the Kaede relay at `push.kaede.chat`. The official
-Firebase client configuration is injected by protected release CI; federated
-home operators do not receive either it or the provider service account. The
-app pins the relay and registers its provider token directly there.
+Firebase client configuration is injected by protected release CI. Federated
+home operators receive neither it nor the provider service account. The app
+pins the relay and registers its provider token directly there.
 
 Community builds use a distinct application/bundle ID, signing identity,
 Firebase/APNs project, and update lineage. Configure these Dart definitions:
