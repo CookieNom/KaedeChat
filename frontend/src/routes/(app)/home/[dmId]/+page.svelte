@@ -64,6 +64,7 @@
   import GifPicker from '$lib/components/GifPicker.svelte';
   import MessageRow from '$lib/components/MessageRow.svelte';
   import MessageSearch from '$lib/components/MessageSearch.svelte';
+  import NewMessageDialog from '$lib/components/NewMessageDialog.svelte';
   import PinnedMessagesPanel from '$lib/components/PinnedMessagesPanel.svelte';
   import PresencePicker from '$lib/components/PresencePicker.svelte';
   import UploadPreviewTray from '$lib/components/UploadPreviewTray.svelte';
@@ -102,6 +103,7 @@
   let gifPickerEnabled = $state(false);
   let gifPickerOpen = $state(false);
   let messageSearchOpen = $state(false);
+  let newMessageOpen = $state(false);
   let gifConfigurationError = $state('');
   let gifConfigurationLoading = $state(false);
   let featureController: AbortController | null = null;
@@ -1785,12 +1787,15 @@
     </header>
     <div class="sidebar-section-heading">
       <p class="sidebar-section-label">Conversations</p>
-      <a
+      <button
         class="sidebar-create-link"
-        href={resolve('/home')}
-        aria-label="Start a new conversation"
-        title="Start a new conversation"
-        onclick={() => closeMobileNavigation(false)}>+</a
+        type="button"
+        aria-label="New message"
+        title="New message"
+        onclick={() => {
+          closeMobileNavigation(false);
+          newMessageOpen = true;
+        }}>+</button
       >
     </div>
     <nav aria-label="Direct messages">
@@ -2224,6 +2229,8 @@
     {/if}
   </section>
 </main>
+
+<NewMessageDialog bind:open={newMessageOpen} />
 
 {#if profile}
   <UserProfileCard

@@ -35,6 +35,7 @@
   import GuildRail from '$lib/components/GuildRail.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import MessageSearch from '$lib/components/MessageSearch.svelte';
+  import NewMessageDialog from '$lib/components/NewMessageDialog.svelte';
   import { onMount, tick } from 'svelte';
 
   let guilds = $state<Guild[]>([]);
@@ -57,6 +58,7 @@
   let navigationClose: HTMLButtonElement | null = null;
   let messageDialog = $state<HTMLDialogElement | null>(null);
   let messageSearchOpen = $state(false);
+  let newMessageOpen = $state(false);
   let messageDialogError = $state('');
   let messageMode = $state<'direct' | 'group'>('direct');
   let groupName = $state('');
@@ -476,16 +478,6 @@
     }
   }
 
-  function showNewMessageDialog() {
-    handle = '';
-    groupName = '';
-    groupMemberKeys = [];
-    messageMode = 'direct';
-    messageDialogError = '';
-    messageDialog?.showModal();
-    void tick().then(() => messageDialog?.querySelector<HTMLInputElement>('input')?.focus());
-  }
-
   function toggleGroupFriend(user: UserSummary) {
     const key = entityKey(user);
     groupMemberKeys = groupMemberKeys.includes(key)
@@ -674,8 +666,11 @@
     </nav>
     <div class="home-sidebar-heading">
       <span>Direct messages</span>
-      <button type="button" aria-label="Start a direct message" onclick={showNewMessageDialog}
-        ><Icon name="plus" size={17} /></button
+      <button
+        type="button"
+        aria-label="New message"
+        title="New message"
+        onclick={() => (newMessageOpen = true)}><Icon name="plus" size={17} /></button
       >
     </div>
     <nav class="home-dm-list" aria-label="Direct messages">
@@ -1057,6 +1052,8 @@
     </div>
   </section>
 </main>
+
+<NewMessageDialog bind:open={newMessageOpen} />
 
 <dialog
   bind:this={messageDialog}
