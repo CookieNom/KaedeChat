@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -25,6 +26,7 @@ from app.core.dm import (
 )
 from app.core.settings import Settings
 from app.db.models import Channel, DMConversation, User
+from app.federation.replication import replicate_group_notice
 from app.voice.schemas import CallResponse
 
 
@@ -137,6 +139,198 @@ def test_group_membership_notices_explain_changes_and_owner_transfer() -> None:
         group_dm_notice_text(GROUP_DM_MEMBER_LEFT, "Alice", "Alice", "Bob")
         == "Alice left the group. Bob is now the owner."
     )
+
+
+@pytest.mark.asyncio
+async def test_initial_group_snapshot_accepts_add_notice_for_its_local_invitee(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    author = user(1)
+    invitee = user(2, "beta.localhost")
+    existing_member = user(3, "gamma.localhost")
+    conversation = DMConversation(
+        id=100,
+        origin_domain="alpha.localhost",
+        pair_key=group_dm_key("alpha.localhost", 100),
+        type="group",
+        authority_domain="alpha.localhost",
+        owner_id=author.id,
+        owner_domain=author.origin_domain,
+        state_version=7,
+    )
+    channel = Channel(
+        id=100,
+        origin_domain="alpha.localhost",
+        type=1,
+        created_floor_id=100,
+    )
+    created_at = datetime.now(UTC)
+    raw_notice = {
+        "author": {
+            "id": str(author.id),
+            "origin_domain": author.origin_domain,
+            "username": author.username,
+            "profile_version": 1,
+        },
+        "target": {
+            "id": str(invitee.id),
+            "origin_domain": invitee.origin_domain,
+        },
+        "message": {
+            "id": "101",
+            "origin_domain": author.origin_domain,
+            "channel_id": str(channel.id),
+            "channel_domain": channel.origin_domain,
+            "author_id": str(author.id),
+            "author_domain": author.origin_domain,
+            "content": group_dm_notice_text(
+                GROUP_DM_MEMBER_ADDED,
+                author.username,
+                invitee.username,
+            ),
+            "e2ee": None,
+            "message_type": GROUP_DM_MEMBER_ADDED,
+            "flags": 4,
+            "mention_user_refs": [],
+            "attachments": [],
+            "referenced_message_id": None,
+            "referenced_message_domain": None,
+            "client_nonce": None,
+            "edited_at": None,
+            "deleted_at": None,
+            "created_at": created_at.isoformat(),
+        },
+    }
+    session = SimpleNamespace(get=AsyncMock(return_value=None), add=MagicMock())
+    monkeypatch.setattr(
+        "app.federation.replication.upsert_remote_user",
+        AsyncMock(return_value=author),
+    )
+    admit_message = AsyncMock()
+    advance_cursor = AsyncMock()
+    monkeypatch.setattr(
+        "app.federation.replication.admit_federated_dm_message",
+        admit_message,
+    )
+    monkeypatch.setattr(
+        "app.federation.replication.advance_channel_cursor",
+        advance_cursor,
+    )
+    monkeypatch.setattr(
+        "app.federation.replication.validate_snowflake_timestamp",
+        MagicMock(),
+    )
+    after = [author, existing_member, invitee]
+
+    with pytest.raises(ValueError, match="membership transition"):
+        await replicate_group_notice(
+            cast(Any, session),
+            cast(Settings, SimpleNamespace(domain="beta.localhost")),
+            raw_notice,
+            conversation,
+            channel,
+            [],
+            after,
+            previous_owner=(None, None),
+            expected_actor=(author.id, author.origin_domain),
+        )
+
+    message = await replicate_group_notice(
+        cast(Any, session),
+        cast(Settings, SimpleNamespace(domain="beta.localhost")),
+        raw_notice,
+        conversation,
+        channel,
+        [],
+        after,
+        previous_owner=(None, None),
+        expected_actor=(author.id, author.origin_domain),
+        initial_snapshot=True,
+    )
+
+    assert message is not None
+    assert (message.channel_id, message.channel_domain) == (
+        conversation.id,
+        conversation.origin_domain,
+    )
+    admit_message.assert_awaited_once()
+    advance_cursor.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_initial_group_snapshot_does_not_accept_add_notice_for_a_remote_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    author = user(1)
+    target = user(2, "gamma.localhost")
+    conversation = DMConversation(
+        id=100,
+        origin_domain="alpha.localhost",
+        pair_key=group_dm_key("alpha.localhost", 100),
+        type="group",
+        authority_domain="alpha.localhost",
+        owner_id=author.id,
+        owner_domain=author.origin_domain,
+        state_version=7,
+    )
+    channel = Channel(
+        id=100,
+        origin_domain="alpha.localhost",
+        type=1,
+        created_floor_id=100,
+    )
+    raw_notice = {
+        "author": {
+            "id": str(author.id),
+            "origin_domain": author.origin_domain,
+            "username": author.username,
+            "profile_version": 1,
+        },
+        "target": {"id": str(target.id), "origin_domain": target.origin_domain},
+        "message": {
+            "id": "101",
+            "origin_domain": author.origin_domain,
+            "channel_id": str(channel.id),
+            "channel_domain": channel.origin_domain,
+            "author_id": str(author.id),
+            "author_domain": author.origin_domain,
+            "content": group_dm_notice_text(
+                GROUP_DM_MEMBER_ADDED,
+                author.username,
+                target.username,
+            ),
+            "e2ee": None,
+            "message_type": GROUP_DM_MEMBER_ADDED,
+            "flags": 4,
+            "mention_user_refs": [],
+            "attachments": [],
+            "referenced_message_id": None,
+            "referenced_message_domain": None,
+            "client_nonce": None,
+            "edited_at": None,
+            "deleted_at": None,
+            "created_at": datetime.now(UTC).isoformat(),
+        },
+    }
+    session = SimpleNamespace(get=AsyncMock(return_value=None), add=MagicMock())
+    monkeypatch.setattr(
+        "app.federation.replication.upsert_remote_user",
+        AsyncMock(return_value=author),
+    )
+
+    with pytest.raises(ValueError, match="membership transition"):
+        await replicate_group_notice(
+            cast(Any, session),
+            cast(Settings, SimpleNamespace(domain="beta.localhost")),
+            raw_notice,
+            conversation,
+            channel,
+            [],
+            [author, target],
+            previous_owner=(None, None),
+            expected_actor=(author.id, author.origin_domain),
+            initial_snapshot=True,
+        )
 
 
 @pytest.mark.asyncio

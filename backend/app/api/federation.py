@@ -1173,6 +1173,7 @@ async def process_event(
                         database_snowflake(envelope.actor.id, "group DM notice actor id"),
                         envelope.actor.domain,
                     ),
+                    initial_snapshot=existing_group is None,
                     event_timestamp_ms=envelope.ts,
                 )
                 if notice_message is not None:

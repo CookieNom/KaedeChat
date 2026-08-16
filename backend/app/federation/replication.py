@@ -763,6 +763,7 @@ async def replicate_group_notice(
     *,
     previous_owner: tuple[int | None, str | None],
     expected_actor: tuple[int, str],
+    initial_snapshot: bool = False,
     event_timestamp_ms: int | None = None,
 ) -> Message | None:
     """Validate and retain an authority-issued group membership notice."""
@@ -820,7 +821,20 @@ async def replicate_group_notice(
     after_refs = {(user.id, user.origin_domain) for user in after}
     added = after_refs - before_refs
     removed = before_refs - after_refs
-    if message_type == GROUP_DM_MEMBER_ADDED:
+    if initial_snapshot:
+        # A newly invited user's home receives the current full membership
+        # snapshot, not the authority's historical pre-mutation participant
+        # set. The signed notice can therefore prove who was just invited, but
+        # the local replica cannot reconstruct a one-member diff from an empty
+        # database. Accept only an add notice for a local target that is present
+        # in the snapshot; normal updates continue to require an exact diff.
+        valid_transition = bool(
+            message_type == GROUP_DM_MEMBER_ADDED
+            and target_ref[1] == settings.domain
+            and target_ref in after_refs
+            and author_ref in after_refs
+        )
+    elif message_type == GROUP_DM_MEMBER_ADDED:
         valid_transition = added == {target_ref} and not removed and author_ref in before_refs
     elif message_type == GROUP_DM_MEMBER_LEFT:
         valid_transition = removed == {target_ref} == {author_ref} and not added
