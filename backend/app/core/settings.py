@@ -85,9 +85,9 @@ class Settings(BaseSettings):
     gateway_warmup_timeout_seconds: int = Field(default=60, ge=5, le=300)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     proxy_secret: SecretStr | None = None
-    # New encrypted-room activation is a release gate. Disabling it never
-    # downgrades or interrupts rooms that are already encrypted.
-    e2ee_activation_enabled: bool = False
+    # New encrypted-room activation is enabled by default. Disabling this
+    # kill switch never downgrades or interrupts rooms already encrypted.
+    e2ee_activation_enabled: bool = True
 
     # Persistence and queues
     database_url: SecretStr

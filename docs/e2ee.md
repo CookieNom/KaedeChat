@@ -152,9 +152,9 @@ encrypted-room join, recovery, and integration changes. “Encrypted” and
 
 ## Release gate
 
-`KAEDE_E2EE_ACTIVATION_ENABLED=false` is the default. New activation stays
-hidden and the API rejects new proposals until an operator explicitly enables
-it after the applicable release gates pass:
+`KAEDE_E2EE_ACTIVATION_ENABLED=true` is the default. Operators deploying clients
+that have not passed the applicable release gates must explicitly set it to
+`false`; doing so hides new activation and makes the API reject new proposals:
 
 1. External review of the protocol, bindings, recovery, and metadata policy.
 2. Cross-language RFC vectors for web, desktop, and mobile.

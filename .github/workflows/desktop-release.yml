@@ -27,6 +27,26 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Validate desktop release version
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#desktop-v}"
+          version="${version#v}"
+          python3 - "$version" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          expected = sys.argv[1]
+          config = json.loads(pathlib.Path("desktop/tauri/src-tauri/tauri.conf.json").read_text())
+          cargo = pathlib.Path("desktop/tauri/src-tauri/Cargo.toml").read_text()
+          match = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.MULTILINE)
+          if config["version"] != expected or match is None or match.group(1) != expected:
+              raise SystemExit(
+                  f"tag version {expected} must match tauri.conf.json and kaede-tauri Cargo.toml"
+              )
+          PY
       - name: Install Linux desktop dependencies
         run: >-
           sudo apt-get update && sudo apt-get install -y
@@ -60,10 +80,16 @@ jobs:
         run: cargo +"$RUST_VERSION" install tauri-cli --version "$TAURI_CLI_VERSION" --locked
       - name: Build Linux packages
         working-directory: desktop/tauri
-        run: >-
-          cargo +"$RUST_VERSION" tauri build
-          --config src-tauri/tauri.conf.json
-          --bundles appimage,deb
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          cargo +"$RUST_VERSION" tauri build \
+            --config src-tauri/tauri.conf.json \
+            --bundles appimage,deb
       - name: Collect Linux release files
         shell: bash
         run: |
@@ -75,9 +101,12 @@ jobs:
               *.deb) extension="deb" ;;
               *) continue ;;
             esac
-            cp "$file" "release-assets/Kaede-Chat-${GITHUB_REF_NAME}-linux-x86_64.${extension}"
+            destination="release-assets/Kaede-Chat-${GITHUB_REF_NAME}-linux-x86_64.${extension}"
+            cp "$file" "$destination"
+            if [ -f "$file.sig" ]; then cp "$file.sig" "$destination.sig"; fi
           done < <(find desktop/target/release/bundle -type f \
             \( -name '*.AppImage' -o -name '*.deb' \) -print0)
+          test -s "release-assets/Kaede-Chat-${GITHUB_REF_NAME}-linux-x86_64.AppImage.sig"
           test -n "$(find release-assets -type f -print -quit)"
           for file in release-assets/*; do
             name="$(basename "$file")"
@@ -145,29 +174,59 @@ jobs:
             -Password $password
           "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File `
             -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Build Windows executable
-        shell: bash
-        run: >-
-          cargo +"$RUST_VERSION" build --locked --release
-          --manifest-path desktop/Cargo.toml -p kaede-tauri
-      - name: Sign and collect Windows release file
+      - name: Configure Tauri Authenticode signing
         shell: pwsh
         run: |
-          $signTool = Get-ChildItem `
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-            Sort-Object FullName -Descending |
+          $config = @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT
+                digestAlgorithm = "sha256"
+                timestampUrl = "http://timestamp.digicert.com"
+              }
+            }
+          } | ConvertTo-Json -Depth 4
+          Set-Content desktop/tauri/src-tauri/tauri.windows.conf.json $config -Encoding utf8
+      - name: Install pinned Tauri CLI
+        shell: bash
+        run: cargo +"$RUST_VERSION" install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Build signed Windows installer
+        shell: bash
+        working-directory: desktop/tauri
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          cargo +"$RUST_VERSION" tauri build \
+            --config src-tauri/tauri.conf.json \
+            --bundles nsis
+      - name: Collect Windows release files
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "desktop\target\release\bundle\nsis\*-setup.exe" |
             Select-Object -First 1
-          if (-not $signTool) { throw "signtool.exe is unavailable on the runner" }
-          $source = "desktop\target\release\kaede-tauri.exe"
-          & $signTool.FullName sign /sha1 $env:WINDOWS_CERTIFICATE_THUMBPRINT `
-            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $source
-          if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed" }
+          $updater = Get-ChildItem "desktop\target\release\bundle\nsis\*-setup.nsis.zip" |
+            Select-Object -First 1
+          if (-not $installer) { throw "The NSIS installer was not produced" }
+          if (-not $updater -or -not (Test-Path "$($updater.FullName).sig")) {
+            throw "The signed updater artifact was not produced"
+          }
           New-Item -ItemType Directory -Force release-assets | Out-Null
-          $name = "Kaede-Chat-$($env:GITHUB_REF_NAME)-windows-x86_64.exe"
-          $destination = Join-Path "release-assets" $name
-          Copy-Item $source $destination
-          $hash = (Get-FileHash -Algorithm SHA256 $destination).Hash.ToLowerInvariant()
-          "$hash  $name" | Set-Content "$destination.sha256" -Encoding ascii
+          $installerName = "Kaede-Chat-$($env:GITHUB_REF_NAME)-windows-x86_64-setup.exe"
+          $installerDestination = Join-Path "release-assets" $installerName
+          Copy-Item $installer.FullName $installerDestination
+          $updaterName = "Kaede-Chat-$($env:GITHUB_REF_NAME)-windows-x86_64-setup.nsis.zip"
+          $updaterDestination = Join-Path "release-assets" $updaterName
+          Copy-Item $updater.FullName $updaterDestination
+          Copy-Item "$($updater.FullName).sig" "$updaterDestination.sig"
+          foreach ($destination in @($installerDestination, $updaterDestination)) {
+            $name = Split-Path $destination -Leaf
+            $hash = (Get-FileHash -Algorithm SHA256 $destination).Hash.ToLowerInvariant()
+            "$hash  $name" | Set-Content "$destination.sha256" -Encoding ascii
+          }
       - name: Upload Windows release files
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -242,12 +301,16 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           test -n "$APPLE_SIGNING_IDENTITY"
           test -n "$APPLE_ID"
           test -n "$APPLE_PASSWORD"
           test -n "$APPLE_TEAM_ID"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
           cargo +"$RUST_VERSION" tauri build \
             --config src-tauri/tauri.conf.json \
             --bundles app,dmg
@@ -265,6 +328,11 @@ jobs:
             ditto -c -k --sequesterRsrc --keepParent "$app" \
               "release-assets/Kaede-Chat-${GITHUB_REF_NAME}-macos-${arch}.zip"
           fi
+          updater="$(find desktop/target/release/bundle/macos -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)"
+          test -n "$updater"
+          updater_destination="release-assets/Kaede-Chat-${GITHUB_REF_NAME}-macos-${arch}.app.tar.gz"
+          cp "$updater" "$updater_destination"
+          cp "$updater.sig" "$updater_destination.sig"
           test -n "$(find release-assets -type f -print -quit)"
           for file in release-assets/*; do
             name="$(basename "$file")"
@@ -369,6 +437,48 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+      - name: Create signed desktop update manifest
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#desktop-v}"
+          version="${version#v}"
+          export version
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          from pathlib import Path
+
+          assets = Path("release-assets")
+          tag = os.environ["GITHUB_REF_NAME"]
+          version = os.environ["version"]
+          repository = os.environ["REPOSITORY"]
+          names = {
+              "windows-x86_64": f"Kaede-Chat-{tag}-windows-x86_64-setup.nsis.zip",
+              "linux-x86_64": f"Kaede-Chat-{tag}-linux-x86_64.AppImage",
+              "darwin-x86_64": f"Kaede-Chat-{tag}-macos-x86_64.app.tar.gz",
+              "darwin-aarch64": f"Kaede-Chat-{tag}-macos-arm64.app.tar.gz",
+          }
+          platforms = {}
+          for platform, name in names.items():
+              artifact = assets / name
+              signature = assets / f"{name}.sig"
+              if not artifact.is_file() or not signature.is_file():
+                  raise SystemExit(f"missing updater artifact or signature for {platform}")
+              platforms[platform] = {
+                  "url": f"https://github.com/{repository}/releases/download/{tag}/{name}",
+                  "signature": signature.read_text(encoding="utf-8").strip(),
+              }
+          manifest = {
+              "version": version,
+              "notes": f"Kaede Chat {version}",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+              "platforms": platforms,
+          }
+          (assets / "latest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
       - name: Publish tag release
         env:
           GH_TOKEN: ${{ github.token }}

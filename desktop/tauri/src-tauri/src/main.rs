@@ -43,6 +43,9 @@ use tauri::{
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_updater::UpdaterExt;
+#[cfg(target_os = "windows")]
+use tokio::sync::oneshot;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 type NativeSession = SessionManager<SystemCredentialVault, EmbeddedTurnstile>;
@@ -273,6 +276,24 @@ struct PlatformInfo {
     secure_credentials: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct NativeUpdateStatus {
+    current_version: String,
+    supported: bool,
+    support_message: Option<&'static str>,
+    available: bool,
+    version: Option<String>,
+    notes: Option<String>,
+    published_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct NativeTaskbarPinStatus {
+    supported: bool,
+    allowed: bool,
+    pinned: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum VoiceControl {
@@ -298,6 +319,226 @@ fn native_platform_info() -> PlatformInfo {
         native_notifications: true,
         secure_credentials: true,
     }
+}
+
+#[tauri::command]
+async fn native_update_check(app: AppHandle) -> Result<NativeUpdateStatus, NativeError> {
+    let current_version = app.package_info().version.to_string();
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("APPIMAGE").is_none() {
+        return Ok(NativeUpdateStatus {
+            current_version,
+            supported: false,
+            support_message: Some(
+                "Automatic installation is available for the AppImage build. Package-manager installations should be updated through that package manager.",
+            ),
+            available: false,
+            version: None,
+            notes: None,
+            published_at: None,
+        });
+    }
+    let updater = app.updater().map_err(|error| {
+        NativeError::operation(
+            "UPDATE_CONFIGURATION_FAILED",
+            "Kaede could not initialize its signed update checker.",
+            error,
+        )
+    })?;
+    let update = updater.check().await.map_err(|error| {
+        NativeError::operation(
+            "UPDATE_CHECK_FAILED",
+            "Kaede could not check GitHub Releases for updates. Check your connection and try again.",
+            error,
+        )
+    })?;
+
+    Ok(match update {
+        Some(update) => NativeUpdateStatus {
+            current_version,
+            supported: true,
+            support_message: None,
+            available: true,
+            version: Some(update.version.clone()),
+            notes: update.body,
+            published_at: update.date.map(|date| date.to_string()),
+        },
+        None => NativeUpdateStatus {
+            current_version,
+            supported: true,
+            support_message: None,
+            available: false,
+            version: None,
+            notes: None,
+            published_at: None,
+        },
+    })
+}
+
+#[tauri::command]
+async fn native_update_install(app: AppHandle) -> Result<(), NativeError> {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("APPIMAGE").is_none() {
+        return Err(NativeError::local(
+            "UPDATE_UNSUPPORTED_INSTALLATION",
+            "This Linux installation is managed by a package manager. Update Kaede through that package manager, or use the AppImage build for in-app updates.",
+        ));
+    }
+    let updater = app.updater().map_err(|error| {
+        NativeError::operation(
+            "UPDATE_CONFIGURATION_FAILED",
+            "Kaede could not initialize its signed update installer.",
+            error,
+        )
+    })?;
+    let Some(update) = updater.check().await.map_err(|error| {
+        NativeError::operation(
+            "UPDATE_CHECK_FAILED",
+            "Kaede could not verify the available update. Check your connection and try again.",
+            error,
+        )
+    })?
+    else {
+        return Ok(());
+    };
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|error| {
+            NativeError::operation(
+                "UPDATE_INSTALL_FAILED",
+                "Kaede could not download or install the signed update. Try again shortly.",
+                error,
+            )
+        })?;
+    app.restart();
+}
+
+#[cfg(target_os = "windows")]
+fn windows_taskbar_manager() -> Result<windows::UI::Shell::TaskbarManager, NativeError> {
+    use windows::UI::Shell::{ITaskbarManagerDesktopAppSupportStatics, TaskbarManager};
+
+    windows::core::factory::<TaskbarManager, ITaskbarManagerDesktopAppSupportStatics>().map_err(
+        |error| {
+            NativeError::operation(
+                "TASKBAR_PIN_UNAVAILABLE",
+                "This Windows version does not support taskbar pin requests from desktop apps. You can right-click Kaede in the taskbar and choose Pin to taskbar.",
+                error,
+            )
+        },
+    )?;
+    windows::UI::Shell::TaskbarManager::GetDefault().map_err(|error| {
+        NativeError::operation(
+            "TASKBAR_PIN_UNAVAILABLE",
+            "Windows does not offer taskbar pinning to this installation. You can right-click Kaede in the taskbar and choose Pin to taskbar.",
+            error,
+        )
+    })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn native_taskbar_pin_status() -> Result<NativeTaskbarPinStatus, NativeError> {
+    let manager = windows_taskbar_manager()?;
+    let supported = manager.IsSupported().unwrap_or(false);
+    let allowed = supported && manager.IsPinningAllowed().unwrap_or(false);
+    let pinned = if supported {
+        manager
+            .IsCurrentAppPinnedAsync()
+            .map_err(|error| {
+                NativeError::operation(
+                    "TASKBAR_PIN_STATUS_FAILED",
+                    "Kaede could not read its Windows taskbar pin status.",
+                    error,
+                )
+            })?
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    Ok(NativeTaskbarPinStatus {
+        supported,
+        allowed,
+        pinned,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn native_taskbar_pin_status() -> Result<NativeTaskbarPinStatus, NativeError> {
+    Ok(NativeTaskbarPinStatus {
+        supported: false,
+        allowed: false,
+        pinned: false,
+    })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn native_taskbar_pin_request(app: AppHandle) -> Result<NativeTaskbarPinStatus, NativeError> {
+    let (sender, receiver) = oneshot::channel();
+    let foreground_app = app.clone();
+    app.run_on_main_thread(move || {
+        show_main_window(&foreground_app);
+        let operation = windows_taskbar_manager().and_then(|manager| {
+            if !manager.IsSupported().unwrap_or(false)
+                || !manager.IsPinningAllowed().unwrap_or(false)
+            {
+                return Err(NativeError::local(
+                    "TASKBAR_PIN_NOT_ALLOWED",
+                    "Windows is not allowing this app to request a taskbar pin. Right-click Kaede in the taskbar and choose Pin to taskbar.",
+                ));
+            }
+            manager.RequestPinCurrentAppAsync().map_err(|error| {
+                NativeError::operation(
+                    "TASKBAR_PIN_FAILED",
+                    "Windows could not open the taskbar pin confirmation. Right-click Kaede in the taskbar and choose Pin to taskbar.",
+                    error,
+                )
+            })
+        });
+        let _ = sender.send(operation);
+    })
+    .map_err(|error| {
+        NativeError::operation(
+            "TASKBAR_PIN_FAILED",
+            "Kaede could not bring its Windows taskbar pin request to the foreground.",
+            error,
+        )
+    })?;
+    let operation = receiver.await.map_err(|error| {
+        NativeError::operation(
+            "TASKBAR_PIN_FAILED",
+            "Kaede could not start the Windows taskbar pin request.",
+            error,
+        )
+    })??;
+    let pinned = operation
+        .await
+        .map_err(|error| {
+            NativeError::operation(
+                "TASKBAR_PIN_FAILED",
+                "Windows did not complete the taskbar pin request. You can pin Kaede from its taskbar context menu.",
+                error,
+            )
+        })?;
+    Ok(NativeTaskbarPinStatus {
+        supported: true,
+        allowed: true,
+        pinned,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn native_taskbar_pin_request(
+    _app: AppHandle,
+) -> Result<NativeTaskbarPinStatus, NativeError> {
+    Err(NativeError::local(
+        "TASKBAR_PIN_UNAVAILABLE",
+        "Taskbar pinning is only available in the Windows desktop app.",
+    ))
 }
 
 #[tauri::command]
@@ -1796,6 +2037,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |_app, _shortcut, event| {
@@ -1904,6 +2146,10 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             native_platform_info,
+            native_update_check,
+            native_update_install,
+            native_taskbar_pin_status,
+            native_taskbar_pin_request,
             native_set_instance,
             native_restore_session,
             native_api_request,

@@ -144,13 +144,13 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
             setup,
         )
         for example in env_examples:
-            self.assertIn("KAEDE_E2EE_ACTIVATION_ENABLED=false", example)
+            self.assertIn("KAEDE_E2EE_ACTIVATION_ENABLED=true", example)
         self.assertEqual(
-            compose.count("${KAEDE_E2EE_ACTIVATION_ENABLED:-false}"),
+            compose.count("${KAEDE_E2EE_ACTIVATION_ENABLED:-true}"),
             2,
         )
         self.assertIn(
-            "old_bool KAEDE_E2EE_ACTIVATION_ENABLED false",
+            "old_bool KAEDE_E2EE_ACTIVATION_ENABLED true",
             setup,
         )
         remote_cache_assignment = (

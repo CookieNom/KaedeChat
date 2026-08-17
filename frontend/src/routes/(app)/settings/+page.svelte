@@ -6,6 +6,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import NativeVoiceSettings from '$lib/components/NativeVoiceSettings.svelte';
+  import NativeDesktopSettings from '$lib/components/NativeDesktopSettings.svelte';
   import E2EESettings from '$lib/components/E2EESettings.svelte';
   import { isNativeDesktop, nativeError, nativeInvoke } from '$lib/platform/native';
   import { assetUrl } from '$lib/media/assets';
@@ -580,18 +581,20 @@
       <p>Account</p>
       <a href="#profile"><Icon name="user" size={18} />Profile</a>
       <a href="#security"><Icon name="shield" size={18} />Security</a>
-      <a href="/reports"><Icon name="shield" size={18} />My reports</a>
+      <a href={resolve('/reports')}><Icon name="shield" size={18} />My reports</a>
       <p>Preferences</p>
       <a href="#appearance"><Icon name="palette" size={18} />Appearance</a>
       {#if isNativeDesktop()}<a href="#voice-devices"
           ><Icon name="volume" size={18} />Voice & devices</a
         >{/if}
+      {#if isNativeDesktop()}<a href="#desktop-app"><Icon name="settings" size={18} />Desktop app</a
+        >{/if}
       <a href="#notifications"><Icon name="bell" size={18} />Notifications</a>
       <a href="#privacy"><Icon name="lock" size={18} />Privacy</a>
       <a href="#advanced"><Icon name="settings" size={18} />Advanced</a>
       <p>Build and operate</p>
-      <a href="/developers"><Icon name="server" size={18} />Developer Portal</a>
-      {#if administrationAvailable}<a href={'/administration'}
+      <a href={resolve('/developers')}><Icon name="server" size={18} />Developer Portal</a>
+      {#if administrationAvailable}<a href={resolve('/administration')}
           ><Icon name="shield" size={18} />Administration</a
         >{/if}
     </nav>
@@ -826,6 +829,8 @@
       </section>
 
       <NativeVoiceSettings />
+
+      {#if isNativeDesktop()}<NativeDesktopSettings />{/if}
 
       <section id="notifications" class="settings-section">
         <div class="settings-section-heading">

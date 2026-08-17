@@ -71,6 +71,22 @@ export interface NativeSessionBootstrap {
   authenticated: boolean;
 }
 
+export interface NativeUpdateStatus {
+  current_version: string;
+  supported: boolean;
+  support_message: string | null;
+  available: boolean;
+  version: string | null;
+  notes: string | null;
+  published_at: string | null;
+}
+
+export interface NativeTaskbarPinStatus {
+  supported: boolean;
+  allowed: boolean;
+  pinned: boolean;
+}
+
 let nativeInitialization: Promise<NativeSessionBootstrap> | null = null;
 const LAST_NATIVE_ROUTE = 'kaede.native.last-route';
 

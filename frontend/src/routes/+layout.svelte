@@ -12,6 +12,7 @@
     storedNativeRoute
   } from '$lib/platform/native';
   import { applyTheme, storedTheme } from '$lib/ui/theme';
+  import NativeDesktopLifecycle from '$lib/components/NativeDesktopLifecycle.svelte';
   import { onMount } from 'svelte';
 
   let { children } = $props();
@@ -64,3 +65,4 @@
 </script>
 
 {@render children()}
+<NativeDesktopLifecycle />
