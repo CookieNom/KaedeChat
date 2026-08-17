@@ -181,6 +181,7 @@ class CallFederationRequest(BaseModel):
     actor_domain: FederationDomain
     action: Literal["create", "ring", "accept", "decline", "end"]
     created_at: int = Field(ge=0)
+    state_version: SnowflakeString | None = None
 
 
 class CallStateFederationRequest(BaseModel):

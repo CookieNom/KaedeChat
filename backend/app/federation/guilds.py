@@ -651,9 +651,8 @@ async def apply_guild_message_event(
         event.get("seq") or event.get("context", {}).get("seq"), "guild sequence"
     )
     expected = guild.last_event_seq + 1
-    if seq <= guild.last_event_seq:
-        return None
-    if seq != expected:
+    stale_replay = seq <= guild.last_event_seq
+    if not stale_replay and seq != expected:
         guild.sync_status = "stale"
         raise GuildSequenceGap(expected, seq)
     raw = event["content"]["message"]
@@ -692,7 +691,7 @@ async def apply_guild_message_event(
         GuildMember,
         (guild.id, guild.origin_domain, author.id, author.origin_domain),
     )
-    if membership is None:
+    if membership is None and not stale_replay:
         raise ValueError("guild message author is not a guild member")
     event_type = event.get("type")
     event_actor = event.get("actor")
@@ -770,13 +769,14 @@ async def apply_guild_message_event(
             )
         )
     mention_pairs = list(dict.fromkeys(mention_pairs))
-    for user_id, user_domain in mention_pairs:
-        mentioned_member = await session.get(
-            GuildMember,
-            (guild.id, guild.origin_domain, user_id, user_domain),
-        )
-        if mentioned_member is None:
-            raise ValueError("guild message mentions a user outside the guild")
+    if not stale_replay:
+        for user_id, user_domain in mention_pairs:
+            mentioned_member = await session.get(
+                GuildMember,
+                (guild.id, guild.origin_domain, user_id, user_domain),
+            )
+            if mentioned_member is None:
+                raise ValueError("guild message mentions a user outside the guild")
     mention_refs = [
         {"id": str(user_id), "origin_domain": domain} for user_id, domain in mention_pairs
     ]
@@ -834,9 +834,10 @@ async def apply_guild_message_event(
         .on_conflict_do_nothing(index_elements=["id", "origin_domain"])
         .returning(Message.id)
     )
-    guild.last_event_seq = seq
-    guild.next_event_seq = seq + 1
-    guild.sync_status = "ready"
+    if not stale_replay:
+        guild.last_event_seq = seq
+        guild.next_event_seq = seq + 1
+        guild.sync_status = "ready"
     if inserted is None:
         existing = await session.get(Message, (message_id, message_origin))
         if existing is None or replicated_message_create_fingerprint(

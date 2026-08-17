@@ -597,3 +597,44 @@ def test_group_call_schema_supports_all_ten_members() -> None:
         participants=participants,
     )
     assert len(call.participants) == 10
+
+
+@pytest.mark.asyncio
+async def test_group_authority_confirms_a_third_domain_invitee_at_their_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = cast(
+        Settings,
+        SimpleNamespace(domain="alpha.localhost"),
+    )
+    inviter = user(1, "beta.localhost")
+    invitee = user(2, "gamma.localhost")
+    conversation = cast(
+        DMConversation,
+        SimpleNamespace(id=100, origin_domain="alpha.localhost"),
+    )
+    session = cast(Any, SimpleNamespace())
+    request = AsyncMock(return_value=SimpleNamespace(status_code=204))
+    monkeypatch.setattr(federation_api, "signed_request", request)
+
+    await federation_api.authorize_group_invitee_at_home(
+        session,
+        configured,
+        conversation,
+        inviter,
+        invitee,
+    )
+
+    assert request.await_args.args[:5] == (
+        session,
+        configured,
+        "POST",
+        "gamma.localhost",
+        "/_kaede/v1/dm/groups/authorize",
+    )
+    assert request.await_args.kwargs["payload"] == {
+        "conversation_id": "100",
+        "conversation_domain": "alpha.localhost",
+        "inviter": federation_api.profile_from_user(inviter),
+        "invitee": federation_api.profile_from_user(invitee),
+    }

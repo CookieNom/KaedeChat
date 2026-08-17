@@ -106,10 +106,16 @@ def group_state_rejection_is_upgrade_retryable(
     code: str,
     now: datetime,
 ) -> bool:
-    """Keep generic group-state rejections live across a rolling upgrade."""
+    """Keep generic group protocol rejections live across a rolling upgrade."""
 
     return bool(
-        event.event_type == "dm.group.state"
+        event.event_type
+        in {
+            "dm.group.state",
+            "dm.group.message.proposed",
+            "dm.group.message.committed",
+            "dm.group.call.create",
+        }
         and code == "KAED_FED_EVENT_REJECTED"
         and now - row.created_at < timedelta(hours=24)
     )
@@ -472,11 +478,10 @@ async def drain_destination(
                 await increment_metric(redis, "federation_delivery_failures")
                 event = by_ref.get((row.event_origin_domain, row.event_id))
                 rejection_code = str((result or {}).get("code") or "peer rejected event")[:500]
-                # Group-state support was expanded from two homes to many.
-                # During a rolling deployment, an older peer reports only the
-                # generic rejection code. Keep the signed state retryable for
-                # one day so the recipient can upgrade without requiring the
-                # group owner to remove and re-add everyone.
+                # Group federation support has evolved across rolling releases.
+                # An older peer reports only the generic rejection code for a
+                # newly introduced group event. Keep it retryable for one day so
+                # the peer can upgrade without losing state, messages, or calls.
                 if event is not None and group_state_rejection_is_upgrade_retryable(
                     event, row, rejection_code, now
                 ):
@@ -565,7 +570,7 @@ async def publish_dm_delivery_update(
     status: str,
     code: str | None,
 ) -> None:
-    if event.event_type != "dm.message.create":
+    if event.event_type not in {"dm.message.create", "dm.group.message.proposed"}:
         return
     envelope = event.envelope
     actor = envelope.get("actor")

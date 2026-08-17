@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from app.api.calls import act_on_call, federation_call_signal, federation_call_state
 from app.core.settings import Settings
 from app.core.types import EntityRef
-from app.db.models import Channel, User
+from app.db.models import Channel, DMConversation, User
 from app.federation.security import FederationPrincipal
 from app.tasks import voice_call_room_gc
 from app.voice.cleanup import cleanup_orphaned_dm_rooms
@@ -90,6 +90,74 @@ def dm_channel() -> Channel:
         name=None,
         created_floor_id=34,
     )
+
+
+@pytest.mark.asyncio
+async def test_remote_group_call_is_committed_and_fanned_out_by_group_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = dm_channel()
+    conversation = DMConversation(
+        id=channel.id,
+        origin_domain=channel.origin_domain,
+        pair_key="group:alpha.localhost:34",
+        type="group",
+        authority_domain="alpha.localhost",
+        owner_id=1,
+        owner_domain="alpha.localhost",
+        state_version=7,
+    )
+    owner = user(1, "alpha.localhost")
+    actor = user(2, "beta.localhost")
+    third = user(3, "gamma.localhost")
+
+    async def get_model(model: object, _key: object) -> object | None:
+        if model is Channel:
+            return channel
+        if model is DMConversation:
+            return conversation
+        if model is User:
+            return actor
+        return None
+
+    monkeypatch.setattr("app.api.calls.time.time", lambda: 10)
+    monkeypatch.setattr("app.api.calls.enforce_federation_route_rate_limit", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.calls.local_dm_participants",
+        AsyncMock(return_value=[owner, actor, third]),
+    )
+    monkeypatch.setattr("app.api.calls.create_call", AsyncMock(return_value=True))
+    monkeypatch.setattr("app.api.calls.notify_call", AsyncMock())
+    propagate = AsyncMock()
+    monkeypatch.setattr("app.api.calls.propagate_call_create", propagate)
+
+    response = await federation_call_signal(
+        CallFederationRequest(
+            call_id="56",
+            channel_id="34",
+            channel_domain="alpha.localhost",
+            authority_domain="alpha.localhost",
+            actor_id="2",
+            actor_domain="beta.localhost",
+            action="create",
+            created_at=10,
+            state_version="7",
+        ),
+        FederationPrincipal(origin="beta.localhost", key_id="beta-key"),
+        cast(Any, SimpleNamespace(get=get_model)),
+        cast(Any, object()),
+        settings(),
+    )
+
+    assert response.authority_domain == "alpha.localhost"
+    assert response.caller == "2@beta.localhost"
+    assert set(response.participants) == {
+        "1@alpha.localhost",
+        "2@beta.localhost",
+        "3@gamma.localhost",
+    }
+    propagate.assert_awaited_once()
+    assert propagate.await_args.kwargs["exclude_domains"] == {"beta.localhost"}
 
 
 def test_orphaned_call_room_cleanup_is_scheduled() -> None:

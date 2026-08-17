@@ -143,8 +143,16 @@ class DMOpenFederationRequest(BaseModel):
 class DMGroupAuthorizeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    conversation_id: SnowflakeString | None = None
+    conversation_domain: FederationDomain | None = None
     inviter: RemoteUserProfile
     invitee: RemoteUserProfile
+
+    @model_validator(mode="after")
+    def coherent_authority_context(self) -> DMGroupAuthorizeRequest:
+        if (self.conversation_id is None) != (self.conversation_domain is None):
+            raise ValueError("group authorization authority context is incomplete")
+        return self
 
 
 class DMGroupMutationRequest(BaseModel):

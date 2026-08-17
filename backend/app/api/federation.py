@@ -99,6 +99,7 @@ from app.db.models import (
     PeerKey,
     Pin,
     Reaction,
+    RemoteGuildMembershipIntent,
     RemoteMediaTombstone,
     Role,
     User,
@@ -117,6 +118,7 @@ from app.federation.events import build_envelope, queue_event
 from app.federation.guilds import (
     GUILD_MUTATION_EVENT_TYPES,
     HISTORY_ACCESS_MUTATION_EVENT_TYPES,
+    REMOTE_GUILD_JOINING,
     GuildSequenceGap,
     apply_guild_access_revocation,
     apply_guild_instance_access_revocation,
@@ -215,6 +217,9 @@ from app.tasks import (
     media_remote_purge,
     mentions_fanout,
 )
+from app.voice.rooms import parse_participant_identity, participant_identity
+from app.voice.schemas import CallResponse
+from app.voice.state import create_call
 
 router = APIRouter(tags=["federation"])
 log = structlog.get_logger()
@@ -790,6 +795,29 @@ async def _apply_authoritative_guild_leave(
     return True
 
 
+async def remote_guild_snapshot_is_pending(
+    session: AsyncSession,
+    settings: Settings,
+    guild_id: int,
+    guild_domain: str,
+) -> bool:
+    """Return whether a local user is actively installing this remote guild."""
+
+    return (
+        await session.scalar(
+            select(RemoteGuildMembershipIntent.user_id)
+            .where(
+                RemoteGuildMembershipIntent.guild_id == guild_id,
+                RemoteGuildMembershipIntent.guild_domain == guild_domain,
+                RemoteGuildMembershipIntent.user_domain == settings.domain,
+                RemoteGuildMembershipIntent.state == REMOTE_GUILD_JOINING,
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
 async def process_event(
     session: AsyncSession,
     redis: Redis,
@@ -798,8 +826,14 @@ async def process_event(
     envelope: EventEnvelope,
     snowflake: SnowflakeGenerator,
 ) -> InboxResult:
+    authority_attested_group_types = {
+        "dm.group.state",
+        "dm.group.message.committed",
+        "dm.group.call.create",
+    }
     if envelope.origin != principal.origin or (
-        envelope.actor.domain != principal.origin and envelope.type != "dm.group.state"
+        envelope.actor.domain != principal.origin
+        and envelope.type not in authority_attested_group_types
     ):
         return InboxResult(
             event_id=envelope.event_id,
@@ -1014,6 +1048,7 @@ async def process_event(
     history_access_changed = False
     authoritative_leave_guild: Guild | None = None
     authoritative_leave_target: tuple[int, str] | None = None
+    replicated_group_call: dict[str, Any] | None = None
     durably_committed = False
     try:
         if envelope.type in {
@@ -1288,19 +1323,133 @@ async def process_event(
                 )
                 await queue_event(session, settings, envelope.origin, created)
             delivery_wakes.add(envelope.origin)
-        elif envelope.type == "dm.message.create":
+        elif envelope.type == "dm.group.call.create":
+            call = CallResponse.model_validate(envelope.content.get("call"))
+            if call.authority_domain != envelope.origin:
+                raise ValueError("group call did not originate at its authority")
+            if call.channel_id != str(
+                envelope.context.get("conversation_id")
+            ) or call.channel_domain != str(envelope.context.get("conversation_domain")):
+                raise ValueError("group call context does not match its conversation")
+            call_conversation = await session.get(
+                DMConversation,
+                (int(call.channel_id), call.channel_domain),
+            )
+            if call_conversation is None:
+                raise FederationResyncRetry
+            if (
+                call_conversation.type != "group"
+                or call_conversation.authority_domain != envelope.origin
+                or call_conversation.origin_domain != envelope.origin
+            ):
+                raise ValueError("group call references a non-authoritative conversation")
+            required_state_version = database_snowflake(
+                envelope.context.get("state_version"),
+                "group call state version",
+            )
+            if call_conversation.state_version < required_state_version:
+                raise FederationResyncRetry
+            caller_ref = parse_participant_identity(call.caller)
+            if caller_ref != (
+                database_snowflake(envelope.actor.id, "group call actor id"),
+                envelope.actor.domain,
+            ):
+                raise ValueError("group call actor does not match its caller")
+            current_participants = await group_participants(session, call_conversation)
+            expected_identities = {
+                participant_identity(user.id, user.origin_domain) for user in current_participants
+            }
+            if set(call.participants) != expected_identities:
+                raise ValueError("group call participant set does not match group state")
+            replicated_group_call = call.model_dump(mode="json")
+        elif envelope.type in {
+            "dm.message.create",
+            "dm.group.message.proposed",
+            "dm.group.message.committed",
+        }:
             author = envelope.content["author"]
             if (
                 str(author.get("id")) != envelope.actor.id
                 or author.get("origin_domain") != envelope.actor.domain
             ):
                 raise ValueError("DM event actor does not match message author")
+            raw_message = envelope.content.get("message")
+            if not isinstance(raw_message, dict):
+                raise ValueError("DM message content is malformed")
+            conversation_ref = (
+                database_snowflake(raw_message.get("channel_id"), "DM channel id"),
+                normalize_domain(str(raw_message.get("channel_domain", ""))),
+            )
+            message_conversation = await session.get(DMConversation, conversation_ref)
+            if envelope.type != "dm.message.create":
+                if message_conversation is None:
+                    if envelope.type == "dm.group.message.committed":
+                        raise FederationResyncRetry
+                    raise ValueError("group DM conversation is not replicated")
+                if message_conversation.type != "group":
+                    raise ValueError("group DM message references a direct conversation")
+                if (
+                    str(envelope.context.get("conversation_id")) != str(message_conversation.id)
+                    or normalize_domain(str(envelope.context.get("conversation_domain", "")))
+                    != message_conversation.origin_domain
+                ):
+                    raise ValueError("group DM message context does not match its conversation")
+                required_state_version = database_snowflake(
+                    envelope.context.get("state_version"),
+                    "group DM message state version",
+                )
+                if required_state_version > message_conversation.state_version:
+                    raise FederationResyncRetry
+                if envelope.type == "dm.group.message.proposed" and (
+                    message_conversation.authority_domain != settings.domain
+                    or message_conversation.origin_domain != settings.domain
+                ):
+                    raise ValueError("group DM proposal was not sent to its authority")
+                if envelope.type == "dm.group.message.committed" and (
+                    message_conversation.authority_domain != envelope.origin
+                    or message_conversation.origin_domain != envelope.origin
+                ):
+                    raise ValueError("group DM commit did not originate at its authority")
             replicated_message = await replicate_dm_message(
                 session,
                 settings,
                 envelope.content,
                 event_timestamp_ms=envelope.ts,
             )
+            if envelope.type == "dm.group.message.proposed":
+                if message_conversation is None:
+                    raise RuntimeError("validated group DM proposal lost its conversation")
+                actor = await session.get(
+                    User,
+                    (
+                        database_snowflake(envelope.actor.id, "group DM message actor id"),
+                        envelope.actor.domain,
+                    ),
+                )
+                if actor is None:
+                    raise RuntimeError("replicated group DM message author disappeared")
+                committed = await build_envelope(
+                    session,
+                    settings,
+                    "dm.group.message.committed",
+                    actor,
+                    envelope.content,
+                    context={
+                        "conversation_id": str(message_conversation.id),
+                        "conversation_domain": message_conversation.origin_domain,
+                        "state_version": str(message_conversation.state_version),
+                    },
+                    authority_attested_actor=True,
+                )
+                participants = await group_participants(session, message_conversation)
+                committed_destinations = {
+                    participant.origin_domain
+                    for participant in participants
+                    if participant.origin_domain != settings.domain
+                }
+                for destination in committed_destinations:
+                    await queue_event(session, settings, destination, committed)
+                delivery_wakes.update(committed_destinations)
         elif envelope.type == "dm.open.rejected":
             target = envelope.content["target"]
             dm_open_rejection_target = (
@@ -1332,6 +1481,10 @@ async def process_event(
                 raise ValueError("guild event did not originate at the guild home")
             replicated_guild = await session.get(Guild, (guild_id, guild_domain))
             if replicated_guild is None:
+                if await remote_guild_snapshot_is_pending(
+                    session, settings, guild_id, guild_domain
+                ):
+                    raise FederationResyncRetry
                 raise ValueError("guild snapshot is required before live events")
             if envelope.type == "guild.message.committed" and (
                 database_snowflake(envelope.actor.id, "guild commit actor id"),
@@ -1354,6 +1507,10 @@ async def process_event(
                 raise ValueError("guild member event did not originate at the guild home")
             replicated_guild = await session.get(Guild, (guild_id, guild_domain))
             if replicated_guild is None:
+                if await remote_guild_snapshot_is_pending(
+                    session, settings, guild_id, guild_domain
+                ):
+                    raise FederationResyncRetry
                 raise ValueError("guild snapshot is required before live events")
             if (
                 database_snowflake(envelope.actor.id, "guild member event actor id"),
@@ -1407,6 +1564,10 @@ async def process_event(
                 raise ValueError("guild mutation did not originate at the guild home")
             replicated_guild = await session.get(Guild, (guild_id, guild_domain))
             if replicated_guild is None:
+                if await remote_guild_snapshot_is_pending(
+                    session, settings, guild_id, guild_domain
+                ):
+                    raise FederationResyncRetry
                 raise ValueError("guild snapshot is required before live mutations")
             mutation_sequence = database_snowflake(
                 envelope.context.get("seq"), "guild mutation sequence"
@@ -1867,6 +2028,24 @@ async def process_event(
                 replicated_message.id,
                 replicated_message.origin_domain,
             )
+        if replicated_group_call is not None:
+            call_identities = set(cast(list[str], replicated_group_call["participants"]))
+            if await create_call(
+                redis,
+                replicated_group_call,
+                call_identities,
+                settings,
+                accepted={str(replicated_group_call["caller"])},
+            ):
+                for identity in sorted(call_identities):
+                    user_id, user_domain = parse_participant_identity(identity)
+                    if user_domain == settings.domain:
+                        await publish_dispatch(
+                            redis,
+                            user_topic(user_domain, user_id),
+                            "CALL_RING",
+                            replicated_group_call,
+                        )
         if created_dm_channel is not None and dm_channel_recipient is not None:
             participants = list(
                 await session.scalars(
@@ -2151,7 +2330,11 @@ async def process_event(
             # history is user-owned and is never silently pruned; reject that
             # write deliberately with the stable capacity code.
             retryable = envelope.type == "dm.conversation.create"
-            if envelope.type == "dm.message.create":
+            if envelope.type in {
+                "dm.message.create",
+                "dm.group.message.proposed",
+                "dm.group.message.committed",
+            }:
                 raw_message = envelope.content.get("message")
                 if isinstance(raw_message, dict):
                     try:
@@ -2167,8 +2350,12 @@ async def process_event(
                     except (FederationNetworkError, ValueError):
                         quota_conversation = None
                     retryable = bool(
-                        quota_conversation is not None
-                        and quota_conversation.authority_domain != settings.domain
+                        envelope.type == "dm.group.message.committed"
+                        or (
+                            envelope.type == "dm.message.create"
+                            and quota_conversation is not None
+                            and quota_conversation.authority_domain != settings.domain
+                        )
                     )
             inbox = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
             if retryable:
@@ -3106,7 +3293,11 @@ async def federation_group_dm_authorize(
     await enforce_federation_route_rate_limit(
         redis, principal.origin, "dm-group-authorize", capacity=120, refill_per_minute=120
     )
-    if payload.inviter.origin_domain != principal.origin:
+    direct_inviter_request = payload.inviter.origin_domain == principal.origin
+    authority_request = (
+        payload.conversation_id is not None and payload.conversation_domain == principal.origin
+    )
+    if not direct_inviter_request and not authority_request:
         raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
     inviter = await upsert_remote_user(session, settings, payload.inviter)
     invitee = await upsert_remote_user(session, settings, payload.invitee)
@@ -3115,6 +3306,46 @@ async def federation_group_dm_authorize(
     await require_group_invite_friend(session, inviter, invitee)
     await session.commit()
     return Response(status_code=204)
+
+
+async def authorize_group_invitee_at_home(
+    session: AsyncSession,
+    settings: Settings,
+    conversation: DMConversation,
+    actor: User,
+    target: User,
+) -> None:
+    """Require the invitee's home to confirm a cross-origin group invitation."""
+
+    if target.origin_domain == settings.domain:
+        await require_group_invite_friend(session, actor, target)
+        return
+    try:
+        authorization = await signed_request(
+            session,
+            settings,
+            "POST",
+            target.origin_domain,
+            "/_kaede/v1/dm/groups/authorize",
+            payload={
+                "conversation_id": str(conversation.id),
+                "conversation_domain": conversation.origin_domain,
+                "inviter": profile_from_user(actor),
+                "invitee": profile_from_user(target),
+            },
+            request_timeout=8,
+            max_response_bytes=16 * 1024,
+        )
+    except FederationNetworkError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "KAED_GROUP_DM_INVITEE_HOME_UNREACHABLE"},
+        ) from exc
+    if authorization.status_code != 204:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "KAED_GROUP_DM_INVITE_NOT_FRIEND"},
+        )
 
 
 @router.post("/_kaede/v1/dm/groups/mutate")
@@ -3147,33 +3378,13 @@ async def federation_group_dm_mutate(
             payload.conversation_domain,
         )
         await require_group_member(session, unlocked_conversation, actor)
-        if target.origin_domain == settings.domain:
-            await require_group_invite_friend(session, actor, target)
-        elif actor.origin_domain == settings.domain:
-            try:
-                authorization = await signed_request(
-                    session,
-                    settings,
-                    "POST",
-                    target.origin_domain,
-                    "/_kaede/v1/dm/groups/authorize",
-                    payload={
-                        "inviter": profile_from_user(actor),
-                        "invitee": profile_from_user(target),
-                    },
-                    request_timeout=8,
-                    max_response_bytes=16 * 1024,
-                )
-            except FederationNetworkError as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail={"code": "KAED_GROUP_DM_INVITEE_HOME_UNREACHABLE"},
-                ) from exc
-            if authorization.status_code != 204:
-                raise HTTPException(
-                    status_code=403,
-                    detail={"code": "KAED_GROUP_DM_INVITE_NOT_FRIEND"},
-                )
+        await authorize_group_invitee_at_home(
+            session,
+            settings,
+            unlocked_conversation,
+            actor,
+            target,
+        )
     conversation, channel = await load_authoritative_group(
         session,
         settings,

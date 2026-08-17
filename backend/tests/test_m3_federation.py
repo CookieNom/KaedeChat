@@ -445,6 +445,15 @@ def test_group_state_generic_rejection_retries_only_during_upgrade_window() -> N
     )
 
     assert group_state_rejection_is_upgrade_retryable(event, row, "KAED_FED_EVENT_REJECTED", now)
+    for event_type in (
+        "dm.group.message.proposed",
+        "dm.group.message.committed",
+        "dm.group.call.create",
+    ):
+        event.event_type = event_type
+        assert group_state_rejection_is_upgrade_retryable(
+            event, row, "KAED_FED_EVENT_REJECTED", now
+        )
     assert not group_state_rejection_is_upgrade_retryable(
         event, row, "KAED_FED_BAD_EVENT_SIGNATURE", now
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any, cast
@@ -23,9 +24,11 @@ from app.chat.payloads import public_user_display_name
 from app.chat.privacy import blocked_between, require_can_direct_message
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
+from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef
 from app.db.models import Channel, DMConversation, DMParticipant, User
 from app.federation.client import signed_request
+from app.federation.events import build_envelope, queue_event
 from app.federation.network import (
     FederationNetworkError,
     decode_federation_response_json,
@@ -148,6 +151,86 @@ async def propagate_terminal_call(
             log.exception("call_terminal_propagation_failed", destination=destination)
 
 
+async def propagate_call_create(
+    session: AsyncSession,
+    settings: Settings,
+    record: dict[str, Any],
+    *,
+    actor: User,
+    state_version: int | None,
+    exclude_domains: set[str] | None = None,
+) -> None:
+    """Project an authoritative call after its group membership fence is committed."""
+
+    excluded = {settings.domain, *(exclude_domains or set())}
+    destinations = {
+        parse_participant_identity(identity)[1]
+        for identity in cast(list[str], record["participants"])
+    } - excluded
+    if state_version is not None:
+        envelope = await build_envelope(
+            session,
+            settings,
+            "dm.group.call.create",
+            actor,
+            {"call": record},
+            context={
+                "conversation_id": str(record["channel_id"]),
+                "conversation_domain": str(record["channel_domain"]),
+                "state_version": str(state_version),
+            },
+            authority_attested_actor=actor.origin_domain != settings.domain,
+        )
+        for destination in sorted(destinations):
+            await queue_event(session, settings, destination, envelope)
+        await session.commit()
+        from app.tasks import federation_deliver
+
+        for destination in sorted(destinations):
+            await enqueue_best_effort(federation_deliver, destination)
+        return
+    for destination in sorted(destinations):
+        for attempt in range(3):
+            try:
+                response = await signed_request(
+                    session,
+                    settings,
+                    "POST",
+                    destination,
+                    "/_kaede/v1/calls",
+                    payload={
+                        "call_id": str(record["id"]),
+                        "channel_id": str(record["channel_id"]),
+                        "channel_domain": str(record["channel_domain"]),
+                        "authority_domain": str(record["authority_domain"]),
+                        "actor_id": str(actor.id),
+                        "actor_domain": actor.origin_domain,
+                        "action": "create",
+                        "created_at": int(record["created_at"]),
+                        "state_version": (
+                            str(state_version) if state_version is not None else None
+                        ),
+                    },
+                    request_timeout=5,
+                    max_response_bytes=16 * 1024,
+                )
+            except FederationNetworkError:
+                break
+            except Exception:
+                log.exception("call_create_projection_failed", destination=destination)
+                break
+            if response.status_code == 200:
+                break
+            if response.status_code != 409 or attempt == 2:
+                log.info(
+                    "call_create_projection_rejected",
+                    destination=destination,
+                    status=response.status_code,
+                )
+                break
+            await asyncio.sleep(0.25 * (attempt + 1))
+
+
 async def project_call_transition(
     redis: Redis,
     session: AsyncSession,
@@ -263,15 +346,25 @@ async def start_call(
     participants = await local_dm_participants(
         session, access.channel.id, access.channel.origin_domain
     )
+    conversation = await session.get(
+        DMConversation,
+        (access.channel.id, access.channel.origin_domain),
+    )
+    if conversation is None:
+        raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
     identities = {participant_identity(item.id, item.origin_domain) for item in participants}
     caller = participant_identity(auth.user.id, auth.user.origin_domain)
     call_id = await snowflake.mint()
     created_at = int(time.time())
+    call_authority = (
+        conversation.authority_domain if conversation.type == "group" else settings.domain
+    )
+    state_version = conversation.state_version if conversation.type == "group" else None
     record: dict[str, Any] = {
         "id": str(call_id),
         "channel_id": str(access.channel.id),
         "channel_domain": access.channel.origin_domain,
-        "authority_domain": settings.domain,
+        "authority_domain": call_authority,
         "room": dm_room_name(access.channel.id, call_id),
         "state": "ringing",
         "created_at": created_at,
@@ -280,39 +373,67 @@ async def start_call(
         "participants": sorted(identities),
     }
     await require_call_policy(session, settings, record, auth.user, participants)
-    if not await create_call(redis, record, identities, settings, accepted={caller}):
-        raise HTTPException(status_code=409, detail={"code": "CALL_ALREADY_ACTIVE"})
-    await notify_call(redis, sorted(identities), "CALL_CREATE", record, settings)
-    if payload.ring:
-        await notify_call(redis, sorted(identities - {caller}), "CALL_RING", record, settings)
-    for destination in sorted({item.origin_domain for item in participants} - {settings.domain}):
+    if call_authority != settings.domain:
         try:
-            await signed_request(
+            response = await signed_request(
                 session,
                 settings,
                 "POST",
-                destination,
+                call_authority,
                 "/_kaede/v1/calls",
                 payload={
                     "call_id": str(call_id),
                     "channel_id": str(access.channel.id),
                     "channel_domain": access.channel.origin_domain,
-                    "authority_domain": settings.domain,
+                    "authority_domain": call_authority,
                     "actor_id": str(auth.user.id),
                     "actor_domain": auth.user.origin_domain,
                     "action": "create",
                     "created_at": created_at,
+                    "state_version": str(state_version),
                 },
                 request_timeout=5,
                 max_response_bytes=16 * 1024,
             )
-        except FederationNetworkError:
-            # The durable chat relationship is unaffected. A missed ephemeral
-            # ring is surfaced as peer unavailability and may be retried by a
-            # fresh call without creating phantom call state remotely.
-            continue
-        except Exception:
-            log.exception("call_create_projection_failed", destination=destination)
+        except FederationNetworkError as exc:
+            raise HTTPException(status_code=503, detail={"code": "CALL_HOME_UNREACHABLE"}) from exc
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail={"code": "CALL_REJECTED"})
+        try:
+            raw_authoritative = decode_federation_response_json(response)
+            if not isinstance(raw_authoritative, dict):
+                raise ValueError("call authority response is not an object")
+            authoritative = call_response(raw_authoritative).model_dump(mode="json")
+        except (FederationNetworkError, ValueError) as exc:
+            raise HTTPException(
+                status_code=502, detail={"code": "CALL_HOME_INVALID_RESPONSE"}
+            ) from exc
+        if not same_call_identity(record, authoritative) or authoritative["state"] != "ringing":
+            raise HTTPException(status_code=502, detail={"code": "CALL_HOME_INVALID_RESPONSE"})
+        if not await create_call(redis, authoritative, identities, settings, accepted={caller}):
+            raise HTTPException(status_code=409, detail={"code": "CALL_ALREADY_ACTIVE"})
+        await notify_call(redis, sorted(identities), "CALL_CREATE", authoritative, settings)
+        if payload.ring:
+            await notify_call(
+                redis,
+                sorted(identities - {caller}),
+                "CALL_RING",
+                authoritative,
+                settings,
+            )
+        return call_response(authoritative)
+    if not await create_call(redis, record, identities, settings, accepted={caller}):
+        raise HTTPException(status_code=409, detail={"code": "CALL_ALREADY_ACTIVE"})
+    await notify_call(redis, sorted(identities), "CALL_CREATE", record, settings)
+    if payload.ring:
+        await notify_call(redis, sorted(identities - {caller}), "CALL_RING", record, settings)
+    await propagate_call_create(
+        session,
+        settings,
+        record,
+        actor=auth.user,
+        state_version=state_version,
+    )
     return call_response(record)
 
 
@@ -567,12 +688,11 @@ async def federation_call_signal(
     await enforce_federation_route_rate_limit(
         redis, principal.origin, "dm-call", capacity=120, refill_per_minute=120
     )
-    if payload.actor_domain != principal.origin:
-        raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
-    if payload.action == "create":
-        if payload.authority_domain != principal.origin:
-            raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
-    elif payload.authority_domain != settings.domain or payload.action == "ring":
+    if payload.action != "create" and (
+        payload.actor_domain != principal.origin
+        or payload.authority_domain != settings.domain
+        or payload.action == "ring"
+    ):
         raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
     if (
         payload.action == "create"
@@ -599,6 +719,41 @@ async def federation_call_signal(
     actor = await session.get(User, (int(payload.actor_id), payload.actor_domain))
     if channel is None or channel.type != 1 or actor is None:
         raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
+    conversation = await session.get(DMConversation, (channel.id, channel.origin_domain))
+    if conversation is None:
+        raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
+    authority_proposal = False
+    if payload.action == "create":
+        if conversation.type == "group":
+            if (
+                payload.authority_domain != conversation.authority_domain
+                or principal.origin not in {payload.actor_domain, conversation.authority_domain}
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"},
+                )
+            if payload.state_version is None:
+                raise HTTPException(status_code=409, detail={"code": "GROUP_DM_STATE_REQUIRED"})
+            requested_state_version = int(payload.state_version)
+            if conversation.state_version < requested_state_version:
+                raise HTTPException(status_code=409, detail={"code": "GROUP_DM_STATE_BEHIND"})
+            authority_proposal = (
+                settings.domain == conversation.authority_domain
+                and principal.origin == payload.actor_domain
+                and payload.actor_domain != conversation.authority_domain
+            )
+            if authority_proposal and conversation.state_version != requested_state_version:
+                raise HTTPException(status_code=409, detail={"code": "GROUP_DM_STATE_STALE"})
+        elif (
+            payload.actor_domain != principal.origin
+            or payload.authority_domain != principal.origin
+            or payload.state_version is not None
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"},
+            )
     participants = await local_dm_participants(session, channel.id, channel.origin_domain)
     identities = {participant_identity(item.id, item.origin_domain) for item in participants}
     identity = participant_identity(actor.id, actor.origin_domain)
@@ -629,6 +784,15 @@ async def federation_call_signal(
                 raise HTTPException(status_code=409, detail={"code": "CALL_ALREADY_ACTIVE"})
             return call_response(existing)
         await notify_call(redis, sorted(identities), "CALL_RING", record, settings)
+        if authority_proposal:
+            await propagate_call_create(
+                session,
+                settings,
+                record,
+                actor=actor,
+                state_version=conversation.state_version,
+                exclude_domains={principal.origin},
+            )
         return call_response(record)
     if existing_call is None:
         raise RuntimeError("non-create call action lost its validated authority record")

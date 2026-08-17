@@ -389,7 +389,7 @@ async def dm_delivery_statuses(
             )
             .where(
                 FederationEvent.origin_domain == settings.domain,
-                FederationEvent.event_type == "dm.message.create",
+                FederationEvent.event_type.in_(("dm.message.create", "dm.group.message.proposed")),
                 FederationEvent.envelope["content"]["message"]["channel_id"].astext
                 == str(channel.id),
                 FederationEvent.envelope["content"]["message"]["id"].astext.in_(local_ids),
@@ -1167,22 +1167,54 @@ async def create_message(
         attachment.message_domain = message.origin_domain
     remote_destinations: set[str] = set()
     if access.guild is None:
-        remote_destinations = {
-            participant.origin_domain
-            for participant in access.participants
-            if participant.origin_domain != settings.domain
+        conversation = dm_conversation
+        if conversation is None:
+            raise RuntimeError("direct-message channel has no conversation")
+        message_content = {
+            "message": message_payload(message, auth.user, message_attachments),
+            "author": profile_from_user(auth.user),
         }
-        for destination in remote_destinations:
+        if conversation.type == "group" and conversation.authority_domain != settings.domain:
+            remote_destinations = {conversation.authority_domain}
             envelope = await build_envelope(
                 session,
                 settings,
-                "dm.message.create",
+                "dm.group.message.proposed",
                 auth.user,
-                {
-                    "message": message_payload(message, auth.user, message_attachments),
-                    "author": profile_from_user(auth.user),
+                message_content,
+                context={
+                    "conversation_id": str(conversation.id),
+                    "conversation_domain": conversation.origin_domain,
+                    "state_version": str(conversation.state_version),
                 },
             )
+        else:
+            remote_destinations = {
+                participant.origin_domain
+                for participant in access.participants
+                if participant.origin_domain != settings.domain
+            }
+            envelope = await build_envelope(
+                session,
+                settings,
+                (
+                    "dm.group.message.committed"
+                    if conversation.type == "group"
+                    else "dm.message.create"
+                ),
+                auth.user,
+                message_content,
+                context=(
+                    {
+                        "conversation_id": str(conversation.id),
+                        "conversation_domain": conversation.origin_domain,
+                        "state_version": str(conversation.state_version),
+                    }
+                    if conversation.type == "group"
+                    else None
+                ),
+            )
+        for destination in remote_destinations:
             await queue_event(session, settings, destination, envelope)
     elif access.guild.origin_domain == settings.domain:
         remote_destinations = await remote_destinations_with_channel_access(
