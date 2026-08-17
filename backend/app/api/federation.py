@@ -3216,7 +3216,18 @@ async def federation_group_dm_mutate(
         deleted=deleted,
         notice=notice_payload,
     )
-    envelope = await build_envelope(session, settings, "dm.group.state", actor, content)
+    # The authenticated actor's home requested this mutation, while this
+    # instance is the conversation authority that signs the resulting state.
+    # Preserve the semantic actor for notice and transition validation on
+    # replicas without opening remote-actor signing to any other event type.
+    envelope = await build_envelope(
+        session,
+        settings,
+        "dm.group.state",
+        actor,
+        content,
+        authority_attested_actor=True,
+    )
     destinations = {user.origin_domain for user in [*before, *participants]} - {settings.domain}
     for destination in destinations:
         await queue_event(session, settings, destination, envelope)
@@ -4580,15 +4591,21 @@ async def federation_guild_pin_proxy(
         )
         changed = removed is not None
     if changed:
+        # The guild home signs authoritative mutations. Keep the remote member
+        # who performed the action in the event content, as reactions do.
+        owner = await session.get(User, (guild.owner_id, guild.owner_domain))
+        if owner is None or not owner.is_local or owner.origin_domain != settings.domain:
+            raise RuntimeError("local guild owner cannot sign the authoritative pin event")
         await queue_guild_mutation(
             session,
             settings,
             guild,
-            actor,
+            owner,
             "guild.pin.add" if payload.pinned else "guild.pin.remove",
             {
                 "message": {"id": str(message.id), "origin_domain": message.origin_domain},
                 "channel": {"id": str(channel.id), "origin_domain": channel.origin_domain},
+                "user": {"id": str(actor.id), "origin_domain": actor.origin_domain},
             },
             channel=channel,
         )

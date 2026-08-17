@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+import app.api.federation as federation_api
 from app.api.dms import publish_local_group_state
 from app.chat.group_conversations import (
     apply_authoritative_group_mutation,
@@ -27,6 +28,8 @@ from app.core.dm import (
 from app.core.settings import Settings
 from app.db.models import Channel, DMConversation, User
 from app.federation.replication import replicate_group_notice
+from app.federation.schemas import DMGroupMutationRequest
+from app.federation.security import FederationPrincipal
 from app.voice.schemas import CallResponse
 
 
@@ -139,6 +142,100 @@ def test_group_membership_notices_explain_changes_and_owner_transfer() -> None:
         group_dm_notice_text(GROUP_DM_MEMBER_LEFT, "Alice", "Alice", "Bob")
         == "Alice left the group. Bob is now the owner."
     )
+
+
+@pytest.mark.asyncio
+async def test_group_authority_attests_an_authenticated_remote_leaving_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = Settings(
+        domain="alpha.localhost",
+        environment="test",
+        secret_key="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        database_url="postgresql+asyncpg://test:test@postgres/test",
+        dragonfly_url="redis://dragonfly:6379/0",
+        media_s3_access_key="GK00000000000000000000000000000000",
+        media_s3_secret_key="0" * 64,
+    )
+    actor = user(1, "beta.localhost")
+    remaining = user(2, "gamma.localhost")
+    conversation = DMConversation(
+        id=100,
+        origin_domain="alpha.localhost",
+        pair_key=group_dm_key("alpha.localhost", 100),
+        type="group",
+        authority_domain="alpha.localhost",
+        owner_id=remaining.id,
+        owner_domain=remaining.origin_domain,
+        state_version=2,
+    )
+    channel = Channel(
+        id=100,
+        origin_domain="alpha.localhost",
+        type=1,
+        created_floor_id=100,
+    )
+    payload = DMGroupMutationRequest(
+        action="leave",
+        conversation_id="100",
+        conversation_domain="alpha.localhost",
+        actor={
+            "id": str(actor.id),
+            "origin_domain": actor.origin_domain,
+            "username": actor.username,
+        },
+    )
+    session = SimpleNamespace(commit=AsyncMock())
+    build = AsyncMock(return_value={"event_id": "kcfe_test"})
+    queue = AsyncMock()
+
+    monkeypatch.setattr(federation_api, "enforce_federation_route_rate_limit", AsyncMock())
+    monkeypatch.setattr(federation_api, "upsert_remote_user", AsyncMock(return_value=actor))
+    monkeypatch.setattr(
+        federation_api,
+        "load_authoritative_group",
+        AsyncMock(return_value=(conversation, channel)),
+    )
+    monkeypatch.setattr(
+        federation_api,
+        "apply_authoritative_group_mutation",
+        AsyncMock(return_value=([actor, remaining], [remaining], False)),
+    )
+    monkeypatch.setattr(
+        federation_api,
+        "create_group_mutation_notice",
+        AsyncMock(return_value=None),
+    )
+    content = {"conversation": {"id": "100"}, "participants": []}
+    monkeypatch.setattr(federation_api, "group_conversation_content", lambda *_args, **_kw: content)
+    monkeypatch.setattr(federation_api, "build_envelope", build)
+    monkeypatch.setattr(federation_api, "queue_event", queue)
+    monkeypatch.setattr(
+        federation_api,
+        "reload_group_projection",
+        AsyncMock(return_value=(conversation, channel, [remaining])),
+    )
+    monkeypatch.setattr(federation_api, "enqueue_best_effort", AsyncMock())
+
+    result = await federation_api.federation_group_dm_mutate(
+        payload=payload,
+        principal=FederationPrincipal("beta.localhost", "ed25519:test"),
+        session=cast(Any, session),
+        redis=cast(Any, SimpleNamespace()),
+        snowflake=cast(Any, SimpleNamespace()),
+        settings=configured,
+    )
+
+    assert result is content
+    assert build.await_args.args[:5] == (
+        session,
+        configured,
+        "dm.group.state",
+        actor,
+        content,
+    )
+    assert build.await_args.kwargs == {"authority_attested_actor": True}
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

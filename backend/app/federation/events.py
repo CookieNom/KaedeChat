@@ -36,8 +36,14 @@ async def build_envelope(
     content: dict[str, Any],
     *,
     context: dict[str, Any] | None = None,
+    authority_attested_actor: bool = False,
 ) -> dict[str, Any]:
-    if actor.origin_domain != settings.domain:
+    remote_group_actor = (
+        authority_attested_actor
+        and event_type == "dm.group.state"
+        and actor.origin_domain != settings.domain
+    )
+    if actor.origin_domain != settings.domain and not remote_group_actor:
         raise ValueError("an instance may only sign events for its own users")
     key_id, private_key = await self_private_key(session, settings)
     envelope: dict[str, Any] = {

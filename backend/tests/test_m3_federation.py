@@ -55,7 +55,7 @@ from app.federation.delivery import (
     publish_dm_delivery_update,
     retry_delay,
 )
-from app.federation.events import ensure_queue_destination
+from app.federation.events import build_envelope, ensure_queue_destination
 from app.federation.guilds import (
     GUILD_MUTATION_EVENT_TYPES,
     _event_ref,
@@ -146,6 +146,55 @@ def settings(**overrides: object) -> Settings:
     }
     values.update(overrides)
     return Settings(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_envelope_builder_only_allows_authority_attested_remote_group_actors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = settings()
+    remote_actor = User(
+        id=42,
+        origin_domain="beta.localhost",
+        username="remote",
+        is_local=False,
+    )
+    monkeypatch.setattr(
+        "app.federation.events.self_private_key",
+        AsyncMock(return_value=("ed25519:test", object())),
+    )
+    monkeypatch.setattr("app.federation.events.sign_envelope", lambda *_args: "signature")
+
+    with pytest.raises(ValueError, match="only sign events for its own users"):
+        await build_envelope(
+            cast(Any, SimpleNamespace()),
+            configured,
+            "dm.group.state",
+            remote_actor,
+            {},
+        )
+    with pytest.raises(ValueError, match="only sign events for its own users"):
+        await build_envelope(
+            cast(Any, SimpleNamespace()),
+            configured,
+            "guild.pin.add",
+            remote_actor,
+            {},
+            authority_attested_actor=True,
+        )
+
+    envelope = await build_envelope(
+        cast(Any, SimpleNamespace()),
+        configured,
+        "dm.group.state",
+        remote_actor,
+        {},
+        authority_attested_actor=True,
+    )
+
+    assert envelope["origin"] == "alpha.localhost"
+    assert envelope["actor"] == {"id": "42", "domain": "beta.localhost"}
+    assert envelope["signatures"] == {"alpha.localhost": {"ed25519:test": "signature"}}
 
 
 @pytest.mark.asyncio
@@ -906,6 +955,78 @@ def test_complete_guild_mutation_registry_and_snapshot_fences() -> None:
     }
     assert guild_event_requires_snapshot(event)
     assert guild_event_channel_ref(event) == (42, "alpha.localhost")
+
+
+@pytest.mark.asyncio
+async def test_authoritative_pin_event_preserves_the_remote_pinner() -> None:
+    guild = SimpleNamespace(
+        id=42,
+        origin_domain="alpha.localhost",
+        last_event_seq=0,
+        next_event_seq=1,
+        sync_status="stale",
+        permission_generation=0,
+        snapshot_generation=1,
+    )
+    owner = User(
+        id=7,
+        origin_domain="alpha.localhost",
+        username="owner",
+        is_local=False,
+    )
+    message = SimpleNamespace(
+        id=81,
+        origin_domain="alpha.localhost",
+        channel_id=80,
+        channel_domain="alpha.localhost",
+        deleted_at=None,
+    )
+    channel = SimpleNamespace(
+        id=80,
+        origin_domain="alpha.localhost",
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+    )
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=guild),
+        get=AsyncMock(side_effect=[owner, message, channel]),
+        execute=AsyncMock(),
+    )
+    event = {
+        "type": "guild.pin.add",
+        "context": {
+            "guild_id": str(guild.id),
+            "guild_domain": guild.origin_domain,
+            "seq": "1",
+        },
+        "actor": {"id": str(owner.id), "domain": owner.origin_domain},
+        "content": {
+            "message": {"id": str(message.id), "origin_domain": message.origin_domain},
+            "channel": {"id": str(channel.id), "origin_domain": channel.origin_domain},
+            "user": {"id": "66", "origin_domain": "member.example"},
+        },
+    }
+
+    dispatch = await apply_guild_mutation_event(
+        cast(Any, session),
+        settings(domain="beta.localhost"),
+        cast(Any, guild),
+        event,
+    )
+
+    statement = session.execute.await_args.args[0]
+    assert statement.compile().params["pinned_by_id"] == 66
+    assert statement.compile().params["pinned_by_domain"] == "member.example"
+    assert dispatch == (
+        "MESSAGE_UPDATE",
+        {
+            "id": str(message.id),
+            "origin_domain": message.origin_domain,
+            "channel_id": str(channel.id),
+            "channel_domain": channel.origin_domain,
+            "pinned": True,
+        },
+    )
 
 
 def test_legacy_guild_update_reference_inherits_only_a_missing_authoritative_domain() -> None:

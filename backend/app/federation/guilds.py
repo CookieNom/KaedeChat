@@ -1814,6 +1814,14 @@ async def apply_guild_mutation_event(
     elif event_type in {"guild.pin.add", "guild.pin.remove"}:
         message_ref = _event_ref(content.get("message"), "pinned message")
         channel_ref = _event_ref(content.get("channel"), "pin channel")
+        # New events carry the semantic pinner separately because an
+        # authoritative guild event may be signed by the local owner on behalf
+        # of an authenticated remote member. Older events used the signer.
+        pinner_ref = (
+            _event_ref(content.get("user"), "pin user")
+            if content.get("user") is not None
+            else actor_ref
+        )
         message = await session.get(Message, message_ref)
         channel = await session.get(Channel, channel_ref)
         if message is not None and channel is not None:
@@ -1832,8 +1840,8 @@ async def apply_guild_mutation_event(
                         channel_domain=channel_ref[1],
                         message_id=message_ref[0],
                         message_domain=message_ref[1],
-                        pinned_by_id=actor_ref[0],
-                        pinned_by_domain=actor_ref[1],
+                        pinned_by_id=pinner_ref[0],
+                        pinned_by_domain=pinner_ref[1],
                     )
                     .on_conflict_do_nothing()
                 )

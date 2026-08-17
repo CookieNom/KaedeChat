@@ -1928,6 +1928,10 @@ async def pin_message(
             {
                 "message": {"id": str(message.id), "origin_domain": message.origin_domain},
                 "channel": {"id": str(channel.id), "origin_domain": channel.origin_domain},
+                "user": {
+                    "id": str(auth.user.id),
+                    "origin_domain": auth.user.origin_domain,
+                },
             },
             channel=channel,
         )
@@ -2061,6 +2065,10 @@ async def unpin_message(
                 "channel": {
                     "id": str(access.channel.id),
                     "origin_domain": access.channel.origin_domain,
+                },
+                "user": {
+                    "id": str(auth.user.id),
+                    "origin_domain": auth.user.origin_domain,
                 },
             },
             channel=access.channel,
