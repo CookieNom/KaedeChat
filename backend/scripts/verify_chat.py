@@ -281,12 +281,6 @@ def verify() -> None:
         )
         require(moderator.status_code == 201, f"moderator role failed: {moderator.text}")
         moderator_id = moderator.json()["id"]
-        raised = api.patch(
-            f"/api/v1/guilds/{guild_id}/roles/{moderator_id}",
-            headers=versioned_headers(alice_headers, moderator.json()),
-            json={"position": 10},
-        )
-        require(raised.status_code == 200, f"role positioning failed: {raised.text}")
         helper = api.post(
             f"/api/v1/guilds/{guild_id}/roles",
             headers=alice_headers,
@@ -294,12 +288,25 @@ def verify() -> None:
         )
         require(helper.status_code == 201, f"helper role failed: {helper.text}")
         helper_id = helper.json()["id"]
-        lowered = api.patch(
-            f"/api/v1/guilds/{guild_id}/roles/{helper_id}",
-            headers=versioned_headers(alice_headers, helper.json()),
-            json={"position": 1},
+        reordered = api.patch(
+            f"/api/v1/guilds/{guild_id}/roles",
+            headers=alice_headers,
+            json={
+                "roles": [
+                    {
+                        "id": helper_id,
+                        "position": 1,
+                        "version": helper.json()["version"],
+                    },
+                    {
+                        "id": moderator_id,
+                        "position": 2,
+                        "version": moderator.json()["version"],
+                    },
+                ]
+            },
         )
-        require(lowered.status_code == 200, "helper role could not be positioned")
+        require(reordered.status_code == 200, f"role positioning failed: {reordered.text}")
         assigned = api.put(
             f"/api/v1/guilds/{guild_id}/members/{bob_id}/roles/{moderator_id}",
             headers=alice_headers,
@@ -422,6 +429,10 @@ def verify() -> None:
             )
             require(typing.status_code == 204, f"typing event failed: {typing.text}")
             typing_dispatch = socket.receive_json()
+            for _ in range(9):
+                if typing_dispatch.get("t") == "TYPING_START":
+                    break
+                typing_dispatch = socket.receive_json()
             require(
                 typing_dispatch["t"] == "TYPING_START"
                 and typing_dispatch["d"]["channel_id"] == channel_id

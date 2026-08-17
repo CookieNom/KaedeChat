@@ -319,7 +319,7 @@
 <svelte:head><title>{application?.name ?? 'Application'} · Developer Portal</title></svelte:head>
 <main class="page">
   <header class="top">
-    <a href="/developers">← Applications</a>
+    <a href={resolve('/developers')}>← Applications</a>
     <div>
       <small>Developer Portal</small>
       <h1>{application?.name ?? 'Loading…'}</h1>
@@ -362,7 +362,8 @@
           </p>
           <h3>Scopes</h3>
           <div class="chips">
-            {#each scopes as scope}<label class:active={application.default_scopes.includes(scope)}
+            {#each scopes as scope (scope)}<label
+                class:active={application.default_scopes.includes(scope)}
                 ><input
                   type="checkbox"
                   checked={application.default_scopes.includes(scope)}
@@ -374,7 +375,7 @@
           </div>
           <h3>Gateway intents</h3>
           <div class="chips">
-            {#each intents as intent}<label
+            {#each intents as intent (intent)}<label
                 class:active={application.default_intents.includes(intent)}
                 ><input
                   type="checkbox"
@@ -428,7 +429,7 @@
             </div>
           {/if}
           <div class="rows">
-            {#each credentials as credential}<article>
+            {#each credentials as credential (credential.id)}<article>
                 <div>
                   <strong>{credential.label}</strong><small
                     >{credential.token_hint} · {credential.scopes.join(', ')}</small
@@ -475,7 +476,7 @@
             >Enroll worker</button
           >
           <div class="rows">
-            {#each workers as worker}<article>
+            {#each workers as worker (worker.id)}<article>
                 <div>
                   <strong>{worker.name}</strong><small
                     >#{worker.id} · {worker.target_domains.join(', ') ||
@@ -507,7 +508,7 @@
             disabled={busy}>Create invite link</button
           >
           <div class="rows">
-            {#each templates as template}<article>
+            {#each templates as template (template.id)}<article>
                 <div>
                   <strong>{template.name}</strong><small
                     >{template.e2ee_mode} · {template.active ? 'active' : 'disabled'}</small
@@ -532,7 +533,7 @@
             ><button onclick={addRule}>Add rule</button>
           </div>
           <div class="rows">
-            {#each rules as rule}<article>
+            {#each rules as rule (rule.target_domain)}<article>
                 <code>{rule.target_domain}</code><span class:revoked={rule.effect === 'deny'}
                   >{rule.effect}</span
                 ><button onclick={() => deleteRule(rule.target_domain)}>Remove</button>
@@ -542,7 +543,7 @@
         <section id="installations">
           <h2>Installations</h2>
           <div class="rows">
-            {#each installations as installation}<article>
+            {#each installations as installation (installation.id)}<article>
                 <div>
                   <strong>{installation.guild_ref}</strong><small
                     >{installation.e2ee_mode} · revision {installation.id}</small

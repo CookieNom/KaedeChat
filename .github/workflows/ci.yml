@@ -25,6 +25,8 @@ jobs:
         with: { version: "0.11.8", enable-cache: true }
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with: { python-version: "3.12.13" }
+      - name: Install backend native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libvips42
       - run: uv lock --check
       - run: uv sync --locked
       - run: uv run ruff check .
@@ -46,6 +48,13 @@ jobs:
         run: |
           git clone --depth 1 --branch 3.41.4 https://github.com/flutter/flutter.git flutter
           echo "${{ runner.temp }}/flutter/bin" >> "$GITHUB_PATH"
+      - name: Install pinned Rust Android targets
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup target add --toolchain 1.92.0 \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android
       - run: flutter pub get
       - run: dart format --output=none --set-exit-if-changed lib test
       - run: flutter analyze

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
   import type { BotInviteReference } from '$lib/chat/bot-invites';
   import { assetUrl } from '$lib/media/assets';
@@ -76,7 +77,7 @@
       <span>{invite.template.scopes.length} API scopes</span>
       <span>{invite.template.e2ee_mode.replaceAll('_', ' ')} E2EE</span>
     </div>
-    <a href={installPath}>Review and add</a>
+    <a href={resolve(installPath)}>Review and add</a>
   </aside>
 {:else if unavailable}
   <aside class="bot-invite unavailable">

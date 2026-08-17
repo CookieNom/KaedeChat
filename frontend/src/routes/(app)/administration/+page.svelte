@@ -226,7 +226,7 @@
     {#if me}<small>{me.user.display_name ?? me.user.username}<br />{me.roles.join(' · ')}</small
       >{/if}
     <nav>
-      {#each ['overview', 'users', 'applications', 'reports', 'instances', 'operators', 'audit'] as item}<button
+      {#each ['overview', 'users', 'applications', 'reports', 'instances', 'operators', 'audit'] as item (item)}<button
           class:active={view === item}
           onclick={() => (view = item as View)}>{item}</button
         >{/each}
@@ -247,7 +247,7 @@
       </div>{/if}
     {#if !me && !error}<p>Loading administration…</p>
     {:else if view === 'overview'}<div class="metrics">
-        {#each Object.entries(overview) as [label, value]}<article>
+        {#each Object.entries(overview) as [label, value] (label)}<article>
             <strong>{value.toLocaleString()}</strong><span>{label.replaceAll('_', ' ')}</span>
           </article>{/each}
       </div>
@@ -268,7 +268,7 @@
           /><button onclick={searchUsers}>Search</button>
         </div>
         <div class="table">
-          {#each users as user}<article>
+          {#each users as user (`${user.id}@${user.origin_domain}`)}<article>
               <div>
                 <strong>{user.display_name ?? user.username}</strong><small
                   >{user.username}@{user.origin_domain} · {user.account_type ?? 'human'}</small
@@ -288,7 +288,7 @@
           revocation generation.
         </p>
         <div class="table">
-          {#each apps as app}<article>
+          {#each apps as app (app.ref)}<article>
               <div><strong>{app.name}</strong><small>{app.ref} · team {app.team_ref}</small></div>
               <span class:bad={app.status === 'suspended'}>{app.status}</span
               >{#if can('bots.manage')}<button
@@ -305,7 +305,7 @@
           not submitted to the instance.
         </p>
         <div class="table reports">
-          {#each reports as report}<article>
+          {#each reports as report (report.id)}<article>
               <div>
                 <strong>#{report.id} · {report.category}</strong><small
                   >{report.target_type}
@@ -327,7 +327,7 @@
               {#if can('reports.manage')}<select
                   value={report.status}
                   onchange={(e) => patchReport(report, e.currentTarget.value)}
-                  >{#each reportStatuses as status}<option value={status}
+                  >{#each reportStatuses as status (status)}<option value={status}
                       >{status.replaceAll('_', ' ')}</option
                     >{/each}</select
                 >{:else}<span>{report.status}</span>{/if}
@@ -350,7 +350,7 @@
             >
           </div>{/if}
         <div class="table">
-          {#each blocks as block}<article>
+          {#each blocks as block (block.domain)}<article>
               <div>
                 <strong>{block.domain}</strong><small
                   >{block.reason ?? 'No public reason'}{block.include_subdomains
@@ -369,12 +369,13 @@
         {#if me?.roles.includes('owner')}<div class="toolbar">
             <input bind:value={operatorRef} placeholder="User ID (snowflake@instance)" /><select
               bind:value={operatorRole}
-              >{#each roleOptions as role}<option value={role}>{role.replaceAll('_', ' ')}</option
+              >{#each roleOptions as role (role)}<option value={role}
+                  >{role.replaceAll('_', ' ')}</option
                 >{/each}</select
             ><button onclick={addOperator}>Grant role</button>
           </div>{/if}
         <div class="table">
-          {#each operators as operator}<article>
+          {#each operators as operator (operator.id)}<article>
               <div>
                 <strong>{operator.user.display_name ?? operator.user.username}</strong><small
                   >{operator.user.id}@{operator.user.origin_domain}</small
@@ -389,7 +390,7 @@
       </section>
     {:else if view === 'audit'}<section class="panel">
         <div class="table">
-          {#each audits as event}<article>
+          {#each audits as event (event.id)}<article>
               <div>
                 <strong>{event.action}</strong><small
                   >{event.actor_ref ?? event.actor_kind} · {new Date(

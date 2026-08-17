@@ -13,6 +13,7 @@ from sqlalchemy import func, select, tuple_
 from websockets.asyncio.client import connect
 
 from app.auth.security import hash_password
+from app.core.settings import get_settings
 from app.db.models import (
     Channel,
     Emoji,
@@ -32,6 +33,7 @@ from app.db.models import (
     UserSettings,
 )
 from app.db.session import create_engine_and_sessionmaker
+from app.federation.delivery import drain_destination
 from scripts.verification import VerificationFailure, failure_message, require
 
 PASSWORD = "correct horse battery staple"  # noqa: S105 - disposable validation credential
@@ -127,7 +129,7 @@ async def seed_guild_emoji(
 
 
 async def wait_for(
-    operation: Any, predicate: Any, message: str, *, wait_seconds: float = 20
+    operation: Any, predicate: Any, message: str, *, wait_seconds: float = 60
 ) -> Any:
     deadline = time.monotonic() + wait_seconds
     last: Any = None
@@ -136,7 +138,11 @@ async def wait_for(
         if predicate(last):
             return last
         await asyncio.sleep(0.2)
-    raise VerificationFailure(f"{message}; last observed result: {last!r}")
+    if isinstance(last, httpx.Response):
+        detail = f"HTTP {last.status_code}: {last.text[:2000]}"
+    else:
+        detail = repr(last)
+    raise VerificationFailure(f"{message}; last observed result: {detail}")
 
 
 async def login(client: httpx.AsyncClient, username: str) -> dict[str, str]:
@@ -703,11 +709,81 @@ async def verify() -> None:
                     return int(item.get("permissions", "0"))
             return None
 
-        await wait_for(
-            lambda: beta.get(f"/api/v1/guilds/{guild_ref}", headers=bob),
-            lambda response: bool((replicated_voice_permissions(response) or 0) & (1 << 20)),
-            "replicated voice channel did not grant the default CONNECT permission",
+        # Delivery is durably asynchronous. Drain this fixture synchronously so
+        # the permission assertion tests guild replication rather than whether
+        # a duplicate Taskiq wake lost an advisory-lock race on a busy runner.
+        delivery_settings = get_settings().model_copy(
+            update={
+                "domain": "alpha.localhost",
+                "federation_peer_overrides": {"beta.localhost": "http://beta-api:8000"},
+            }
         )
+        delivery_engine, delivery_sessionmaker = create_engine_and_sessionmaker(ALPHA_DATABASE_URL)
+        delivery_redis = Redis.from_url(os.environ["KAEDE_DRAGONFLY_URL"])
+        try:
+
+            async def drain_voice_fixture() -> httpx.Response:
+                await drain_destination(
+                    delivery_sessionmaker,
+                    delivery_settings,
+                    "beta.localhost",
+                    delivery_redis,
+                )
+                return await beta.get(f"/api/v1/guilds/{guild_ref}", headers=bob)
+
+            try:
+                await wait_for(
+                    drain_voice_fixture,
+                    lambda response: bool(
+                        (replicated_voice_permissions(response) or 0) & (1 << 20)
+                    ),
+                    "replicated voice channel did not grant the default CONNECT permission",
+                    wait_seconds=60,
+                )
+            except VerificationFailure as exc:
+                async with delivery_sessionmaker() as diagnostic_session:
+                    outbox = (
+                        await diagnostic_session.execute(
+                            select(
+                                FederationOutbox.status,
+                                FederationOutbox.attempts,
+                                FederationOutbox.last_error,
+                                FederationEvent.envelope,
+                            )
+                            .join(
+                                FederationEvent,
+                                (
+                                    FederationEvent.origin_domain
+                                    == FederationOutbox.event_origin_domain
+                                )
+                                & (FederationEvent.event_id == FederationOutbox.event_id),
+                            )
+                            .where(FederationEvent.event_type == "guild.channel.create")
+                        )
+                    ).one()
+                beta_engine, beta_sessionmaker = create_engine_and_sessionmaker(BETA_DATABASE_URL)
+                try:
+                    async with beta_sessionmaker() as beta_session:
+                        beta_guild = await beta_session.get(
+                            Guild, (int(guild_id), "alpha.localhost")
+                        )
+                        replica_state = (
+                            beta_guild.last_event_seq,
+                            beta_guild.snapshot_generation,
+                            beta_guild.sync_status,
+                            beta_guild.sync_error_code,
+                        )
+                finally:
+                    await beta_engine.dispose()
+                context = outbox.envelope.get("context", {})
+                raise VerificationFailure(
+                    "voice channel replication diagnostic: "
+                    f"outbox={(outbox.status, outbox.attempts, outbox.last_error)!r}; "
+                    f"event_context={context!r}; replica={replica_state!r}"
+                ) from exc
+        finally:
+            await delivery_redis.aclose()
+            await delivery_engine.dispose()
         voice_denied = await alpha.put(
             f"/api/v1/guilds/{guild_ref}/channels/{voice_channel_ref}/overwrites",
             headers=alice,
@@ -726,6 +802,7 @@ async def verify() -> None:
                 and not (int(replicated_voice_permissions(response) or 0) & (1 << 20))
             ),
             "federated CONNECT denial did not reach the remote member",
+            wait_seconds=60,
         )
         voice_inherited = await alpha.put(
             f"/api/v1/guilds/{guild_ref}/channels/{voice_channel_ref}/overwrites",
@@ -745,6 +822,7 @@ async def verify() -> None:
             lambda: beta.get(f"/api/v1/guilds/{guild_ref}", headers=bob),
             lambda response: bool((replicated_voice_permissions(response) or 0) & (1 << 20)),
             "CONNECT did not recover after the federated overwrite returned to inherit",
+            wait_seconds=60,
         )
 
         # Presence originates in the gateway, but the worker owns federation

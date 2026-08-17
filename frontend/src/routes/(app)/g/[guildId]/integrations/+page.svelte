@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { api, userErrorMessage } from '$lib/api/client';
   import type { Guild } from '$lib/chat/types';
@@ -64,7 +65,7 @@
 <main>
   <header>
     <div>
-      <a href={`/g/${encodeURIComponent(guildRef)}/settings`}>← Guild settings</a><span
+      <a href={resolve(`/g/${encodeURIComponent(guildRef)}/settings`)}>← Guild settings</a><span
         >Guild integrations</span
       >
       <h1>Bots and automations</h1>
@@ -111,11 +112,11 @@
             <summary>Approved access</summary>
             <h3>Scopes</h3>
             <div class="pills">
-              {#each installation.scopes as scope}<span>{scope}</span>{/each}
+              {#each installation.scopes as scope (scope)}<span>{scope}</span>{/each}
             </div>
             <h3>Live events</h3>
             <div class="pills">
-              {#each installation.intents as intent}<span>{intent}</span>{/each}
+              {#each installation.intents as intent (intent)}<span>{intent}</span>{/each}
             </div>
             <p>Guild permission bits: {installation.permissions}</p>
           </details>

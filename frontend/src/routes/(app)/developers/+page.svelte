@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resolve } from '$app/paths';
   import DeveloperPortalNav from '$lib/components/DeveloperPortalNav.svelte';
   import { api, userErrorMessage } from '$lib/api/client';
   import { onMount } from 'svelte';
@@ -117,7 +118,7 @@
           <label>
             Owner
             <select bind:value={teamRef}>
-              {#each teams as team}
+              {#each teams as team (team.ref)}
                 <option value={team.ref}>
                   {team.personal ? 'Personal' : team.name} · {team.role}
                 </option>
@@ -166,7 +167,10 @@
       {:else}
         <div class="app-grid">
           {#each applications as application (application.ref)}
-            <a class="app-card" href={`/developers/${encodeURIComponent(application.ref)}`}>
+            <a
+              class="app-card"
+              href={resolve(`/developers/${encodeURIComponent(application.ref)}`)}
+            >
               <span class="avatar">{application.name.slice(0, 1).toUpperCase()}</span>
               <span class="app-copy">
                 <span class="app-title">

@@ -2149,6 +2149,10 @@ async def process_event(
                             replicated_group_call,
                         )
         if created_dm_channel is not None and dm_channel_recipient is not None:
+            # The durable commit expires ORM attributes. Refresh before
+            # rendering the best-effort gateway projection so payload helpers
+            # never trigger asynchronous lazy IO outside a greenlet context.
+            await session.refresh(created_dm_channel)
             participants = list(
                 await session.scalars(
                     select(User)

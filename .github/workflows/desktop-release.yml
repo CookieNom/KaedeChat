@@ -208,25 +208,17 @@ jobs:
         run: |
           $installer = Get-ChildItem "desktop\target\release\bundle\nsis\*-setup.exe" |
             Select-Object -First 1
-          $updater = Get-ChildItem "desktop\target\release\bundle\nsis\*-setup.nsis.zip" |
-            Select-Object -First 1
           if (-not $installer) { throw "The NSIS installer was not produced" }
-          if (-not $updater -or -not (Test-Path "$($updater.FullName).sig")) {
-            throw "The signed updater artifact was not produced"
+          if (-not (Test-Path "$($installer.FullName).sig")) {
+            throw "The signed NSIS updater signature was not produced"
           }
           New-Item -ItemType Directory -Force release-assets | Out-Null
           $installerName = "Kaede-Chat-$($env:GITHUB_REF_NAME)-windows-x86_64-setup.exe"
           $installerDestination = Join-Path "release-assets" $installerName
           Copy-Item $installer.FullName $installerDestination
-          $updaterName = "Kaede-Chat-$($env:GITHUB_REF_NAME)-windows-x86_64-setup.nsis.zip"
-          $updaterDestination = Join-Path "release-assets" $updaterName
-          Copy-Item $updater.FullName $updaterDestination
-          Copy-Item "$($updater.FullName).sig" "$updaterDestination.sig"
-          foreach ($destination in @($installerDestination, $updaterDestination)) {
-            $name = Split-Path $destination -Leaf
-            $hash = (Get-FileHash -Algorithm SHA256 $destination).Hash.ToLowerInvariant()
-            "$hash  $name" | Set-Content "$destination.sha256" -Encoding ascii
-          }
+          Copy-Item "$($installer.FullName).sig" "$installerDestination.sig"
+          $hash = (Get-FileHash -Algorithm SHA256 $installerDestination).Hash.ToLowerInvariant()
+          "$hash  $installerName" | Set-Content "$installerDestination.sha256" -Encoding ascii
       - name: Upload Windows release files
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -237,6 +229,7 @@ jobs:
 
   desktop-macos:
     name: macOS desktop (${{ matrix.arch }})
+    if: vars.APPLE_RELEASE_ENABLED == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -360,6 +353,13 @@ jobs:
         run: |
           git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git flutter
           echo "${{ runner.temp }}/flutter/bin" >> "$GITHUB_PATH"
+      - name: Install pinned Rust Android targets
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup target add --toolchain "$RUST_VERSION" \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android
       - name: Configure Android release signing
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -427,6 +427,12 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: [desktop-linux, desktop-windows, desktop-macos, android]
+    if: >-
+      always() &&
+      needs.desktop-linux.result == 'success' &&
+      needs.desktop-windows.result == 'success' &&
+      needs.android.result == 'success' &&
+      (needs.desktop-macos.result == 'success' || needs.desktop-macos.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -456,7 +462,7 @@ jobs:
           version = os.environ["version"]
           repository = os.environ["REPOSITORY"]
           names = {
-              "windows-x86_64": f"Kaede-Chat-{tag}-windows-x86_64-setup.nsis.zip",
+              "windows-x86_64": f"Kaede-Chat-{tag}-windows-x86_64-setup.exe",
               "linux-x86_64": f"Kaede-Chat-{tag}-linux-x86_64.AppImage",
               "darwin-x86_64": f"Kaede-Chat-{tag}-macos-x86_64.app.tar.gz",
               "darwin-aarch64": f"Kaede-Chat-{tag}-macos-arm64.app.tar.gz",
@@ -465,12 +471,16 @@ jobs:
           for platform, name in names.items():
               artifact = assets / name
               signature = assets / f"{name}.sig"
+              if not artifact.is_file() and not signature.is_file():
+                  continue
               if not artifact.is_file() or not signature.is_file():
-                  raise SystemExit(f"missing updater artifact or signature for {platform}")
+                  raise SystemExit(f"incomplete updater artifact or signature for {platform}")
               platforms[platform] = {
                   "url": f"https://github.com/{repository}/releases/download/{tag}/{name}",
                   "signature": signature.read_text(encoding="utf-8").strip(),
               }
+          if not platforms:
+              raise SystemExit("no signed desktop updater artifacts were produced")
           manifest = {
               "version": version,
               "notes": f"Kaede Chat {version}",

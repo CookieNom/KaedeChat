@@ -271,7 +271,7 @@
             <label>
               Role
               <select bind:value={memberRole}>
-                {#each roles as role}<option value={role}>{role}</option>{/each}
+                {#each roles as role (role)}<option value={role}>{role}</option>{/each}
               </select>
             </label>
             <button class="primary" disabled={busy}>{busy ? 'Adding…' : 'Add member'}</button>
@@ -298,7 +298,7 @@
                   value={member.role}
                   onchange={(event) => changeRole(member, event.currentTarget.value as TeamRole)}
                 >
-                  {#each roles as role}<option value={role}>{role}</option>{/each}
+                  {#each roles as role (role)}<option value={role}>{role}</option>{/each}
                 </select>
                 <button class="remove" type="button" onclick={() => removeMember(member)}
                   >Remove</button

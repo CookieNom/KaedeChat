@@ -25,7 +25,7 @@
   </nav>
   <div class="resources">
     <small>Resources</small>
-    <a href="/docs/bots-and-automations">Bot API guide ↗</a>
+    <a href={resolve('/docs/bots-and-automations')}>Bot API guide ↗</a>
   </div>
 </aside>
 

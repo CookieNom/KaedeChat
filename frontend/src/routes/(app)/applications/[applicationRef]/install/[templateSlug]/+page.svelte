@@ -37,9 +37,6 @@
   let error = $state('');
   let busy = $state(false);
   let installed = $state(false);
-  const appRef = $derived(
-    invite?.application.ref ?? `${invite?.application.id}@${invite?.application.origin_domain}`
-  );
   async function load() {
     try {
       const [resolvedInvite, memberships] = await Promise.all([
@@ -79,6 +76,7 @@
 
 <svelte:head><title>{invite?.application.name ?? 'Bot invitation'} · Kaede Chat</title></svelte:head
 >
+<!-- eslint-disable svelte/no-navigation-without-resolve -- privacy and support destinations are external URLs supplied by the application -->
 <main>
   <a class="back" href={resolve('/home')}>← Back to Kaede</a>{#if error}<div
       class="notice error"
@@ -113,7 +111,8 @@
             <a href={resolve('/home')}>Return to Kaede</a>
           </div>{:else}<label
             >Guild<select bind:value={selected}
-              >{#each guilds as guild}<option value={`${guild.id}@${guild.origin_domain}`}
+              >{#each guilds as guild (`${guild.id}@${guild.origin_domain}`)}<option
+                  value={`${guild.id}@${guild.origin_domain}`}
                   >{guild.name} · {guild.origin_domain}</option
                 >{/each}</select
             ></label
@@ -124,12 +123,12 @@
       <section>
         <h2>Requested access</h2>
         <div class="pills">
-          {#each invite.template.scopes as scope}<span>{scope}</span>{/each}
+          {#each invite.template.scopes as scope (scope)}<span>{scope}</span>{/each}
         </div>
         <details>
           <summary>Live event intents</summary>
           <div class="pills">
-            {#each invite.template.intents as intent}<span>{intent}</span>{/each}
+            {#each invite.template.intents as intent (intent)}<span>{intent}</span>{/each}
           </div>
         </details>
         <p class="muted">Guild permission bits: {invite.template.permissions}</p>
