@@ -397,10 +397,7 @@
   };
   const setReadStates = (items: ReadStateStatus[]) => entities.readStates.replace(items);
   const setGuilds = (items: Guild[]) => entities.ingestGuilds(items);
-  const setDirectMessages = (items: Channel[]) => {
-    entities.channels.upsertMany(items);
-    entities.users.upsertMany(items.flatMap((item) => item.recipients ?? []));
-  };
+  const setDirectMessages = (items: Channel[]) => entities.ingestDirectMessages(items);
 
   function unreadFor(target: Channel): ReadStateStatus | undefined {
     return readStates.find(

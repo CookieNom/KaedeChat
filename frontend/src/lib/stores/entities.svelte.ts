@@ -47,8 +47,10 @@ export class NormalizedCollection<T> {
     const key = this.keyOf(item);
     const existing = this.records[key];
     this.records = { ...this.records, [key]: existing ? { ...existing, ...item } : item };
-    if (!this.order.includes(key)) {
-      this.order = options.append === false ? [key, ...this.order] : [...this.order, key];
+    if (options.append === false) {
+      this.order = [key, ...this.order.filter((itemKey) => itemKey !== key)];
+    } else if (!this.order.includes(key)) {
+      this.order = [...this.order, key];
     }
   }
 
@@ -95,6 +97,11 @@ export class ChatEntityStore {
   ingestGuilds(guilds: Guild[]): void {
     this.guilds.upsertMany(guilds);
     this.channels.upsertMany(guilds.flatMap((guild) => guild.channels ?? []));
+  }
+
+  ingestDirectMessages(channels: Channel[]): void {
+    this.channels.replaceWhere(channels, (channel) => channel.guild_id === null);
+    this.users.upsertMany(channels.flatMap((channel) => channel.recipients ?? []));
   }
 
   ingestCurrentUser(user: UserSummary): void {

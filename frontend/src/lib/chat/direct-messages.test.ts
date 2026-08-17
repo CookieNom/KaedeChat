@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { dmTitle, groupDmSubtitle, isGroupDm, ownsGroupDm } from './direct-messages';
+import {
+  dmTitle,
+  groupDmSubtitle,
+  isGroupDm,
+  ownsGroupDm,
+  promoteDirectMessage
+} from './direct-messages';
 import type { Channel, UserSummary } from './types';
 
 const self: UserSummary = {
@@ -76,5 +82,12 @@ describe('direct-message presentation', () => {
     });
     expect(dmTitle(group)).toBe('Turtle, Turtle');
     expect(ownsGroupDm(group, self)).toBe(false);
+  });
+
+  it('promotes live activity without duplicating the conversation', () => {
+    const older = channel({ id: '9', name: 'Older' });
+    const active = channel({ id: '10', name: 'Updated' });
+
+    expect(promoteDirectMessage([older, channel()], active)).toEqual([active, older]);
   });
 });

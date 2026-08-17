@@ -58,7 +58,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       // all member data before the new READY is applied.
       chatEntities.beginGatewaySession(ready.user);
       chatEntities.ingestGuilds(ready.guilds);
-      chatEntities.channels.upsertMany(ready.dm_channels);
+      chatEntities.ingestDirectMessages(ready.dm_channels);
       chatEntities.readStates.upsertMany(ready.read_states);
       applyOwnPresencePreference(ready.presence_preference);
       return;
@@ -73,6 +73,8 @@ function applyEntityDispatch(dispatch: Dispatch): void {
     case 'MESSAGE_CREATE': {
       const message = dispatch.d as Message;
       chatEntities.messages.upsert(message);
+      const channel = chatEntities.channels.get(`${message.channel_id}@${message.channel_domain}`);
+      if (channel?.guild_id === null) chatEntities.channels.upsert(channel, { append: false });
       chatEntities.readStates.replace(
         applyIncomingMessage(chatEntities.readStates.values, message, chatEntities.currentUser)
       );
@@ -93,9 +95,11 @@ function applyEntityDispatch(dispatch: Dispatch): void {
     }
     case 'CHANNEL_CREATE':
     case 'CHANNEL_UPDATE':
-    case 'CHANNEL_ACCESS_GRANTED':
-      chatEntities.channels.upsert(dispatch.d as Channel);
+    case 'CHANNEL_ACCESS_GRANTED': {
+      const channel = dispatch.d as Channel;
+      chatEntities.channels.upsert(channel, { append: channel.guild_id !== null });
       return;
+    }
     case 'CHANNEL_PERMISSION_UPDATE': {
       const update = dispatch.d as {
         channel_id: string;

@@ -18,6 +18,48 @@ describe('normalized entity collections', () => {
     expect(collection.order).toEqual(['1']);
   });
 
+  it('promotes an existing entity when it is prepended', () => {
+    const collection = new NormalizedCollection<{ id: string; value: string }>((item) => item.id);
+    collection.replace([
+      { id: '1', value: 'first' },
+      { id: '2', value: 'second' }
+    ]);
+
+    collection.upsert({ id: '2', value: 'updated' }, { append: false });
+
+    expect(collection.values).toEqual([
+      { id: '2', value: 'updated' },
+      { id: '1', value: 'first' }
+    ]);
+  });
+
+  it('replaces direct messages in server order without reordering guild channels', () => {
+    const store = new ChatEntityStore();
+    const channel = (id: string, guildId: string | null, name: string): Channel => ({
+      id,
+      origin_domain: 'alpha.test',
+      guild_id: guildId,
+      guild_domain: guildId === null ? null : 'alpha.test',
+      type: guildId === null ? 1 : 0,
+      name,
+      topic: null,
+      position: 0,
+      parent_id: null,
+      parent_domain: null,
+      rate_limit_per_user: 0,
+      last_message_id: null,
+      last_message_domain: null
+    });
+    const guildChannel = channel('10', '20', 'general');
+    const olderDm = channel('1', null, 'older');
+    const newerDm = channel('2', null, 'newer');
+    store.channels.replace([guildChannel, olderDm]);
+
+    store.ingestDirectMessages([newerDm, olderDm]);
+
+    expect(store.channels.values).toEqual([guildChannel, newerDm, olderDm]);
+  });
+
   it('normalizes nested guild channels', () => {
     const store = new ChatEntityStore();
     store.ingestGuilds([

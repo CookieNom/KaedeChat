@@ -6,7 +6,7 @@
   import { firstNavigableChannel } from '$lib/chat/channels';
   import { invitedChannel, loadInvitePreview } from '$lib/chat/invite-preview';
   import { filterDmFriends, friendsWithoutVisibleDm } from '$lib/chat/dm-picker';
-  import { dmTitle, isGroupDm } from '$lib/chat/direct-messages';
+  import { dmTitle, isGroupDm, promoteDirectMessage } from '$lib/chat/direct-messages';
   import { normalizeInviteReference } from '$lib/chat/invites';
   import { entityKey, entityRef, sameEntity } from '$lib/chat/refs';
   import type {
@@ -146,21 +146,22 @@
       };
       readStates = applyReadStateDispatch(readStates, update);
     } else if (dispatch.t === 'MESSAGE_CREATE') {
-      readStates = applyIncomingMessage(readStates, dispatch.d as Message, currentUser);
+      const message = dispatch.d as Message;
+      readStates = applyIncomingMessage(readStates, message, currentUser);
+      const channel = directMessages.find(
+        (item) => item.id === message.channel_id && item.origin_domain === message.channel_domain
+      );
+      if (channel) directMessages = promoteDirectMessage(directMessages, channel);
     } else if (dispatch.t === 'CHANNEL_CREATE') {
       const channel = dispatch.d as Channel;
       if (channel.type === 1 && !directMessages.some((item) => sameEntity(item, channel))) {
-        directMessages = [channel, ...directMessages];
+        directMessages = promoteDirectMessage(directMessages, channel);
         notice = 'Your direct-message request is ready.';
       }
     } else if (dispatch.t === 'CHANNEL_UPDATE') {
       const channel = dispatch.d as Channel;
       if (channel.type === 1) {
-        const existing = directMessages.findIndex((item) => sameEntity(item, channel));
-        directMessages =
-          existing === -1
-            ? [channel, ...directMessages]
-            : directMessages.map((item, index) => (index === existing ? channel : item));
+        directMessages = promoteDirectMessage(directMessages, channel);
       }
     } else if (dispatch.t === 'CHANNEL_DELETE') {
       const channel = dispatch.d as Pick<Channel, 'id' | 'origin_domain'>;

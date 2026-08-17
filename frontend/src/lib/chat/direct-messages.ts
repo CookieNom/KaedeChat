@@ -5,6 +5,15 @@ export function isGroupDm(channel: Channel | null | undefined): boolean {
   return channel?.conversation_type === 'group';
 }
 
+export function promoteDirectMessage(channels: Channel[], active: Channel): Channel[] {
+  return [
+    active,
+    ...channels.filter(
+      (channel) => channel.id !== active.id || channel.origin_domain !== active.origin_domain
+    )
+  ];
+}
+
 export function dmTitle(channel: Channel | null | undefined): string {
   if (!channel) return 'Conversation';
   if (!isGroupDm(channel)) {
