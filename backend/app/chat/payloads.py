@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.e2ee import channel_encryption_policy_payload
 from app.db.models import (
     Attachment,
     AuditLogEntry,
@@ -43,6 +44,7 @@ def user_payload(user: User) -> dict[str, object]:
         "bio": user.bio,
         "custom_status": user.custom_status,
         "profile_version": str(user.profile_version),
+        "e2ee_device_generation": str(getattr(user, "e2ee_device_generation", 0)),
         "profile_resolved": user.profile_resolved,
         "handle": f"{user.username}@{user.origin_domain}",
         "account_type": user.account_type,
@@ -102,6 +104,20 @@ def channel_payload(channel: Channel) -> dict[str, object]:
         "rate_limit_per_user": channel.rate_limit_per_user,
         "federated_history_policy": channel.federated_history_policy,
         "encryption_mode": channel.encryption_mode,
+        "encryption_state": channel.encryption_state,
+        "encryption_policy_generation": str(channel.encryption_policy_generation),
+        "encryption_protocol": channel.encryption_protocol,
+        "encryption_suite": channel.encryption_suite,
+        "encryption_group_id": channel.encryption_group_id,
+        "encryption_epoch": (
+            str(channel.encryption_epoch) if channel.encryption_epoch is not None else None
+        ),
+        "encryption_activated_at": (
+            channel.encryption_activated_at.isoformat()
+            if channel.encryption_activated_at is not None
+            else None
+        ),
+        "encryption_policy": channel_encryption_policy_payload(channel),
         "search_available": channel.encryption_mode == "plaintext",
         "last_message_id": (
             str(channel.last_message_id) if channel.last_message_id is not None else None
@@ -236,6 +252,8 @@ def attachment_payload(attachment: Attachment) -> dict[str, object]:
         "height": attachment.height,
         "blurhash": attachment.blurhash,
         "scan_status": attachment.scan_status,
+        "encryption_mode": attachment.encryption_mode,
+        "encryption_protocol": attachment.encryption_protocol,
         "variants": attachment.variants,
     }
 
@@ -264,6 +282,10 @@ def message_payload(
         "author": user_payload(author) if author is not None and webhook is None else None,
         "content": None if message.deleted_at is not None else message.content,
         "e2ee": None if message.deleted_at is not None else message.e2ee,
+        "encryption_policy_generation": str(message.encryption_policy_generation),
+        "encryption_epoch": (
+            str(message.encryption_epoch) if message.encryption_epoch is not None else None
+        ),
         "message_type": message.message_type,
         "flags": message.flags,
         "client_nonce": message.client_nonce,

@@ -12,7 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.chat.e2ee import validate_e2ee_envelope
+from app.chat.e2ee import validate_e2ee_envelope, validate_message_encryption_policy
 from app.chat.payloads import message_payload, user_payload
 from app.chat.permissions import calculate_permissions
 from app.core.permissions import Permission
@@ -1984,6 +1984,19 @@ async def _merge_history_import_batch(
             if referenced is None:
                 referenced_id = None
                 referenced_domain = None
+        channel = await session.get(Channel, staged_channel_ref)
+        if channel is None or channel.guild_id != guild.id:
+            raise RuntimeError("historical message channel disappeared")
+        staged_e2ee = validate_e2ee_envelope(raw.get("e2ee"))
+        validate_message_encryption_policy(
+            channel.encryption_mode,
+            content=raw.get("content"),
+            e2ee=staged_e2ee,
+            attachment_count=len(raw.get("attachments", [])),
+            policy_generation=channel.encryption_policy_generation,
+            policy_epoch=channel.encryption_epoch,
+            policy_group_id=channel.encryption_group_id,
+        )
         inserted = await session.scalar(
             pg_insert(Message)
             .values(
@@ -1994,7 +2007,9 @@ async def _merge_history_import_batch(
                 author_id=author.id,
                 author_domain=author.origin_domain,
                 content=raw.get("content"),
-                e2ee=validate_e2ee_envelope(raw.get("e2ee")),
+                e2ee=staged_e2ee,
+                encryption_policy_generation=channel.encryption_policy_generation,
+                encryption_epoch=channel.encryption_epoch,
                 message_type=int(raw.get("message_type", 0)),
                 flags=int(raw.get("flags", 0)),
                 client_nonce=raw.get("client_nonce"),

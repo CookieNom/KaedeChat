@@ -45,3 +45,7 @@ mobile/android/app/*.jks
 mobile/android/app/*.keystore
 mobile/android/app/google-services.json
 mobile/ios/Runner/GoogleService-Info.plist
+# Generated mobile MLS binaries. Release builds regenerate these from the
+# locked Rust workspace.
+mobile/android/app/src/main/jniLibs/
+mobile/ios/KaedeE2EE.xcframework/

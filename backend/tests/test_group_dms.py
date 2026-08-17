@@ -96,6 +96,15 @@ def test_group_payload_exposes_owner_and_full_state_version() -> None:
         "name": "Trip",
         "state_version": "7",
         "deleted": False,
+        "encryption_policy": {
+            "mode": "plaintext",
+            "state": "plaintext",
+            "generation": "0",
+            "protocol": None,
+            "suite": None,
+            "group_id": None,
+            "epoch": None,
+        },
     }
     rendered = dm_channel_payload(channel, [peer], conversation=conversation)
     assert rendered["conversation_type"] == "group"
@@ -529,6 +538,7 @@ async def test_owner_leave_transfers_ownership_to_the_earliest_remaining_member(
 
     before, after, deleted = await apply_authoritative_group_mutation(
         cast(Any, session),
+        AsyncMock(),
         cast(Settings, SimpleNamespace()),
         conversation,
         channel,
@@ -572,6 +582,7 @@ async def test_only_owner_can_remove_another_group_member(
     with pytest.raises(HTTPException) as error:
         await apply_authoritative_group_mutation(
             cast(Any, session),
+            AsyncMock(),
             cast(Settings, SimpleNamespace()),
             conversation,
             cast(Any, SimpleNamespace(name=None, unavailable=False)),

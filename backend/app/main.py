@@ -26,6 +26,7 @@ from app.api.bots import router as bots_router
 from app.api.calls import router as calls_router
 from app.api.channels import router as channels_router
 from app.api.dms import router as dms_router
+from app.api.e2ee import router as e2ee_router
 from app.api.federation import router as federation_router
 from app.api.gifs import router as gifs_router
 from app.api.guild_lifecycle import router as guild_lifecycle_router
@@ -130,6 +131,7 @@ app.include_router(guild_lifecycle_router)
 app.include_router(channels_router)
 app.include_router(calls_router)
 app.include_router(dms_router)
+app.include_router(e2ee_router)
 app.include_router(invites_router)
 app.include_router(interactions_router)
 app.include_router(interaction_federation_router)

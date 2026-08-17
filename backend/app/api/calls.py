@@ -49,9 +49,17 @@ from app.voice.schemas import (
     CallResponse,
     CallStateFederationRequest,
     DMVoiceBrokerRequest,
+    VoiceTokenRequest,
     VoiceTokenResponse,
 )
-from app.voice.service import require_voice_enabled
+from app.voice.service import (
+    MEDIA_E2EE_PROTOCOL,
+    MEDIA_E2EE_SUITE,
+    media_session_id,
+    require_e2ee_voice_device,
+    require_voice_enabled,
+    voice_e2ee_context,
+)
 from app.voice.state import (
     apply_authoritative_call,
     create_call,
@@ -556,6 +564,9 @@ async def mint_dm_call_token(
     settings: Settings,
     record: dict[str, Any],
     user: User,
+    *,
+    sender_device_id: str | None,
+    remote_device_attested: bool = False,
 ) -> VoiceTokenResponse:
     await require_call_policy(session, settings, record, user)
     identity = participant_identity(user.id, user.origin_domain)
@@ -569,19 +580,38 @@ async def mint_dm_call_token(
         raise HTTPException(status_code=409, detail={"code": "CALL_NOT_ACCEPTED"})
     room = str(record["room"])
     generation = await current_generation(redis, authority, room, identity)
+    channel = await session.get(
+        Channel,
+        (int(record["channel_id"]), str(record["channel_domain"])),
+    )
+    if channel is None:
+        raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
+    await require_e2ee_voice_device(
+        session,
+        settings,
+        channel,
+        user,
+        sender_device_id,
+        remote_device_attested=remote_device_attested,
+    )
+    e2ee_context = voice_e2ee_context(channel, room)
     metadata: dict[str, object] = {
         "version": 1,
         "generation": generation,
         "user_id": str(user.id),
         "user_domain": user.origin_domain,
         "channel_id": str(record["channel_id"]),
+        "channel_domain": str(record["channel_domain"]),
         "call_id": str(call_id),
+        "e2ee": bool(e2ee_context),
         "server_mute": False,
         "server_deaf": False,
         "can_speak": True,
         "can_stream": True,
         "can_use_vad": True,
     }
+    if e2ee_context:
+        metadata.update({"e2ee": True, **e2ee_context})
     try:
         await LiveKitControl(settings).ensure_room(room)
         token, expires_at = mint_join_token(
@@ -604,6 +634,21 @@ async def mint_dm_call_token(
         can_speak=True,
         can_stream=True,
         can_use_vad=True,
+        e2ee=channel.encryption_mode == "e2ee",
+        channel_id=str(channel.id),
+        channel_domain=channel.origin_domain,
+        encryption_policy_generation=(
+            str(channel.encryption_policy_generation) if channel.encryption_mode == "e2ee" else None
+        ),
+        encryption_epoch=(
+            str(channel.encryption_epoch)
+            if channel.encryption_mode == "e2ee" and channel.encryption_epoch is not None
+            else None
+        ),
+        media_protocol=e2ee_context.get("media_protocol"),
+        media_suite=e2ee_context.get("media_suite"),
+        media_session_id=e2ee_context.get("media_session_id"),
+        media_epoch=e2ee_context.get("media_epoch"),
     )
 
 
@@ -614,6 +659,7 @@ async def call_voice_token(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
+    payload: VoiceTokenRequest | None = None,
 ) -> VoiceTokenResponse:
     require_voice_enabled(settings)
     call_id, authority = call_ref.resolve(settings.domain)
@@ -622,10 +668,30 @@ async def call_voice_token(
         raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
     identity = participant_identity(auth.user.id, auth.user.origin_domain)
     if authority == settings.domain:
-        grant = await mint_dm_call_token(session, redis, settings, record, auth.user)
+        grant = await mint_dm_call_token(
+            session,
+            redis,
+            settings,
+            record,
+            auth.user,
+            sender_device_id=payload.sender_device_id if payload is not None else None,
+        )
         await discard_all_federated_voice_home_sessions(redis, identity)
         return grant
     await require_call_policy(session, settings, record, auth.user)
+    channel = await session.get(
+        Channel,
+        (int(record["channel_id"]), str(record["channel_domain"])),
+    )
+    if channel is None:
+        raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
+    await require_e2ee_voice_device(
+        session,
+        settings,
+        channel,
+        auth.user,
+        payload.sender_device_id if payload is not None else None,
+    )
     try:
         response = await signed_request(
             session,
@@ -637,6 +703,7 @@ async def call_voice_token(
                 "call_id": str(call_id),
                 "actor_id": str(auth.user.id),
                 "actor_domain": auth.user.origin_domain,
+                "sender_device_id": payload.sender_device_id if payload is not None else None,
             },
             request_timeout=5,
             max_response_bytes=16 * 1024,
@@ -651,6 +718,21 @@ async def call_voice_token(
         raise HTTPException(
             status_code=502, detail={"code": "VOICE_HOME_INVALID_RESPONSE"}
         ) from exc
+    if grant.e2ee != (channel.encryption_mode == "e2ee") or (
+        grant.e2ee
+        and (
+            channel.encryption_state != "active"
+            or grant.channel_id != str(channel.id)
+            or grant.channel_domain != channel.origin_domain
+            or grant.encryption_policy_generation != str(channel.encryption_policy_generation)
+            or grant.encryption_epoch != str(channel.encryption_epoch)
+            or grant.media_protocol != MEDIA_E2EE_PROTOCOL
+            or grant.media_suite != MEDIA_E2EE_SUITE
+            or grant.media_session_id != media_session_id(channel, str(record["room"]))
+            or grant.media_epoch != str(channel.encryption_epoch)
+        )
+    ):
+        raise HTTPException(status_code=502, detail={"code": "VOICE_HOME_INVALID_RESPONSE"})
     await discard_all_federated_voice_home_sessions(redis, identity)
     return grant
 
@@ -674,7 +756,15 @@ async def federation_dm_voice_token(
     if record is None or user is None or record.get("authority_domain") != settings.domain:
         raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
     await require_call_policy(session, settings, record, user)
-    return await mint_dm_call_token(session, redis, settings, record, user)
+    return await mint_dm_call_token(
+        session,
+        redis,
+        settings,
+        record,
+        user,
+        sender_device_id=payload.sender_device_id,
+        remote_device_attested=True,
+    )
 
 
 @router.post("/_kaede/v1/calls", response_model=CallResponse)

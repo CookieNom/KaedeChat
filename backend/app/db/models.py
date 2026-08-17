@@ -160,6 +160,9 @@ class User(Base, FederatedIdMixin, TimestampMixin):
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     profile_version: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
+    e2ee_device_generation: Mapped[int] = mapped_column(
+        BigInteger, server_default="0", nullable=False
+    )
     profile_resolved: Mapped[bool] = mapped_column(Boolean, server_default=true(), nullable=False)
     # Charge a remote identity to the authenticated peer that introduced it
     # until the User row is physically garbage-collected. For a profile learned
@@ -192,6 +195,7 @@ class User(Base, FederatedIdMixin, TimestampMixin):
         ),
         CheckConstraint("id >= 0", name="nonnegative_id"),
         CheckConstraint("profile_version >= 1", name="positive_profile_version"),
+        CheckConstraint("e2ee_device_generation >= 0", name="e2ee_device_generation_nonnegative"),
         CheckConstraint(
             "is_local OR profile_resolved OR username LIKE 'history_%'",
             name="unresolved_history_handle",
@@ -466,6 +470,120 @@ class Session(Base, LocalUserMixin):
             "ix_sessions_previous_token_hash",
             "previous_token_hash",
             postgresql_where=text("previous_token_hash IS NOT NULL"),
+        ),
+    )
+
+
+class E2EEDevice(Base, LocalUserMixin):
+    """A separately revocable cryptographic endpoint, not an auth session."""
+
+    __tablename__ = "e2ee_devices"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    identity_key: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    credential: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    device_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False)
+    capabilities: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default="[]")
+    trust_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="unverified", server_default="unverified"
+    )
+    registered_session_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("sessions.id", ondelete="SET NULL")
+    )
+    device_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (
+        *LocalUserMixin.locality_constraints("e2ee_devices"),
+        UniqueConstraint(
+            "user_id",
+            "user_domain",
+            "identity_key",
+            name="uq_e2ee_devices_user_identity_key",
+        ),
+        UniqueConstraint(
+            "user_id",
+            "user_domain",
+            "device_generation",
+            name="uq_e2ee_devices_user_generation",
+        ),
+        UniqueConstraint(
+            "id",
+            "user_id",
+            "user_domain",
+            name="uq_e2ee_devices_ref_user",
+        ),
+        CheckConstraint("octet_length(identity_key) = 32", name="e2ee_identity_key_length"),
+        CheckConstraint(
+            "octet_length(credential) BETWEEN 1 AND 16384",
+            name="e2ee_device_credential_length",
+        ),
+        CheckConstraint(
+            "platform IN ('web','desktop','android','ios')",
+            name="e2ee_device_platform_value",
+        ),
+        CheckConstraint(
+            "trust_state IN ('unverified','verified','blocked')",
+            name="e2ee_device_trust_state_value",
+        ),
+        CheckConstraint("device_generation > 0", name="e2ee_device_generation_positive"),
+        CheckConstraint(
+            "jsonb_typeof(capabilities) = 'array'",
+            name="e2ee_device_capabilities_array",
+        ),
+        Index("ix_e2ee_devices_user_active", "user_id", "user_domain", "revoked_at"),
+    )
+
+
+class E2EEKeyPackage(Base, LocalUserMixin):
+    """A bounded, one-use MLS KeyPackage published for one local device."""
+
+    __tablename__ = "e2ee_key_packages"
+    id: Mapped[str] = mapped_column(String(43), primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    cipher_suite: Mapped[str] = mapped_column(String(96), nullable=False)
+    package_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_by_id: Mapped[int | None] = mapped_column(BigInteger)
+    claimed_by_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (
+        *LocalUserMixin.locality_constraints("e2ee_key_packages"),
+        ForeignKeyConstraint(
+            ["device_id", "user_id", "user_domain"],
+            ["e2ee_devices.id", "e2ee_devices.user_id", "e2ee_devices.user_domain"],
+            name="fk_e2ee_key_packages_device_user",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("device_id", "id", name="uq_e2ee_key_package_device"),
+        CheckConstraint(
+            "octet_length(package_data) BETWEEN 1 AND 32768",
+            name="e2ee_key_package_data_length",
+        ),
+        CheckConstraint(
+            "(claimed_by_id IS NULL) = (claimed_by_domain IS NULL)",
+            name="e2ee_key_package_claim_complete",
+        ),
+        CheckConstraint(
+            "(claimed_at IS NULL) = (claimed_by_id IS NULL)",
+            name="e2ee_key_package_claim_state",
+        ),
+        CheckConstraint("expires_at > created_at", name="e2ee_key_package_positive_lifetime"),
+        Index(
+            "ix_e2ee_key_packages_available",
+            "user_id",
+            "user_domain",
+            "device_id",
+            "expires_at",
+            postgresql_where=text("claimed_at IS NULL"),
         ),
     )
 
@@ -957,6 +1075,17 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
     encryption_mode: Mapped[str] = mapped_column(
         String(16), server_default="plaintext", nullable=False
     )
+    encryption_state: Mapped[str] = mapped_column(
+        String(16), server_default="plaintext", nullable=False
+    )
+    encryption_policy_generation: Mapped[int] = mapped_column(
+        BigInteger, server_default="0", nullable=False
+    )
+    encryption_protocol: Mapped[str | None] = mapped_column(String(32))
+    encryption_suite: Mapped[str | None] = mapped_column(String(96))
+    encryption_group_id: Mapped[str | None] = mapped_column(String(128))
+    encryption_epoch: Mapped[int | None] = mapped_column(BigInteger)
+    encryption_activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_message_id: Mapped[int | None] = mapped_column(BigInteger)
     last_message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
     created_floor_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -1022,6 +1151,35 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
         CheckConstraint(
             "encryption_mode IN ('plaintext','e2ee')",
             name="channel_encryption_mode_value",
+        ),
+        CheckConstraint(
+            "encryption_state IN "
+            "('plaintext','legacy','proposed','activating','active','rekeying','failed')",
+            name="channel_encryption_state_value",
+        ),
+        CheckConstraint(
+            "encryption_policy_generation >= 0",
+            name="channel_encryption_generation_nonnegative",
+        ),
+        CheckConstraint(
+            "encryption_epoch IS NULL OR encryption_epoch >= 0",
+            name="channel_encryption_epoch_nonnegative",
+        ),
+        CheckConstraint(
+            "(encryption_policy_generation = 0 AND "
+            "((encryption_state = 'plaintext' AND encryption_mode = 'plaintext') OR "
+            "(encryption_state = 'legacy' AND encryption_mode = 'e2ee')) AND "
+            "encryption_protocol IS NULL AND encryption_suite IS NULL AND "
+            "encryption_group_id IS NULL AND encryption_epoch IS NULL) OR "
+            "(encryption_policy_generation > 0 AND encryption_protocol = 'mls10' AND "
+            "encryption_suite = "
+            "'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' AND "
+            "encryption_group_id IS NOT NULL AND "
+            "((encryption_state IN ('proposed','failed') AND "
+            "encryption_mode = 'plaintext' AND encryption_epoch IS NULL) OR "
+            "(encryption_state IN ('activating','active','rekeying','failed') AND "
+            "encryption_mode = 'e2ee' AND encryption_epoch IS NOT NULL)))",
+            name="channel_encryption_policy_consistent",
         ),
         CheckConstraint("(guild_id IS NULL) = (guild_domain IS NULL)", name="guild_ref_complete"),
         CheckConstraint(
@@ -1142,6 +1300,13 @@ class Message(Base, FederatedIdMixin):
     # as the JSON literal `null`, which is neither absent nor a valid envelope
     # and violates the object-only database invariant.
     e2ee: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    # Immutable policy metadata records the security boundary in force when
+    # this body was admitted. It lets pre-activation history coexist with an
+    # encrypted room without treating that history as retroactively protected.
+    encryption_policy_generation: Mapped[int] = mapped_column(
+        BigInteger, server_default="0", nullable=False
+    )
+    encryption_epoch: Mapped[int | None] = mapped_column(BigInteger)
     message_type: Mapped[int] = mapped_column(Integer, server_default="0")
     flags: Mapped[int] = mapped_column(Integer, server_default="0")
     client_nonce: Mapped[str | None] = mapped_column(String(64))
@@ -1186,6 +1351,14 @@ class Message(Base, FederatedIdMixin):
         CheckConstraint("deleted_at IS NULL OR e2ee IS NULL", name="deleted_message_has_no_e2ee"),
         CheckConstraint("content IS NULL OR e2ee IS NULL", name="plaintext_or_e2ee"),
         CheckConstraint("e2ee IS NULL OR jsonb_typeof(e2ee) = 'object'", name="e2ee_is_object"),
+        CheckConstraint(
+            "encryption_policy_generation >= 0",
+            name="message_encryption_generation_nonnegative",
+        ),
+        CheckConstraint(
+            "encryption_epoch IS NULL OR encryption_epoch >= 0",
+            name="message_encryption_epoch_nonnegative",
+        ),
         CheckConstraint("jsonb_typeof(mention_user_refs) = 'array'", name="mentions_are_array"),
         Index("ix_messages_channel_id_desc", "channel_id", "channel_domain", "id"),
         Index("ix_messages_author_id_desc", "author_id", "author_domain", "id"),
@@ -1270,7 +1443,7 @@ class SearchIndexState(Base):
     """Singleton cursor for resumable online search backfills."""
 
     __tablename__ = "search_index_state"
-    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1)
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
@@ -1484,6 +1657,10 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
     purpose: Mapped[str] = mapped_column(String(24), server_default="attachment")
     asset_binding: Mapped[str | None] = mapped_column(String(600))
     scan_status: Mapped[str] = mapped_column(String(16), server_default="pending")
+    encryption_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="plaintext"
+    )
+    encryption_protocol: Mapped[str | None] = mapped_column(String(32))
     upload_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -1508,7 +1685,19 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
             name="positive_dimensions",
         ),
         CheckConstraint(
-            "scan_status IN ('pending','clean','infected','failed')", name="scan_status"
+            "scan_status IN ('pending','clean','infected','failed','encrypted')",
+            name="scan_status",
+        ),
+        CheckConstraint(
+            "encryption_mode IN ('plaintext','e2ee')",
+            name="attachment_encryption_mode_value",
+        ),
+        CheckConstraint(
+            "(encryption_mode = 'plaintext' AND encryption_protocol IS NULL AND "
+            "scan_status <> 'encrypted') OR "
+            "(encryption_mode = 'e2ee' AND encryption_protocol = 'kaede-file-v1' AND "
+            "scan_status NOT IN ('clean','infected'))",
+            name="attachment_encryption_policy_consistent",
         ),
         CheckConstraint(
             "purpose IN ('attachment','avatar','banner','guild_icon',"
@@ -2105,7 +2294,11 @@ class RemoteMediaTombstone(Base):
     deleted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("now() + interval '30 days'"),
+        nullable=False,
+    )
     __table_args__ = (
         PrimaryKeyConstraint("origin_domain", "attachment_id"),
         ForeignKeyConstraint(["origin_domain"], ["instances.domain"], ondelete="CASCADE"),

@@ -20,6 +20,7 @@ from app.api.dependencies import (
 )
 from app.api.guilds import local_guild
 from app.chat.audit import add_audit_entry
+from app.chat.e2ee_membership import pause_guild_e2ee_for_membership_change
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import (
     queue_guild_mutation,
@@ -636,6 +637,7 @@ async def accept_invite(
             joined_at=now,
         )
         session.add(member)
+        await pause_guild_e2ee_for_membership_change(session, guild)
         invite.uses += 1
         owner = await session.get(User, (guild.owner_id, guild.owner_domain))
         if owner is None or not owner.is_local:

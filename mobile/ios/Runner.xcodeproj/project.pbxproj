@@ -16,6 +16,7 @@
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		A11C00010000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A11C00010000000000000002 /* PrivacyInfo.xcprivacy */; };
+		E2EE00010000000000000001 /* KaedeE2EE.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = E2EE00010000000000000002 /* KaedeE2EE.xcframework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -60,6 +61,7 @@
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A11C00010000000000000002 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		A11C00010000000000000003 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
+		E2EE00010000000000000002 /* KaedeE2EE.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = KaedeE2EE.xcframework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -67,6 +69,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E2EE00010000000000000001 /* KaedeE2EE.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -95,6 +98,7 @@
 		97C146E51CF9000F007C117D = {
 			isa = PBXGroup;
 			children = (
+				E2EE00010000000000000002 /* KaedeE2EE.xcframework */,
 				9740EEB11CF90186004384FC /* Flutter */,
 				97C146F01CF9000F007C117D /* Runner */,
 				97C146EF1CF9000F007C117D /* Products */,
@@ -153,6 +157,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 97C147051CF9000F007C117D /* Build configuration list for PBXNativeTarget "Runner" */;
 			buildPhases = (
+				E2EE00010000000000000003 /* Build native MLS */,
 				9740EEB61CF901F6004384FC /* Run Script */,
 				97C146EA1CF9000F007C117D /* Sources */,
 				97C146EB1CF9000F007C117D /* Frameworks */,
@@ -231,6 +236,24 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		E2EE00010000000000000003 /* Build native MLS */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"${SRCROOT}/../tool/build_e2ee_native.sh",
+				"${SRCROOT}/../../desktop/Cargo.lock",
+			);
+			name = "Build native MLS";
+			outputPaths = (
+				"${SRCROOT}/KaedeE2EE.xcframework",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "\"${SRCROOT}/../tool/build_e2ee_native.sh\" --ios";
+		};
 		3B06AD1E1E4923F5004D2608 /* Thin Binary */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -378,6 +401,12 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-Wl,-u,_kaede_e2ee_invoke",
+					"-Wl,-u,_kaede_e2ee_close",
+					"-Wl,-u,_kaede_e2ee_buffer_free",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = chat.kaede.mobile;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -559,6 +588,12 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-Wl,-u,_kaede_e2ee_invoke",
+					"-Wl,-u,_kaede_e2ee_close",
+					"-Wl,-u,_kaede_e2ee_buffer_free",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = chat.kaede.mobile;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -581,6 +616,12 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-Wl,-u,_kaede_e2ee_invoke",
+					"-Wl,-u,_kaede_e2ee_close",
+					"-Wl,-u,_kaede_e2ee_buffer_free",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = chat.kaede.mobile;
 				PRODUCT_NAME = "$(TARGET_NAME)";

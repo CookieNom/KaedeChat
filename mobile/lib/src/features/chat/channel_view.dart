@@ -15,6 +15,7 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/voice/voice_room.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -304,7 +305,10 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       });
     }
     final moderationStatus = state.activeModerationStatus;
-    final canSend = moderationStatus == null &&
+    final encryptedPaused =
+        channel.encryptionMode == 'e2ee' && channel.encryptionState != 'active';
+    final canSend = !encryptedPaused &&
+        moderationStatus == null &&
         (channel.type == ChannelType.dm ||
             channel.allows(Permission.sendMessages));
     final messages = state.messages;
@@ -488,9 +492,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           ),
         if (!canSend)
           _PermissionNotice(
-            message: moderationStatus == null
-                ? 'You do not have permission to send messages here.'
-                : 'You cannot send messages while timed out.',
+            message: encryptedPaused
+                ? 'Encrypted messaging is paused while participant device keys are secured. No plaintext will be sent.'
+                : moderationStatus == null
+                    ? 'You do not have permission to send messages here.'
+                    : 'You cannot send messages while timed out.',
           )
         else
           IgnorePointer(
@@ -777,18 +783,32 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     try {
       final controller = ref.read(mobileControllerProvider.notifier);
       final uploaded = <EntityRef>[];
+      final encryptedAttachments = <Map<String, Object?>>[];
       for (final item in pendingUploads) {
-        uploaded.add(await controller.repository.uploadAttachmentFile(
-          channel: channel.ref,
-          filename: item.name,
-          contentType: item.contentType,
-          file: item.file,
-        ));
+        if (channel.encryptionMode == 'e2ee') {
+          final encrypted = await uploadEncryptedFile(
+            repository: controller.repository,
+            channel: channel.ref,
+            source: item.file,
+            filename: item.name,
+            contentType: item.contentType,
+          );
+          uploaded.add(encrypted.attachment);
+          encryptedAttachments.add(encrypted.manifest);
+        } else {
+          uploaded.add(await controller.repository.uploadAttachmentFile(
+            channel: channel.ref,
+            filename: item.name,
+            contentType: item.contentType,
+            file: item.file,
+          ));
+        }
       }
       await controller.send(
         channel.ref,
         content,
         attachments: uploaded,
+        encryptedAttachments: encryptedAttachments,
         mentionUsers: mentionReferences(content),
         replyTo: reply?.ref,
         replyAuthor: reply?.authorRef,
@@ -1039,10 +1059,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 leading: const Icon(Icons.reply_rounded),
                 title: const Text('Reply'),
                 onTap: () => Navigator.pop(context, 'reply')),
-            ListTile(
-                leading: const Icon(Icons.copy_rounded),
-                title: const Text('Copy text'),
-                onTap: () => Navigator.pop(context, 'copy')),
+            if (message.content?.isNotEmpty == true)
+              ListTile(
+                  leading: const Icon(Icons.copy_rounded),
+                  title: const Text('Copy text'),
+                  onTap: () => Navigator.pop(context, 'copy')),
             ListTile(
                 leading: const Icon(Icons.link_rounded),
                 title: const Text('Copy message link'),
@@ -1066,11 +1087,18 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                       : Icons.push_pin_outlined),
                   title: Text(message.pinned ? 'Unpin message' : 'Pin message'),
                   onTap: () => Navigator.pop(context, 'pin')),
-            if (message.authorRef == me)
+            if (message.authorRef == me &&
+                (message.e2ee == null || message.content != null))
               ListTile(
                   leading: const Icon(Icons.edit_outlined),
                   title: const Text('Edit message'),
                   onTap: () => Navigator.pop(context, 'edit')),
+            if (message.authorRef != me)
+              ListTile(
+                leading: const Icon(Icons.flag_outlined),
+                title: const Text('Report message'),
+                onTap: () => Navigator.pop(context, 'report'),
+              ),
             if (message.authorRef == me || canManage)
               ListTile(
                 leading: const Icon(Icons.delete_outline_rounded,
@@ -1143,6 +1171,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         case 'delete':
           await controller.removeMessage(message);
           break;
+        case 'report':
+          await _reportMessageDialog(message);
+          break;
       }
     } on Object catch (error) {
       if (!mounted) return;
@@ -1175,6 +1206,146 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         ],
       ),
     );
+  }
+
+  Future<void> _reportMessageDialog(KaedeMessage message) async {
+    const categories = <String, String>{
+      'spam': 'Spam',
+      'harassment': 'Harassment',
+      'hate': 'Hate',
+      'sexual_content': 'Sexual content',
+      'violence': 'Violence',
+      'self_harm': 'Self-harm',
+      'impersonation': 'Impersonation',
+      'privacy': 'Privacy',
+      'malware': 'Malware',
+      'illegal_content': 'Illegal content',
+      'other': 'Other',
+    };
+    var category = 'spam';
+    var disclose = false;
+    var submitting = false;
+    final description = TextEditingController();
+    try {
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: !submitting,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('Report message'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (message.e2ee != null) ...[
+                    const Text(
+                      'This message is end-to-end encrypted. Reporting can share only the decrypted text shown on this device with this instance’s Trust & Safety team. Encryption keys and other messages are not sent.',
+                    ),
+                    const SizedBox(height: 12),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: disclose,
+                      onChanged: submitting
+                          ? null
+                          : (value) =>
+                              setDialogState(() => disclose = value == true),
+                      title: const Text(
+                        'I understand the decrypted text will be disclosed.',
+                      ),
+                    ),
+                  ] else
+                    const Text(
+                      'The message text and basic context will be sent to this instance’s Trust & Safety team.',
+                    ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: category,
+                    decoration: const InputDecoration(labelText: 'Reason'),
+                    items: categories.entries
+                        .map((entry) => DropdownMenuItem(
+                              value: entry.key,
+                              child: Text(entry.value),
+                            ))
+                        .toList(growable: false),
+                    onChanged: submitting
+                        ? null
+                        : (value) => setDialogState(
+                              () => category = value ?? category,
+                            ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: description,
+                    enabled: !submitting,
+                    maxLength: 2000,
+                    maxLines: 4,
+                    decoration: const InputDecoration(
+                      labelText: 'Additional details (optional)',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed:
+                    submitting ? null : () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: submitting ||
+                        (message.e2ee != null &&
+                            (!disclose ||
+                                message.content?.trim().isNotEmpty != true))
+                    ? null
+                    : () async {
+                        setDialogState(() => submitting = true);
+                        try {
+                          await ref
+                              .read(mobileControllerProvider.notifier)
+                              .repository
+                              .reportMessage(
+                                message.ref,
+                                category: category,
+                                description: description.text,
+                                disclosedContent: message.e2ee == null
+                                    ? null
+                                    : message.content,
+                                disclosureAcknowledged: disclose,
+                              );
+                          if (dialogContext.mounted) {
+                            Navigator.pop(dialogContext);
+                          }
+                          if (mounted) {
+                            ScaffoldMessenger.of(this.context).showSnackBar(
+                              const SnackBar(
+                                  content: Text('Report submitted.')),
+                            );
+                          }
+                        } on Object catch (error) {
+                          if (dialogContext.mounted) {
+                            setDialogState(() => submitting = false);
+                            ScaffoldMessenger.of(dialogContext).showSnackBar(
+                              SnackBar(
+                                content: Text(userFacingError(
+                                  error,
+                                  summary: 'Could not submit the report',
+                                )),
+                              ),
+                            );
+                          }
+                        }
+                      },
+                child: Text(submitting ? 'Submitting…' : 'Submit report'),
+              ),
+            ],
+          ),
+        ),
+      );
+    } finally {
+      description.dispose();
+    }
   }
 }
 
@@ -1848,6 +2019,28 @@ final class _MessageTile extends StatelessWidget {
                         fontStyle: FontStyle.italic,
                       ),
                     )
+                  else if (message.e2ee != null && message.content == null)
+                    const Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          Icons.lock_outline_rounded,
+                          size: 17,
+                          color: KaedeColors.muted,
+                        ),
+                        SizedBox(width: 7),
+                        Expanded(
+                          child: Text(
+                            'Can’t decrypt this message on this device. Verify, recover, or update this device’s encryption support.',
+                            style: TextStyle(
+                              color: KaedeColors.muted,
+                              fontSize: 14,
+                              height: 1.25,
+                            ),
+                          ),
+                        ),
+                      ],
+                    )
                   else if (message.content case final content?
                       when content.isNotEmpty)
                     MarkdownBody(
@@ -1902,7 +2095,11 @@ final class _MessageTile extends StatelessWidget {
                   for (final attachment in deleted
                       ? const <KaedeAttachment>[]
                       : message.attachments)
-                    _AttachmentCard(attachment: attachment),
+                    _AttachmentCard(
+                      attachment: attachment,
+                      encryptedManifest:
+                          _encryptedManifestFor(message, attachment),
+                    ),
                   if (!deleted && message.reactionCounts.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 6),
@@ -1943,9 +2140,44 @@ final class _MessageTile extends StatelessWidget {
   }
 }
 
+Map<String, Object?>? _encryptedManifestFor(
+  KaedeMessage message,
+  KaedeAttachment attachment,
+) {
+  for (final manifest in message.decryptedAttachments) {
+    if ('${manifest['attachment_id']}' == attachment.ref.id.value &&
+        '${manifest['attachment_domain']}' == attachment.ref.domain.value) {
+      return manifest;
+    }
+  }
+  return null;
+}
+
+KaedeAttachment _manifestAttachment(
+  KaedeAttachment attachment,
+  Map<String, Object?>? manifest,
+) {
+  if (manifest == null) return attachment;
+  return KaedeAttachment(
+    ref: attachment.ref,
+    filename: '${manifest['filename'] ?? 'file'}',
+    contentType: '${manifest['content_type'] ?? 'application/octet-stream'}',
+    size: (manifest['plaintext_size'] as num?)?.toInt() ?? 0,
+    scanStatus: attachment.scanStatus == 'pending' ||
+            attachment.scanStatus == 'processing'
+        ? attachment.scanStatus
+        : 'encrypted',
+    historyMediaUrl: attachment.historyMediaUrl,
+  );
+}
+
 final class _AttachmentCard extends ConsumerStatefulWidget {
-  const _AttachmentCard({required this.attachment});
+  const _AttachmentCard({
+    required this.attachment,
+    this.encryptedManifest,
+  });
   final KaedeAttachment attachment;
+  final Map<String, Object?>? encryptedManifest;
 
   @override
   ConsumerState<_AttachmentCard> createState() => _AttachmentCardState();
@@ -2268,7 +2500,7 @@ final class _MentionBuilder extends MarkdownElementBuilder {
 
 final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
   late Future<File> _future;
-  late KaedeAttachment _displayAttachment = widget.attachment;
+  late KaedeAttachment _displayAttachment;
   File? _file;
   Timer? _statusTimer;
   Object? _statusError;
@@ -2279,6 +2511,10 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
   @override
   void initState() {
     super.initState();
+    _displayAttachment = _manifestAttachment(
+      widget.attachment,
+      widget.encryptedManifest,
+    );
     _future = _initialFuture();
     _scheduleStatusPoll();
   }
@@ -2288,11 +2524,15 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.attachment.ref != widget.attachment.ref ||
         oldWidget.attachment.scanStatus != widget.attachment.scanStatus ||
+        oldWidget.encryptedManifest != widget.encryptedManifest ||
         oldWidget.attachment.historyMediaUrl !=
             widget.attachment.historyMediaUrl) {
       _loadGeneration += 1;
       _takeFile();
-      _displayAttachment = widget.attachment;
+      _displayAttachment = _manifestAttachment(
+        widget.attachment,
+        widget.encryptedManifest,
+      );
       _statusError = null;
       _statusFailures = 0;
       _future = _initialFuture();
@@ -2300,13 +2540,15 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
     }
   }
 
-  Future<File> _initialFuture() => widget.attachment.scanStatus == 'clean'
+  Future<File> _initialFuture() => (_displayAttachment.scanStatus == 'clean' ||
+          _displayAttachment.scanStatus == 'encrypted')
       ? _load()
       : Completer<File>().future;
 
   void _scheduleStatusPoll() {
     _statusTimer?.cancel();
     if (_displayAttachment.scanStatus == 'clean' ||
+        _displayAttachment.scanStatus == 'encrypted' ||
         _displayAttachment.scanStatus == 'rejected' ||
         _displayAttachment.scanStatus == 'failed') {
       return;
@@ -2322,10 +2564,16 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
           .attachmentStatus(_displayAttachment);
       if (!mounted || attachment.ref != widget.attachment.ref) return;
       setState(() {
-        _displayAttachment = attachment;
+        _displayAttachment = _manifestAttachment(
+          attachment,
+          widget.encryptedManifest,
+        );
         _statusError = null;
         _statusFailures = 0;
-        if (attachment.scanStatus == 'clean') _future = _load(attachment);
+        if (attachment.scanStatus == 'clean' ||
+            attachment.scanStatus == 'encrypted') {
+          _future = _load(_displayAttachment);
+        }
       });
     } on Object catch (error) {
       // Gateway updates are the primary path. Polling is a recovery path for
@@ -2362,11 +2610,19 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
       _file = destination;
       return destination;
     }
-    final downloaded = await _downloadWithCapacityRetry(
-      attachment,
-      destination,
-      generation,
-    );
+    final manifest = widget.encryptedManifest;
+    final downloaded = manifest == null
+        ? await _downloadWithCapacityRetry(
+            attachment,
+            destination,
+            generation,
+          )
+        : await downloadEncryptedFile(
+            repository: ref.read(mobileControllerProvider.notifier).repository,
+            manifest: manifest,
+            destination: destination,
+            historyMediaUrl: attachment.historyMediaUrl,
+          );
     if (_disposed || generation != _loadGeneration) {
       throw const FileSystemException('Attachment load was cancelled.');
     }
@@ -2500,7 +2756,8 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
         message: 'Preparing ${attachment.filename}…',
       );
     }
-    if (attachment.scanStatus != 'clean') {
+    if (attachment.scanStatus != 'clean' &&
+        attachment.scanStatus != 'encrypted') {
       final rejected = attachment.scanStatus == 'rejected' ||
           attachment.scanStatus == 'infected';
       return _AttachmentStatusCard(

@@ -34,6 +34,14 @@ export interface Channel {
   rate_limit_per_user: number;
   federated_history_policy?: 'inherit' | 'disabled' | 'full_retained';
   encryption_mode?: 'plaintext' | 'e2ee';
+  encryption_state?:
+    'plaintext' | 'legacy' | 'proposed' | 'activating' | 'active' | 'rekeying' | 'failed';
+  encryption_policy_generation?: string;
+  encryption_protocol?: string | null;
+  encryption_suite?: string | null;
+  encryption_group_id?: string | null;
+  encryption_epoch?: string | null;
+  encryption_activated_at?: string | null;
   search_available?: boolean;
   last_message_id: string | null;
   last_message_domain: string | null;
@@ -114,6 +122,12 @@ export interface Message {
   author: UserSummary | null;
   content: string | null;
   e2ee?: Record<string, unknown> | null;
+  encryption_policy_generation?: string;
+  encryption_epoch?: string | null;
+  /** Client-only plaintext produced after authenticated E2EE decryption. Never persisted or relayed. */
+  decrypted_content?: string | null;
+  /** Client-only attachment keys authenticated inside the decrypted MLS application. */
+  decrypted_attachments?: import('$lib/e2ee/media').EncryptedFileManifest[];
   message_type: number;
   flags: number;
   client_nonce: string | null;
@@ -174,7 +188,9 @@ export interface Attachment {
   width: number | null;
   height: number | null;
   blurhash: string | null;
-  scan_status: 'pending' | 'clean' | 'infected' | 'failed';
+  scan_status: 'pending' | 'clean' | 'infected' | 'failed' | 'encrypted';
+  encryption_mode?: 'plaintext' | 'e2ee';
+  encryption_protocol?: 'kaede-file-v1' | null;
   variants: Record<string, { width?: number; height?: number; content_type?: string }>;
   /**
    * Same-origin, authenticated stream for media returned by an on-demand

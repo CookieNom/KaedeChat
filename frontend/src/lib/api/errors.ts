@@ -32,8 +32,60 @@ const ERROR_MESSAGES: Record<string, string> = {
   DEVELOPER_TEAM_NOT_FOUND: 'That developer team no longer exists or you cannot access it.',
   E2EE_INTERACTION_PAYLOAD_REQUIRED:
     'This encrypted channel requires an encrypted command payload.',
-  E2EE_MESSAGE_REPORT_UNAVAILABLE:
-    'Encrypted message contents cannot be reported to the server because it cannot read them.',
+  E2EE_ACTIVATION_DISABLED: 'New end-to-end encrypted rooms are not enabled on this instance yet.',
+  E2EE_MEMBERSHIP_COMMIT_REQUIRED:
+    'Secure the updated member list on an approved device before changing this encrypted group.',
+  E2EE_NOT_ENABLED: 'This conversation does not accept encrypted message envelopes.',
+  E2EE_ENVELOPE_REQUIRED: 'This conversation requires an end-to-end encrypted message.',
+  E2EE_MLS_ENVELOPE_REQUIRED: 'This conversation requires a current MLS 1.0 encrypted message.',
+  E2EE_POLICY_CONTEXT_MISMATCH:
+    'The encrypted message was created for a different room policy or MLS epoch. Refresh encryption state and try again.',
+  E2EE_ATTACHMENTS_NOT_READY:
+    'Encrypted attachment support is unavailable on this client. No file was uploaded as plaintext.',
+  E2EE_DEVICE_CHALLENGE_EXPIRED: 'The device setup request expired. Start device setup again.',
+  E2EE_DEVICE_CHALLENGE_MISMATCH:
+    'The device setup request does not match this account or session.',
+  E2EE_DEVICE_PROOF_INVALID: 'The device could not prove that it owns its encryption identity key.',
+  E2EE_DEVICE_REVOKED: 'This encryption device was revoked and cannot be registered again.',
+  E2EE_DEVICE_IDENTITY_CONFLICT:
+    'This encryption identity is already bound to different device credentials.',
+  E2EE_DEVICE_LIMIT_REACHED: 'This account has reached its active encryption-device limit.',
+  E2EE_DEVICE_NOT_FOUND: 'The encryption device was not found.',
+  E2EE_SENDER_DEVICE_INVALID:
+    'This encrypted message was not created by one of your active encryption devices. Refresh device keys and try again.',
+  E2EE_KEY_PACKAGE_EXPIRY_INVALID: 'The encryption key-package expiry is invalid.',
+  E2EE_KEY_PACKAGE_LIMIT_REACHED: 'This device already has enough unused encryption key packages.',
+  E2EE_KEY_PACKAGE_CONFLICT: 'The encryption key package conflicts with an existing package.',
+  E2EE_KEY_PACKAGE_UNAVAILABLE:
+    'An enrolled device has no unused encryption key package. Ask its user to open Kaede and retry.',
+  E2EE_NO_OTHER_DEVICES: 'No other enrolled device is available for this encrypted room.',
+  E2EE_PARTICIPANT_DEVICE_MISSING:
+    'Every participant needs an enrolled encryption device before encryption can be enabled.',
+  E2EE_PARTICIPANT_HOME_REJECTED: "A participant's home instance rejected encrypted-room setup.",
+  E2EE_PARTICIPANT_HOME_UNREACHABLE:
+    "A participant's home instance could not be reached for encrypted-room setup.",
+  E2EE_POLICY_ALREADY_EXISTS: 'This conversation already has an encryption policy.',
+  E2EE_ROOM_MEMBER_LIMIT: 'This conversation has too many members for encrypted-room setup.',
+  E2EE_AUTHORITY_REMOTE:
+    "Encrypted-room settings must be completed by the conversation's home instance.",
+  E2EE_OPERATION_INVALID: 'The encrypted message operation is not valid for this request.',
+  E2EE_ATTACHMENT_REQUIRED: 'Encrypted conversations accept only client-encrypted file uploads.',
+  E2EE_REMOTE_DEVICE_DISCOVERY_REQUIRED:
+    "The remote user's encryption devices could not be verified.",
+  E2EE_REKEY_REQUIRED:
+    'Encrypted messaging is paused until an authorized member secures the updated participant list.',
+  E2EE_MEDIA_ROTATION_UNAVAILABLE:
+    'The previous encrypted media session could not be safely closed. Try again shortly.',
+  E2EE_REKEY_PROPOSAL_EXPIRED: 'The key-rotation proposal expired. Start securing the room again.',
+  E2EE_ROOM_AUTHORITY_UNREACHABLE:
+    "The conversation's home instance could not be reached for encryption setup.",
+  E2EE_ROOM_AUTHORITY_INVALID_RESPONSE:
+    "The conversation's home instance returned an invalid encryption response.",
+  E2EE_ROOM_AUTHORITY_REJECTED: "The conversation's home instance rejected encryption setup.",
+  MESSAGE_ENCRYPTION_POLICY_INVALID:
+    "This conversation's encryption policy is invalid, so the message was not sent.",
+  E2EE_REPORT_DISCLOSURE_REQUIRED:
+    'Decrypt the message here and confirm that you want to share its text with Trust & Safety.',
   FEDERATED_COMMANDS_UNAVAILABLE:
     'Commands from that remote application are temporarily unavailable.',
   INTERACTION_ALREADY_RESPONDED: 'This interaction already has a response.',
@@ -42,6 +94,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   OWNER_CLI_MANAGED: 'Instance owner access can only be changed from the server CLI.',
   OWNER_REQUIRED: 'Only an instance owner can perform that action.',
   REPORT_NOT_FOUND: 'That safety report no longer exists or you cannot access it.',
+  REPORT_DISCLOSURE_UNEXPECTED:
+    'Decrypted evidence can only be included when reporting an encrypted message.',
   TEAM_LAST_OWNER: 'Add another team owner before removing or changing the last owner.',
   TEAM_OWNER_REQUIRED: 'Only a developer team owner can perform that action.',
   TEMPLATE_EXCEEDS_APPLICATION: 'The invite requests access that the application has not enabled.',

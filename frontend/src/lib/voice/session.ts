@@ -1,7 +1,8 @@
-import { Room, RoomEvent, Track, type Participant } from 'livekit-client';
+import { ExternalE2EEKeyProvider, Room, RoomEvent, Track, type Participant } from 'livekit-client';
 import type { LocalTrackPublication, RemoteTrack, RemoteTrackPublication } from 'livekit-client';
 import { userErrorMessage } from '$lib/api/client';
 import { isNativeDesktop, nativeInvoke, type NativeVoiceStatus } from '$lib/platform/native';
+import { base64url } from '$lib/e2ee/encoding';
 
 export interface VoiceToken {
   token: string;
@@ -13,6 +14,15 @@ export interface VoiceToken {
   can_stream: boolean;
   can_use_vad: boolean;
   move_session_id?: string | null;
+  e2ee?: boolean;
+  channel_id?: string | null;
+  channel_domain?: string | null;
+  encryption_policy_generation?: string | null;
+  encryption_epoch?: string | null;
+  media_protocol?: 'livekit-e2ee-v1' | null;
+  media_suite?: 'AES-256-GCM' | null;
+  media_session_id?: string | null;
+  media_epoch?: string | null;
 }
 
 export interface VoiceTile {
@@ -75,18 +85,26 @@ export function isUsableVoiceToken(value: VoiceToken, now = Date.now()): boolean
     (value.move_session_id == null ||
       (typeof value.move_session_id === 'string' &&
         /^[A-Za-z0-9_-]{32,64}$/.test(value.move_session_id))) &&
+    (!value.e2ee
+      ? value.media_protocol == null &&
+        value.media_suite == null &&
+        value.media_session_id == null &&
+        value.media_epoch == null
+      : Boolean(value.channel_id) &&
+        Boolean(value.channel_domain) &&
+        /^(0|[1-9][0-9]*)$/.test(value.encryption_policy_generation ?? '') &&
+        /^(0|[1-9][0-9]*)$/.test(value.encryption_epoch ?? '') &&
+        value.media_protocol === 'livekit-e2ee-v1' &&
+        value.media_suite === 'AES-256-GCM' &&
+        /^[A-Za-z0-9_-]{43}$/.test(value.media_session_id ?? '') &&
+        value.media_epoch === value.encryption_epoch) &&
     Number.isFinite(expires) &&
     expires > now
   );
 }
 
 export class VoiceSession extends EventTarget {
-  readonly room = new Room({
-    adaptiveStream: true,
-    dynacast: true,
-    disconnectOnPageLeave: true,
-    stopLocalTrackOnUnpublish: true
-  });
+  room: Room;
 
   connected = false;
   connecting = false;
@@ -104,21 +122,34 @@ export class VoiceSession extends EventTarget {
   #nativeDeafened = false;
   #nativeSpeakingUntil = 0;
   #activeSpeakers = new Set<string>();
+  #e2eeConfigured = false;
+  #e2eeWorker: Worker | null = null;
 
   constructor() {
     super();
+    this.room = this.#createRoom();
+  }
+
+  #createRoom(e2ee?: { keyProvider: ExternalE2EEKeyProvider; worker: Worker }): Room {
+    const room = new Room({
+      adaptiveStream: true,
+      dynacast: true,
+      disconnectOnPageLeave: true,
+      stopLocalTrackOnUnpublish: true,
+      ...(e2ee ? { e2ee } : {})
+    });
     const changed = () => this.#changed();
-    this.room.on(RoomEvent.TrackSubscribed, changed);
-    this.room.on(RoomEvent.TrackUnsubscribed, changed);
-    this.room.on(RoomEvent.LocalTrackPublished, changed);
-    this.room.on(RoomEvent.LocalTrackUnpublished, changed);
-    this.room.on(RoomEvent.ParticipantConnected, changed);
-    this.room.on(RoomEvent.ParticipantDisconnected, changed);
-    this.room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+    room.on(RoomEvent.TrackSubscribed, changed);
+    room.on(RoomEvent.TrackUnsubscribed, changed);
+    room.on(RoomEvent.LocalTrackPublished, changed);
+    room.on(RoomEvent.LocalTrackUnpublished, changed);
+    room.on(RoomEvent.ParticipantConnected, changed);
+    room.on(RoomEvent.ParticipantDisconnected, changed);
+    room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
       this.#activeSpeakers = new Set(speakers.map((speaker) => speaker.identity));
       changed();
     });
-    this.room.on(RoomEvent.Disconnected, () => {
+    room.on(RoomEvent.Disconnected, () => {
       this.connected = false;
       this.moveSessionId = null;
       this.microphone = false;
@@ -127,11 +158,45 @@ export class VoiceSession extends EventTarget {
       this.#activeSpeakers.clear();
       this.#changed();
     });
+    return room;
   }
 
-  async connect(grant: VoiceToken): Promise<void> {
+  async #configureE2EE(key: ArrayBuffer): Promise<void> {
+    if (!globalThis.RTCRtpSender || !('transform' in RTCRtpSender.prototype)) {
+      throw new Error('This browser does not support encrypted voice and video.');
+    }
+    await this.room.disconnect();
+    this.#e2eeWorker?.terminate();
+    const keyProvider = new ExternalE2EEKeyProvider({ ratchetSalt: 'kaede-livekit-v1' });
+    await keyProvider.setKey(key);
+    const worker = new Worker(new URL('livekit-client/e2ee-worker', import.meta.url), {
+      type: 'module'
+    });
+    this.#e2eeWorker = worker;
+    this.room = this.#createRoom({ keyProvider, worker });
+    this.#e2eeConfigured = true;
+  }
+
+  async #configurePlaintext(): Promise<void> {
+    if (!this.#e2eeConfigured) return;
+    await this.room.disconnect();
+    this.#e2eeWorker?.terminate();
+    this.#e2eeWorker = null;
+    this.room = this.#createRoom();
+    this.#e2eeConfigured = false;
+  }
+
+  async connect(grant: VoiceToken, encryptionKey?: ArrayBuffer): Promise<void> {
     if (this.connected || this.connecting) return;
     if (!isUsableVoiceToken(grant)) throw new TypeError('Invalid or expired voice grant');
+    if (grant.e2ee) {
+      if (!encryptionKey) throw new Error('This encrypted call has no device media key.');
+      await this.#configureE2EE(encryptionKey);
+    } else if (encryptionKey) {
+      throw new Error('A plaintext voice grant cannot use an encrypted-room key.');
+    } else {
+      await this.#configurePlaintext();
+    }
     this.connecting = true;
     this.error = '';
     this.canSpeak = grant.can_speak;
@@ -160,14 +225,24 @@ export class VoiceSession extends EventTarget {
     }
   }
 
-  async connectNative(reference: string, isCall: boolean): Promise<void> {
+  async connectNative(
+    reference: string,
+    isCall: boolean,
+    encryptionKey?: ArrayBuffer,
+    senderDeviceId?: string
+  ): Promise<void> {
     if (!isNativeDesktop()) throw new Error('Native voice is unavailable.');
     if (this.connected || this.connecting) return;
     this.connecting = true;
     this.error = '';
     this.#changed();
     try {
-      await nativeInvoke('native_voice_join', { reference, isCall });
+      await nativeInvoke('native_voice_join', {
+        reference,
+        isCall,
+        e2eeKey: encryptionKey ? base64url(new Uint8Array(encryptionKey)) : null,
+        senderDeviceId: senderDeviceId ?? null
+      });
       this.#startNativePolling();
       await this.#pollNativeStatus();
       this.#startNativeVideoPolling();
@@ -317,6 +392,8 @@ export class VoiceSession extends EventTarget {
       return;
     }
     await this.room.disconnect(true);
+    this.#e2eeWorker?.terminate();
+    this.#e2eeWorker = null;
     this.connected = false;
     this.moveSessionId = null;
     this.#changed();

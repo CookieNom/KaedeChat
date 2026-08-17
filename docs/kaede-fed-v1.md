@@ -541,23 +541,23 @@ members as opaque and never selects or validates a cipher suite. Plaintext and a
 `e2ee` object are mutually exclusive. A sender MUST NOT activate an encrypted room
 across an instance that does not advertise this capability.
 
-This capability is plumbing, not end-to-end encryption by itself. In particular,
-kaede-fed/1 does not yet define user devices, credentials, key packages, welcome
-messages, MLS groups, DM ratchets, recovery, verification UX, or encrypted
-attachments. The Ed25519 signatures in sections 2 and 3 authenticate one instance
-to another; they do not prove which participant device created a ciphertext.
+This capability alone is plumbing, not proof of end-to-end encryption. Kaede's
+`e2ee-mls/1` and `e2ee-media/1` extensions add device credentials, one-use key
+packages, MLS groups and welcomes, recovery UX, and encrypted attachments. The
+Ed25519 signatures in sections 2 and 3 authenticate one instance to another;
+they do not prove which participant device created a ciphertext.
 
-A future encryption extension MUST define a canonical authenticated-associated-data
-encoding that binds, at minimum:
+The version-2 MLS extension defines a canonical NUL-separated authenticated-data
+encoding that binds:
 
 - the encryption protocol and cipher-suite versions;
 - the composite guild/channel or DM reference (numeric ID and origin domain);
-- the sender's composite user reference and authenticated device identity;
+- the authenticated sender device (the MLS credential binds the user account);
 - an authenticated room-policy generation and cryptographic epoch;
-- a stable per-message nonce/generation and the create/edit operation; and
+- the create/edit operation and edit target, if any; and
 - the hashes and semantics of any encrypted attachment manifest.
 
-The extension must also define downgrade protection. Enabling encryption cannot be
+The extension also enforces downgrade protection. Enabling encryption cannot be
 an unauthenticated boolean: it must advance an authenticated, monotonic room-policy
 generation, and membership or trusted-device changes must advance the cryptographic
 epoch. Clients must reject plaintext, stale policies, and stale epochs after

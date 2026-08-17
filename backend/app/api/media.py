@@ -315,6 +315,18 @@ async def create_channel_attachment_ticket(
             required_permissions("attachment.create"),
             channel=access.channel,
         )
+    expected_mode = "e2ee" if access.channel.encryption_mode == "e2ee" else "plaintext"
+    if expected_mode == "e2ee" and access.channel.encryption_state != "active":
+        raise HTTPException(status_code=409, detail={"code": "E2EE_REKEY_REQUIRED"})
+    if payload.encryption_mode != expected_mode:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": (
+                    "E2EE_ATTACHMENT_REQUIRED" if expected_mode == "e2ee" else "E2EE_NOT_ENABLED"
+                )
+            },
+        )
     attachment, upload_url = await create_upload_ticket(
         session,
         settings,
@@ -323,6 +335,8 @@ async def create_channel_attachment_ticket(
         filename=payload.filename,
         content_type=payload.content_type,
         size=payload.size,
+        encryption_mode=payload.encryption_mode,
+        encryption_protocol=payload.encryption_protocol,
     )
     await session.commit()
     return ticket_payload(attachment, upload_url)
@@ -737,8 +751,10 @@ async def get_attachment_status(
 def select_variant(
     settings: Settings, attachment: Attachment, variant: str
 ) -> tuple[str, str, str]:
-    if attachment.scan_status != "clean" or attachment.deleted_at is not None:
+    if attachment.scan_status not in {"clean", "encrypted"} or attachment.deleted_at is not None:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_AVAILABLE"})
+    if attachment.encryption_mode == "e2ee" and variant != "original":
+        raise HTTPException(status_code=404, detail={"code": "MEDIA_VARIANT_NOT_FOUND"})
     if variant == "original":
         return settings.media_attachments_bucket, attachment.object_key, attachment.filename
     raw = attachment.variants.get(variant)
@@ -822,6 +838,37 @@ async def public_emoji(
     return redirect_to_object(settings, attachment, variant, public=True)
 
 
+def remote_media_federation_query(
+    dm_history_scope: tuple[tuple[int, str], tuple[int, str]] | None,
+    requester: tuple[int, str] | None,
+) -> dict[str, str] | None:
+    """Bind remote DM media fetches to the exact requesting local user.
+
+    Group-DM origins require this identity even for the ordinary live media
+    path.  History scope is an additional binding, not the condition that
+    decides whether the requester is sent.
+    """
+
+    query: dict[str, str] = {}
+    if dm_history_scope is not None:
+        query.update(
+            {
+                "conversation_id": str(dm_history_scope[0][0]),
+                "conversation_domain": dm_history_scope[0][1],
+                "message_id": str(dm_history_scope[1][0]),
+                "message_domain": dm_history_scope[1][1],
+            }
+        )
+    if requester is not None:
+        query.update(
+            {
+                "requester_id": str(requester[0]),
+                "requester_domain": requester[1],
+            }
+        )
+    return query or None
+
+
 async def cache_remote_media(
     session: AsyncSession,
     settings: Settings,
@@ -831,7 +878,8 @@ async def cache_remote_media(
     attachment_id: int,
     variant: str,
     dm_history_scope: tuple[tuple[int, str], tuple[int, str]] | None = None,
-    dm_history_requester: tuple[int, str] | None = None,
+    requester: tuple[int, str] | None = None,
+    encrypted_transport: bool = False,
 ) -> RemoteMediaCache:
     if await session.get(RemoteMediaTombstone, (origin_domain, attachment_id)) is not None:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
@@ -844,6 +892,8 @@ async def cache_remote_media(
     received = 0
     digest_builder = hashlib.sha256()
     prefix = bytearray()
+    federation_query = remote_media_federation_query(dm_history_scope, requester)
+
     try:
         try:
             async with signed_stream_request(
@@ -852,24 +902,7 @@ async def cache_remote_media(
                 "GET",
                 origin_domain,
                 f"/_kaede/v1/media/{attachment_id}/{variant}",
-                query=(
-                    {
-                        "conversation_id": str(dm_history_scope[0][0]),
-                        "conversation_domain": dm_history_scope[0][1],
-                        "message_id": str(dm_history_scope[1][0]),
-                        "message_domain": dm_history_scope[1][1],
-                        **(
-                            {
-                                "requester_id": str(dm_history_requester[0]),
-                                "requester_domain": dm_history_requester[1],
-                            }
-                            if dm_history_requester is not None
-                            else {}
-                        ),
-                    }
-                    if dm_history_scope is not None
-                    else None
-                ),
+                query=federation_query,
                 request_timeout=REMOTE_MEDIA_FETCH_DEADLINE_SECONDS,
                 max_response_bytes=settings.media_max_attachment_bytes,
             ) as remote:
@@ -916,24 +949,29 @@ async def cache_remote_media(
                 status_code=503,
                 detail={"code": "REMOTE_MEDIA_UNAVAILABLE"},
             )
-        try:
-            scan_status = await clamav_scan_file(temporary_path, settings)
-        except RuntimeError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "REMOTE_MEDIA_UNAVAILABLE"},
-            ) from exc
-        if scan_status != "clean":
-            raise HTTPException(status_code=422, detail={"code": "REMOTE_MEDIA_REJECTED"})
+        if encrypted_transport:
+            if variant != "original" or declared_type != "application/octet-stream":
+                raise HTTPException(status_code=422, detail={"code": "REMOTE_MEDIA_REJECTED"})
+            detected_type = "application/octet-stream"
+        else:
+            try:
+                scan_status = await clamav_scan_file(temporary_path, settings)
+            except RuntimeError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "REMOTE_MEDIA_UNAVAILABLE"},
+                ) from exc
+            if scan_status != "clean":
+                raise HTTPException(status_code=422, detail={"code": "REMOTE_MEDIA_REJECTED"})
 
-        detected_type = sniff_content_type(bytes(prefix))
-        try:
-            validate_detected_type(declared_type, detected_type)
-        except MediaValidationError as exc:
-            raise HTTPException(
-                status_code=422,
-                detail={"code": "REMOTE_MEDIA_REJECTED"},
-            ) from exc
+            detected_type = sniff_content_type(bytes(prefix))
+            try:
+                validate_detected_type(declared_type, detected_type)
+            except MediaValidationError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "REMOTE_MEDIA_REJECTED"},
+                ) from exc
 
         digest = digest_builder.hexdigest()
         cache_key = f"{origin_domain}/{attachment_id}/{variant}/{digest}"
@@ -1219,6 +1257,8 @@ async def authorized_attachment(
                         origin_domain=origin_domain,
                         attachment_id=remote_attachment_id,
                         variant=variant,
+                        requester=(auth.user.id, auth.user.origin_domain),
+                        encrypted_transport=attachment.encryption_mode == "e2ee",
                     )
     if cached is None:
         raise RuntimeError("remote media cache write did not converge")
@@ -1353,7 +1393,10 @@ async def authorized_dm_history_media(
                         attachment_id=attachment_id,
                         variant=variant,
                         dm_history_scope=(conversation_key, message_key),
-                        dm_history_requester=(auth.user.id, auth.user.origin_domain),
+                        requester=(auth.user.id, auth.user.origin_domain),
+                        encrypted_transport=(
+                            authorization.headers.get("X-Kaede-Media-Encryption") == "e2ee"
+                        ),
                     )
     if cached is None:
         raise RuntimeError("remote history media cache write did not converge")

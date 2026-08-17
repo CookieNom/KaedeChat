@@ -258,7 +258,22 @@ def _validated_attachment(
         )
     except ValueError as exc:
         raise FederationNetworkError("DM history attachment metadata is invalid") from exc
-    if raw.get("scan_status") != "clean":
+    encryption_mode = raw.get("encryption_mode", "plaintext")
+    encryption_protocol = raw.get("encryption_protocol")
+    if encryption_mode == "e2ee":
+        if (
+            encryption_protocol != "kaede-file-v1"
+            or filename != "encrypted-file"
+            or content_type != "application/octet-stream"
+            or raw.get("scan_status") not in {"pending", "encrypted"}
+        ):
+            raise FederationNetworkError("encrypted DM history attachment is invalid")
+        rendered_scan_status = "encrypted"
+    elif encryption_mode == "plaintext" and encryption_protocol is None:
+        rendered_scan_status = "clean"
+    else:
+        raise FederationNetworkError("DM history attachment encryption policy is invalid")
+    if encryption_mode == "plaintext" and raw.get("scan_status") != "clean":
         raise FederationNetworkError("DM history attachment is not available")
     attachment_ref = (attachment_id, origin)
     rendered: dict[str, object] = {
@@ -270,7 +285,9 @@ def _validated_attachment(
         "width": width,
         "height": height,
         "blurhash": blurhash,
-        "scan_status": "clean",
+        "scan_status": rendered_scan_status,
+        "encryption_mode": encryption_mode,
+        "encryption_protocol": encryption_protocol,
         "variants": variants,
     }
     # Locally-authored media keeps its ordinary authoritative Attachment row

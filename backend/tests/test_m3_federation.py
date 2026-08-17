@@ -1364,6 +1364,8 @@ def test_block_policy_holds_durable_traffic_and_protects_reconciliation() -> Non
         "guild.leave.request",
         "guild.resync.required",
         "relationship.remove",
+        "e2ee.device-list.changed",
+        "e2ee.room-policy.changed",
     } == SECURITY_CRITICAL_GUILD_EVENTS
 
 

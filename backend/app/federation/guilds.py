@@ -15,7 +15,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.chat.e2ee import validate_e2ee_envelope
+from app.chat.e2ee import (
+    channel_encryption_policy_payload,
+    validate_channel_encryption_policy,
+    validate_channel_encryption_policy_transition,
+    validate_e2ee_envelope,
+    validate_message_encryption_policy,
+)
+from app.chat.e2ee_membership import (
+    GUILD_E2EE_ACCESS_MUTATION_EVENTS,
+    pause_guild_e2ee_for_membership_change,
+)
 from app.chat.payloads import member_payload
 from app.chat.permissions import calculate_permissions
 from app.core.permissions import ALL_PERMISSIONS, Permission
@@ -712,12 +722,23 @@ async def apply_guild_message_event(
     content = raw.get("content")
     e2ee = validate_e2ee_envelope(raw.get("e2ee"))
     raw_attachments = raw.get("attachments", [])
+    if not isinstance(raw_attachments, list):
+        raise ValueError("guild message attachment list is invalid")
     if content is not None and (not isinstance(content, str) or not 1 <= len(content) <= 4000):
         raise ValueError("guild message content is invalid")
     if content is not None and e2ee is not None:
         raise ValueError("guild message mixes plaintext and encrypted content")
     if content is None and e2ee is None and not raw_attachments:
         raise ValueError("guild message requires content, encrypted content, or an attachment")
+    validate_message_encryption_policy(
+        channel.encryption_mode or "plaintext",
+        content=content,
+        e2ee=e2ee,
+        attachment_count=len(raw_attachments),
+        policy_generation=channel.encryption_policy_generation or 0,
+        policy_epoch=channel.encryption_epoch,
+        policy_group_id=channel.encryption_group_id,
+    )
     message_type = raw.get("message_type", 0)
     flags = raw.get("flags", 0)
     client_nonce = raw.get("client_nonce")
@@ -821,6 +842,8 @@ async def apply_guild_message_event(
             author_domain=author.origin_domain,
             content=content,
             e2ee=e2ee,
+            encryption_policy_generation=channel.encryption_policy_generation,
+            encryption_epoch=channel.encryption_epoch,
             message_type=message_type,
             flags=flags,
             client_nonce=client_nonce,
@@ -1183,7 +1206,15 @@ async def apply_guild_mutation_event(
         position = raw.get("position")
         slowmode = raw.get("rate_limit_per_user")
         history_policy = raw.get("federated_history_policy", "inherit")
-        encryption_mode = raw.get("encryption_mode", "plaintext")
+        raw_encryption_policy = raw.get("encryption_policy")
+        if raw_encryption_policy is None:
+            legacy_mode = raw.get("encryption_mode", "plaintext")
+            raw_encryption_policy = {
+                "mode": legacy_mode,
+                "state": "legacy" if legacy_mode == "e2ee" else "plaintext",
+                "generation": "0",
+            }
+        encryption_policy = validate_channel_encryption_policy(raw_encryption_policy)
         if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5}:
             raise ValueError("channel mutation type is invalid")
         if not isinstance(name, str) or not 1 <= len(name) <= 100:
@@ -1200,8 +1231,6 @@ async def apply_guild_mutation_event(
             raise ValueError("channel mutation slowmode is invalid")
         if history_policy not in {"inherit", "disabled", "full_retained"}:
             raise ValueError("channel history policy is invalid")
-        if encryption_mode not in {"plaintext", "e2ee"}:
-            raise ValueError("channel encryption mode is invalid")
         parent_id = (
             database_snowflake(raw.get("parent_id"), "parent channel id")
             if raw.get("parent_id") is not None
@@ -1242,7 +1271,13 @@ async def apply_guild_mutation_event(
                 permissions_synced=permissions_synced,
                 rate_limit_per_user=slowmode,
                 federated_history_policy=str(history_policy),
-                encryption_mode=str(encryption_mode),
+                encryption_mode=str(encryption_policy["mode"]),
+                encryption_state=str(encryption_policy["state"]),
+                encryption_policy_generation=int(encryption_policy["generation"]),
+                encryption_protocol=encryption_policy["protocol"],
+                encryption_suite=encryption_policy["suite"],
+                encryption_group_id=encryption_policy["group_id"],
+                encryption_epoch=encryption_policy["epoch"],
                 created_floor_id=created_floor_id,
             )
             session.add(channel)
@@ -1258,7 +1293,19 @@ async def apply_guild_mutation_event(
             channel.permissions_synced = permissions_synced
             channel.rate_limit_per_user = slowmode
             channel.federated_history_policy = str(history_policy)
-            channel.encryption_mode = str(encryption_mode)
+            incoming_generation = int(encryption_policy["generation"])
+            validate_channel_encryption_policy_transition(
+                channel,
+                encryption_policy,
+                label="channel",
+            )
+            channel.encryption_mode = str(encryption_policy["mode"])
+            channel.encryption_state = str(encryption_policy["state"])
+            channel.encryption_policy_generation = incoming_generation
+            channel.encryption_protocol = encryption_policy["protocol"]
+            channel.encryption_suite = encryption_policy["suite"]
+            channel.encryption_group_id = encryption_policy["group_id"]
+            channel.encryption_epoch = encryption_policy["epoch"]
             channel.unavailable = False
         dispatch_type = "CHANNEL_CREATE" if event_type.endswith("create") else "CHANNEL_UPDATE"
         dispatch = dict(raw)
@@ -1711,6 +1758,14 @@ async def apply_guild_mutation_event(
                     raise ValueError("message update content is invalid")
                 if (value is None) == (e2ee is None):
                     raise ValueError("message update must contain one plaintext or encrypted body")
+                validate_message_encryption_policy(
+                    channel.encryption_mode,
+                    content=value,
+                    e2ee=e2ee,
+                    policy_generation=channel.encryption_policy_generation,
+                    policy_epoch=channel.encryption_epoch,
+                    policy_group_id=channel.encryption_group_id,
+                )
                 edited_at = _event_datetime(raw_message.get("edited_at"), "message edit")
                 if edited_at is None:
                     raise ValueError("message edit timestamp is invalid")
@@ -1720,6 +1775,8 @@ async def apply_guild_mutation_event(
                     raise ValueError("message edit regressed authoritative state")
                 message.content = value
                 message.e2ee = e2ee
+                message.encryption_policy_generation = channel.encryption_policy_generation
+                message.encryption_epoch = channel.encryption_epoch
                 message.edited_at = edited_at
             else:
                 deleted_at = _event_datetime(content.get("deleted_at"), "message deletion")
@@ -1880,6 +1937,8 @@ async def apply_guild_mutation_event(
         from app.federation.history import purge_ineligible_federated_history
 
         await purge_ineligible_federated_history(session, settings, locked)
+    if event_type in GUILD_E2EE_ACCESS_MUTATION_EVENTS:
+        await pause_guild_e2ee_for_membership_change(session, locked)
     return dispatch_type, dispatch
 
 
@@ -2346,7 +2405,15 @@ def validate_guild_snapshot(
         position = raw.get("position")
         slowmode = raw.get("rate_limit_per_user")
         history_policy = raw.get("federated_history_policy", "inherit")
-        encryption_mode = raw.get("encryption_mode", "plaintext")
+        raw_encryption_policy = raw.get("encryption_policy")
+        if raw_encryption_policy is None:
+            legacy_mode = raw.get("encryption_mode", "plaintext")
+            raw_encryption_policy = {
+                "mode": legacy_mode,
+                "state": "legacy" if legacy_mode == "e2ee" else "plaintext",
+                "generation": "0",
+            }
+        validate_channel_encryption_policy(raw_encryption_policy)
         parent_id = raw.get("parent_id")
         permissions_synced = raw.get("permissions_synced", parent_id is not None)
         if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5}:
@@ -2365,8 +2432,6 @@ def validate_guild_snapshot(
             raise ValueError("guild snapshot channel slowmode is invalid")
         if history_policy not in {"inherit", "disabled", "full_retained"}:
             raise ValueError("guild snapshot channel history policy is invalid")
-        if encryption_mode not in {"plaintext", "e2ee"}:
-            raise ValueError("guild snapshot channel encryption mode is invalid")
         if (
             not isinstance(permissions_synced, bool)
             or permissions_synced
@@ -2850,6 +2915,7 @@ def guild_snapshot_payload(
                 "rate_limit_per_user": channel.rate_limit_per_user,
                 "federated_history_policy": channel.federated_history_policy,
                 "encryption_mode": getattr(channel, "encryption_mode", "plaintext"),
+                "encryption_policy": channel_encryption_policy_payload(channel),
                 "created_floor_id": str(channel.created_floor_id),
             }
             for channel in channels
@@ -3121,7 +3187,28 @@ async def apply_guild_snapshot(
         loaded_channel.federated_history_policy = str(
             raw.get("federated_history_policy", "inherit")
         )
-        loaded_channel.encryption_mode = str(raw.get("encryption_mode", "plaintext"))
+        raw_encryption_policy = raw.get("encryption_policy")
+        if raw_encryption_policy is None:
+            legacy_mode = raw.get("encryption_mode", "plaintext")
+            raw_encryption_policy = {
+                "mode": legacy_mode,
+                "state": "legacy" if legacy_mode == "e2ee" else "plaintext",
+                "generation": "0",
+            }
+        encryption_policy = validate_channel_encryption_policy(raw_encryption_policy)
+        incoming_generation = int(encryption_policy["generation"])
+        validate_channel_encryption_policy_transition(
+            loaded_channel,
+            encryption_policy,
+            label="snapshot channel",
+        )
+        loaded_channel.encryption_mode = str(encryption_policy["mode"])
+        loaded_channel.encryption_state = str(encryption_policy["state"])
+        loaded_channel.encryption_policy_generation = incoming_generation
+        loaded_channel.encryption_protocol = encryption_policy["protocol"]
+        loaded_channel.encryption_suite = encryption_policy["suite"]
+        loaded_channel.encryption_group_id = encryption_policy["group_id"]
+        loaded_channel.encryption_epoch = encryption_policy["epoch"]
     for raw in snapshot.get("emojis", []):
         loaded_emoji = await session.get(Emoji, (int(raw["id"]), str(raw["origin_domain"])))
         if loaded_emoji is None:

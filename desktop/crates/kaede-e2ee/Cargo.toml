@@ -1,0 +1,36 @@
+[package]
+name = "kaede-e2ee"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# wasm-pack 0.13 bundles a Binaryen build that predates the bulk-memory
+# instructions emitted by our pinned Rust toolchain. The Rust release profile
+# still optimizes this artifact; skipping the incompatible second optimizer is
+# required for reproducible browser builds.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dependencies]
+openmls = { workspace = true, features = ["js"] }
+openmls_basic_credential.workspace = true
+openmls_rust_crypto.workspace = true
+openmls_traits.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tls_codec.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_old = { package = "getrandom", version = "0.2.17", features = ["js"] }
+js-sys = "0.3.77"
+wasm-bindgen = "0.2.100"
+
+[lints]
+workspace = true

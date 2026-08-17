@@ -252,6 +252,7 @@ async def auth_configuration(settings: Settings = Depends(get_settings)) -> dict
         },
         "gif_picker_enabled": settings.klipy_enabled,
         "message_search_enabled": settings.search_enabled,
+        "e2ee_activation_enabled": settings.e2ee_activation_enabled,
     }
 
 

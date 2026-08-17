@@ -5197,6 +5197,28 @@ progress {
   font-style: italic;
 }
 
+.encrypted-message-unavailable {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
+.encrypted-message-unavailable svg {
+  width: 1rem;
+  min-width: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
+.encrypted-message-unavailable strong {
+  display: block;
+  color: var(--text);
+}
+
 .message-reply-reference {
   display: flex;
   width: min(100%, 42rem);

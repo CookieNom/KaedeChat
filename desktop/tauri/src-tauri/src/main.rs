@@ -11,6 +11,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use kaede_api::{ApiClient, ApiClientError, InstanceEndpoint};
 use kaede_audio::{
@@ -30,7 +31,7 @@ use kaede_voice::{
 };
 use parking_lot::Mutex as SyncMutex;
 use reqwest::Method;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{
@@ -88,6 +89,8 @@ struct VoiceUiState {
 struct VoiceTarget {
     reference: String,
     is_call: bool,
+    e2ee_key: Option<SecretString>,
+    sender_device_id: Option<String>,
 }
 
 struct HotkeyRegistration {
@@ -202,6 +205,9 @@ impl From<VoiceError> for NativeError {
                     VoiceError::LiveKit(_) => "VOICE_SERVICE_UNAVAILABLE",
                     VoiceError::Camera(_) | VoiceError::CameraWorker(_) => "CAMERA_UNAVAILABLE",
                     VoiceError::VoiceActivityDenied => "VOICE_ACTIVITY_NOT_ALLOWED",
+                    VoiceError::EncryptionPolicyMismatch | VoiceError::EncryptionKeyMissing => {
+                        "VOICE_E2EE_POLICY_MISMATCH"
+                    }
                     VoiceError::CaptureThread(_) => "SCREEN_CAPTURE_UNAVAILABLE",
                     VoiceError::Api(_) => unreachable!("API voice errors returned above"),
                 };
@@ -1300,14 +1306,18 @@ async fn native_test_output(
 async fn native_voice_join(
     reference: String,
     is_call: bool,
+    e2ee_key: Option<String>,
+    sender_device_id: Option<String>,
     state: State<'_, NativeState>,
 ) -> Result<(), NativeError> {
-    join_native_voice(reference, is_call, &state).await
+    join_native_voice(reference, is_call, e2ee_key, sender_device_id, &state).await
 }
 
 async fn join_native_voice(
     reference: String,
     is_call: bool,
+    e2ee_key: Option<String>,
+    sender_device_id: Option<String>,
     state: &NativeState,
 ) -> Result<(), NativeError> {
     let generation = state.voice_generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -1325,10 +1335,45 @@ async fn join_native_voice(
     let preferences = state.preferences.read().await.clone();
     let capture = capture_settings(&preferences);
     let output = preferences.output_device.map(|device| device.id);
+    let media_key = e2ee_key
+        .as_deref()
+        .map(|encoded| {
+            let decoded = URL_SAFE_NO_PAD.decode(encoded).map_err(|error| {
+                NativeError::operation(
+                    "INVALID_E2EE_MEDIA_KEY",
+                    "The encrypted call key was invalid. Refresh the conversation and try again.",
+                    error,
+                )
+            })?;
+            if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(&decoded) != encoded {
+                return Err(NativeError::local(
+                    "INVALID_E2EE_MEDIA_KEY",
+                    "The encrypted call key was invalid. Refresh the conversation and try again.",
+                ));
+            }
+            Ok(decoded)
+        })
+        .transpose()?;
     let mut handle = if is_call {
-        kaede_voice::join_call(account.api.clone(), &entity, capture, output).await
+        kaede_voice::join_call(
+            account.api.clone(),
+            &entity,
+            capture,
+            output,
+            media_key,
+            sender_device_id.as_deref(),
+        )
+        .await
     } else {
-        kaede_voice::join_channel(account.api.clone(), &entity, capture, output).await
+        kaede_voice::join_channel(
+            account.api.clone(),
+            &entity,
+            capture,
+            output,
+            media_key,
+            sender_device_id.as_deref(),
+        )
+        .await
     }
     .map_err(NativeError::from)?;
     if state.voice_generation.load(Ordering::Acquire) != generation {
@@ -1340,7 +1385,12 @@ async fn join_native_voice(
     if let Some(previous) = state.voice.lock().await.replace(handle) {
         previous.leave().await;
     }
-    *state.voice_target.write().await = Some(VoiceTarget { reference, is_call });
+    *state.voice_target.write().await = Some(VoiceTarget {
+        reference,
+        is_call,
+        e2ee_key: e2ee_key.map(SecretString::from),
+        sender_device_id,
+    });
     *state.voice_ui.write().await = VoiceUiState::default();
     Ok(())
 }
@@ -1549,7 +1599,17 @@ async fn native_preferences_set(
         None
     };
     if let Some(target) = target {
-        join_native_voice(target.reference, target.is_call, &state).await?;
+        join_native_voice(
+            target.reference,
+            target.is_call,
+            target
+                .e2ee_key
+                .as_ref()
+                .map(|key| key.expose_secret().to_owned()),
+            target.sender_device_id,
+            &state,
+        )
+        .await?;
     }
     Ok(())
 }

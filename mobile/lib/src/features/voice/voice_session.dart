@@ -4,16 +4,21 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
+import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart' as permissions;
 
 final voiceSessionProvider = ChangeNotifierProvider<VoiceSession>((ref) {
-  final session = VoiceSession(ref.watch(repositoryProvider));
+  final session = VoiceSession(
+    ref.watch(repositoryProvider),
+    () => ref.read(mobileControllerProvider.notifier).e2eeClient(),
+  );
   ref.onDispose(session.dispose);
   return session;
 });
@@ -46,9 +51,10 @@ String voiceDisconnectMessage(DisconnectReason? reason) => switch (reason) {
 /// increasing generation fences late token and LiveKit completions when a user
 /// switches rooms quickly.
 final class VoiceSession extends ChangeNotifier {
-  VoiceSession(this._repository);
+  VoiceSession(this._repository, this._e2eeClient);
 
   final KaedeRepository _repository;
+  final Future<MobileE2EEClient> Function() _e2eeClient;
   Room? _room;
   EventsListener<RoomEvent>? _events;
   KaedeChannel? _channel;
@@ -128,9 +134,19 @@ final class VoiceSession extends ChangeNotifier {
     Room? candidate;
     EventsListener<RoomEvent>? candidateEvents;
     try {
+      MobileE2EEClient? e2ee;
+      if (target.encryptionMode == 'e2ee') {
+        e2ee = await _e2eeClient();
+      }
       final grant = callRef == null
-          ? await _repository.voiceToken(target.ref)
-          : await _repository.callVoiceToken(callRef);
+          ? await _repository.voiceToken(
+              target.ref,
+              senderDeviceId: e2ee?.deviceId,
+            )
+          : await _repository.callVoiceToken(
+              callRef,
+              senderDeviceId: e2ee?.deviceId,
+            );
       if (generation != _generation) return;
       final url = '${grant['url'] ?? ''}';
       final token = '${grant['token'] ?? ''}';
@@ -143,9 +159,65 @@ final class VoiceSession extends ChangeNotifier {
         );
       }
 
+      final encryptedGrant = grant['e2ee'] == true;
+      final encryptedChannel = target.encryptionMode == 'e2ee';
+      if (encryptedGrant != encryptedChannel) {
+        throw const KaedeException(
+          code: 'VOICE_E2EE_POLICY_MISMATCH',
+          message:
+              'The voice encryption grant did not match this conversation. Nothing was connected.',
+          status: 409,
+        );
+      }
+      E2EEOptions? e2eeOptions;
+      if (encryptedGrant) {
+        if (target.encryptionState != 'active' ||
+            '${grant['channel_id']}@${grant['channel_domain']}' !=
+                target.ref.wire ||
+            '${grant['encryption_policy_generation']}' !=
+                '${target.encryptionPolicyGeneration}' ||
+            '${grant['encryption_epoch']}' != '${target.encryptionEpoch}' ||
+            grant['media_protocol'] != 'livekit-e2ee-v1' ||
+            grant['media_suite'] != 'AES-256-GCM' ||
+            !RegExp(r'^[A-Za-z0-9_-]{43}$')
+                .hasMatch('${grant['media_session_id']}') ||
+            '${grant['media_epoch']}' != '${grant['encryption_epoch']}') {
+          throw const KaedeException(
+            code: 'VOICE_E2EE_POLICY_MISMATCH',
+            message:
+                'Voice encryption keys are being refreshed. Wait for the room to become ready and rejoin.',
+            status: 409,
+          );
+        }
+        e2ee ??= await _e2eeClient();
+        await e2ee.syncRoomState(target);
+        final mediaKey = await e2ee.mediaKey(
+          target,
+          <String>[
+            'kaede-livekit-key-v1',
+            '${grant['media_protocol']}',
+            '${grant['media_suite']}',
+            '${grant['media_session_id']}',
+            '${grant['media_epoch']}',
+            '${grant['room']}',
+          ].join('\u0000'),
+        );
+        try {
+          final provider = await BaseKeyProvider.create(
+            sharedKey: true,
+            ratchetSalt: 'kaede-livekit-v1',
+          );
+          await provider.setRawKey(mediaKey);
+          e2eeOptions = E2EEOptions(keyProvider: provider);
+        } finally {
+          mediaKey.fillRange(0, mediaKey.length, 0);
+        }
+      }
+
       final room = candidate = Room(
-        roomOptions: const RoomOptions(
-          defaultAudioCaptureOptions: AudioCaptureOptions(
+        roomOptions: RoomOptions(
+          e2eeOptions: e2eeOptions,
+          defaultAudioCaptureOptions: const AudioCaptureOptions(
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,

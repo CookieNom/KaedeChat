@@ -1,5 +1,6 @@
 import { api } from '$lib/api/client';
 import { isNativeDesktop, nativeInvokeBytes } from '$lib/platform/native';
+import type { EncryptedFileManifest } from '$lib/e2ee/media';
 
 export interface UploadTicket {
   id: string;
@@ -19,6 +20,7 @@ export interface PendingUpload {
   progress: number;
   status: 'uploading' | 'ready' | 'failed';
   attachmentId?: string;
+  encryptedManifest?: EncryptedFileManifest;
   error?: string;
 }
 

@@ -26,7 +26,8 @@ from app.core.settings import Settings
 from app.core.types import EntityRef
 from app.federation.security import FederationPrincipal
 from app.voice.background import _publish_local_room_snapshot
-from app.voice.livekit import mint_join_token, publication_sources, receive_webhook
+from app.voice.e2ee import MediaSessionRotationError, evict_channel_media_sessions
+from app.voice.livekit import LiveKitError, mint_join_token, publication_sources, receive_webhook
 from app.voice.rooms import (
     dm_room_name,
     guild_room_name,
@@ -41,7 +42,14 @@ from app.voice.schemas import (
     VoiceMoveRequest,
     VoiceTokenResponse,
 )
-from app.voice.service import parse_minted_metadata
+from app.voice.service import (
+    MEDIA_E2EE_PROTOCOL,
+    MEDIA_E2EE_SUITE,
+    media_session_id,
+    parse_minted_metadata,
+    require_e2ee_voice_device,
+    voice_metadata_matches_policy,
+)
 from app.voice.state import (
     ACTIVATE_FEDERATED_VOICE_SESSION_LUA,
     ADVANCE_FEDERATED_VOICE_SESSION_LUA,
@@ -322,6 +330,8 @@ def test_voice_metadata_is_bound_to_identity_and_room() -> None:
         "user_id": "78",
         "user_domain": "alpha.localhost",
         "channel_id": "34",
+        "channel_domain": "alpha.localhost",
+        "e2ee": False,
         "can_speak": True,
         "can_stream": False,
         "can_use_vad": True,
@@ -341,6 +351,143 @@ def test_voice_metadata_is_bound_to_identity_and_room() -> None:
         )
         == dm_metadata
     )
+
+
+def test_encrypted_voice_context_is_complete_and_policy_bound() -> None:
+    channel = SimpleNamespace(
+        id=34,
+        origin_domain="alpha.localhost",
+        encryption_mode="e2ee",
+        encryption_state="active",
+        encryption_group_id="group-a",
+        encryption_policy_generation=5,
+        encryption_epoch=7,
+    )
+    first = media_session_id(channel, "g.12.34")
+    assert len(first) == 43
+    channel.encryption_epoch = 8
+    assert media_session_id(channel, "g.12.34") != first
+    channel.encryption_epoch = 7
+    assert media_session_id(channel, "d.34.56") != first
+
+    complete = {
+        "token": "x" * 32,
+        "url": "wss://alpha.localhost/livekit",
+        "room": "g.12.34",
+        "generation": 1,
+        "expires_at": "2026-08-11T12:00:00+00:00",
+        "can_speak": True,
+        "can_stream": True,
+        "e2ee": True,
+        "channel_id": "34",
+        "channel_domain": "alpha.localhost",
+        "encryption_policy_generation": "5",
+        "encryption_epoch": "7",
+        "media_protocol": MEDIA_E2EE_PROTOCOL,
+        "media_suite": MEDIA_E2EE_SUITE,
+        "media_session_id": first,
+        "media_epoch": "7",
+    }
+    assert VoiceTokenResponse.model_validate(complete).media_session_id == first
+    with pytest.raises(ValidationError, match="complete room context"):
+        VoiceTokenResponse.model_validate({**complete, "media_session_id": None})
+    with pytest.raises(ValidationError, match="media epoch"):
+        VoiceTokenResponse.model_validate({**complete, "media_epoch": "6"})
+
+    metadata = {
+        "e2ee": True,
+        "encryption_policy_generation": "5",
+        "encryption_epoch": "7",
+        "media_protocol": MEDIA_E2EE_PROTOCOL,
+        "media_suite": MEDIA_E2EE_SUITE,
+        "media_session_id": first,
+        "media_epoch": "7",
+    }
+    assert voice_metadata_matches_policy(channel, "g.12.34", metadata)
+    assert not voice_metadata_matches_policy(channel, "g.12.34", {**metadata, "media_epoch": "6"})
+    channel.encryption_state = "rekeying"
+    assert not voice_metadata_matches_policy(channel, "g.12.34", metadata)
+
+
+@pytest.mark.asyncio
+async def test_encrypted_voice_requires_an_active_owned_device() -> None:
+    actor = SimpleNamespace(id=78, origin_domain="alpha.localhost")
+    channel = SimpleNamespace(encryption_mode="e2ee", encryption_state="active")
+    session = SimpleNamespace(scalar=AsyncMock(return_value=None))
+    with pytest.raises(HTTPException) as missing:
+        await require_e2ee_voice_device(
+            session,
+            settings(),
+            channel,
+            actor,
+            None,  # type: ignore[arg-type]
+        )
+    assert missing.value.detail == {"code": "E2EE_SENDER_DEVICE_INVALID"}
+    with pytest.raises(HTTPException) as unowned:
+        await require_e2ee_voice_device(
+            session,
+            settings(),
+            channel,
+            actor,
+            "ked_" + "a" * 43,  # type: ignore[arg-type]
+        )
+    assert unowned.value.detail == {"code": "E2EE_SENDER_DEVICE_INVALID"}
+
+    channel.encryption_state = "rekeying"
+    with pytest.raises(HTTPException) as paused:
+        await require_e2ee_voice_device(
+            session,
+            settings(),
+            channel,
+            actor,
+            "ked_" + "a" * 43,  # type: ignore[arg-type]
+        )
+    assert paused.value.detail == {"code": "E2EE_REKEY_REQUIRED"}
+
+
+@pytest.mark.asyncio
+async def test_media_rotation_fences_grants_before_deleting_the_old_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    occupant = Occupant(
+        identity="78@alpha.localhost",
+        user_id="78",
+        user_domain="alpha.localhost",
+        room="g.12.34",
+        guild_id="12",
+        channel_id="34",
+        joined_at=1,
+    )
+    list_rooms = AsyncMock(return_value=[SimpleNamespace(name="g.12.34")])
+    delete_room = AsyncMock()
+    bump = AsyncMock()
+    remove = AsyncMock()
+    monkeypatch.setattr("app.voice.e2ee.LiveKitControl.list_rooms", list_rooms)
+    monkeypatch.setattr("app.voice.e2ee.LiveKitControl.delete_room", delete_room)
+    monkeypatch.setattr("app.voice.e2ee.room_occupants", AsyncMock(return_value=[occupant]))
+    monkeypatch.setattr("app.voice.e2ee.bump_generation", bump)
+    monkeypatch.setattr("app.voice.e2ee.remove_occupant", remove)
+
+    channel = SimpleNamespace(id=34, type=2, guild_id=12)
+    redis = AsyncMock()
+    await evict_channel_media_sessions(redis, settings(), channel)  # type: ignore[arg-type]
+
+    bump.assert_awaited_once_with(redis, "alpha.localhost", "g.12.34", occupant.identity)
+    delete_room.assert_awaited_once_with("g.12.34")
+    remove.assert_awaited_once_with(redis, "alpha.localhost", "g.12.34", occupant.identity)
+
+
+@pytest.mark.asyncio
+async def test_media_rotation_fails_closed_when_livekit_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.voice.e2ee.LiveKitControl.list_rooms",
+        AsyncMock(side_effect=LiveKitError("unavailable")),
+    )
+    channel = SimpleNamespace(id=34, type=2, guild_id=12)
+    with pytest.raises(MediaSessionRotationError):
+        await evict_channel_media_sessions(AsyncMock(), settings(), channel)  # type: ignore[arg-type]
 
 
 def test_voice_and_call_federation_schemas_forbid_malleable_fields() -> None:

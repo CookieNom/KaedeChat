@@ -3,9 +3,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from fastapi import HTTPException
+from redis.asyncio import Redis
 from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.e2ee import channel_encryption_policy_payload, validate_message_encryption_policy
 from app.chat.payloads import message_payload
 from app.chat.privacy import blocked_between, lock_relationship_pair, relationship
 from app.core.dm import (
@@ -48,6 +50,7 @@ def group_conversation_content(
             "name": channel.name,
             "state_version": str(conversation.state_version),
             "deleted": deleted,
+            "encryption_policy": channel_encryption_policy_payload(channel),
         },
         "participants": [profile_from_user(user) for user in users],
     }
@@ -81,6 +84,11 @@ async def create_group_mutation_notice(
     previous_owner: tuple[int | None, str | None],
     participants: list[User],
 ) -> tuple[Message, dict[str, object]] | None:
+    if channel.encryption_mode == "e2ee":
+        # Membership state is still federated and rendered by the participant
+        # list. A server-authored plaintext notice must never be inserted into
+        # an encrypted room; the rekey control message records the transition.
+        return None
     if action == "rename":
         return None
     if not participants:
@@ -111,6 +119,14 @@ async def create_group_mutation_notice(
             None,
         )
     content = group_notice_text(message_type, actor, affected, new_owner)
+    validate_message_encryption_policy(
+        channel.encryption_mode,
+        content=content,
+        e2ee=None,
+        policy_generation=channel.encryption_policy_generation,
+        policy_epoch=channel.encryption_epoch,
+        policy_group_id=channel.encryption_group_id,
+    )
     message_id = await snowflake.mint()
     # Membership notices are informational system messages, not mentions.  A
     # mention projection would incorrectly notify the person who was added or
@@ -141,6 +157,8 @@ async def create_group_mutation_notice(
                 author_domain=actor.origin_domain,
                 content=content,
                 e2ee=None,
+                encryption_policy_generation=channel.encryption_policy_generation,
+                encryption_epoch=channel.encryption_epoch,
                 message_type=message_type,
                 flags=4,
                 mention_user_refs=mention_refs,
@@ -275,6 +293,7 @@ async def require_group_member(
 
 async def apply_authoritative_group_mutation(
     session: AsyncSession,
+    redis: Redis,
     settings: Settings,
     conversation: DMConversation,
     channel: Channel,
@@ -291,6 +310,9 @@ async def apply_authoritative_group_mutation(
     """
 
     await require_group_member(session, conversation, actor)
+    membership_changed = (
+        getattr(channel, "encryption_mode", "plaintext") == "e2ee" and action != "rename"
+    )
     before = await group_participants(session, conversation)
     if action == "rename":
         channel.name = name
@@ -362,6 +384,26 @@ async def apply_authoritative_group_mutation(
             conversation.owner_domain = successor.origin_domain
     else:
         raise HTTPException(status_code=400, detail={"code": "GROUP_DM_MUTATION_INVALID"})
+    if membership_changed:
+        # Keep the previous group for historical decryption but stop new
+        # application messages until a member creates a fresh group for the
+        # authoritative participant set.
+        channel.encryption_state = "rekeying"
+        from app.voice.e2ee import MediaSessionRotationError, evict_channel_media_sessions
+
+        try:
+            await evict_channel_media_sessions(
+                redis,
+                settings,
+                channel,
+                conversation=conversation,
+            )
+        except MediaSessionRotationError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "E2EE_MEDIA_ROTATION_UNAVAILABLE", "retry_after_ms": 2000},
+                headers={"Retry-After": "2"},
+            ) from exc
     conversation.state_version += 1
     await session.flush()
     return before, await group_participants(session, conversation), False

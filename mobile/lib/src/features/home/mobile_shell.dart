@@ -9,6 +9,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/message_search_screen.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
@@ -19,6 +20,143 @@ import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:uuid/uuid.dart';
+
+Future<void> _showE2eeRoomSettings(
+  BuildContext context,
+  WidgetRef ref,
+  KaedeChannel initialChannel, {
+  required bool canManage,
+}) async {
+  var channel = initialChannel;
+  var busy = false;
+  String? error;
+  String? safetyNumber;
+  await showDialog<void>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setDialogState) {
+        final encrypted = channel.encryptionMode == 'e2ee';
+        final active = encrypted && channel.encryptionState == 'active';
+        final needsRekey = encrypted &&
+            {'rekeying', 'failed'}.contains(channel.encryptionState);
+        Future<void> run(Future<void> Function(MobileE2EEClient) action) async {
+          if (busy) return;
+          setDialogState(() {
+            busy = true;
+            error = null;
+          });
+          try {
+            final controller = ref.read(mobileControllerProvider.notifier);
+            final client = await controller.e2eeClient();
+            await action(client);
+            await controller.refreshNavigation();
+          } on Object catch (caught) {
+            error = userFacingError(
+              caught,
+              summary: 'Could not update end-to-end encryption.',
+            );
+          } finally {
+            if (dialogContext.mounted) {
+              setDialogState(() => busy = false);
+            }
+          }
+        }
+
+        return AlertDialog(
+          title: const Row(children: [
+            Icon(Icons.lock_rounded),
+            SizedBox(width: 10),
+            Expanded(child: Text('End-to-end encryption')),
+          ]),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    active
+                        ? 'Encryption is active. Only enrolled participant devices can read message, file, voice, video, and screen-share content.'
+                        : needsRekey
+                            ? 'Encrypted activity is paused until a member rotates the room keys.'
+                            : encrypted
+                                ? 'Encryption is being prepared. Messaging remains paused until setup completes.'
+                                : 'Encryption is optional and cannot be turned off after it is enabled for this conversation.',
+                  ),
+                  const SizedBox(height: 12),
+                  if (!encrypted) ...[
+                    const Text(
+                      'Before enabling:',
+                      style: TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      '• Server message search, link previews, bots, webhooks, server-side file previews and malware scanning will be unavailable.\n'
+                      '• Notification wakes contain no message content.\n'
+                      '• Existing history stays plaintext; new content is encrypted.\n'
+                      '• Metadata such as participants, timing, and message size remains visible.\n'
+                      '• Losing every enrolled device without a recovery backup permanently loses encrypted history.\n'
+                      '• Removed members retain content already received.',
+                    ),
+                  ],
+                  if (safetyNumber != null) ...[
+                    const SizedBox(height: 14),
+                    const Text('Conversation safety number',
+                        style: TextStyle(fontWeight: FontWeight.w800)),
+                    const SizedBox(height: 6),
+                    SelectableText(safetyNumber!),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Compare this number with the other participants through a trusted channel. It changes when membership or devices change.',
+                    ),
+                  ],
+                  if (error != null) ...[
+                    const SizedBox(height: 12),
+                    Text(error!,
+                        style: const TextStyle(color: KaedeColors.coral)),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: busy ? null : () => Navigator.pop(dialogContext),
+              child: const Text('Done'),
+            ),
+            if (active)
+              FilledButton.tonal(
+                onPressed: busy
+                    ? null
+                    : () => run((client) async {
+                          await client.syncRoomState(channel);
+                          final value = await client.safetyNumber(channel);
+                          if (dialogContext.mounted) {
+                            setDialogState(() => safetyNumber = value);
+                          }
+                        }),
+                child: const Text('Verify safety number'),
+              ),
+            if (canManage && (!encrypted || needsRekey))
+              FilledButton.icon(
+                onPressed: busy
+                    ? null
+                    : () => run((client) async {
+                          channel = needsRekey
+                              ? await client.rekeyRoom(channel)
+                              : await client.enableRoom(channel);
+                        }),
+                icon: Icon(
+                    needsRekey ? Icons.sync_lock_rounded : Icons.lock_rounded),
+                label: Text(needsRekey ? 'Rotate keys' : 'Enable encryption'),
+              ),
+          ],
+        );
+      },
+    ),
+  );
+}
 
 final class MobileShell extends ConsumerStatefulWidget {
   const MobileShell({super.key});
@@ -454,8 +592,30 @@ final class _ConversationScreenState
     );
   }
 
+  Future<void> _showEncryptionSettings() async {
+    var channel = widget.channel;
+    for (final candidate in ref.read(mobileControllerProvider).dms) {
+      if (candidate.ref == widget.channel.ref) {
+        channel = candidate;
+        break;
+      }
+    }
+    final current = ref.read(mobileControllerProvider).user;
+    final canManage = channel.conversationType != 'group' ||
+        (current != null && current.ref == channel.ownerRef);
+    await _showE2eeRoomSettings(
+      context,
+      ref,
+      channel,
+      canManage: canManage,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final activationEnabled = ref.watch(
+      mobileControllerProvider.select((state) => state.e2eeActivationEnabled),
+    );
     final recipient = widget.channel.recipients.isEmpty
         ? null
         : widget.channel.recipients.first;
@@ -481,6 +641,16 @@ final class _ConversationScreenState
               ? '${widget.channel.recipients.length + 1} members'
               : widget.channel.topic,
           actions: [
+            if (widget.channel.encryptionMode == 'e2ee' || activationEnabled)
+              IconButton(
+                tooltip: widget.channel.encryptionMode == 'e2ee'
+                    ? 'Encryption settings'
+                    : 'Enable end-to-end encryption',
+                onPressed: _showEncryptionSettings,
+                icon: Icon(widget.channel.encryptionMode == 'e2ee'
+                    ? Icons.lock_rounded
+                    : Icons.lock_open_rounded),
+              ),
             if (_isGroup)
               IconButton(
                 tooltip: 'Group settings',
@@ -700,6 +870,33 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                 child: const Text('Add member'),
               ),
               const SizedBox(height: 18),
+              if (channel.encryptionMode == 'e2ee' ||
+                  mobile.e2eeActivationEnabled) ...[
+                Card(
+                  margin: EdgeInsets.zero,
+                  child: ListTile(
+                    leading: Icon(channel.encryptionMode == 'e2ee'
+                        ? Icons.lock_rounded
+                        : Icons.lock_open_rounded),
+                    title: const Text('End-to-end encryption'),
+                    subtitle: Text(channel.encryptionMode == 'e2ee'
+                        ? channel.encryptionState == 'active'
+                            ? 'Active'
+                            : 'Encrypted activity is paused until keys rotate'
+                        : 'Optional · review feature tradeoffs before enabling'),
+                    trailing: const Icon(Icons.chevron_right_rounded),
+                    onTap: _busy
+                        ? null
+                        : () => _showE2eeRoomSettings(
+                              context,
+                              ref,
+                              channel,
+                              canManage: isOwner,
+                            ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+              ],
               Text('Members', style: Theme.of(context).textTheme.titleMedium),
               if (current != null)
                 ListTile(

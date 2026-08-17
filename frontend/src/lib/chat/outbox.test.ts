@@ -14,6 +14,7 @@ describe('pending message sends', () => {
     expect(send).toEqual({
       clientNonce: 'stable-nonce',
       content: 'hello',
+      encryptedAttachments: [],
       attachmentIds: ['10'],
       mentionUserIds: ['20@example.test'],
       referencedMessageId: null
@@ -26,6 +27,7 @@ describe('pending message sends', () => {
     expect(discardAttachments(send)).toEqual({
       clientNonce: 'stable-nonce',
       content: null,
+      encryptedAttachments: [],
       attachmentIds: [],
       mentionUserIds: [],
       referencedMessageId: null
@@ -39,6 +41,7 @@ describe('pending message sends', () => {
     expect(discardAttachments(send)).toEqual({
       clientNonce: 'stable-nonce',
       content: 'reply',
+      encryptedAttachments: [],
       attachmentIds: [],
       mentionUserIds: ['20@example.test'],
       referencedMessageId: '30'

@@ -23,11 +23,14 @@ SECURITY_CRITICAL_GUILD_EVENTS = frozenset(
         "guild.leave.request",
         "guild.resync.required",
         "relationship.remove",
+        "e2ee.device-list.changed",
+        "e2ee.room-policy.changed",
     }
 )
 FEDERATION_CAPABILITIES = (
     "dm-history-page/1",
-    "e2ee-transport/1",
+    "e2ee-mls/1",
+    "e2ee-media/1",
     "bot-direct-auth/1",
     "group-dm/1",
     "guild-history-sync/1",

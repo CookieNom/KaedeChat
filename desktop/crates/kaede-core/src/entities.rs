@@ -155,6 +155,22 @@ pub struct Channel {
     pub rate_limit_per_user: u32,
     #[serde(default)]
     pub federated_history_policy: Option<String>,
+    #[serde(default = "default_encryption_mode")]
+    pub encryption_mode: String,
+    #[serde(default = "default_encryption_state")]
+    pub encryption_state: String,
+    #[serde(default)]
+    pub encryption_policy_generation: u64,
+    #[serde(default)]
+    pub encryption_protocol: Option<String>,
+    #[serde(default)]
+    pub encryption_suite: Option<String>,
+    #[serde(default)]
+    pub encryption_group_id: Option<String>,
+    #[serde(default)]
+    pub encryption_epoch: Option<u64>,
+    #[serde(default)]
+    pub encryption_activated_at: Option<DateTime<Utc>>,
     /// Remote DM replicas retain a bounded recent window. These optional
     /// fields let clients stop pagination at that window without mistaking it
     /// for the authoritative beginning of the conversation.
@@ -186,6 +202,14 @@ pub struct Channel {
 
 fn default_conversation_type() -> String {
     "direct".to_owned()
+}
+
+fn default_encryption_mode() -> String {
+    "plaintext".to_owned()
+}
+
+fn default_encryption_state() -> String {
+    "plaintext".to_owned()
 }
 
 impl Channel {
@@ -289,6 +313,10 @@ pub struct Message {
     #[serde(default)]
     pub content: Option<String>,
     pub e2ee: Option<Value>,
+    #[serde(default)]
+    pub encryption_policy_generation: u64,
+    #[serde(default)]
+    pub encryption_epoch: Option<u64>,
     #[serde(alias = "nonce")]
     pub client_nonce: Option<String>,
     #[serde(default, alias = "mentions")]
@@ -617,10 +645,12 @@ mod tests {
         let Ok(attachment) = serde_json::from_value::<Attachment>(payload) else {
             panic!("history attachment should deserialize");
         };
-        assert!(attachment
-            .history_media_url
-            .as_deref()
-            .is_some_and(|path| path.starts_with("/api/v1/dms/")));
+        assert!(
+            attachment
+                .history_media_url
+                .as_deref()
+                .is_some_and(|path| path.starts_with("/api/v1/dms/"))
+        );
     }
 
     #[test]

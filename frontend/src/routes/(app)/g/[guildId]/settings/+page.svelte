@@ -2,6 +2,7 @@
   import { page } from '$app/state';
   import { resolve } from '$app/paths';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
+  import { loadAuthConfiguration } from '$lib/auth/config';
   import { firstNavigableChannel, groupChannels } from '$lib/chat/channels';
   import { entityKey, entityRef } from '$lib/chat/refs';
   import type {
@@ -15,6 +16,7 @@
   import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import Icon from '$lib/components/Icon.svelte';
   import Toast from '$lib/components/Toast.svelte';
+  import { initializeE2EE } from '$lib/e2ee/client';
   import { PERMISSION_METADATA, Permission } from '$lib/generated/permissions';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
@@ -151,6 +153,8 @@
   const channelId = $derived(channelOnly ? (page.params.channelId ?? '') : '');
   let localDomain = $state('');
   let currentUserRef = $state('');
+  let signedInUser = $state<UserSummary | null>(null);
+  let e2eeActivationEnabled = $state(false);
   let guild = $state<GuildView | null>(null);
   let members = $state<MemberSummary[]>([]);
   let membersHaveMore = $state(false);
@@ -705,6 +709,47 @@
     });
   }
 
+  function enableChannelEncryption() {
+    if (!selectedChannel || !signedInUser) return;
+    const channel = selectedChannel;
+    const user = signedInUser;
+    const rekey = channel.encryption_mode === 'e2ee' && channel.encryption_state === 'rekeying';
+    if (!rekey && !e2eeActivationEnabled) return;
+    if (channel.encryption_mode === 'e2ee' && !rekey) return;
+    const activationWarning =
+      channel.type === 2
+        ? 'Turn on end-to-end encryption for this voice channel? This is permanent. Microphone, camera, screen video, and screen audio will be encrypted on participant devices. Recording, transcription, server media moderation, and unsupported clients will stop working. Participant, timing, track, and traffic metadata remains visible. Anyone can still record content on their own device.'
+        : 'Turn on end-to-end encryption for this channel? This is permanent and protects only new content; existing history stays readable to the server. Server search, link and GIF previews, bots, webhooks, file previews, and malware scanning will stop. Notifications become generic, while participants, timing, and message-size metadata remain visible. Losing every enrolled device and recovery backup loses encrypted history. Removed members keep content they already received.';
+    if (
+      !window.confirm(
+        rekey
+          ? 'Create fresh encryption keys for the current channel members? Removed members and revoked devices will not receive the new keys.'
+          : activationWarning
+      )
+    )
+      return;
+    return run(async (_guildRef, generation) => {
+      const client = await initializeE2EE(user);
+      const updated = rekey
+        ? await client.rekeyRoom(entityRef(channel))
+        : await client.activateRoom(
+            entityRef(channel),
+            await client.createRoomProposal(entityRef(channel))
+          );
+      if (generation !== loadGeneration || !guild) return;
+      guild = {
+        ...guild,
+        channels: guild.channels?.map((item) =>
+          entityKey(item) === entityKey(updated) ? updated : item
+        )
+      };
+      selectChannel(updated, true);
+      notice = rekey
+        ? 'Fresh encryption keys are active for the current channel members.'
+        : 'End-to-end encryption is now on for this channel.';
+    });
+  }
+
   function saveGuildNotificationLevel(level: GuildNotificationLevel) {
     if (!guild || level === guildNotificationLevel) return;
     return run(async (guildRef, generation) => {
@@ -744,17 +789,23 @@
   ) {
     loading = true;
     try {
-      const [loaded, currentUser, notificationSettings] = await Promise.all([
+      const [loaded, currentUser, notificationSettings, authConfiguration] = await Promise.all([
         api<GuildView>(`/guilds/${encodeURIComponent(targetGuild)}`, { signal }),
         api<UserSummary>('/users/@me', { signal }),
         api<GuildNotificationPreference>(
           `/guilds/${encodeURIComponent(targetGuild)}/notification-settings`,
           { signal }
-        )
+        ),
+        loadAuthConfiguration(signal)
       ]);
       if (generation !== loadGeneration || targetGuild !== guildId) return;
       localDomain = currentUser.origin_domain;
       currentUserRef = entityRef(currentUser);
+      signedInUser = currentUser;
+      e2eeActivationEnabled = authConfiguration.e2ee_activation_enabled;
+      void initializeE2EE(currentUser).catch(() => {
+        // Guild settings remain available on clients without secure device storage.
+      });
       guild = loaded;
       name = loaded.name;
       description = loaded.description ?? '';
@@ -2658,6 +2709,41 @@
                             Remote deletion is requested on access loss, but cannot be guaranteed.
                           </div>
                         {/if}
+                      {/if}
+                      {#if (selectedChannel.type === 0 || selectedChannel.type === 2 || selectedChannel.type === 5) && (selectedChannel.encryption_mode === 'e2ee' || e2eeActivationEnabled)}
+                        <div class="notice-banner compact-warning" role="note">
+                          <Icon name="lock" size={17} />
+                          <div>
+                            <strong>End-to-end encryption</strong>
+                            {#if selectedChannel.encryption_mode === 'e2ee'}
+                              <p>
+                                {selectedChannel.encryption_state === 'rekeying'
+                                  ? 'Paused after a membership change. Secure the current member list before messaging resumes.'
+                                  : 'On. Only enrolled member devices can read messages and files.'}
+                              </p>
+                              {#if selectedChannel.encryption_state === 'rekeying'}
+                                <button
+                                  class="secondary-button"
+                                  type="button"
+                                  disabled={busy}
+                                  onclick={enableChannelEncryption}>Secure current members</button
+                                >
+                              {/if}
+                            {:else if e2eeActivationEnabled}
+                              <p>
+                                {selectedChannel.type === 2
+                                  ? 'Optional and permanent. Encrypts microphone, camera, and screen-share frames. Unsupported devices cannot join, and key loss prevents access.'
+                                  : 'Optional and permanent. Disables server search, previews, bots, webhooks, and file scanning in this channel. Key loss can make history unrecoverable.'}
+                              </p>
+                              <button
+                                class="secondary-button"
+                                type="button"
+                                disabled={busy}
+                                onclick={enableChannelEncryption}>Turn on encryption</button
+                              >
+                            {/if}
+                          </div>
+                        </div>
                       {/if}
                       <label class="form-field compact-field">
                         <span>Category</span>

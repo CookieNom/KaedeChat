@@ -123,6 +123,30 @@ def media_settings(*, max_bytes: int = 2048, cache_bytes: int = 8192) -> SimpleN
     )
 
 
+def test_live_group_dm_media_query_carries_requester_without_history_scope() -> None:
+    assert media_api.remote_media_federation_query(
+        None,
+        (42, "gamma.localhost"),
+    ) == {
+        "requester_id": "42",
+        "requester_domain": "gamma.localhost",
+    }
+
+
+def test_group_dm_history_media_query_binds_scope_and_requester() -> None:
+    assert media_api.remote_media_federation_query(
+        ((30, "authority.localhost"), (20, "beta.localhost")),
+        (42, "gamma.localhost"),
+    ) == {
+        "conversation_id": "30",
+        "conversation_domain": "authority.localhost",
+        "message_id": "20",
+        "message_domain": "beta.localhost",
+        "requester_id": "42",
+        "requester_domain": "gamma.localhost",
+    }
+
+
 async def test_remote_media_is_spooled_scanned_and_uploaded_without_a_body_buffer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

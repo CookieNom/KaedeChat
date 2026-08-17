@@ -5,6 +5,7 @@ export interface AuthConfiguration {
   password_recovery_enabled: boolean;
   gif_picker_enabled: boolean;
   message_search_enabled: boolean;
+  e2ee_activation_enabled: boolean;
   turnstile: {
     enabled: boolean;
     site_key: string | null;

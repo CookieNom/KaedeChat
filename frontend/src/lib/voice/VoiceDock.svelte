@@ -4,6 +4,9 @@
   import { Permission } from '$lib/generated/permissions';
   import { onDestroy, onMount } from 'svelte';
   import { isNativeDesktop } from '$lib/platform/native';
+  import { initializeE2EE } from '$lib/e2ee/client';
+  import { entityKey } from '$lib/chat/refs';
+  import { chatEntities as entities } from '$lib/stores/entities.svelte';
 
   import { attachVideo, VoiceSession, type VoiceToken } from './session';
 
@@ -74,6 +77,23 @@
     error = voice.error;
   };
 
+  function selectedChannel() {
+    if (!channelRef) return null;
+    return entities.channels.values.find((item) => entityKey(item) === channelRef) ?? null;
+  }
+
+  async function senderDeviceId(grant?: VoiceToken): Promise<string | null> {
+    const channel = grant?.channel_id
+      ? (entities.channels.values.find(
+          (item) => entityKey(item) === `${grant.channel_id}@${grant.channel_domain}`
+        ) ?? null)
+      : selectedChannel();
+    if (channel?.encryption_mode !== 'e2ee') return null;
+    const user = entities.currentUser;
+    if (!user) throw new Error('Sign in again before joining encrypted voice.');
+    return (await initializeE2EE(user)).deviceId;
+  }
+
   const moved = (event: Event) => {
     const grant = (event as CustomEvent<VoiceToken>).detail;
     if ((grant.move_session_id ?? null) !== voice.moveSessionId) return;
@@ -86,10 +106,16 @@
         if (!mounted || generation !== connectionGeneration) return;
         if (isNativeDesktop()) {
           const reference = callRef ?? channelRef;
-          if (reference) await voice.connectNative(reference, Boolean(callRef));
+          if (reference)
+            await voice.connectNative(
+              reference,
+              Boolean(callRef),
+              await mediaKey(grant),
+              (await senderDeviceId(grant)) ?? undefined
+            );
           return;
         }
-        await voice.connect(grant);
+        await voice.connect(grant, await mediaKey(grant));
         if (!mounted || generation !== connectionGeneration) await voice.disconnect();
       } catch (caught) {
         if (mounted && generation === connectionGeneration) {
@@ -105,6 +131,41 @@
     window.addEventListener('kaede:voice-token', moved);
     if (audioHost) detachAudio = voice.attachAudio(audioHost);
   });
+
+  async function mediaKey(grant: VoiceToken): Promise<ArrayBuffer | undefined> {
+    if (!grant.e2ee) return undefined;
+    const user = entities.currentUser;
+    const channel = entities.channels.values.find(
+      (item) => entityKey(item) === `${grant.channel_id}@${grant.channel_domain}`
+    );
+    if (!user || !channel || channel.encryption_mode !== 'e2ee')
+      throw new Error('Encrypted room state is unavailable on this device.');
+    if (
+      channel.encryption_policy_generation !== grant.encryption_policy_generation ||
+      channel.encryption_epoch !== grant.encryption_epoch
+    )
+      throw new Error('Encrypted call keys changed. Refresh the conversation and try again.');
+    const client = await initializeE2EE(user);
+    await client.syncRoomState(channel);
+    if (
+      grant.media_protocol !== 'livekit-e2ee-v1' ||
+      grant.media_suite !== 'AES-256-GCM' ||
+      !grant.media_session_id ||
+      grant.media_epoch !== grant.encryption_epoch
+    )
+      throw new Error('Encrypted call context is invalid. Nothing was connected.');
+    return client.exportMediaKey(
+      channel,
+      [
+        'kaede-livekit-key-v1',
+        grant.media_protocol,
+        grant.media_suite,
+        grant.media_session_id,
+        grant.media_epoch,
+        grant.room
+      ].join('\0')
+    );
+  }
 
   onDestroy(() => {
     mounted = false;
@@ -129,21 +190,28 @@
     joinController = controller;
     error = '';
     try {
-      if (isNativeDesktop()) {
-        const reference = callRef ?? channelRef;
-        if (!reference) throw new Error('Voice channel is unavailable.');
-        await voice.connectNative(reference, Boolean(callRef));
-        return;
-      }
+      const deviceId = await senderDeviceId();
       const path = callRef
         ? `/calls/${encodeURIComponent(callRef)}/voice/token`
         : `/channels/${encodeURIComponent(channelRef ?? '')}/voice/token`;
       const grant = await api<VoiceToken>(path, {
         method: 'POST',
+        body: JSON.stringify({ sender_device_id: deviceId }),
         signal: controller.signal
       });
       if (!mounted || generation !== connectionGeneration || controller.signal.aborted) return;
-      await voice.connect(grant);
+      if (isNativeDesktop()) {
+        const reference = callRef ?? channelRef;
+        if (!reference) throw new Error('Voice channel is unavailable.');
+        await voice.connectNative(
+          reference,
+          Boolean(callRef),
+          await mediaKey(grant),
+          deviceId ?? undefined
+        );
+      } else {
+        await voice.connect(grant, await mediaKey(grant));
+      }
       if (!mounted || generation !== connectionGeneration || controller.signal.aborted) {
         await voice.disconnect();
         return;

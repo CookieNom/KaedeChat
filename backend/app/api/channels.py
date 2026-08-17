@@ -27,6 +27,7 @@ from app.chat.channel_access import (
     publish_channel_dispatch,
 )
 from app.chat.custom_emojis import validate_custom_emoji_use
+from app.chat.e2ee import MessageEncryptionPolicyError, validate_message_encryption_policy
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
 from app.chat.mentions import merge_mention_recipients, role_mention_recipients
@@ -60,6 +61,7 @@ from app.db.models import (
     Attachment,
     Channel,
     DMConversation,
+    E2EEDevice,
     FederationEvent,
     FederationOutbox,
     Guild,
@@ -118,8 +120,50 @@ from app.tasks import (
 )
 
 router = APIRouter(prefix="/api/v1/channels", tags=["messages"])
+
+
+async def require_owned_e2ee_sender_device(
+    session: AsyncSession,
+    user: User,
+    envelope: object,
+) -> None:
+    if not isinstance(envelope, dict):
+        raise HTTPException(status_code=409, detail={"code": "E2EE_SENDER_DEVICE_INVALID"})
+    device_id = envelope.get("sender_device_id")
+    device = await session.get(E2EEDevice, device_id) if isinstance(device_id, str) else None
+    if (
+        device is None
+        or (device.user_id, device.user_domain) != (user.id, user.origin_domain)
+        or device.revoked_at is not None
+    ):
+        raise HTTPException(status_code=409, detail={"code": "E2EE_SENDER_DEVICE_INVALID"})
+
+
 DM_REACTIONS_PER_MESSAGE_LIMIT = 100
 log = structlog.get_logger()
+
+
+def require_message_encryption_policy(
+    channel: Channel,
+    *,
+    content: object,
+    e2ee: object,
+    attachment_count: int = 0,
+) -> None:
+    if channel.encryption_mode == "e2ee" and channel.encryption_state != "active":
+        raise HTTPException(status_code=409, detail={"code": "E2EE_REKEY_REQUIRED"})
+    try:
+        validate_message_encryption_policy(
+            channel.encryption_mode,
+            content=content,
+            e2ee=e2ee,
+            attachment_count=attachment_count,
+            policy_generation=channel.encryption_policy_generation,
+            policy_epoch=channel.encryption_epoch,
+            policy_group_id=channel.encryption_group_id,
+        )
+    except MessageEncryptionPolicyError as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
 
 
 async def publish_replica_guild_status(redis: Redis, guild: Guild) -> None:
@@ -895,6 +939,24 @@ async def create_message(
         if attachment.message_id is not None or attachment.message_domain is not None:
             raise HTTPException(status_code=409, detail={"code": "ATTACHMENT_ALREADY_USED"})
         message_attachments.append(attachment)
+    require_message_encryption_policy(
+        channel,
+        content=payload.content,
+        e2ee=payload.e2ee,
+        attachment_count=len(message_attachments),
+    )
+    if channel.encryption_mode == "e2ee":
+        await require_owned_e2ee_sender_device(session, auth.user, payload.e2ee)
+    if channel.encryption_mode == "e2ee" and (
+        not isinstance(payload.e2ee, dict) or payload.e2ee.get("operation") != "create"
+    ):
+        raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_INVALID"})
+    expected_attachment_mode = "e2ee" if channel.encryption_mode == "e2ee" else "plaintext"
+    if any(item.encryption_mode != expected_attachment_mode for item in message_attachments):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "MESSAGE_ENCRYPTION_POLICY_INVALID"},
+        )
     if access.guild is not None and channel.rate_limit_per_user:
         slowmode_key = (
             f"slowmode:{channel.origin_domain}:{channel.id}:"
@@ -1151,6 +1213,8 @@ async def create_message(
                 author_domain=auth.user.origin_domain,
                 content=payload.content,
                 e2ee=payload.e2ee,
+                encryption_policy_generation=channel.encryption_policy_generation,
+                encryption_epoch=channel.encryption_epoch,
                 client_nonce=payload.client_nonce,
                 referenced_message_id=(referenced_ref[0] if referenced_ref is not None else None),
                 referenced_message_domain=(
@@ -1350,6 +1414,19 @@ async def edit_message(
         # Moderation is intentionally delete-only. Editing another user's
         # content while preserving their authorship would be impersonation.
         raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
+    require_message_encryption_policy(
+        channel,
+        content=payload.content,
+        e2ee=payload.e2ee,
+    )
+    if channel.encryption_mode == "e2ee":
+        await require_owned_e2ee_sender_device(session, auth.user, payload.e2ee)
+    if channel.encryption_mode == "e2ee" and (
+        not isinstance(payload.e2ee, dict)
+        or payload.e2ee.get("operation") != "edit"
+        or payload.e2ee.get("target_message") != f"{message.id}@{message.origin_domain}"
+    ):
+        raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_INVALID"})
     await validate_custom_emoji_use(
         session,
         auth.user,
@@ -1359,6 +1436,8 @@ async def edit_message(
     )
     message.content = payload.content
     message.e2ee = payload.e2ee
+    message.encryption_policy_generation = channel.encryption_policy_generation
+    message.encryption_epoch = channel.encryption_epoch
     message.edited_at = datetime.now(UTC)
     # An update payload is a complete replacement in both gateway clients and
     # remote projections. Preserve the stored attachment set on content-only

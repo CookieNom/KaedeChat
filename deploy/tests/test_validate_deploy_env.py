@@ -61,6 +61,17 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
         values["KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED"] = "true"
         validate_values(values, observability=False)
 
+    def test_e2ee_activation_gate_is_boolean(self) -> None:
+        validate_values(
+            self.production | {"KAEDE_E2EE_ACTIVATION_ENABLED": "true"},
+            observability=False,
+        )
+        with self.assertRaises(DeploymentConfigurationError):
+            validate_values(
+                self.production | {"KAEDE_E2EE_ACTIVATION_ENABLED": "sometimes"},
+                observability=False,
+            )
+
     def test_federation_budgets_reject_invalid_numbers_and_relationships(self) -> None:
         invalid = (
             {"KAEDE_FEDERATION_INBOX_MAX_EVENTS_PER_ORIGIN": "many"},
@@ -130,6 +141,16 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
         )
         self.assertIn(
             "old_bool KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED true",
+            setup,
+        )
+        for example in env_examples:
+            self.assertIn("KAEDE_E2EE_ACTIVATION_ENABLED=false", example)
+        self.assertEqual(
+            compose.count("${KAEDE_E2EE_ACTIVATION_ENABLED:-false}"),
+            2,
+        )
+        self.assertIn(
+            "old_bool KAEDE_E2EE_ACTIVATION_ENABLED false",
             setup,
         )
         remote_cache_assignment = (

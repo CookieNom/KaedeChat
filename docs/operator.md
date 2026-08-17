@@ -164,6 +164,16 @@ See [mobile push delivery](mobile-push.md) for the data flow, privacy table,
 E2EE behavior, conversion procedure, queue failure semantics, and
 custom-build requirements.
 
+## End-to-end encryption activation
+
+New encrypted-room activation is fail-closed by default. Complete the release
+gates and client compatibility checks in [the E2EE protocol and rollout
+guide](e2ee.md), then set `KAEDE_E2EE_ACTIVATION_ENABLED=true` on every
+participating home. Mixed settings safely reject new proposals; they never
+downgrade an active encrypted room. Turning the flag off later hides new
+activation but leaves rekey, recovery, selective-disclosure reports, and active
+encrypted rooms operational.
+
 Set the same `KAEDE_EDGE_SECRET` in `.env` and in the nginx
 `X-Kaede-Edge-Secret` header. It must differ from `KAEDE_PROXY_SECRET`. The
 internal edge receives only the domain and these two edge credentials.

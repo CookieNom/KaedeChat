@@ -696,6 +696,8 @@ fn install_voice(
                 &channel,
                 capture_settings,
                 output_device,
+                None,
+                None,
             )
             .await
             {
@@ -929,7 +931,7 @@ fn install_voice(
                 };
                 let output = settings.output_device.clone();
                 drop(settings);
-                kaede_voice::join_call(account.api.clone(), &call.key(), capture, output)
+                kaede_voice::join_call(account.api.clone(), &call.key(), capture, output, None, None)
                     .await
                     .map_err(|error| error.to_string())
             }
@@ -973,7 +975,7 @@ fn install_voice(
                 };
                 let output = settings.output_device.clone();
                 drop(settings);
-                kaede_voice::join_call(account.api.clone(), &call, capture, output)
+                kaede_voice::join_call(account.api.clone(), &call, capture, output, None, None)
                     .await
                     .map_err(|error| error.to_string())
             }
@@ -5646,6 +5648,8 @@ async fn reauthorize_voice(
         &channel,
         capture_settings,
         output_device,
+        None,
+        None,
     )
     .await
     {

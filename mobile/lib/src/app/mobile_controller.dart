@@ -14,6 +14,8 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/e2ee/client.dart';
+import 'package:kaede_mobile/src/e2ee/store.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/platform/notification_policy.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
@@ -288,6 +290,7 @@ final class MobileState {
     this.degradedWarnings = const <DegradedFeature, String>{},
     this.gatewayProtocolWarning,
     this.pushWarning,
+    this.e2eeActivationEnabled = false,
     this.offline = false,
     this.error,
   });
@@ -318,6 +321,7 @@ final class MobileState {
   final Map<DegradedFeature, String> degradedWarnings;
   final String? gatewayProtocolWarning;
   final String? pushWarning;
+  final bool e2eeActivationEnabled;
   final bool offline;
   final String? error;
 
@@ -387,6 +391,7 @@ final class MobileState {
     bool clearGatewayProtocolWarning = false,
     String? pushWarning,
     bool clearPushWarning = false,
+    bool? e2eeActivationEnabled,
     bool? offline,
     String? error,
     bool clearError = false,
@@ -424,6 +429,8 @@ final class MobileState {
             ? null
             : gatewayProtocolWarning ?? this.gatewayProtocolWarning,
         pushWarning: clearPushWarning ? null : pushWarning ?? this.pushWarning,
+        e2eeActivationEnabled:
+            e2eeActivationEnabled ?? this.e2eeActivationEnabled,
         offline: offline ?? this.offline,
         error: clearError ? null : error ?? this.error,
       );
@@ -494,6 +501,82 @@ final class MobileController extends StateNotifier<MobileState> {
   final Set<EntityRef> _acknowledgementsInFlight = <EntityRef>{};
   var _malformedGatewayEvents = 0;
   var _validGatewayEventsAfterWarning = 0;
+  Future<MobileE2EEClient>? _e2eeFuture;
+  String? _e2eeAccount;
+
+  KaedeChannel? _channel(EntityRef ref) {
+    for (final channel in state.dms) {
+      if (channel.ref == ref) return channel;
+    }
+    for (final guild in state.guilds) {
+      for (final channel in guild.channels) {
+        if (channel.ref == ref) return channel;
+      }
+    }
+    return null;
+  }
+
+  Future<MobileE2EEClient> e2eeClient() {
+    final user = state.user;
+    if (user == null) throw StateError('No active encryption account.');
+    final account = user.ref.wire;
+    if (_e2eeFuture == null || _e2eeAccount != account) {
+      _e2eeAccount = account;
+      _e2eeFuture = MobileE2EEClient.initialize(repository, user)
+          .catchError((Object error, StackTrace stackTrace) {
+        _e2eeFuture = null;
+        _e2eeAccount = null;
+        Error.throwWithStackTrace(error, stackTrace);
+      });
+    }
+    return _e2eeFuture!;
+  }
+
+  Future<String> exportE2eeRecovery(String passphrase) async =>
+      (await e2eeClient()).exportRecovery(passphrase);
+
+  Future<void> importE2eeRecovery(String bundle, String passphrase) async {
+    final user = state.user;
+    if (user == null) throw StateError('No active encryption account.');
+    final previous = _e2eeFuture;
+    _e2eeFuture = null;
+    _e2eeAccount = null;
+    if (previous != null) {
+      try {
+        (await previous).close();
+      } on Object {
+        // The imported state replaces an unavailable local client.
+      }
+    }
+    await const MobileE2EEStore().importRecovery(
+      user.ref.wire,
+      bundle,
+      passphrase,
+    );
+    await e2eeClient();
+  }
+
+  Future<void> clearLocalE2eeState() async {
+    final user = state.user;
+    if (user == null) return;
+    final previous = _e2eeFuture;
+    _e2eeFuture = null;
+    _e2eeAccount = null;
+    if (previous != null) {
+      try {
+        (await previous).close();
+      } on Object {
+        // Clearing the protected store remains authoritative locally.
+      }
+    }
+    await const MobileE2EEStore().clear(user.ref.wire);
+  }
+
+  Future<String?> currentE2eeDeviceId() async {
+    final user = state.user;
+    if (user == null) return null;
+    return (await const MobileE2EEStore().load(user.ref.wire))?.deviceId;
+  }
 
   void setAppActive(bool active) {
     final becameActive = active && !_appActive;
@@ -788,6 +871,10 @@ final class MobileController extends StateNotifier<MobileState> {
       repository.relationships,
       const <Map<String, Object?>>[],
     );
+    final authConfiguration = await _optional(
+      () => repository.authConfig(resolved.instance),
+      const <String, Object?>{},
+    );
     final settingsLoad = await _optionalWithWarning(
       repository.settings,
       const <String, Object?>{},
@@ -872,6 +959,8 @@ final class MobileController extends StateNotifier<MobileState> {
       drafts: Map.unmodifiable(drafts),
       gatewayHealth: gateway.currentHealth,
       degradedWarnings: Map.unmodifiable(degradedWarnings),
+      e2eeActivationEnabled:
+          authConfiguration['e2ee_activation_enabled'] == true,
       offline: false,
     );
     push.setAppVisibility(
@@ -1363,7 +1452,10 @@ final class MobileController extends StateNotifier<MobileState> {
       )) {
         return;
       }
-      final ordered = page.reversed.toList();
+      var ordered = page.reversed.toList();
+      if (channel.encryptionMode == 'e2ee') {
+        ordered = await (await e2eeClient()).decryptMessages(channel, ordered);
+      }
       final withOlder = Set<EntityRef>.of(state.channelsWithOlderMessages);
       final reachedRetainedStart = channel.historyTruncated &&
           !channel.historyRemoteAvailable &&
@@ -1457,6 +1549,7 @@ final class MobileController extends StateNotifier<MobileState> {
     EntityRef? replyTo,
     EntityRef? replyAuthor,
     List<EntityRef> mentionUsers = const <EntityRef>[],
+    List<Map<String, Object?>> encryptedAttachments = const [],
     bool notify = true,
   }) async {
     if (content.trim().isEmpty && attachments.isEmpty) {
@@ -1467,8 +1560,27 @@ final class MobileController extends StateNotifier<MobileState> {
     final generation = _sessionLoadGeneration;
     final accountKey = tokens.accountKey;
     final nonce = const Uuid().v4();
+    final channelState = _channel(channel);
+    if (channelState == null) {
+      throw StateError('This conversation is unavailable.');
+    }
+    Map<String, Object?>? e2ee;
+    String? wireContent = content.trim().isEmpty ? null : content.trim();
+    if (channelState.encryptionMode == 'e2ee') {
+      if (attachments.length != encryptedAttachments.length) {
+        throw StateError(
+            'Encrypted attachments must be uploaded with their encrypted manifest.');
+      }
+      e2ee = await (await e2eeClient()).encryptMessage(
+        channelState,
+        wireContent ?? '',
+        attachments: encryptedAttachments,
+      );
+      wireContent = null;
+    }
     final payload = <String, Object?>{
-      'content': content.trim().isEmpty ? null : content.trim(),
+      'content': wireContent,
+      if (e2ee != null) 'e2ee': e2ee,
       'attachments': attachments.map((item) => item.wire).toList(),
       if (replyTo != null) 'reply_to': replyTo.wire,
       if (notify && replyAuthor != null) 'reply_author': replyAuthor.wire,
@@ -1544,8 +1656,28 @@ final class MobileController extends StateNotifier<MobileState> {
     if (accountKey == null || !_sessionIsCurrent(accountKey, generation)) {
       return;
     }
-    final updated =
-        await repository.editMessage(message.channelRef, message.ref, content);
+    final channel = _channel(message.channelRef);
+    if (channel == null) throw StateError('This conversation is unavailable.');
+    Map<String, Object?>? e2ee;
+    String? wireContent = content;
+    if (channel.encryptionMode == 'e2ee') {
+      e2ee = await (await e2eeClient()).encryptMessage(
+        channel,
+        content,
+        operation: 'edit',
+        targetMessage: message.ref,
+      );
+      wireContent = null;
+    }
+    var updated = await repository.editMessage(
+      message.channelRef,
+      message.ref,
+      wireContent,
+      e2ee: e2ee,
+    );
+    if (channel.encryptionMode == 'e2ee') {
+      updated = updated.copyWith(content: content);
+    }
     if (!_sessionIsCurrent(accountKey, generation)) return;
     final messages = state.messageStore[message.channelRef];
     if (messages != null) {
@@ -1592,8 +1724,11 @@ final class MobileController extends StateNotifier<MobileState> {
     _setChannelLoading(channelRef, true);
     state = state.copyWith(clearError: true);
     try {
-      final page =
+      var page =
           await repository.messages(channelRef, around: message, limit: 50);
+      if (channel.encryptionMode == 'e2ee') {
+        page = await (await e2eeClient()).decryptMessages(channel, page);
+      }
       if (_messageRequestIsCurrent(
         channelRef,
         generation,
@@ -1685,6 +1820,16 @@ final class MobileController extends StateNotifier<MobileState> {
     await _gatewayHealthSubscription?.cancel();
     _gatewayHealthSubscription = null;
     await gateway.disconnect();
+    final e2ee = _e2eeFuture;
+    _e2eeFuture = null;
+    _e2eeAccount = null;
+    if (e2ee != null) {
+      try {
+        (await e2ee).close();
+      } on Object {
+        // Signing out must not be blocked by unavailable device key state.
+      }
+    }
     await repository.logout();
     if (accountKey != null) {
       await _queueCacheWrite(() => database.purgeAccount(accountKey));
@@ -1737,6 +1882,7 @@ final class MobileController extends StateNotifier<MobileState> {
             'guild_notifications': guildNotifications,
             'unread_counts': unreadCounts,
             'mention_counts': mentionCounts,
+            'e2ee_activation_enabled': state.e2eeActivationEnabled,
           },
         },
       });
@@ -1819,6 +1965,7 @@ final class MobileController extends StateNotifier<MobileState> {
           : const <String, String>{},
       unreadCounts: Map.unmodifiable(unreadCounts),
       mentionCounts: Map.unmodifiable(mentionCounts),
+      e2eeActivationEnabled: preference['e2ee_activation_enabled'] == true,
       outbox: outbox,
       drafts: Map.unmodifiable(drafts),
       offline: true,
@@ -1902,6 +2049,36 @@ final class MobileController extends StateNotifier<MobileState> {
     final messages = state.messageStore[message.channelRef];
     if (messages != null && messages.length > 250) {
       await _cacheMessages(message.channelRef);
+    }
+  }
+
+  Future<void> _decryptIncoming(
+    KaedeMessage message, {
+    bool notify = false,
+  }) async {
+    final channel = _channel(message.channelRef);
+    if (channel == null || channel.encryptionMode != 'e2ee') {
+      if (notify) await _notifyFor(message);
+      return;
+    }
+    try {
+      final application =
+          await (await e2eeClient()).decryptMessage(channel, message);
+      if (application == null) return;
+      final decrypted = message.copyWith(
+        content: application.content,
+        decryptedAttachments: application.attachments,
+      );
+      _patchStoredMessage(
+        message.ref,
+        (_) => decrypted,
+      );
+      await _cacheMessage(decrypted);
+      if (notify) await _notifyFor(decrypted);
+    } on Object {
+      // Keep the encrypted row visibly locked. A Welcome or rekey received
+      // later can make subsequent messages available without exposing bytes.
+      if (notify) await _notifyFor(message);
     }
   }
 
@@ -2009,6 +2186,11 @@ final class MobileController extends StateNotifier<MobileState> {
           );
           unawaited(_cacheMessage(message));
         }
+        if (message.e2ee != null) {
+          unawaited(_decryptIncoming(message, notify: true));
+        } else {
+          unawaited(_notifyFor(message));
+        }
         _removeTyping(message.channelRef, message.authorRef);
         if (message.clientNonce case final nonce?) {
           unawaited(
@@ -2024,7 +2206,6 @@ final class MobileController extends StateNotifier<MobileState> {
                 message.mentionUserRefs.contains(state.user!.ref),
           );
         }
-        unawaited(_notifyFor(message));
         break;
       case 'MESSAGE_UPDATE':
         final raw =
@@ -2289,6 +2470,7 @@ final class MobileController extends StateNotifier<MobileState> {
     if (data['author_id'] != null && data['created_at'] != null) {
       final message = KaedeMessage.fromJson(data);
       _patchStoredMessage(target, (_) => message);
+      if (message.e2ee != null) unawaited(_decryptIncoming(message));
       return;
     }
     _patchStoredMessage(target, (message) {
@@ -3255,6 +3437,9 @@ final class MobileController extends StateNotifier<MobileState> {
       final result = await repository.sendMessage(
         channel,
         content: payload['content'] as String?,
+        e2ee: payload['e2ee'] is Map
+            ? Map<String, Object?>.from(payload['e2ee']! as Map)
+            : null,
         attachments:
             (payload['attachments'] as List<Object?>? ?? const <Object?>[])
                 .map(EntityRef.fromJson)

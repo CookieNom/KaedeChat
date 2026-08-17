@@ -70,6 +70,12 @@
   import UploadPreviewTray from '$lib/components/UploadPreviewTray.svelte';
   import UserProfileCard from '$lib/components/UserProfileCard.svelte';
   import VirtualMessageList from '$lib/components/VirtualMessageList.svelte';
+  import {
+    decryptConversationMessages,
+    initializeE2EE,
+    type KaedeE2EEClient
+  } from '$lib/e2ee/client';
+  import { uploadEncryptedChannelFile } from '$lib/e2ee/media';
   import { uploadChannelFile, type PendingUpload } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
   import { directMessageUnreadCount, guildMentionCount } from '$lib/notifications/counts';
@@ -101,6 +107,7 @@
   const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
   let gifPickerEnabled = $state(false);
+  let e2eeActivationEnabled = $state(false);
   let gifPickerOpen = $state(false);
   let messageSearchOpen = $state(false);
   let newMessageOpen = $state(false);
@@ -168,6 +175,8 @@
   let groupInviteHandle = $state('');
   let groupError = $state('');
   let groupBusy = $state(false);
+  let e2eeClient = $state<KaedeE2EEClient | null>(null);
+  let e2eeSafetyNumber = $state('');
   const uploadControllers = new SvelteMap<string, AbortController>();
   const pendingSends = new SvelteMap<string, PendingMessageSend>();
   const deliveryRecoveries = new SvelteSet<string>();
@@ -498,7 +507,11 @@
     if (dispatch.t === 'MESSAGE_CREATE') {
       const message = dispatch.d as Message;
       if (isCurrentChannel(message.channel_id, message.channel_domain)) {
-        reconcile(message);
+        if (message.e2ee && channel && e2eeClient) {
+          void decryptConversationMessages(e2eeClient, channel, [message]).then(([decrypted]) =>
+            reconcile(decrypted)
+          );
+        } else reconcile(message);
         if (document.visibilityState === 'visible' && timelineAtBottom) void acknowledge(message);
       } else {
         setReadStates(
@@ -517,6 +530,12 @@
       }
     } else if (dispatch.t === 'MESSAGE_UPDATE') {
       const update = dispatch.d as Message;
+      if (update.e2ee && channel && e2eeClient) {
+        void decryptConversationMessages(e2eeClient, channel, [update]).then(([decrypted]) =>
+          applyDispatch({ ...dispatch, d: { ...decrypted, e2ee: null } })
+        );
+        return;
+      }
       setMessages(
         messages.map((item) =>
           entityKey(item) === entityKey(update)
@@ -671,9 +690,11 @@
     try {
       const configuration = await loadAuthConfiguration(controller.signal);
       gifPickerEnabled = configuration.gif_picker_enabled;
+      e2eeActivationEnabled = configuration.e2ee_activation_enabled;
     } catch (caught) {
       if (controller.signal.aborted) return;
       gifPickerEnabled = false;
+      e2eeActivationEnabled = false;
       gifConfigurationError = userErrorMessage(
         caught,
         'Could not check whether GIF search is available. Try again.'
@@ -890,6 +911,15 @@
       }
       const loadedChannel =
         loadedDms.find((item) => matchesEntityRef(targetRef, item, localDomain)) ?? null;
+      if (loadedChannel?.encryption_mode !== 'e2ee') {
+        void initializeE2EE(loadedCurrentUser)
+          .then((client) => {
+            if (routeGeneration === loadGeneration) e2eeClient = client;
+          })
+          .catch(() => {
+            // Plaintext conversations remain usable when secure device storage is unavailable.
+          });
+      }
       const oldestLoaded = loadedMessages.at(-1);
       authorityHistoryComplete =
         (preserveMessages && authorityHistoryComplete) ||
@@ -909,7 +939,18 @@
         !oldestLoaded?.history_page_complete &&
         !reachesRetainedHistoryStart(loadedChannel, oldestLoaded);
       hasLater = Boolean(targetAround && loadedMessages.length > 0);
-      const orderedMessages = loadedMessages.reverse().sort(compareMessages);
+      let orderedMessages = loadedMessages.reverse().sort(compareMessages);
+      if (loadedChannel?.encryption_mode === 'e2ee') {
+        const client = await initializeE2EE(loadedCurrentUser);
+        if (routeGeneration !== loadGeneration || targetRef !== dmId) return;
+        e2eeClient = client;
+        orderedMessages = await decryptConversationMessages(client, loadedChannel, orderedMessages);
+        pinnedMessages = await decryptConversationMessages(client, loadedChannel, loadedPins);
+        e2eeSafetyNumber = await client.safetyNumber(loadedChannel).catch(() => '');
+      } else {
+        e2eeClient = null;
+        e2eeSafetyNumber = '';
+      }
       setMessages(
         preserveMessages
           ? mergeMessageSnapshot(messages, orderedMessages, {
@@ -960,7 +1001,9 @@
         older.length === 0 || older.at(-1)?.history_page_complete === true;
       const authorityHistoryError = older.at(-1)?.history_page_error_code;
       const available = Math.max(0, 1_000 - messages.length);
-      const prepended = older.reverse().slice(-available);
+      let prepended = older.reverse().slice(-available);
+      if (channel?.encryption_mode === 'e2ee' && e2eeClient)
+        prepended = await decryptConversationMessages(e2eeClient, channel, prepended);
       const byKey = Object.create(null) as Record<string, Message>;
       for (const message of prepended) byKey[entityKey(message)] = message;
       for (const message of messages) byKey[entityKey(message)] = message;
@@ -999,7 +1042,10 @@
       if (generation !== loadGeneration || targetRef !== dmId) return;
       const byKey = Object.create(null) as Record<string, Message>;
       for (const message of messages) byKey[entityKey(message)] = message;
-      for (const message of newer.reverse()) byKey[entityKey(message)] = message;
+      let decryptedNewer = newer.reverse();
+      if (channel?.encryption_mode === 'e2ee' && e2eeClient)
+        decryptedNewer = await decryptConversationMessages(e2eeClient, channel, decryptedNewer);
+      for (const message of decryptedNewer) byKey[entityKey(message)] = message;
       setMessages(Object.values(byKey).sort(compareMessages).slice(-1_000));
       hasLater = newer.length === 50;
     } catch (caught) {
@@ -1106,12 +1152,35 @@
       const generation = loadGeneration;
       busy = true;
       try {
+        const encrypted =
+          channel?.encryption_mode === 'e2ee'
+            ? await (
+                e2eeClient ?? (currentUser ? await initializeE2EE(currentUser) : null)
+              )?.encryptMessage(channel, text, {
+                operation: 'edit',
+                targetMessage: entityRef(editing),
+                attachments: editing.decrypted_attachments ?? []
+              })
+            : null;
+        if (channel?.encryption_mode === 'e2ee' && !encrypted)
+          throw new Error('Encryption is unavailable on this device.');
         const saved = await api<Message>(
           `/channels/${encodeURIComponent(dmId)}/messages/${encodeURIComponent(entityRef(editing))}`,
-          { method: 'PATCH', body: JSON.stringify({ content: text }) }
+          {
+            method: 'PATCH',
+            body: JSON.stringify(encrypted ? { e2ee: encrypted } : { content: text })
+          }
         );
         if (generation !== loadGeneration) return;
-        reconcile(saved);
+        reconcile(
+          encrypted
+            ? {
+                ...saved,
+                decrypted_content: text,
+                decrypted_attachments: editing.decrypted_attachments ?? []
+              }
+            : saved
+        );
         finishEditing();
       } catch (caught) {
         if (generation === loadGeneration)
@@ -1141,7 +1210,8 @@
         attachmentIds,
         mentionUserIds,
         crypto.randomUUID(),
-        replyingMessage ? entityRef(replyingMessage) : null
+        replyingMessage ? entityRef(replyingMessage) : null,
+        uploads.flatMap((item) => (item.encryptedManifest ? [item.encryptedManifest] : []))
       );
     if (!draft.content && !draft.attachmentIds.length) {
       error = 'Reattach this message’s files before retrying.';
@@ -1165,6 +1235,9 @@
           author_domain: currentUser?.origin_domain ?? localDomain,
           author: currentUser,
           content: draft.content,
+          decrypted_content: channel.encryption_mode === 'e2ee' ? draft.content : undefined,
+          decrypted_attachments:
+            channel.encryption_mode === 'e2ee' ? draft.encryptedAttachments : undefined,
           message_type: 0,
           flags: 0,
           client_nonce: nonce,
@@ -1198,10 +1271,21 @@
     }
     busy = true;
     try {
+      const encrypted =
+        channel.encryption_mode === 'e2ee'
+          ? await (
+              e2eeClient ?? (currentUser ? await initializeE2EE(currentUser) : null)
+            )?.encryptMessage(channel, draft.content ?? '', {
+              attachments: draft.encryptedAttachments
+            })
+          : null;
+      if (channel.encryption_mode === 'e2ee' && !encrypted)
+        throw new Error('Encryption is unavailable on this device.');
       const saved = await api<Message>(`/channels/${encodeURIComponent(targetRef)}/messages`, {
         method: 'POST',
         body: JSON.stringify({
-          content: draft.content,
+          content: encrypted ? null : draft.content,
+          e2ee: encrypted,
           client_nonce: nonce,
           attachment_ids: draft.attachmentIds,
           mention_user_ids: draft.mentionUserIds,
@@ -1209,7 +1293,15 @@
         })
       });
       if (generation !== loadGeneration || routeRef !== dmId) return;
-      reconcile(saved);
+      reconcile(
+        encrypted
+          ? {
+              ...saved,
+              decrypted_content: draft.content,
+              decrypted_attachments: draft.encryptedAttachments
+            }
+          : saved
+      );
       clearSubmittedUploads(draft.attachmentIds);
       await acknowledge(saved);
     } catch (caught) {
@@ -1241,7 +1333,9 @@
       const controller = new AbortController();
       uploadControllers.set(key, controller);
       uploads = [...uploads, { key, file, progress: 0, status: 'uploading' }];
-      void uploadChannelFile(
+      const upload =
+        channel.encryption_mode === 'e2ee' ? uploadEncryptedChannelFile : uploadChannelFile;
+      void upload(
         target,
         file,
         (progress) => {
@@ -1256,7 +1350,13 @@
           if (generation !== loadGeneration || routeRef !== dmId) return;
           uploads = uploads.map((item) =>
             item.key === key
-              ? { ...item, progress: 100, status: 'ready', attachmentId: ticket.id }
+              ? {
+                  ...item,
+                  progress: 100,
+                  status: 'ready',
+                  attachmentId: 'ticket' in ticket ? ticket.ticket.id : ticket.id,
+                  encryptedManifest: 'manifest' in ticket ? ticket.manifest : undefined
+                }
               : item
           );
         })
@@ -1404,6 +1504,11 @@
         }
       );
       entities.channels.upsert(updated);
+      if (updated.encryption_state === 'rekeying' && currentUser) {
+        const client = e2eeClient ?? (await initializeE2EE(currentUser));
+        const secured = await client.rekeyRoom(entityRef(updated));
+        entities.channels.upsert(secured);
+      }
       groupInviteHandle = '';
     } catch (caught) {
       groupError = userErrorMessage(
@@ -1425,6 +1530,11 @@
         { method: 'DELETE' }
       );
       entities.channels.upsert(updated);
+      if (updated.encryption_state === 'rekeying' && currentUser) {
+        const client = e2eeClient ?? (await initializeE2EE(currentUser));
+        const secured = await client.rekeyRoom(entityRef(updated));
+        entities.channels.upsert(secured);
+      }
     } catch (caught) {
       groupError = userErrorMessage(caught, 'Could not remove that member. Try again.');
     } finally {
@@ -1446,6 +1556,64 @@
       groupError = userErrorMessage(caught, 'Could not leave this group. Try again.');
       groupBusy = false;
     }
+  }
+
+  async function enableEncryption() {
+    if (
+      !channel ||
+      !currentUser ||
+      groupBusy ||
+      channel.encryption_mode === 'e2ee' ||
+      !e2eeActivationEnabled
+    )
+      return;
+    const confirmed = window.confirm(
+      'Turn on end-to-end encryption for this conversation? This cannot be turned off and protects only new content; existing history stays readable to the server. New messages, files, and supported calls will be encrypted. Search, link and GIF previews, bots, webhooks, file previews, malware scanning, call recording, and transcription will stop; unsupported clients cannot participate. Notifications become generic, while participants, timing, message-size, track, and traffic metadata remain visible. Anyone can still record content on their own device. Losing every enrolled device and recovery backup loses encrypted history. Removed members keep content they already received.'
+    );
+    if (!confirmed) return;
+    groupBusy = true;
+    groupError = '';
+    try {
+      const client = await initializeE2EE(currentUser);
+      const proposal = await client.createRoomProposal(entityRef(channel));
+      const updated = await client.activateRoom(entityRef(channel), proposal);
+      e2eeClient = client;
+      entities.channels.upsert(updated);
+      e2eeSafetyNumber = await client.safetyNumber(updated);
+    } catch (caught) {
+      const message = userErrorMessage(
+        caught,
+        'Could not enable end-to-end encryption. Try again.'
+      );
+      if (groupConversation) groupError = message;
+      else error = message;
+    } finally {
+      groupBusy = false;
+    }
+  }
+
+  async function rekeyEncryption() {
+    if (!channel || !currentUser || groupBusy || channel.encryption_state !== 'rekeying') return;
+    groupBusy = true;
+    groupError = '';
+    try {
+      const client = e2eeClient ?? (await initializeE2EE(currentUser));
+      const updated = await client.rekeyRoom(entityRef(channel));
+      e2eeClient = client;
+      entities.channels.upsert(updated);
+      e2eeSafetyNumber = await client.safetyNumber(updated);
+    } catch (caught) {
+      groupError = userErrorMessage(caught, 'Could not secure the updated member list. Try again.');
+    } finally {
+      groupBusy = false;
+    }
+  }
+
+  function showEncryptionInfo() {
+    if (!channel || channel.encryption_mode !== 'e2ee') return;
+    window.alert(
+      `End-to-end encryption is on. Compare this safety number with the other members using a separate trusted channel:\n\n${e2eeSafetyNumber || 'Safety number unavailable on this device.'}`
+    );
   }
 
   function composerPaste(event: ClipboardEvent) {
@@ -1510,7 +1678,7 @@
       composerDraftBeforeEdit = { content, cursor: composerCursor };
     }
     editingMessage = message;
-    content = message.content ?? '';
+    content = message.decrypted_content ?? message.content ?? '';
     composerCursor = content.length;
     void tick().then(() => {
       composerInput?.focus();
@@ -1900,6 +2068,23 @@
         </div>
       </div>
       <div class="channel-header-actions">
+        {#if !groupConversation && channel && (channel.encryption_mode === 'e2ee' || e2eeActivationEnabled)}
+          <button
+            class:active={channel.encryption_mode === 'e2ee'}
+            class="icon-button"
+            type="button"
+            disabled={groupBusy}
+            aria-label={channel.encryption_mode === 'e2ee'
+              ? 'End-to-end encryption is on'
+              : 'Turn on end-to-end encryption'}
+            title={channel.encryption_mode === 'e2ee'
+              ? 'End-to-end encrypted'
+              : 'Turn on end-to-end encryption'}
+            onclick={channel.encryption_mode === 'e2ee' ? showEncryptionInfo : enableEncryption}
+          >
+            <Icon name="lock" size={18} />
+          </button>
+        {/if}
         {#if groupConversation}
           <button
             class="icon-button"
@@ -1961,7 +2146,10 @@
       {:else if activeCall && callJoined}
         <div class="dm-call-stage dm-call-region dm-call-active">
           {#key activeCallRef}
-            <VoiceDock callRef={activeCallRef} />
+            <VoiceDock
+              callRef={activeCallRef}
+              channelRef={channel ? entityRef(channel) : undefined}
+            />
           {/key}
           <button class="end-call" disabled={callBusy} onclick={() => callAction('end')}
             >End call for everyone</button
@@ -2281,6 +2469,40 @@
         disabled={groupBusy || !groupInviteHandle.trim()}
         onclick={addGroupMember}>Add</button
       >
+    </section>
+
+    <section class="group-dm-setting e2ee-setting">
+      <div>
+        <strong>End-to-end encryption</strong>
+        {#if channel?.encryption_mode === 'e2ee'}
+          <small>
+            {channel.encryption_state === 'rekeying'
+              ? 'Paused · The member list changed and requires fresh device keys.'
+              : 'On · Messages, files, and supported calls are readable only on members’ enrolled devices.'}
+          </small>
+          {#if e2eeSafetyNumber}<code class="e2ee-safety-number">{e2eeSafetyNumber}</code>{/if}
+        {:else}
+          <small>
+            Optional and permanent. Disables server message search, previews, bots, webhooks, and
+            file scanning. Losing every device key and recovery backup loses message access.
+          </small>
+        {/if}
+      </div>
+      {#if channel?.encryption_mode !== 'e2ee' && groupOwner && e2eeActivationEnabled}
+        <button
+          class="secondary-button"
+          type="button"
+          disabled={groupBusy}
+          onclick={enableEncryption}>Turn on</button
+        >
+      {:else if channel?.encryption_state === 'rekeying' && groupOwner}
+        <button
+          class="secondary-button"
+          type="button"
+          disabled={groupBusy}
+          onclick={rekeyEncryption}>Secure changes</button
+        >
+      {/if}
     </section>
 
     <section class="group-dm-members" aria-labelledby="group-members-heading">

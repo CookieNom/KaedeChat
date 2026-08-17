@@ -41,6 +41,8 @@ def attachment_payload(attachment: Attachment) -> dict[str, object]:
         "height": attachment.height,
         "blurhash": attachment.blurhash,
         "scan_status": attachment.scan_status,
+        "encryption_mode": attachment.encryption_mode,
+        "encryption_protocol": attachment.encryption_protocol,
         "purpose": attachment.purpose,
         "variants": attachment.variants,
         "finalized_at": (
@@ -86,6 +88,8 @@ async def create_upload_ticket(
     content_type: str,
     size: int,
     purpose: str = "attachment",
+    encryption_mode: str = "plaintext",
+    encryption_protocol: str | None = None,
 ) -> tuple[Attachment, str]:
     if size <= 0 or size > settings.media_max_attachment_bytes:
         raise HTTPException(status_code=413, detail={"code": "ATTACHMENT_TOO_LARGE"})
@@ -121,6 +125,8 @@ async def create_upload_ticket(
         object_key=original_object_key(settings.domain, attachment_id),
         staging_object_key=original_object_key(settings.domain, attachment_id),
         scan_status="pending",
+        encryption_mode=encryption_mode,
+        encryption_protocol=encryption_protocol,
         purpose=purpose,
         upload_expires_at=expires_at,
         variants={},

@@ -1,0 +1,62 @@
+import { webcrypto } from 'node:crypto';
+import { beforeAll, describe, expect, it } from 'vitest';
+
+import { decryptFile, encryptFile, encryptedManifestDigest } from './media';
+
+beforeAll(() => {
+  Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
+});
+
+describe('encrypted attachments', () => {
+  it('round trips a multi-chunk file without exposing its metadata in ciphertext', async () => {
+    const contents = new Uint8Array(180_000);
+    for (let offset = 0; offset < contents.length; offset += 65_536)
+      webcrypto.getRandomValues(
+        contents.subarray(offset, Math.min(contents.length, offset + 65_536))
+      );
+    const file = Object.assign(new Blob([contents], { type: 'image/png' }), {
+      name: 'private-photo.png'
+    });
+    const { ciphertext, manifest } = await encryptFile(file, 64 * 1024);
+
+    expect(await ciphertext.text()).not.toContain('private-photo.png');
+    expect(await ciphertext.text()).not.toContain('image/png');
+    const restored = new Uint8Array(await (await decryptFile(ciphertext, manifest)).arrayBuffer());
+    expect(restored).toEqual(contents);
+  });
+
+  it('rejects tampering, truncation, and unauthenticated manifest changes', async () => {
+    const file = Object.assign(new Blob([new Uint8Array(90_000).fill(7)], { type: 'text/plain' }), {
+      name: 'proof.txt'
+    });
+    const { ciphertext, manifest } = await encryptFile(file, 64 * 1024);
+    const changed = new Uint8Array(await ciphertext.arrayBuffer());
+    changed[changed.length - 1] ^= 1;
+    await expect(
+      decryptFile(new Blob([changed], { type: 'application/octet-stream' }), manifest)
+    ).rejects.toThrow('modified');
+    await expect(decryptFile(ciphertext.slice(0, -1), manifest)).rejects.toThrow('size');
+    await expect(
+      decryptFile(ciphertext, { ...manifest, filename: 'changed.txt', plaintext_size: 1 })
+    ).rejects.toThrow('header');
+  });
+
+  it('binds attachment ordering and keys into the MLS envelope digest', async () => {
+    const first = (
+      await encryptFile(
+        Object.assign(new Blob(['one'], { type: 'text/plain' }), { name: 'one.txt' })
+      )
+    ).manifest;
+    const second = (
+      await encryptFile(
+        Object.assign(new Blob(['two'], { type: 'text/plain' }), { name: 'two.txt' })
+      )
+    ).manifest;
+    expect(await encryptedManifestDigest([first, second])).not.toBe(
+      await encryptedManifestDigest([second, first])
+    );
+    expect(await encryptedManifestDigest([first])).not.toBe(
+      await encryptedManifestDigest([{ ...first, key: second.key }])
+    );
+  });
+});

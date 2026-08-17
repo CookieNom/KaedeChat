@@ -918,7 +918,7 @@ async def guild_history_sync_statuses(
         statuses[(guild_id, guild_domain)] = projected
     if stale_fields:
         try:
-            await redis.hdel(status_key, *stale_fields)
+            await cast(Awaitable[int], redis.hdel(status_key, *stale_fields))  # type: ignore[arg-type]
         except Exception as exc:
             # Cleanup is opportunistic and the hash has a defensive TTL. Keep
             # serving validated statuses even if this Redis write fails.

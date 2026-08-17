@@ -518,7 +518,7 @@ class AbuseReport(Base, TimestampMixin):
             name="abuse_report_category_value",
         ),
         CheckConstraint(
-            "encryption_mode IN ('plaintext','e2ee_metadata')",
+            "encryption_mode IN ('plaintext','e2ee_metadata','e2ee_user_disclosed')",
             name="abuse_report_encryption_mode_value",
         ),
         CheckConstraint(

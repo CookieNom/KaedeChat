@@ -30,12 +30,17 @@
 
   let category = $state<(typeof categories)[number][0]>('spam');
   let description = $state('');
+  let disclosureAcknowledged = $state(false);
   let busy = $state(false);
   let error = $state('');
+  const encrypted = $derived(Boolean(message.e2ee));
+  const disclosedContent = $derived(message.decrypted_content ?? '');
+  const hasDisclosedContent = $derived(Boolean(disclosedContent.trim()));
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (busy) return;
+    if (encrypted && (!hasDisclosedContent || !disclosureAcknowledged)) return;
     busy = true;
     error = '';
     try {
@@ -47,7 +52,13 @@
           target_ref: ref,
           message_ref: ref,
           category,
-          description: description.trim() || null
+          description: description.trim() || null,
+          ...(encrypted
+            ? {
+                disclosed_content: disclosedContent,
+                disclosure_acknowledged: true
+              }
+            : {})
         })
       });
       onSubmitted?.();
@@ -73,15 +84,27 @@
       </div>
       <button type="button" class="close" aria-label="Close report" onclick={onClose}>×</button>
     </header>
-    <p>
-      The message text and basic context will be sent to this instance's Trust &amp; Safety team.
-      Guild moderators do not receive this report.
-    </p>
+    {#if encrypted}
+      <div class="encrypted-disclosure">
+        <strong>Share decrypted message?</strong>
+        <p>
+          This message is end-to-end encrypted. Reporting it sends only the decrypted text shown on
+          this device and basic message context to this instance's Trust &amp; Safety team. It does
+          not send your encryption keys or other messages. The server will label the text as
+          reporter-supplied evidence.
+        </p>
+      </div>
+    {:else}
+      <p>
+        The message text and basic context will be sent to this instance's Trust &amp; Safety team.
+        Guild moderators do not receive this report.
+      </p>
+    {/if}
     <form onsubmit={submit}>
       <label>
         Reason
         <select bind:value={category}>
-          {#each categories as [value, label]}
+          {#each categories as [value, label] (value)}
             <option {value}>{label}</option>
           {/each}
         </select>
@@ -90,10 +113,19 @@
         Additional details <span>(optional)</span>
         <textarea bind:value={description} maxlength="2000" rows="4"></textarea>
       </label>
+      {#if encrypted}
+        <label class="disclosure-consent">
+          <input type="checkbox" bind:checked={disclosureAcknowledged} />
+          <span>I understand the decrypted text will be shared with Trust &amp; Safety.</span>
+        </label>
+      {/if}
       {#if error}<div class="report-error" role="alert">{error}</div>{/if}
       <footer>
         <button type="button" class="secondary" disabled={busy} onclick={onClose}>Cancel</button>
-        <button type="submit" class="danger" disabled={busy}
+        <button
+          type="submit"
+          class="danger"
+          disabled={busy || (encrypted && (!hasDisclosedContent || !disclosureAcknowledged))}
           >{busy ? 'Submitting…' : 'Submit report'}</button
         >
       </footer>
@@ -120,6 +152,15 @@
     color: var(--text);
     background: var(--surface);
     box-shadow: 0 24px 70px rgb(0 0 0 / 0.45);
+  }
+  .encrypted-disclosure {
+    border: 1px solid color-mix(in srgb, var(--danger, #d84a4a) 45%, var(--line));
+    border-radius: 10px;
+    padding: 0.85rem;
+    background: color-mix(in srgb, var(--danger, #d84a4a) 8%, var(--surface));
+  }
+  .encrypted-disclosure p {
+    margin: 0.4rem 0 0;
   }
   header,
   footer {
@@ -159,6 +200,18 @@
   }
   label {
     font-weight: 750;
+  }
+  .disclosure-consent {
+    display: flex;
+    align-items: flex-start;
+    grid-template-columns: none;
+    gap: 0.65rem;
+    font-weight: 650;
+  }
+  .disclosure-consent input {
+    width: 1rem;
+    height: 1rem;
+    margin-top: 0.15rem;
   }
   select,
   textarea {

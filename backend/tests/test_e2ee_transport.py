@@ -1,15 +1,27 @@
+import base64
 from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
+from app.api.channels import require_owned_e2ee_sender_device
 from app.chat.e2ee import (
+    E2EE_PROTOCOL_MLS_10,
+    E2EE_SUITE_MLS_128,
     MAX_E2EE_ARRAY_MEMBERS,
     MAX_E2EE_ENVELOPE_BYTES,
     MAX_E2EE_ENVELOPE_DEPTH,
     MAX_E2EE_ENVELOPE_NODES,
     MAX_E2EE_KEY_BYTES,
+    MessageEncryptionPolicyError,
+    validate_channel_encryption_policy,
+    validate_channel_encryption_policy_transition,
     validate_e2ee_envelope,
+    validate_message_encryption_policy,
 )
 from app.chat.schemas import MessageCreate, MessageEdit
 from app.core.federation import FEDERATION_CAPABILITIES, canonical_json
@@ -75,8 +87,9 @@ def test_e2ee_envelope_returns_a_detached_normalized_json_copy() -> None:
     assert validated["recipients"] == [{"device": "one"}]
 
 
-def test_federation_advertises_transport_only_e2ee_capability() -> None:
-    assert "e2ee-transport/1" in FEDERATION_CAPABILITIES
+def test_federation_advertises_supported_e2ee_protocols() -> None:
+    assert "e2ee-mls/1" in FEDERATION_CAPABILITIES
+    assert "e2ee-media/1" in FEDERATION_CAPABILITIES
     assert "dm-history-page/1" in FEDERATION_CAPABILITIES
 
 
@@ -131,10 +144,271 @@ def test_message_schemas_never_mix_plaintext_and_ciphertext() -> None:
         MessageEdit(content="visible", e2ee=envelope)
 
 
+@pytest.mark.parametrize(
+    ("mode", "content", "e2ee", "attachments", "code"),
+    [
+        ("plaintext", None, {"version": 1}, 0, "E2EE_NOT_ENABLED"),
+        ("e2ee", "visible", None, 0, "E2EE_ENVELOPE_REQUIRED"),
+        ("e2ee", None, None, 0, "E2EE_ENVELOPE_REQUIRED"),
+    ],
+)
+def test_room_policy_rejects_mixed_mode_writes(
+    mode: str,
+    content: object,
+    e2ee: object,
+    attachments: int,
+    code: str,
+) -> None:
+    with pytest.raises(MessageEncryptionPolicyError) as raised:
+        validate_message_encryption_policy(
+            mode,
+            content=content,
+            e2ee=e2ee,
+            attachment_count=attachments,
+        )
+    assert raised.value.code == code
+
+
+def test_room_policy_accepts_matching_plaintext_and_encrypted_writes() -> None:
+    validate_message_encryption_policy(
+        "e2ee",
+        content=None,
+        e2ee={"version": 1},
+        attachment_count=1,
+    )
+    validate_message_encryption_policy(
+        "plaintext",
+        content="visible",
+        e2ee=None,
+    )
+    validate_message_encryption_policy(
+        "e2ee",
+        content=None,
+        e2ee={"version": 1},
+    )
+
+
+def b64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode().rstrip("=")
+
+
+def test_active_mls_room_binds_envelope_to_group_generation_and_epoch() -> None:
+    envelope = validate_e2ee_envelope(
+        {
+            "version": 2,
+            "protocol": E2EE_PROTOCOL_MLS_10,
+            "suite": E2EE_SUITE_MLS_128,
+            "group_id": b64url(b"group-id"),
+            "policy_generation": "4",
+            "epoch": "9",
+            "sender_device_id": "ked_" + b64url(b"d" * 32),
+            "operation": "create",
+            "ciphertext": b64url(b"opaque MLS wire message"),
+        }
+    )
+    validate_message_encryption_policy(
+        "e2ee",
+        content=None,
+        e2ee=envelope,
+        policy_generation=4,
+        policy_epoch=9,
+        policy_group_id=b64url(b"group-id"),
+    )
+
+    with pytest.raises(MessageEncryptionPolicyError) as raised:
+        validate_message_encryption_policy(
+            "e2ee",
+            content=None,
+            e2ee=envelope,
+            policy_generation=4,
+            policy_epoch=10,
+            policy_group_id=b64url(b"group-id"),
+        )
+    assert raised.value.code == "E2EE_POLICY_CONTEXT_MISMATCH"
+
+
+def test_active_mls_room_rejects_legacy_opaque_envelope() -> None:
+    with pytest.raises(MessageEncryptionPolicyError) as raised:
+        validate_message_encryption_policy(
+            "e2ee",
+            content=None,
+            e2ee={"version": 1, "ciphertext": "legacy"},
+            policy_generation=1,
+            policy_epoch=0,
+            policy_group_id=b64url(b"group-id"),
+        )
+    assert raised.value.code == "E2EE_MLS_ENVELOPE_REQUIRED"
+
+
+def test_generated_room_policy_is_typed_and_downgrade_resistant() -> None:
+    policy = validate_channel_encryption_policy(
+        {
+            "mode": "e2ee",
+            "state": "active",
+            "generation": "3",
+            "protocol": E2EE_PROTOCOL_MLS_10,
+            "suite": E2EE_SUITE_MLS_128,
+            "group_id": "group-opaque-id",
+            "epoch": "9",
+        }
+    )
+    assert policy["generation"] == 3
+    assert policy["epoch"] == 9
+
+    with pytest.raises(ValueError, match="inconsistent"):
+        validate_channel_encryption_policy(
+            {
+                "mode": "plaintext",
+                "state": "active",
+                "generation": "3",
+                "protocol": E2EE_PROTOCOL_MLS_10,
+                "suite": E2EE_SUITE_MLS_128,
+                "group_id": "group-opaque-id",
+                "epoch": "9",
+            }
+        )
+
+
+def test_federated_room_policy_rejects_equal_generation_equivocation() -> None:
+    channel = SimpleNamespace(
+        encryption_mode="e2ee",
+        encryption_state="active",
+        encryption_policy_generation=3,
+        encryption_protocol=E2EE_PROTOCOL_MLS_10,
+        encryption_suite=E2EE_SUITE_MLS_128,
+        encryption_group_id="group-opaque-id",
+        encryption_epoch=9,
+    )
+    incoming = validate_channel_encryption_policy(
+        {
+            "mode": "e2ee",
+            "state": "active",
+            "generation": "3",
+            "protocol": E2EE_PROTOCOL_MLS_10,
+            "suite": E2EE_SUITE_MLS_128,
+            "group_id": "group-opaque-id",
+            "epoch": "8",
+        }
+    )
+
+    with pytest.raises(ValueError, match="equivocated"):
+        validate_channel_encryption_policy_transition(channel, incoming, label="channel")
+
+
+@pytest.mark.parametrize(
+    ("current", "incoming"),
+    [
+        ("proposed", "activating"),
+        ("proposed", "active"),
+        ("activating", "active"),
+        ("activating", "failed"),
+        ("active", "rekeying"),
+    ],
+)
+def test_federated_room_policy_accepts_legitimate_same_generation_progress(
+    current: str, incoming: str
+) -> None:
+    channel = SimpleNamespace(
+        encryption_mode="e2ee",
+        encryption_state=current,
+        encryption_policy_generation=3,
+        encryption_protocol=E2EE_PROTOCOL_MLS_10,
+        encryption_suite=E2EE_SUITE_MLS_128,
+        encryption_group_id="group-opaque-id",
+        encryption_epoch=9,
+    )
+    policy = validate_channel_encryption_policy(
+        {
+            "mode": "e2ee",
+            "state": incoming,
+            "generation": "3",
+            "protocol": E2EE_PROTOCOL_MLS_10,
+            "suite": E2EE_SUITE_MLS_128,
+            "group_id": "group-opaque-id",
+            "epoch": "9",
+        }
+    )
+    validate_channel_encryption_policy_transition(channel, policy, label="channel")
+
+
+def test_federated_room_policy_rejects_same_generation_state_rollback() -> None:
+    channel = SimpleNamespace(
+        encryption_mode="e2ee",
+        encryption_state="active",
+        encryption_policy_generation=3,
+        encryption_protocol=E2EE_PROTOCOL_MLS_10,
+        encryption_suite=E2EE_SUITE_MLS_128,
+        encryption_group_id="group-opaque-id",
+        encryption_epoch=9,
+    )
+    incoming = validate_channel_encryption_policy(
+        {
+            "mode": "e2ee",
+            "state": "proposed",
+            "generation": "3",
+            "protocol": E2EE_PROTOCOL_MLS_10,
+            "suite": E2EE_SUITE_MLS_128,
+            "group_id": "group-opaque-id",
+            "epoch": "9",
+        }
+    )
+    with pytest.raises(ValueError, match="equivocated"):
+        validate_channel_encryption_policy_transition(channel, incoming, label="channel")
+
+
+def test_database_migration_contains_message_policy_backstop() -> None:
+    migration = (
+        Path(__file__).parents[1] / "migrations/versions/c82f4a1d6e90_e2ee_room_policy_guard.py"
+    ).read_text()
+    assert "channel_encryption_policy_consistent" in migration
+    assert "CREATE TRIGGER trg_channels_encryption_transition" in migration
+    assert "encrypted channel cannot be downgraded to plaintext" in migration
+    assert "CREATE TRIGGER trg_messages_encryption_policy" in migration
+    assert "plaintext body is forbidden in an encrypted channel" in migration
+    assert "message encryption policy generation is stale" in migration
+
+
 def test_plaintext_message_binds_absent_envelope_as_sql_null() -> None:
     """Prevent JSON `null` from violating the object-only DB constraint."""
 
     assert Message.__table__.c.e2ee.type.none_as_null is True
+
+
+@pytest.mark.asyncio
+async def test_local_e2ee_writes_require_an_active_device_owned_by_the_author() -> None:
+    user = SimpleNamespace(id=7, origin_domain="alpha.localhost")
+    session = SimpleNamespace(
+        get=AsyncMock(
+            return_value=SimpleNamespace(
+                user_id=7,
+                user_domain="alpha.localhost",
+                revoked_at=None,
+            )
+        )
+    )
+    await require_owned_e2ee_sender_device(
+        session,
+        user,
+        {"sender_device_id": "ked_owned"},
+    )
+
+    for invalid in (
+        None,
+        SimpleNamespace(user_id=8, user_domain="alpha.localhost", revoked_at=None),
+        SimpleNamespace(
+            user_id=7,
+            user_domain="alpha.localhost",
+            revoked_at=datetime.now(UTC),
+        ),
+    ):
+        session.get = AsyncMock(return_value=invalid)
+        with pytest.raises(HTTPException) as caught:
+            await require_owned_e2ee_sender_device(
+                session,
+                user,
+                {"sender_device_id": "ked_invalid"},
+            )
+        assert caught.value.detail == {"code": "E2EE_SENDER_DEVICE_INVALID"}
 
 
 def test_federated_message_replay_fingerprint_binds_opaque_ciphertext() -> None:

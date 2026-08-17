@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -107,6 +109,15 @@ class ReportCreate(BaseModel):
     ]
     description: str | None = Field(default=None, max_length=2000)
     message_ref: EntityRef | None = None
+    disclosed_content: str | None = Field(default=None, min_length=1, max_length=4000)
+    disclosure_acknowledged: bool = False
+
+    @field_validator("disclosed_content")
+    @classmethod
+    def _meaningful_disclosure(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("disclosed content must contain a non-whitespace character")
+        return value
 
 
 class ReportPatch(BaseModel):
@@ -199,6 +210,53 @@ def report_payload(report: AbuseReport) -> dict[str, object]:
         "updated_at": report.updated_at.isoformat(),
         "resolved_at": report.resolved_at.isoformat() if report.resolved_at else None,
     }
+
+
+def report_message_evidence(
+    message: Message,
+    *,
+    disclosed_content: str | None,
+    disclosure_acknowledged: bool,
+) -> tuple[dict[str, object], str]:
+    """Build report evidence without ever accepting or persisting room keys."""
+
+    evidence: dict[str, object] = {
+        "author_ref": f"{message.author_id}@{message.author_domain}",
+        "channel_ref": f"{message.channel_id}@{message.channel_domain}",
+        "created_at": message.created_at.isoformat(),
+    }
+    if message.e2ee is None:
+        if disclosed_content is not None or disclosure_acknowledged:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "REPORT_DISCLOSURE_UNEXPECTED"},
+            )
+        evidence["content"] = message.content
+        return evidence, "plaintext"
+    if disclosed_content is None or not disclosure_acknowledged:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "E2EE_REPORT_DISCLOSURE_REQUIRED"},
+        )
+    canonical_envelope = json.dumps(
+        message.e2ee,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    evidence.update(
+        {
+            "content": disclosed_content,
+            "ciphertext_sha256": hashlib.sha256(canonical_envelope).hexdigest(),
+            "disclosure": {
+                "source": "reporter_client_decrypted",
+                "reporter_acknowledged": True,
+                "server_verified": False,
+            },
+        }
+    )
+    return evidence, "e2ee_user_disclosed"
 
 
 @router.get("/administration/@me")
@@ -475,15 +533,18 @@ async def create_report(
         raise HTTPException(status_code=422, detail={"code": "REPORT_MESSAGE_REF_REQUIRED"})
     if payload.target_type != "message" and payload.message_ref is not None:
         raise HTTPException(status_code=422, detail={"code": "REPORT_MESSAGE_REF_UNEXPECTED"})
+    if payload.target_type != "message" and (
+        payload.disclosed_content is not None or payload.disclosure_acknowledged
+    ):
+        raise HTTPException(status_code=422, detail={"code": "REPORT_DISCLOSURE_UNEXPECTED"})
     evidence: dict[str, object] = {}
     message_ref: str | None = None
+    report_encryption_mode = "plaintext"
     if payload.message_ref is not None:
         message_id, message_domain = payload.message_ref.resolve(settings.domain)
         message = await session.get(Message, (message_id, message_domain))
         if message is None or message.deleted_at is not None:
             raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
-        if message.e2ee is not None:
-            raise HTTPException(status_code=409, detail={"code": "E2EE_MESSAGE_REPORT_UNAVAILABLE"})
         access = await load_channel_access(
             session,
             settings,
@@ -500,12 +561,11 @@ async def create_report(
         message_ref = f"{message.id}@{message.origin_domain}"
         if payload.target_type == "message" and payload.target_ref != message_ref:
             raise HTTPException(status_code=422, detail={"code": "REPORT_TARGET_MISMATCH"})
-        evidence = {
-            "content": message.content,
-            "author_ref": f"{message.author_id}@{message.author_domain}",
-            "channel_ref": f"{message.channel_id}@{message.channel_domain}",
-            "created_at": message.created_at.isoformat(),
-        }
+        evidence, report_encryption_mode = report_message_evidence(
+            message,
+            disclosed_content=payload.disclosed_content,
+            disclosure_acknowledged=payload.disclosure_acknowledged,
+        )
     report = AbuseReport(
         id=await snowflake.mint(),
         reporter_id=auth.user.id,
@@ -517,7 +577,7 @@ async def create_report(
         description=payload.description,
         message_ref=message_ref,
         evidence=evidence,
-        encryption_mode="plaintext",
+        encryption_mode=report_encryption_mode,
     )
     session.add(report)
     await session.commit()

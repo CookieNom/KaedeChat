@@ -60,6 +60,46 @@ async def process_attachment_record(
         return "missing"
     if attachment.finalized_at is None:
         return "pending_upload"
+    if attachment.encryption_mode == "e2ee":
+        if attachment.scan_status == "encrypted":
+            return "encrypted"
+        storage = S3Storage(settings)
+        staging_key = attachment.object_key
+        try:
+            data = await storage.get(
+                settings.media_attachments_bucket,
+                staging_key,
+                max_bytes=settings.media_max_attachment_bytes,
+            )
+            if len(data) != attachment.size:
+                raise MediaValidationError("stored ciphertext size changed after finalization")
+            digest = content_digest(data)
+            final_key = clean_object_key(origin_domain, attachment_id, digest)
+            await storage.put(
+                settings.media_attachments_bucket,
+                final_key,
+                data,
+                "application/octet-stream",
+            )
+            attachment.content_sha256 = digest
+            attachment.object_key = final_key
+            attachment.staging_object_key = staging_key
+            attachment.scan_status = "encrypted"
+            await session.commit()
+            try:
+                await storage.delete(settings.media_attachments_bucket, staging_key)
+            except StorageError:
+                log.exception(
+                    "encrypted_media_staging_delete_failed",
+                    attachment_id=str(attachment_id),
+                    staging_key=staging_key,
+                )
+            return "encrypted"
+        except (MediaValidationError, StorageError, RuntimeError):
+            attachment.scan_status = "failed"
+            await session.commit()
+            log.exception("encrypted_media_processing_failed", attachment_id=str(attachment_id))
+            raise
     reprocessing = attachment.scan_status == "clean"
     if reprocessing and image_derivatives_are_current(attachment):
         return "clean"

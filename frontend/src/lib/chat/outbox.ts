@@ -1,9 +1,12 @@
+import type { EncryptedFileManifest } from '$lib/e2ee/media';
+
 export interface PendingMessageSend {
   clientNonce: string;
   content: string | null;
   attachmentIds: string[];
   mentionUserIds: string[];
   referencedMessageId: string | null;
+  encryptedAttachments: EncryptedFileManifest[];
 }
 
 export function pendingMessageSend(
@@ -11,19 +14,21 @@ export function pendingMessageSend(
   attachmentIds: readonly string[],
   mentionUserIds: readonly string[],
   clientNonce: string = crypto.randomUUID(),
-  referencedMessageId: string | null = null
+  referencedMessageId: string | null = null,
+  encryptedAttachments: readonly EncryptedFileManifest[] = []
 ): PendingMessageSend {
   return {
     clientNonce,
     content,
     attachmentIds: [...attachmentIds],
     mentionUserIds: [...mentionUserIds],
-    referencedMessageId
+    referencedMessageId,
+    encryptedAttachments: [...encryptedAttachments]
   };
 }
 
 export function discardAttachments(send: PendingMessageSend): PendingMessageSend {
-  return { ...send, attachmentIds: [] };
+  return { ...send, attachmentIds: [], encryptedAttachments: [] };
 }
 
 export function withoutSubmittedUploads<T extends { attachmentId?: string }>(

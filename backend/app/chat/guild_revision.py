@@ -6,6 +6,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.e2ee import channel_encryption_policy_payload
+from app.chat.e2ee_membership import (
+    GUILD_E2EE_ACCESS_MUTATION_EVENTS,
+    pause_guild_e2ee_for_membership_change,
+)
 from app.core.settings import Settings
 from app.core.task_wake import enqueue_best_effort
 from app.db.models import Channel, Guild, GuildMember, User
@@ -72,6 +77,7 @@ def federation_channel_state(channel: Channel) -> dict[str, object]:
         # Server defaults are populated during flush, but channel-create events
         # are rendered before queue_guild_mutation performs that flush.
         "federated_history_policy": channel.federated_history_policy or "inherit",
+        "encryption_policy": channel_encryption_policy_payload(channel),
         "created_floor_id": str(channel.created_floor_id),
     }
 
@@ -99,6 +105,8 @@ async def queue_guild_mutation(
 
     if guild.origin_domain != settings.domain or actor.origin_domain != settings.domain:
         raise RuntimeError("only a guild home and local actor may emit guild mutations")
+    if event_type in GUILD_E2EE_ACCESS_MUTATION_EVENTS:
+        await pause_guild_e2ee_for_membership_change(session, guild)
     snapshot_changed = event_type not in SNAPSHOT_NEUTRAL_GUILD_EVENTS
     if snapshot_changed:
         guild.snapshot_generation = int(getattr(guild, "snapshot_generation", 1) or 1) + 1

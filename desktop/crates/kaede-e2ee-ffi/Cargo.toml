@@ -1,0 +1,18 @@
+[package]
+name = "kaede-e2ee-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+base64.workspace = true
+kaede-e2ee = { path = "../kaede-e2ee" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

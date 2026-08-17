@@ -6,6 +6,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import NativeVoiceSettings from '$lib/components/NativeVoiceSettings.svelte';
+  import E2EESettings from '$lib/components/E2EESettings.svelte';
   import { isNativeDesktop, nativeError, nativeInvoke } from '$lib/platform/native';
   import { assetUrl } from '$lib/media/assets';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
@@ -1145,6 +1146,8 @@
             </form>
           {/if}
         </div>
+
+        {#if profile}<E2EESettings user={profile} />{/if}
 
         {#if emailEnabled}
           <form

@@ -78,6 +78,8 @@ def test_complete_v1_schema_is_registered() -> None:
         "bot_tokens",
         "bot_interactions",
         "abuse_reports",
+        "e2ee_devices",
+        "e2ee_key_packages",
     }
     assert required == set(Base.metadata.tables)
 

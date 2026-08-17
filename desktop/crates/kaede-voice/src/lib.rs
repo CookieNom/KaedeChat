@@ -19,6 +19,11 @@ use kaede_audio::{
 use kaede_capture::{PackedFrame, PackedPixelFormat};
 use kaede_protocol::EntityRef;
 use livekit::{
+    E2eeOptions,
+    e2ee::{
+        EncryptionType,
+        key_provider::{KeyProvider, KeyProviderOptions},
+    },
     options::TrackPublishOptions,
     prelude::{
         DisconnectReason, LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteTrack, Room,
@@ -51,6 +56,7 @@ use tokio::{
 const AUDIO_FRAME_TIME: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Debug, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Wire DTO mirrors independent server grants.
 pub struct VoiceGrant {
     pub token: SecretString,
     pub url: String,
@@ -63,6 +69,24 @@ pub struct VoiceGrant {
     pub can_use_vad: bool,
     #[serde(default)]
     pub move_session_id: Option<String>,
+    #[serde(default)]
+    pub e2ee: bool,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub channel_domain: Option<String>,
+    #[serde(default)]
+    pub encryption_policy_generation: Option<String>,
+    #[serde(default)]
+    pub encryption_epoch: Option<String>,
+    #[serde(default)]
+    pub media_protocol: Option<String>,
+    #[serde(default)]
+    pub media_suite: Option<String>,
+    #[serde(default)]
+    pub media_session_id: Option<String>,
+    #[serde(default)]
+    pub media_epoch: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -142,14 +166,16 @@ pub async fn join_channel(
     channel: &EntityRef,
     capture_settings: CaptureSettings,
     output_device: Option<String>,
+    media_key: Option<Vec<u8>>,
+    sender_device_id: Option<&str>,
 ) -> Result<VoiceHandle, VoiceError> {
     let grant: VoiceGrant = api
         .post(
             &format!("channels/{channel}/voice/token"),
-            &serde_json::json!({}),
+            &serde_json::json!({"sender_device_id": sender_device_id}),
         )
         .await?;
-    Box::pin(join(grant, capture_settings, output_device)).await
+    Box::pin(join(grant, capture_settings, output_device, media_key)).await
 }
 
 /// Obtains a home-instance grant and joins a direct-message call.
@@ -163,18 +189,25 @@ pub async fn join_call(
     call: &EntityRef,
     capture_settings: CaptureSettings,
     output_device: Option<String>,
+    media_key: Option<Vec<u8>>,
+    sender_device_id: Option<&str>,
 ) -> Result<VoiceHandle, VoiceError> {
     let grant: VoiceGrant = api
-        .post(&format!("calls/{call}/voice/token"), &serde_json::json!({}))
+        .post(
+            &format!("calls/{call}/voice/token"),
+            &serde_json::json!({"sender_device_id": sender_device_id}),
+        )
         .await?;
-    Box::pin(join(grant, capture_settings, output_device)).await
+    Box::pin(join(grant, capture_settings, output_device, media_key)).await
 }
 
 async fn join(
     grant: VoiceGrant,
     capture_settings: CaptureSettings,
     output_device: Option<String>,
+    media_key: Option<Vec<u8>>,
 ) -> Result<VoiceHandle, VoiceError> {
+    let room_options = media_room_options(&grant, media_key)?;
     let move_session_id = grant.move_session_id.clone();
     if grant.can_speak
         && capture_settings.mode == kaede_audio::InputMode::VoiceActivity
@@ -203,7 +236,7 @@ async fn join(
     let (room, events) = Box::pin(Room::connect(
         &grant.url,
         grant.token.expose_secret(),
-        RoomOptions::default(),
+        room_options,
     ))
     .await?;
 
@@ -259,6 +292,56 @@ async fn join(
         move_session_id,
         task,
     })
+}
+
+fn media_room_options(
+    grant: &VoiceGrant,
+    media_key: Option<Vec<u8>>,
+) -> Result<RoomOptions, VoiceError> {
+    match (grant.e2ee, media_key) {
+        (false, None) => Ok(RoomOptions::default()),
+        (false, Some(mut key)) => {
+            key.fill(0);
+            Err(VoiceError::EncryptionPolicyMismatch)
+        }
+        (true, None) => Err(VoiceError::EncryptionKeyMissing),
+        (true, Some(mut key)) => {
+            if key.len() != 32
+                || grant.channel_id.as_deref().is_none_or(str::is_empty)
+                || grant.channel_domain.as_deref().is_none_or(str::is_empty)
+                || grant
+                    .encryption_policy_generation
+                    .as_deref()
+                    .is_none_or(str::is_empty)
+                || grant.encryption_epoch.as_deref().is_none_or(str::is_empty)
+                || grant.media_protocol.as_deref() != Some("livekit-e2ee-v1")
+                || grant.media_suite.as_deref() != Some("AES-256-GCM")
+                || grant.media_session_id.as_deref().is_none_or(|value| {
+                    value.len() != 43
+                        || !value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                })
+                || grant.media_epoch != grant.encryption_epoch
+            {
+                key.fill(0);
+                return Err(VoiceError::EncryptionPolicyMismatch);
+            }
+            let provider = KeyProvider::with_shared_key(
+                KeyProviderOptions {
+                    ratchet_salt: b"kaede-livekit-v1".to_vec(),
+                    ..KeyProviderOptions::default()
+                },
+                key,
+            );
+            let mut options = RoomOptions::default();
+            options.encryption = Some(E2eeOptions {
+                encryption_type: EncryptionType::Gcm,
+                key_provider: provider,
+            });
+            Ok(options)
+        }
+    }
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -865,6 +948,10 @@ pub enum VoiceError {
     CameraWorker(String),
     #[error("voice activity is disabled in this channel; select push to talk")]
     VoiceActivityDenied,
+    #[error("the encrypted voice grant did not match the supplied media key")]
+    EncryptionPolicyMismatch,
+    #[error("this encrypted voice room requires a device media key")]
+    EncryptionKeyMissing,
     #[error("failed to start native capture thread: {0}")]
     CaptureThread(std::io::Error),
 }
@@ -895,6 +982,12 @@ impl VoiceError {
                     .to_owned(),
             Self::VoiceActivityDenied =>
                 "Voice activity is not allowed in this channel. Switch your input mode to push to talk and try again."
+                    .to_owned(),
+            Self::EncryptionPolicyMismatch =>
+                "The encrypted call changed before Kaede could join. Refresh the conversation and try again."
+                    .to_owned(),
+            Self::EncryptionKeyMissing =>
+                "This call is encrypted, but this device does not have its media key. Restore or re-enroll this encryption device and try again."
                     .to_owned(),
             Self::CaptureThread(_) =>
                 "Kaede could not start screen capture. Check screen-recording permission and try sharing again."

@@ -140,6 +140,13 @@ final class KaedeChannel {
     this.oldestAvailableMessageRef,
     this.historyDegradedCode,
     this.encryptionMode = 'plaintext',
+    this.encryptionState = 'plaintext',
+    this.encryptionPolicyGeneration = 0,
+    this.encryptionProtocol,
+    this.encryptionSuite,
+    this.encryptionGroupId,
+    this.encryptionEpoch,
+    this.encryptionActivatedAt,
     this.searchAvailable = true,
     this.version,
   });
@@ -185,6 +192,16 @@ final class KaedeChannel {
           _entityRefOrNull(json['oldest_available_message_ref']),
       historyDegradedCode: _string(json['history_degraded_code']),
       encryptionMode: _string(json['encryption_mode']) ?? 'plaintext',
+      encryptionState: _string(json['encryption_state']) ?? 'plaintext',
+      encryptionPolicyGeneration:
+          _integer(json['encryption_policy_generation']),
+      encryptionProtocol: _string(json['encryption_protocol']),
+      encryptionSuite: _string(json['encryption_suite']),
+      encryptionGroupId: _string(json['encryption_group_id']),
+      encryptionEpoch: _nullableInteger(json['encryption_epoch']),
+      encryptionActivatedAt: _string(json['encryption_activated_at']) == null
+          ? null
+          : DateTime.parse(json['encryption_activated_at']! as String).toUtc(),
       searchAvailable: _boolean(json['search_available'], true),
       version: _string(json['version']),
     );
@@ -210,6 +227,13 @@ final class KaedeChannel {
   final EntityRef? oldestAvailableMessageRef;
   final String? historyDegradedCode;
   final String encryptionMode;
+  final String encryptionState;
+  final int encryptionPolicyGeneration;
+  final String? encryptionProtocol;
+  final String? encryptionSuite;
+  final String? encryptionGroupId;
+  final int? encryptionEpoch;
+  final DateTime? encryptionActivatedAt;
   final bool searchAvailable;
   final String? version;
 
@@ -253,6 +277,14 @@ final class KaedeChannel {
               },
         'history_degraded_code': historyDegradedCode,
         'encryption_mode': encryptionMode,
+        'encryption_state': encryptionState,
+        'encryption_policy_generation': encryptionPolicyGeneration.toString(),
+        'encryption_protocol': encryptionProtocol,
+        'encryption_suite': encryptionSuite,
+        'encryption_group_id': encryptionGroupId,
+        'encryption_epoch': encryptionEpoch?.toString(),
+        'encryption_activated_at':
+            encryptionActivatedAt?.toUtc().toIso8601String(),
         'search_available': searchAvailable,
         'version': version,
       };
@@ -526,8 +558,12 @@ final class KaedeMessage {
     required this.createdAt,
     this.author,
     this.content,
+    this.e2ee,
+    this.encryptionPolicyGeneration = 0,
+    this.encryptionEpoch,
     this.messageType = 0,
     this.attachments = const <KaedeAttachment>[],
+    this.decryptedAttachments = const <Json>[],
     this.mentionUserRefs = const <EntityRef>[],
     this.reference,
     this.clientNonce,
@@ -559,9 +595,18 @@ final class KaedeMessage {
           ? KaedeUser.fromJson(Map<String, Object?>.from(author))
           : null,
       content: _string(json['content']),
+      e2ee: json['e2ee'] is Map
+          ? Map<String, Object?>.unmodifiable(
+              Map<String, Object?>.from(json['e2ee']! as Map),
+            )
+          : null,
+      encryptionPolicyGeneration:
+          _integer(json['encryption_policy_generation']),
+      encryptionEpoch: _nullableInteger(json['encryption_epoch']),
       messageType: (json['message_type'] as num?)?.toInt() ?? 0,
       attachments:
           _objects(json['attachments']).map(KaedeAttachment.fromJson).toList(),
+      decryptedAttachments: _objects(json['decrypted_attachments']),
       mentionUserRefs: (json['mention_user_refs'] as List? ?? const <Object>[])
           .map(EntityRef.fromJson)
           .toList(),
@@ -603,8 +648,12 @@ final class KaedeMessage {
   final EntityRef authorRef;
   final KaedeUser? author;
   final String? content;
+  final Json? e2ee;
+  final int encryptionPolicyGeneration;
+  final int? encryptionEpoch;
   final int messageType;
   final List<KaedeAttachment> attachments;
+  final List<Json> decryptedAttachments;
   final List<EntityRef> mentionUserRefs;
   final EntityRef? reference;
   final String? clientNonce;
@@ -624,9 +673,15 @@ final class KaedeMessage {
   KaedeMessage copyWith({
     KaedeUser? author,
     String? content,
+    Json? e2ee,
+    bool clearE2ee = false,
+    int? encryptionPolicyGeneration,
+    int? encryptionEpoch,
+    bool clearEncryptionEpoch = false,
     int? messageType,
     bool clearContent = false,
     List<KaedeAttachment>? attachments,
+    List<Json>? decryptedAttachments,
     List<EntityRef>? mentionUserRefs,
     EntityRef? reference,
     bool clearReference = false,
@@ -651,8 +706,15 @@ final class KaedeMessage {
         authorRef: authorRef,
         author: author ?? this.author,
         content: clearContent ? null : content ?? this.content,
+        e2ee: clearE2ee ? null : e2ee ?? this.e2ee,
+        encryptionPolicyGeneration:
+            encryptionPolicyGeneration ?? this.encryptionPolicyGeneration,
+        encryptionEpoch: clearEncryptionEpoch
+            ? null
+            : encryptionEpoch ?? this.encryptionEpoch,
         messageType: messageType ?? this.messageType,
         attachments: attachments ?? this.attachments,
+        decryptedAttachments: decryptedAttachments ?? this.decryptedAttachments,
         mentionUserRefs: mentionUserRefs ?? this.mentionUserRefs,
         reference: clearReference ? null : reference ?? this.reference,
         clientNonce: clientNonce ?? this.clientNonce,
@@ -683,8 +745,12 @@ final class KaedeMessage {
         'author_domain': authorRef.domain.value,
         'author': author?.toJson(),
         'content': content,
+        'e2ee': e2ee,
+        'encryption_policy_generation': encryptionPolicyGeneration.toString(),
+        'encryption_epoch': encryptionEpoch?.toString(),
         'message_type': messageType,
         'attachments': attachments.map((item) => item.toJson()).toList(),
+        'decrypted_attachments': decryptedAttachments,
         'mention_user_refs': mentionUserRefs.map((item) => item.wire).toList(),
         'referenced_message_id': reference?.id.value,
         'referenced_message_domain': reference?.domain.value,

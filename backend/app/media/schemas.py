@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.types import WireSnowflake
 from app.media.processing import normalize_declared_type, sanitize_filename
@@ -12,6 +12,8 @@ class UploadTicketRequest(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     content_type: str = Field(min_length=1, max_length=255)
     size: int = Field(ge=1)
+    encryption_mode: Literal["plaintext", "e2ee"] = "plaintext"
+    encryption_protocol: Literal["kaede-file-v1"] | None = None
 
     @field_validator("filename")
     @classmethod
@@ -22,6 +24,17 @@ class UploadTicketRequest(BaseModel):
     @classmethod
     def safe_type(cls, value: str) -> str:
         return normalize_declared_type(value)
+
+    @model_validator(mode="after")
+    def encryption_metadata_is_consistent(self) -> UploadTicketRequest:
+        if self.encryption_mode == "e2ee":
+            if self.encryption_protocol != "kaede-file-v1":
+                raise ValueError("encrypted uploads require kaede-file-v1")
+            if self.filename != "encrypted-file" or self.content_type != "application/octet-stream":
+                raise ValueError("encrypted uploads require opaque metadata")
+        elif self.encryption_protocol is not None:
+            raise ValueError("plaintext uploads cannot specify an encryption protocol")
+        return self
 
 
 class AssetCommitRequest(BaseModel):

@@ -31,10 +31,34 @@ from sqlalchemy import and_, delete, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.api.dependencies import get_redis, get_session, get_snowflake
+from app.api.dependencies import AuthenticatedUser, get_redis, get_session, get_snowflake
+from app.api.e2ee import (
+    RoomActivationRequest,
+    RoomProposalRequest,
+    RoomRekeyActivationRequest,
+    activate_room_encryption,
+    activate_room_rekey,
+    claim_local_room_key_packages,
+    propose_room_encryption,
+    propose_room_rekey,
+)
+from app.auth.tokens import AccessGrant
 from app.bootstrap import MAX_ADVERTISED_OLD_KEYS
 from app.chat.custom_emojis import validate_custom_emoji_use
-from app.chat.e2ee import validate_e2ee_envelope
+from app.chat.e2ee import (
+    MessageEncryptionPolicyError,
+    channel_encryption_policy_payload,
+    validate_channel_encryption_policy,
+    validate_channel_encryption_policy_transition,
+    validate_e2ee_envelope,
+    validate_message_encryption_policy,
+)
+from app.chat.e2ee_membership import (
+    e2ee_policy_destinations,
+    pause_guild_e2ee_for_membership_change,
+    pause_local_e2ee_for_device_change,
+    publish_e2ee_policy_updates,
+)
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.group_conversations import (
     apply_authoritative_group_mutation,
@@ -75,7 +99,7 @@ from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
-from app.core.types import MAX_SNOWFLAKE, Snowflake
+from app.core.types import MAX_SNOWFLAKE, EntityRef, Snowflake
 from app.db.models import (
     Attachment,
     Ban,
@@ -180,6 +204,8 @@ from app.federation.schemas import (
     DMGroupAuthorizeRequest,
     DMGroupMutationRequest,
     DMOpenFederationRequest,
+    E2EEKeyPackageClaimRequest,
+    E2EERoomProxyRequest,
     EventEnvelope,
     GuildHistoryExportRequest,
     GuildJoinRequest,
@@ -1049,6 +1075,7 @@ async def process_event(
     authoritative_leave_guild: Guild | None = None
     authoritative_leave_target: tuple[int, str] | None = None
     replicated_group_call: dict[str, Any] | None = None
+    e2ee_policy_channels: list[Channel] = []
     durably_committed = False
     try:
         if envelope.type in {
@@ -1064,6 +1091,68 @@ async def process_event(
             )
             if relationship_application.wake_destination is not None:
                 delivery_wakes.add(relationship_application.wake_destination)
+        elif envelope.type == "e2ee.device-list.changed":
+            raw_profile = envelope.content.get("profile")
+            profile = RemoteUserProfile.model_validate(raw_profile)
+            if envelope.origin != envelope.actor.domain or (profile.id, profile.origin_domain) != (
+                envelope.actor.id,
+                envelope.actor.domain,
+            ):
+                raise ValueError("E2EE device update is not authoritative for its actor")
+            existing_user = await session.get(
+                User,
+                (database_snowflake(profile.id, "E2EE device user id"), profile.origin_domain),
+            )
+            if existing_user is None or existing_user.is_local:
+                raise ValueError("E2EE device update references an unknown remote participant")
+            previous_generation = existing_user.e2ee_device_generation
+            changed_user = await upsert_remote_user(session, settings, profile)
+            if changed_user.e2ee_device_generation > previous_generation:
+                paused = await pause_local_e2ee_for_device_change(session, settings, changed_user)
+                e2ee_policy_channels.extend(paused)
+                for channel in paused:
+                    destinations = await e2ee_policy_destinations(session, settings, channel)
+                    if not destinations:
+                        continue
+                    policy_envelope = await build_envelope(
+                        session,
+                        settings,
+                        "e2ee.room-policy.changed",
+                        changed_user,
+                        {
+                            "channel_id": str(channel.id),
+                            "channel_domain": channel.origin_domain,
+                            "encryption_policy": channel_encryption_policy_payload(channel),
+                        },
+                        authority_attested_actor=True,
+                    )
+                    for destination in destinations:
+                        await queue_event(session, settings, destination, policy_envelope)
+                    delivery_wakes.update(destinations)
+        elif envelope.type == "e2ee.room-policy.changed":
+            raw_channel_id = envelope.content.get("channel_id")
+            raw_channel_domain = envelope.content.get("channel_domain")
+            channel_id = database_snowflake(raw_channel_id, "E2EE policy channel id")
+            if raw_channel_domain != envelope.origin:
+                raise ValueError("E2EE room policy did not originate at its authority")
+            loaded_e2ee_channel = await session.get(Channel, (channel_id, envelope.origin))
+            if loaded_e2ee_channel is None or loaded_e2ee_channel.unavailable:
+                raise ValueError("E2EE room policy references an unknown channel")
+            channel = loaded_e2ee_channel
+            incoming_policy = validate_channel_encryption_policy(
+                envelope.content.get("encryption_policy")
+            )
+            validate_channel_encryption_policy_transition(
+                channel, incoming_policy, label="E2EE room"
+            )
+            channel.encryption_mode = str(incoming_policy["mode"])
+            channel.encryption_state = str(incoming_policy["state"])
+            channel.encryption_policy_generation = int(incoming_policy["generation"])
+            channel.encryption_protocol = incoming_policy["protocol"]
+            channel.encryption_suite = incoming_policy["suite"]
+            channel.encryption_group_id = incoming_policy["group_id"]
+            channel.encryption_epoch = incoming_policy["epoch"]
+            e2ee_policy_channels.append(channel)
         elif envelope.type == "dm.group.state":
             raw_conversation = envelope.content.get("conversation")
             raw_participants = envelope.content.get("participants")
@@ -1415,6 +1504,7 @@ async def process_event(
                 settings,
                 envelope.content,
                 event_timestamp_ms=envelope.ts,
+                event_origin=envelope.origin,
             )
             if envelope.type == "dm.group.message.proposed":
                 if message_conversation is None:
@@ -1528,6 +1618,7 @@ async def process_event(
                 raise FederationResyncRetry from exc
             if applied_member is not None and applied_member[1]:
                 replicated_guild_member = applied_member[0]
+                await pause_guild_e2ee_for_membership_change(session, replicated_guild)
         elif envelope.type == "guild.leave.request":
             guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
             guild_domain = normalize_domain(str(envelope.context.get("guild_domain", "")))
@@ -1685,15 +1776,20 @@ async def process_event(
                 database_snowflake(envelope.context.get("guild_id"), "guild id"),
                 for_update=True,
             )
-            channel = await session.get(
+            loaded_proxy_channel = await session.get(
                 Channel,
                 (
                     database_snowflake(envelope.content.get("channel_id"), "channel id"),
                     guild.origin_domain,
                 ),
             )
-            if channel is None or channel.guild_id != guild.id or channel.type not in {0, 5}:
+            if (
+                loaded_proxy_channel is None
+                or loaded_proxy_channel.guild_id != guild.id
+                or loaded_proxy_channel.type not in {0, 5}
+            ):
                 raise ValueError("proxy channel is not in the guild")
+            channel = loaded_proxy_channel
             raw_attachments = envelope.content.get("attachments", [])
             if not isinstance(raw_attachments, list) or len(raw_attachments) > 10:
                 raise ValueError("proxy write attachment list is invalid")
@@ -1722,6 +1818,10 @@ async def process_event(
             await lock_proxy_nonce(session, guild, actor, channel, nonce)
             proxy_content = envelope.content.get("content")
             proxy_e2ee = validate_e2ee_envelope(envelope.content.get("e2ee"))
+            if proxy_e2ee is not None and (
+                proxy_e2ee.get("version") != 2 or proxy_e2ee.get("operation") != "create"
+            ):
+                raise ValueError("proxy encrypted write operation is invalid")
             if proxy_content is not None and (
                 not isinstance(proxy_content, str) or not 1 <= len(proxy_content) <= 4000
             ):
@@ -1804,6 +1904,8 @@ async def process_event(
                     author_domain=actor.origin_domain,
                     content=proxy_content,
                     e2ee=proxy_e2ee,
+                    encryption_policy_generation=channel.encryption_policy_generation,
+                    encryption_epoch=channel.encryption_epoch,
                     client_nonce=nonce,
                     referenced_message_id=(
                         referenced_message.id if referenced_message is not None else None
@@ -2259,6 +2361,8 @@ async def process_event(
                 ),
             )
             await enqueue_best_effort(mentions_fanout, home_message.id, home_message.origin_domain)
+        if e2ee_policy_channels:
+            await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
         for destination in delivery_wakes:
             await enqueue_best_effort(federation_deliver, destination)
         if rejection_target is not None and rejection_payload is not None:
@@ -2862,6 +2966,198 @@ async def federation_user_profile_by_ref(
     )
 
 
+@router.post("/_kaede/v1/e2ee/key-packages/claim")
+async def federation_e2ee_key_packages_claim(
+    payload: E2EEKeyPackageClaimRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    require_guild_federation_access(principal)
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "e2ee-key-package-claim",
+        capacity=1_000,
+        refill_per_minute=1_000,
+    )
+    if payload.channel_domain != principal.origin or payload.target_domain != settings.domain:
+        raise HTTPException(status_code=403, detail={"code": "KAED_E2EE_AUTHORITY_MISMATCH"})
+    channel = await session.get(
+        Channel,
+        (int(payload.channel_id), payload.channel_domain),
+    )
+    target = await session.get(User, (int(payload.target_id), payload.target_domain))
+    if channel is None or target is None or not target.is_local:
+        raise HTTPException(status_code=404, detail={"code": "KAED_E2EE_TARGET_NOT_FOUND"})
+    claimant_ref = (int(payload.claimant_id), payload.claimant_domain)
+    target_ref = (target.id, target.origin_domain)
+    if channel.guild_id is not None:
+        target_member = await session.get(
+            GuildMember,
+            (channel.guild_id, channel.guild_domain, target.id, target.origin_domain),
+        )
+        claimant_member = await session.get(
+            GuildMember,
+            (channel.guild_id, channel.guild_domain, claimant_ref[0], claimant_ref[1]),
+        )
+        authorized = target_member is not None and claimant_member is not None
+    else:
+        target_participant = await session.get(
+            DMParticipant,
+            (channel.id, channel.origin_domain, target.id, target.origin_domain),
+        )
+        claimant_participant = await session.get(
+            DMParticipant,
+            (channel.id, channel.origin_domain, claimant_ref[0], claimant_ref[1]),
+        )
+        authorized = target_participant is not None and claimant_participant is not None
+    if not authorized:
+        raise HTTPException(status_code=404, detail={"code": "KAED_E2EE_TARGET_NOT_FOUND"})
+    excluded = (payload.excluded_device_id or "") if claimant_ref == target_ref else ""
+    packages = await claim_local_room_key_packages(
+        session,
+        [target],
+        claimant_ref=claimant_ref,
+        excluded_device_id=excluded,
+        max_devices=payload.max_devices,
+    )
+    await session.commit()
+    return {"key_packages": packages}
+
+
+async def federated_e2ee_actor(
+    payload: E2EERoomProxyRequest,
+    principal: FederationPrincipal,
+    session: AsyncSession,
+    settings: Settings,
+) -> AuthenticatedUser:
+    if payload.actor.origin_domain != principal.origin or payload.channel_domain != settings.domain:
+        raise HTTPException(status_code=403, detail={"code": "KAED_E2EE_AUTHORITY_MISMATCH"})
+    actor = await upsert_remote_user(session, settings, payload.actor)
+    return AuthenticatedUser(
+        user=actor,
+        grant=AccessGrant(actor.id, actor.origin_domain, f"federation:{principal.origin}"),
+        access_token="",
+        cookie_authenticated=False,
+    )
+
+
+async def enforce_e2ee_room_proxy_limit(redis: Redis, principal: FederationPrincipal) -> None:
+    require_guild_federation_access(principal)
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "e2ee-room-proxy",
+        capacity=120,
+        refill_per_minute=120,
+    )
+
+
+@router.post("/_kaede/v1/e2ee/rooms/propose")
+async def federation_e2ee_room_propose(
+    payload: E2EERoomProxyRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    await enforce_e2ee_room_proxy_limit(redis, principal)
+    auth = await federated_e2ee_actor(payload, principal, session, settings)
+    return await propose_room_encryption(
+        EntityRef(f"{payload.channel_id}@{payload.channel_domain}"),
+        RoomProposalRequest(sender_device_id=payload.sender_device_id),
+        auth,
+        session,
+        redis,
+        settings,
+    )
+
+
+@router.post("/_kaede/v1/e2ee/rooms/activate")
+async def federation_e2ee_room_activate(
+    payload: E2EERoomProxyRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    await enforce_e2ee_room_proxy_limit(redis, principal)
+    auth = await federated_e2ee_actor(payload, principal, session, settings)
+    activation = RoomActivationRequest.model_validate(
+        {
+            "sender_device_id": payload.sender_device_id,
+            "policy_generation": payload.policy_generation,
+            "epoch": payload.epoch,
+            "commit": payload.commit,
+            "welcome": payload.welcome,
+        }
+    )
+    return await activate_room_encryption(
+        EntityRef(f"{payload.channel_id}@{payload.channel_domain}"),
+        activation,
+        auth,
+        session,
+        redis,
+        snowflake,
+        settings,
+    )
+
+
+@router.post("/_kaede/v1/e2ee/rooms/rekey/propose")
+async def federation_e2ee_room_rekey_propose(
+    payload: E2EERoomProxyRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    await enforce_e2ee_room_proxy_limit(redis, principal)
+    auth = await federated_e2ee_actor(payload, principal, session, settings)
+    return await propose_room_rekey(
+        EntityRef(f"{payload.channel_id}@{payload.channel_domain}"),
+        RoomProposalRequest(sender_device_id=payload.sender_device_id),
+        auth,
+        session,
+        redis,
+        settings,
+    )
+
+
+@router.post("/_kaede/v1/e2ee/rooms/rekey/activate")
+async def federation_e2ee_room_rekey_activate(
+    payload: E2EERoomProxyRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    await enforce_e2ee_room_proxy_limit(redis, principal)
+    auth = await federated_e2ee_actor(payload, principal, session, settings)
+    activation = RoomRekeyActivationRequest.model_validate(
+        {
+            "proposal_id": payload.proposal_id,
+            "sender_device_id": payload.sender_device_id,
+            "policy_generation": payload.policy_generation,
+            "epoch": payload.epoch,
+            "commit": payload.commit,
+            "welcome": payload.welcome,
+        }
+    )
+    return await activate_room_rekey(
+        EntityRef(f"{payload.channel_id}@{payload.channel_domain}"),
+        activation,
+        auth,
+        session,
+        redis,
+        snowflake,
+        settings,
+    )
+
+
 @router.post("/_kaede/v1/presence", status_code=204)
 async def federation_presence_update(
     payload: PresenceFederationRequest,
@@ -3052,11 +3348,13 @@ async def _federation_media_attachment(
     attachment = await session.get(Attachment, (attachment_id, settings.domain))
     if (
         attachment is None
-        or attachment.scan_status != "clean"
+        or attachment.scan_status not in {"clean", "encrypted"}
         or attachment.deleted_at is not None
         or attachment.message_id is None
         or attachment.message_domain is None
     ):
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    if attachment.encryption_mode == "e2ee" and variant != "original":
         raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
     message = await session.get(Message, (attachment.message_id, attachment.message_domain))
     channel = (
@@ -3186,7 +3484,7 @@ async def federation_dm_history_media_authorize(
         if normalized_requester_domain != principal.origin:
             raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
         requester = (requester_id, normalized_requester_domain)
-    await _federation_media_attachment(
+    attachment = await _federation_media_attachment(
         session,
         redis,
         settings,
@@ -3197,7 +3495,10 @@ async def federation_dm_history_media_authorize(
         expected_message=scope[1],
         requester=requester,
     )
-    return Response(status_code=204)
+    return Response(
+        status_code=204,
+        headers={"X-Kaede-Media-Encryption": attachment.encryption_mode},
+    )
 
 
 @router.get("/_kaede/v1/media/{attachment_id}/{variant}")
@@ -3395,6 +3696,7 @@ async def federation_group_dm_mutate(
     previous_owner = (conversation.owner_id, conversation.owner_domain)
     before, participants, deleted = await apply_authoritative_group_mutation(
         session,
+        redis,
         settings,
         conversation,
         channel,
@@ -3686,6 +3988,7 @@ async def federation_guild_join(
             joined_at=datetime.now(UTC),
         )
         session.add(member)
+        await pause_guild_e2ee_for_membership_change(session, guild)
         invite.uses += 1
         guild.snapshot_generation += 1
         seq = await assign_guild_sequence(session, guild)
@@ -4593,6 +4896,18 @@ async def federation_guild_proxy(
         or channel.type not in {0, 5}
     ):
         raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+    try:
+        validate_message_encryption_policy(
+            channel.encryption_mode,
+            content=payload.content,
+            e2ee=payload.e2ee,
+            attachment_count=len(payload.attachments),
+            policy_generation=channel.encryption_policy_generation,
+            policy_epoch=channel.encryption_epoch,
+            policy_group_id=channel.encryption_group_id,
+        )
+    except MessageEncryptionPolicyError as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
     needed = Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES
     if payload.attachments:
         needed |= Permission.ATTACH_FILES
@@ -4671,6 +4986,8 @@ async def federation_guild_proxy(
         author_domain=actor.origin_domain,
         content=payload.content,
         e2ee=payload.e2ee,
+        encryption_policy_generation=channel.encryption_policy_generation,
+        encryption_epoch=channel.encryption_epoch,
         client_nonce=payload.client_nonce,
         referenced_message_id=(referenced_message.id if referenced_message is not None else None),
         referenced_message_domain=(

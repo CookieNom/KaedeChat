@@ -11,7 +11,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.chat.e2ee import validate_e2ee_envelope
+from app.chat.e2ee import (
+    validate_channel_encryption_policy,
+    validate_channel_encryption_policy_transition,
+    validate_e2ee_envelope,
+    validate_message_encryption_policy,
+)
 from app.chat.events import publish_dispatch, user_topic
 from app.chat.payloads import dm_channel_payload, render_message_payload
 from app.chat.privacy import require_can_direct_message
@@ -247,6 +252,7 @@ async def _resolve_unresolved_remote_profile(
             user.username = profile.username
             user.profile_resolved = True
             user.profile_version = profile.profile_version
+            user.e2ee_device_generation = profile.e2ee_device_generation
             user.display_name = profile.display_name
             user.avatar_hash = profile.avatar_hash
             user.banner_hash = profile.banner_hash
@@ -294,6 +300,7 @@ async def upsert_remote_user(
                 bio=profile.bio,
                 custom_status=profile.custom_status,
                 profile_version=profile.profile_version,
+                e2ee_device_generation=profile.e2ee_device_generation,
                 federation_introduced_by_domain=introducer,
             )
             .on_conflict_do_nothing()
@@ -316,6 +323,10 @@ async def upsert_remote_user(
         return user
     if user.username != profile.username:
         raise ValueError("remote user profile changed an immutable identity")
+    user.e2ee_device_generation = max(
+        user.e2ee_device_generation,
+        profile.e2ee_device_generation,
+    )
     if profile.profile_version < user.profile_version:
         return user
     mutable_profile = (
@@ -484,6 +495,7 @@ def profile_from_user(user: User) -> dict[str, object]:
         "bio": user.bio,
         "custom_status": user.custom_status,
         "profile_version": user.profile_version,
+        "e2ee_device_generation": getattr(user, "e2ee_device_generation", 0),
     }
 
 
@@ -519,6 +531,20 @@ async def replicate_message_attachments(
         if not isinstance(content_type_raw, str):
             raise ValueError("attachment content type is invalid")
         content_type = normalize_declared_type(content_type_raw)
+        encryption_mode = raw.get("encryption_mode", "plaintext")
+        encryption_protocol = raw.get("encryption_protocol")
+        if encryption_mode == "e2ee":
+            if (
+                encryption_protocol != "kaede-file-v1"
+                or filename_raw != "encrypted-file"
+                or content_type != "application/octet-stream"
+            ):
+                raise ValueError("encrypted attachment metadata is invalid")
+            replicated_scan_status = "encrypted"
+        elif encryption_mode == "plaintext" and encryption_protocol is None:
+            replicated_scan_status = "clean"
+        else:
+            raise ValueError("attachment encryption policy is invalid")
         if (
             isinstance(size, bool)
             or not isinstance(size, int)
@@ -547,7 +573,9 @@ async def replicate_message_attachments(
                 width=width,
                 height=height,
                 blurhash=blurhash,
-                scan_status="clean",
+                scan_status=replicated_scan_status,
+                encryption_mode=encryption_mode,
+                encryption_protocol=encryption_protocol,
                 purpose="attachment",
                 finalized_at=message.created_at,
                 variants=variants,
@@ -560,7 +588,17 @@ async def replicate_message_attachments(
                 existing.filename,
                 existing.content_type,
                 existing.size,
-            ) != (author.id, author.origin_domain, filename_raw, content_type, size):
+                existing.encryption_mode,
+                existing.encryption_protocol,
+            ) != (
+                author.id,
+                author.origin_domain,
+                filename_raw,
+                content_type,
+                size,
+                encryption_mode,
+                encryption_protocol,
+            ):
                 raise ValueError("attachment identity conflicts with stored metadata")
             if existing.message_id is not None and (
                 existing.message_id,
@@ -605,6 +643,14 @@ async def replicate_conversation(
     if len(participant_refs) != len(participants):
         raise ValueError("DM conversation participants must be unique")
     conversation_id = database_snowflake(conversation.get("id"), "conversation id")
+    raw_encryption_policy = conversation.get("encryption_policy")
+    if raw_encryption_policy is None:
+        raw_encryption_policy = {
+            "mode": "plaintext",
+            "state": "plaintext",
+            "generation": "0",
+        }
+    encryption_policy = validate_channel_encryption_policy(raw_encryption_policy)
     owner_id: int | None = None
     owner_domain: str | None = None
     state_version = 0
@@ -683,6 +729,15 @@ async def replicate_conversation(
         await session.flush()
     elif channel.guild_id is not None or channel.type != 1:
         raise ValueError("DM conversation ID conflicts with a non-DM channel")
+    incoming_generation = int(encryption_policy["generation"])
+    validate_channel_encryption_policy_transition(channel, encryption_policy, label="DM")
+    channel.encryption_mode = str(encryption_policy["mode"])
+    channel.encryption_state = str(encryption_policy["state"])
+    channel.encryption_policy_generation = incoming_generation
+    channel.encryption_protocol = encryption_policy["protocol"]
+    channel.encryption_suite = encryption_policy["suite"]
+    channel.encryption_group_id = encryption_policy["group_id"]
+    channel.encryption_epoch = encryption_policy["epoch"]
     if conversation_type == "group":
         stored_participants = set(
             (
@@ -888,6 +943,14 @@ async def replicate_group_notice(
     )
     if raw_message.get("content") != expected_content:
         raise ValueError("group DM notice text does not match the membership transition")
+    validate_message_encryption_policy(
+        channel.encryption_mode or "plaintext",
+        content=expected_content,
+        e2ee=None,
+        policy_generation=channel.encryption_policy_generation or 0,
+        policy_epoch=channel.encryption_epoch,
+        policy_group_id=channel.encryption_group_id,
+    )
     created_at = datetime.fromisoformat(str(raw_message.get("created_at")))
     created_ms = int(created_at.timestamp() * 1000)
     validate_snowflake_timestamp(
@@ -919,6 +982,8 @@ async def replicate_group_notice(
         author_domain=author.origin_domain,
         content=expected_content,
         e2ee=None,
+        encryption_policy_generation=channel.encryption_policy_generation,
+        encryption_epoch=channel.encryption_epoch,
         message_type=message_type,
         flags=4,
         mention_user_refs=mention_refs,
@@ -944,6 +1009,7 @@ async def replicate_dm_message(
     content: dict[str, Any],
     *,
     event_timestamp_ms: int,
+    event_origin: str,
 ) -> Message | None:
     author = await upsert_remote_user(
         session, settings, RemoteUserProfile.model_validate(content["author"])
@@ -1013,6 +1079,34 @@ async def replicate_dm_message(
     if conversation is None or conversation.type not in {"direct", "group"}:
         raise ValueError("DM conversation is not replicated")
     await lock_federated_dm_authority(session, conversation.authority_domain)
+    raw_policy = content.get("encryption_policy")
+    if raw_policy is not None:
+        if event_origin != conversation.authority_domain:
+            raise ValueError("DM encryption policy did not originate at its authority")
+        encryption_policy = validate_channel_encryption_policy(raw_policy)
+        validate_channel_encryption_policy_transition(
+            channel,
+            encryption_policy,
+            label="DM",
+        )
+        channel.encryption_mode = str(encryption_policy["mode"])
+        channel.encryption_state = str(encryption_policy["state"])
+        channel.encryption_policy_generation = int(encryption_policy["generation"])
+        channel.encryption_protocol = encryption_policy["protocol"]
+        channel.encryption_suite = encryption_policy["suite"]
+        channel.encryption_group_id = encryption_policy["group_id"]
+        channel.encryption_epoch = encryption_policy["epoch"]
+        if channel.encryption_mode == "e2ee" and channel.encryption_activated_at is None:
+            channel.encryption_activated_at = created_at
+    validate_message_encryption_policy(
+        channel.encryption_mode,
+        content=message_content,
+        e2ee=e2ee,
+        attachment_count=len(raw_attachments),
+        policy_generation=channel.encryption_policy_generation,
+        policy_epoch=channel.encryption_epoch,
+        policy_group_id=channel.encryption_group_id,
+    )
     author_participates = await session.get(
         DMParticipant,
         (channel.id, channel.origin_domain, author.id, author.origin_domain),
@@ -1113,6 +1207,8 @@ async def replicate_dm_message(
             author_domain=author_domain,
             content=message_content,
             e2ee=e2ee,
+            encryption_policy_generation=channel.encryption_policy_generation,
+            encryption_epoch=channel.encryption_epoch,
             message_type=message_type,
             flags=flags,
             client_nonce=client_nonce,

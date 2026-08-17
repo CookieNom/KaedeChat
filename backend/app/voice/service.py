@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from typing import cast
 
@@ -13,7 +15,7 @@ from app.chat.payloads import public_user_display_name
 from app.chat.permissions import get_permissions
 from app.core.permissions import Permission
 from app.core.settings import Settings
-from app.db.models import Channel, Guild, GuildMember, User
+from app.db.models import Channel, E2EEDevice, Guild, GuildMember, User
 from app.voice.livekit import LiveKitControl, LiveKitError, mint_join_token
 from app.voice.rooms import guild_room_name, parse_room_name, participant_identity
 from app.voice.schemas import VoiceTokenResponse
@@ -24,6 +26,100 @@ log = structlog.get_logger()
 VOICE_SERVER_MUTE = 1 << 0
 VOICE_SERVER_DEAF = 1 << 1
 VOICE_FLAG_MASK = VOICE_SERVER_MUTE | VOICE_SERVER_DEAF
+MEDIA_E2EE_PROTOCOL = "livekit-e2ee-v1"
+MEDIA_E2EE_SUITE = "AES-256-GCM"
+
+
+def media_session_id(channel: Channel, room: str) -> str:
+    if (
+        channel.encryption_mode != "e2ee"
+        or channel.encryption_group_id is None
+        or channel.encryption_epoch is None
+    ):
+        raise HTTPException(status_code=409, detail={"code": "E2EE_POLICY_CONTEXT_MISMATCH"})
+    context = "\0".join(
+        (
+            "kaede-livekit-session-v1",
+            room,
+            f"{channel.id}@{channel.origin_domain}",
+            channel.encryption_group_id,
+            str(channel.encryption_policy_generation),
+            str(channel.encryption_epoch),
+            MEDIA_E2EE_PROTOCOL,
+            MEDIA_E2EE_SUITE,
+        )
+    ).encode()
+    return base64.urlsafe_b64encode(hashlib.sha256(context).digest()).rstrip(b"=").decode()
+
+
+async def require_e2ee_voice_device(
+    session: AsyncSession,
+    settings: Settings,
+    channel: Channel,
+    actor: User,
+    sender_device_id: str | None,
+    *,
+    remote_device_attested: bool = False,
+) -> None:
+    if channel.encryption_mode != "e2ee":
+        return
+    if channel.encryption_state != "active":
+        raise HTTPException(status_code=409, detail={"code": "E2EE_REKEY_REQUIRED"})
+    if sender_device_id is None:
+        raise HTTPException(status_code=409, detail={"code": "E2EE_SENDER_DEVICE_INVALID"})
+    if actor.origin_domain != settings.domain:
+        if remote_device_attested:
+            return
+        raise HTTPException(status_code=409, detail={"code": "E2EE_SENDER_DEVICE_INVALID"})
+    device = await session.scalar(
+        select(E2EEDevice).where(
+            E2EEDevice.id == sender_device_id,
+            E2EEDevice.user_id == actor.id,
+            E2EEDevice.user_domain == actor.origin_domain,
+            E2EEDevice.revoked_at.is_(None),
+        )
+    )
+    if device is None:
+        raise HTTPException(status_code=409, detail={"code": "E2EE_SENDER_DEVICE_INVALID"})
+
+
+def voice_e2ee_context(channel: Channel, room: str) -> dict[str, str]:
+    if channel.encryption_mode != "e2ee":
+        return {}
+    if channel.encryption_state != "active" or channel.encryption_epoch is None:
+        raise HTTPException(status_code=409, detail={"code": "E2EE_REKEY_REQUIRED"})
+    return {
+        "encryption_policy_generation": str(channel.encryption_policy_generation),
+        "encryption_epoch": str(channel.encryption_epoch),
+        "media_protocol": MEDIA_E2EE_PROTOCOL,
+        "media_suite": MEDIA_E2EE_SUITE,
+        "media_session_id": media_session_id(channel, room),
+        "media_epoch": str(channel.encryption_epoch),
+    }
+
+
+def voice_metadata_matches_policy(
+    channel: Channel,
+    room: str,
+    metadata: dict[str, object],
+) -> bool:
+    encrypted = channel.encryption_mode == "e2ee"
+    if bool(metadata.get("e2ee")) != encrypted:
+        return False
+    if not encrypted:
+        return True
+    if channel.encryption_state != "active" or channel.encryption_epoch is None:
+        return False
+    return metadata == {
+        **metadata,
+        "e2ee": True,
+        "encryption_policy_generation": str(channel.encryption_policy_generation),
+        "encryption_epoch": str(channel.encryption_epoch),
+        "media_protocol": MEDIA_E2EE_PROTOCOL,
+        "media_suite": MEDIA_E2EE_SUITE,
+        "media_session_id": media_session_id(channel, room),
+        "media_epoch": str(channel.encryption_epoch),
+    }
 
 
 def require_voice_enabled(settings: Settings) -> None:
@@ -62,6 +158,8 @@ async def authoritative_guild_token(
     actor: User,
     move_session_id: str | None = None,
     disconnect_previous: bool = True,
+    sender_device_id: str | None = None,
+    remote_device_attested: bool = False,
 ) -> VoiceTokenResponse:
     require_voice_enabled(settings)
     if guild.origin_domain != settings.domain or channel.origin_domain != settings.domain:
@@ -83,6 +181,15 @@ async def authoritative_guild_token(
     if member is None:
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
     room = guild_room_name(guild.id, channel.id)
+    await require_e2ee_voice_device(
+        session,
+        settings,
+        channel,
+        actor,
+        sender_device_id,
+        remote_device_attested=remote_device_attested,
+    )
+    e2ee_context = voice_e2ee_context(channel, room)
     identity = participant_identity(actor.id, actor.origin_domain)
     previous_raw = await redis.get(f"voice:user-room:{identity}")
     if disconnect_previous and previous_raw is not None:
@@ -113,6 +220,8 @@ async def authoritative_guild_token(
         "user_domain": actor.origin_domain,
         "guild_id": str(guild.id),
         "channel_id": str(channel.id),
+        "channel_domain": channel.origin_domain,
+        "e2ee": bool(e2ee_context),
         "server_mute": server_mute,
         "server_deaf": server_deaf,
         "can_speak": can_speak,
@@ -121,6 +230,8 @@ async def authoritative_guild_token(
     }
     if move_session_id is not None:
         metadata["move_session_id"] = move_session_id
+    if e2ee_context:
+        metadata.update({"e2ee": True, **e2ee_context})
     try:
         await LiveKitControl(settings).ensure_room(room)
         token, expires_at = mint_join_token(
@@ -149,6 +260,21 @@ async def authoritative_guild_token(
         can_speak=can_speak,
         can_stream=can_stream,
         can_use_vad=can_use_vad,
+        e2ee=channel.encryption_mode == "e2ee",
+        channel_id=str(channel.id),
+        channel_domain=channel.origin_domain,
+        encryption_policy_generation=(
+            str(channel.encryption_policy_generation) if channel.encryption_mode == "e2ee" else None
+        ),
+        encryption_epoch=(
+            str(channel.encryption_epoch)
+            if channel.encryption_mode == "e2ee" and channel.encryption_epoch is not None
+            else None
+        ),
+        media_protocol=e2ee_context.get("media_protocol"),
+        media_suite=e2ee_context.get("media_suite"),
+        media_session_id=e2ee_context.get("media_session_id"),
+        media_epoch=e2ee_context.get("media_epoch"),
         move_session_id=move_session_id,
     )
 
@@ -165,6 +291,8 @@ def parse_minted_metadata(raw: str, *, room: str, identity: str) -> dict[str, ob
         "user_id": str,
         "user_domain": str,
         "channel_id": str,
+        "channel_domain": str,
+        "e2ee": bool,
         "can_speak": bool,
         "can_stream": bool,
         "can_use_vad": bool,
@@ -174,6 +302,23 @@ def parse_minted_metadata(raw: str, *, room: str, identity: str) -> dict[str, ob
     for name, expected in required.items():
         if type(metadata.get(name)) is not expected:
             raise ValueError("invalid voice token metadata")
+    e2ee_fields = {
+        "encryption_policy_generation",
+        "encryption_epoch",
+        "media_protocol",
+        "media_suite",
+        "media_session_id",
+        "media_epoch",
+    }
+    if metadata["e2ee"]:
+        if (
+            any(not isinstance(metadata.get(field), str) for field in e2ee_fields)
+            or metadata.get("media_protocol") != MEDIA_E2EE_PROTOCOL
+            or metadata.get("media_suite") != MEDIA_E2EE_SUITE
+        ):
+            raise ValueError("invalid encrypted voice metadata")
+    elif any(metadata.get(field) is not None for field in e2ee_fields):
+        raise ValueError("plaintext voice metadata contains encryption context")
     metadata_identity = participant_identity(
         int(cast(str, metadata["user_id"])), str(metadata["user_domain"])
     )

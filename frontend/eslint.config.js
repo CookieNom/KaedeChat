@@ -20,5 +20,13 @@ export default tseslint.config(
     files: ['**/*.svelte.ts'],
     languageOptions: { parser: tseslint.parser }
   },
-  { ignores: ['build/', '.svelte-kit/', 'src/lib/generated/'] }
+  {
+    ignores: [
+      'build/',
+      '.svelte-kit/',
+      'src/lib/generated/',
+      'src/lib/e2ee/wasm/kaede_e2ee.js',
+      'src/lib/e2ee/wasm/kaede_e2ee_bg.wasm.d.ts'
+    ]
+  }
 );

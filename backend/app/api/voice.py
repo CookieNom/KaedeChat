@@ -30,7 +30,7 @@ from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef
-from app.db.models import GuildMember, User
+from app.db.models import Channel, GuildMember, User
 from app.federation.client import signed_request
 from app.federation.network import (
     FederationNetworkError,
@@ -51,16 +51,22 @@ from app.voice.schemas import (
     VoiceMoveFederationRequest,
     VoiceMoveRequest,
     VoiceStateFederationRequest,
+    VoiceTokenRequest,
     VoiceTokenResponse,
 )
 from app.voice.service import (
+    MEDIA_E2EE_PROTOCOL,
+    MEDIA_E2EE_SUITE,
     VOICE_FLAG_MASK,
     VOICE_SERVER_DEAF,
     VOICE_SERVER_MUTE,
     authoritative_guild_token,
     load_voice_channel,
+    media_session_id,
     parse_minted_metadata,
+    require_e2ee_voice_device,
     require_voice_enabled,
+    voice_metadata_matches_policy,
 )
 from app.voice.state import (
     FederatedVoiceSession,
@@ -120,6 +126,7 @@ async def channel_voice_token(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
+    payload: VoiceTokenRequest | None = None,
 ) -> VoiceTokenResponse:
     require_voice_enabled(settings)
     channel_id, channel_domain = channel_ref.resolve(settings.domain)
@@ -137,12 +144,20 @@ async def channel_voice_token(
             },
         )
     identity = participant_identity(auth.user.id, auth.user.origin_domain)
+    sender_device_id = payload.sender_device_id if payload is not None else None
     if guild.origin_domain == settings.domain:
         grant = await authoritative_guild_token(
-            session, redis, settings, channel=channel, guild=guild, actor=auth.user
+            session,
+            redis,
+            settings,
+            channel=channel,
+            guild=guild,
+            actor=auth.user,
+            sender_device_id=sender_device_id,
         )
         await discard_all_federated_voice_home_sessions(redis, identity)
         return grant
+    await require_e2ee_voice_device(session, settings, channel, auth.user, sender_device_id)
     move_session_id = secrets.token_urlsafe(32)
     expected_room = f"g.{guild.id}.{channel.id}"
     await begin_federated_voice_home_session(
@@ -170,6 +185,7 @@ async def channel_voice_token(
                 "actor_id": str(auth.user.id),
                 "actor_domain": auth.user.origin_domain,
                 "move_session_id": move_session_id,
+                "sender_device_id": sender_device_id,
             },
             request_timeout=5,
             max_response_bytes=16 * 1024,
@@ -194,6 +210,22 @@ async def channel_voice_token(
             grant.move_session_id != move_session_id
             or grant.room != expected_room
             or not valid_federated_voice_url(grant.url, guild.origin_domain)
+            or grant.e2ee != (channel.encryption_mode == "e2ee")
+            or (
+                grant.e2ee
+                and (
+                    channel.encryption_state != "active"
+                    or grant.channel_id != str(channel.id)
+                    or grant.channel_domain != channel.origin_domain
+                    or grant.encryption_policy_generation
+                    != str(channel.encryption_policy_generation)
+                    or grant.encryption_epoch != str(channel.encryption_epoch)
+                    or grant.media_protocol != MEDIA_E2EE_PROTOCOL
+                    or grant.media_suite != MEDIA_E2EE_SUITE
+                    or grant.media_session_id != media_session_id(channel, expected_room)
+                    or grant.media_epoch != str(channel.encryption_epoch)
+                )
+            )
         ):
             raise HTTPException(status_code=502, detail={"code": "VOICE_HOME_INVALID_RESPONSE"})
         if not await activate_federated_voice_home_session(
@@ -249,6 +281,8 @@ async def federation_voice_token(
         guild=guild,
         actor=actor,
         move_session_id=payload.move_session_id,
+        sender_device_id=payload.sender_device_id,
+        remote_device_attested=True,
     )
 
 
@@ -770,6 +804,7 @@ async def livekit_webhook(
                     or guild.id != scope_id
                     or str(metadata.get("guild_id")) != str(scope_id)
                     or str(metadata.get("channel_id")) != str(leaf_id)
+                    or not voice_metadata_matches_policy(channel, room, metadata)
                 ):
                     raise HTTPException(status_code=403, detail={"code": "VOICE_JOIN_REVOKED"})
                 member = await session.get(
@@ -784,6 +819,12 @@ async def livekit_webhook(
                 # Tokens are short-lived capabilities, not durable permission.
                 # Recheck SQL at the actual LiveKit admission event so a token
                 # minted before a kick or overwrite denial cannot be replayed.
+                with suppress(LiveKitError):
+                    await LiveKitControl(settings).remove_participant(room, identity)
+                return await completed()
+        else:
+            dm_channel = await session.get(Channel, (scope_id, settings.domain))
+            if dm_channel is None or not voice_metadata_matches_policy(dm_channel, room, metadata):
                 with suppress(LiveKitError):
                     await LiveKitControl(settings).remove_participant(room, identity)
                 return await completed()

@@ -98,6 +98,12 @@
   import UploadPreviewTray from '$lib/components/UploadPreviewTray.svelte';
   import UserProfileCard from '$lib/components/UserProfileCard.svelte';
   import VirtualMessageList from '$lib/components/VirtualMessageList.svelte';
+  import {
+    decryptConversationMessages,
+    initializeE2EE,
+    type KaedeE2EEClient
+  } from '$lib/e2ee/client';
+  import { uploadEncryptedChannelFile } from '$lib/e2ee/media';
   import { uploadChannelFile, type PendingUpload } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
   import {
@@ -218,6 +224,7 @@
   let lastMemberRefreshAt = 0;
   let dispatchBuffer: Dispatch[] | null = null;
   let uploads = $state<PendingUpload[]>([]);
+  let e2eeClient = $state<KaedeE2EEClient | null>(null);
   let fileInput = $state<HTMLInputElement | null>(null);
   let composerInput = $state<HTMLTextAreaElement | null>(null);
   let autocomplete = $state<{ handleKeydown(event: KeyboardEvent): boolean } | null>(null);
@@ -1816,7 +1823,11 @@
     if (dispatch.t === 'MESSAGE_CREATE') {
       const message = dispatch.d as Message;
       if (isCurrentChannel(message.channel_id, message.channel_domain)) {
-        reconcile(message);
+        if (message.e2ee && channel && e2eeClient) {
+          void decryptConversationMessages(e2eeClient, channel, [message]).then(([decrypted]) =>
+            reconcile(decrypted)
+          );
+        } else reconcile(message);
         if (document.visibilityState === 'visible' && timelineAtBottom) void acknowledge(message);
       } else {
         setReadStates(
@@ -1835,6 +1846,12 @@
       }
     } else if (dispatch.t === 'MESSAGE_UPDATE') {
       const update = dispatch.d as Message;
+      if (update.e2ee && channel && e2eeClient) {
+        void decryptConversationMessages(e2eeClient, channel, [update]).then(([decrypted]) =>
+          applyDispatch({ ...dispatch, d: { ...decrypted, e2ee: null } })
+        );
+        return;
+      }
       setMessages(
         messages.map((item) =>
           entityKey(item) === entityKey(update)
@@ -2518,7 +2535,28 @@
       void loadVoiceOccupancy(loadedGuild.channels ?? [], routeGeneration);
       hasEarlier = targetAround ? loadedMessages.length > 0 : loadedMessages.length === 50;
       hasLater = Boolean(targetAround && loadedMessages.length > 0);
-      const orderedMessages = loadedMessages.reverse().sort(compareMessages);
+      const loadedChannel = loadedGuild.channels?.find((item) =>
+        matchesEntityRef(targetChannel, item, localDomain)
+      );
+      if (loadedChannel?.encryption_mode !== 'e2ee') {
+        void initializeE2EE(loadedCurrentUser)
+          .then((client) => {
+            if (routeGeneration === loadGeneration) e2eeClient = client;
+          })
+          .catch(() => {
+            // Plaintext channels remain usable when secure device storage is unavailable.
+          });
+      }
+      let orderedMessages = loadedMessages.reverse().sort(compareMessages);
+      if (loadedChannel?.encryption_mode === 'e2ee') {
+        const client = await initializeE2EE(loadedCurrentUser);
+        if (routeGeneration !== loadGeneration || targetChannel !== channelId) return;
+        e2eeClient = client;
+        orderedMessages = await decryptConversationMessages(client, loadedChannel, orderedMessages);
+        pinnedMessages = await decryptConversationMessages(client, loadedChannel, loadedPins);
+      } else {
+        e2eeClient = null;
+      }
       setMessages(
         preserveMessages
           ? mergeMessageSnapshot(messages, orderedMessages, {
@@ -2565,7 +2603,9 @@
       );
       if (generation !== loadGeneration || targetChannel !== channelId) return;
       const available = Math.max(0, 1_000 - messages.length);
-      const prepended = older.reverse().slice(-available);
+      let prepended = older.reverse().slice(-available);
+      if (channel?.encryption_mode === 'e2ee' && e2eeClient)
+        prepended = await decryptConversationMessages(e2eeClient, channel, prepended);
       const byKey = Object.create(null) as Record<string, Message>;
       for (const message of prepended) byKey[entityKey(message)] = message;
       for (const message of messages) byKey[entityKey(message)] = message;
@@ -2592,7 +2632,10 @@
       if (generation !== loadGeneration || targetChannel !== channelId) return;
       const byKey = Object.create(null) as Record<string, Message>;
       for (const message of messages) byKey[entityKey(message)] = message;
-      for (const message of newer.reverse()) byKey[entityKey(message)] = message;
+      let decryptedNewer = newer.reverse();
+      if (channel?.encryption_mode === 'e2ee' && e2eeClient)
+        decryptedNewer = await decryptConversationMessages(e2eeClient, channel, decryptedNewer);
+      for (const message of decryptedNewer) byKey[entityKey(message)] = message;
       setMessages(Object.values(byKey).sort(compareMessages).slice(-1_000));
       hasLater = newer.length === 50;
     } catch (caught) {
@@ -2671,12 +2714,35 @@
       const generation = loadGeneration;
       busy = true;
       try {
+        const encrypted =
+          channel?.encryption_mode === 'e2ee'
+            ? await (
+                e2eeClient ?? (currentUser ? await initializeE2EE(currentUser) : null)
+              )?.encryptMessage(channel, text, {
+                operation: 'edit',
+                targetMessage: entityRef(editing),
+                attachments: editing.decrypted_attachments ?? []
+              })
+            : null;
+        if (channel?.encryption_mode === 'e2ee' && !encrypted)
+          throw new Error('Encryption is unavailable on this device.');
         const saved = await api<Message>(
           `/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(entityRef(editing))}`,
-          { method: 'PATCH', body: JSON.stringify({ content: text }) }
+          {
+            method: 'PATCH',
+            body: JSON.stringify(encrypted ? { e2ee: encrypted } : { content: text })
+          }
         );
         if (generation !== loadGeneration) return;
-        reconcile(saved);
+        reconcile(
+          encrypted
+            ? {
+                ...saved,
+                decrypted_content: text,
+                decrypted_attachments: editing.decrypted_attachments ?? []
+              }
+            : saved
+        );
         finishEditing();
       } catch (caught) {
         if (generation === loadGeneration)
@@ -2756,7 +2822,8 @@
         attachmentIds,
         mentionUserIds,
         crypto.randomUUID(),
-        replyingMessage ? entityRef(replyingMessage) : null
+        replyingMessage ? entityRef(replyingMessage) : null,
+        uploads.flatMap((item) => (item.encryptedManifest ? [item.encryptedManifest] : []))
       );
     if (!draft.content && !draft.attachmentIds.length) {
       error = 'Reattach this message’s files before retrying.';
@@ -2780,6 +2847,9 @@
           author_domain: currentUser?.origin_domain ?? localDomain,
           author: currentUser,
           content: draft.content,
+          decrypted_content: channel.encryption_mode === 'e2ee' ? draft.content : undefined,
+          decrypted_attachments:
+            channel.encryption_mode === 'e2ee' ? draft.encryptedAttachments : undefined,
           message_type: 0,
           flags: 0,
           client_nonce: nonce,
@@ -2814,12 +2884,23 @@
     }
     busy = true;
     try {
+      const encrypted =
+        channel.encryption_mode === 'e2ee'
+          ? await (
+              e2eeClient ?? (currentUser ? await initializeE2EE(currentUser) : null)
+            )?.encryptMessage(channel, draft.content ?? '', {
+              attachments: draft.encryptedAttachments
+            })
+          : null;
+      if (channel.encryption_mode === 'e2ee' && !encrypted)
+        throw new Error('Encryption is unavailable on this device.');
       const saved = await api<Message | { status: 'queued'; client_nonce: string }>(
         `/channels/${encodeURIComponent(targetChannel)}/messages`,
         {
           method: 'POST',
           body: JSON.stringify({
-            content: draft.content,
+            content: encrypted ? null : draft.content,
+            e2ee: encrypted,
             client_nonce: nonce,
             attachment_ids: draft.attachmentIds,
             mention_user_ids: draft.mentionUserIds,
@@ -2840,7 +2921,15 @@
         if (channel.rate_limit_per_user > 0) startSlowmode(channel.rate_limit_per_user * 1000);
         return;
       }
-      reconcile(saved);
+      reconcile(
+        encrypted
+          ? {
+              ...saved,
+              decrypted_content: draft.content,
+              decrypted_attachments: draft.encryptedAttachments
+            }
+          : saved
+      );
       clearSubmittedUploads(draft.attachmentIds);
       if (channel.rate_limit_per_user > 0) startSlowmode(channel.rate_limit_per_user * 1000);
       await acknowledge(saved);
@@ -2907,7 +2996,9 @@
       const controller = new AbortController();
       uploadControllers.set(key, controller);
       uploads = [...uploads, { key, file, progress: 0, status: 'uploading' }];
-      void uploadChannelFile(
+      const upload =
+        channel.encryption_mode === 'e2ee' ? uploadEncryptedChannelFile : uploadChannelFile;
+      void upload(
         target,
         file,
         (progress) => {
@@ -2926,7 +3017,13 @@
           if (generation !== loadGeneration || routeChannel !== channelId) return;
           uploads = uploads.map((item) =>
             item.key === key
-              ? { ...item, progress: 100, status: 'ready', attachmentId: ticket.id }
+              ? {
+                  ...item,
+                  progress: 100,
+                  status: 'ready',
+                  attachmentId: 'ticket' in ticket ? ticket.ticket.id : ticket.id,
+                  encryptedManifest: 'manifest' in ticket ? ticket.manifest : undefined
+                }
               : item
           );
         })
@@ -3025,7 +3122,7 @@
       composerDraftBeforeEdit = { content, cursor: composerCursor };
     }
     editingMessage = message;
-    content = message.content ?? '';
+    content = message.decrypted_content ?? message.content ?? '';
     composerCursor = content.length;
     void tick().then(() => {
       composerInput?.focus();

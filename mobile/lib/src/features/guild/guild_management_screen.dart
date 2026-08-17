@@ -10,6 +10,7 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -101,6 +102,8 @@ final class _GuildManagementScreenState
             changed: _changed,
             canManageChannels: canManageChannels,
             canManagePermissions: canManageRoles,
+            e2eeClient: () =>
+                ref.read(mobileControllerProvider.notifier).e2eeClient(),
           ),
         ),
       if (canManageRoles)
@@ -586,12 +589,14 @@ final class _ChannelsTab extends StatefulWidget {
     required this.changed,
     required this.canManageChannels,
     required this.canManagePermissions,
+    required this.e2eeClient,
   });
   final KaedeGuild guild;
   final KaedeRepository repository;
   final Future<KaedeGuild> Function([String?]) changed;
   final bool canManageChannels;
   final bool canManagePermissions;
+  final Future<MobileE2EEClient> Function() e2eeClient;
   @override
   State<_ChannelsTab> createState() => _ChannelsTabState();
 }
@@ -599,6 +604,27 @@ final class _ChannelsTab extends StatefulWidget {
 final class _ChannelsTabState extends State<_ChannelsTab> {
   late List<KaedeChannel> _channels = [...widget.guild.channels]
     ..sort((a, b) => a.position.compareTo(b.position));
+  var _e2eeActivationEnabled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadE2eeActivation();
+  }
+
+  Future<void> _loadE2eeActivation() async {
+    final instance = widget.repository.api.tokens?.instance;
+    if (instance == null) return;
+    try {
+      final configuration = await widget.repository.authConfig(instance);
+      if (mounted) {
+        setState(() => _e2eeActivationEnabled =
+            configuration['e2ee_activation_enabled'] == true);
+      }
+    } on Object {
+      // Activation stays hidden when the instance configuration cannot be verified.
+    }
+  }
 
   @override
   void didUpdateWidget(covariant _ChannelsTab oldWidget) {
@@ -654,15 +680,27 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
       PopupMenuButton<String>(
         onSelected: (action) => action == 'permissions'
             ? _permissions(channel)
-            : action == 'delete'
-                ? _delete(channel)
-                : _edit(channel),
+            : action == 'encryption'
+                ? _encryption(channel)
+                : action == 'delete'
+                    ? _delete(channel)
+                    : _edit(channel),
         itemBuilder: (_) => [
           if (widget.canManageChannels)
             const PopupMenuItem(value: 'edit', child: Text('Edit channel')),
           if (widget.canManagePermissions)
             const PopupMenuItem(
                 value: 'permissions', child: Text('Permissions')),
+          if (widget.canManageChannels &&
+              {ChannelType.text, ChannelType.announcement, ChannelType.voice}
+                  .contains(channel.type) &&
+              (channel.encryptionMode == 'e2ee' || _e2eeActivationEnabled))
+            PopupMenuItem(
+              value: 'encryption',
+              child: Text(channel.encryptionMode == 'e2ee'
+                  ? 'Encryption settings'
+                  : 'Enable encryption'),
+            ),
           if (widget.canManageChannels)
             const PopupMenuItem(
                 value: 'delete',
@@ -745,6 +783,131 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
     } on Object catch (error) {
       if (mounted) _tabError(context, 'Could not delete channel', error);
     }
+  }
+
+  Future<void> _encryption(KaedeChannel channel) async {
+    final encrypted = channel.encryptionMode == 'e2ee';
+    final needsRekey =
+        encrypted && {'rekeying', 'failed'}.contains(channel.encryptionState);
+    String? safetyNumber;
+    String? error;
+    var busy = false;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          Future<void> run(
+              Future<void> Function(MobileE2EEClient) action) async {
+            if (busy) return;
+            setDialogState(() {
+              busy = true;
+              error = null;
+            });
+            try {
+              final client = await widget.e2eeClient();
+              await action(client);
+            } on Object catch (caught) {
+              error = userFacingError(
+                caught,
+                summary: 'Could not update end-to-end encryption.',
+              );
+            } finally {
+              if (dialogContext.mounted) {
+                setDialogState(() => busy = false);
+              }
+            }
+          }
+
+          final media = channel.type == ChannelType.voice;
+          return AlertDialog(
+            title: Text(encrypted
+                ? 'End-to-end encryption'
+                : 'Enable end-to-end encryption?'),
+            content: SizedBox(
+              width: 520,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(encrypted
+                        ? needsRekey
+                            ? 'Encrypted activity is paused until a manager rotates the room keys.'
+                            : 'Encryption is ${channel.encryptionState}.'
+                        : media
+                            ? 'Voice, video, screen video, and screen audio will be encrypted on participant devices. The media relay still sees routing, timing, track, traffic, and participant metadata.'
+                            : 'New messages and files will be encrypted on participant devices. Existing history remains plaintext.'),
+                    const SizedBox(height: 12),
+                    Text(media
+                        ? 'Server recording, transcription, media moderation, and unsupported clients will be unavailable. A participant can still record on their own device. This change cannot be reversed.'
+                        : 'Search, link previews, bots, webhooks, server file previews, and malware scanning will be unavailable. Push wakes contain no message text, but participants, timing, and message-size metadata remain visible. Losing every enrolled device without a recovery backup permanently loses encrypted history. Removed members retain content already received. This change cannot be reversed.'),
+                    if (safetyNumber != null) ...[
+                      const SizedBox(height: 14),
+                      const Text('Channel safety number',
+                          style: TextStyle(fontWeight: FontWeight.w800)),
+                      SelectableText(safetyNumber!),
+                      const SizedBox(height: 6),
+                      const Text(
+                          'Compare this with members through a trusted channel. It changes after membership or device changes.'),
+                    ],
+                    if (error != null) ...[
+                      const SizedBox(height: 12),
+                      Text(error!,
+                          style: const TextStyle(color: KaedeColors.coral)),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: busy ? null : () => Navigator.pop(dialogContext),
+                child: const Text('Done'),
+              ),
+              if (encrypted && channel.encryptionState == 'active')
+                FilledButton.tonal(
+                  onPressed: busy
+                      ? null
+                      : () => run((client) async {
+                            await client.syncRoomState(channel);
+                            final value = await client.safetyNumber(channel);
+                            if (dialogContext.mounted) {
+                              setDialogState(() => safetyNumber = value);
+                            }
+                          }),
+                  child: const Text('Verify safety number'),
+                ),
+              if (!encrypted || needsRekey)
+                FilledButton.icon(
+                  onPressed: busy
+                      ? null
+                      : () => run((client) async {
+                            final updated = needsRekey
+                                ? await client.rekeyRoom(channel)
+                                : await client.enableRoom(channel);
+                            if (!dialogContext.mounted) return;
+                            Navigator.pop(dialogContext);
+                            await widget.changed(needsRekey
+                                ? 'Encryption keys rotated'
+                                : 'End-to-end encryption enabled');
+                            if (mounted) {
+                              setState(() {
+                                final index = _channels.indexWhere(
+                                    (item) => item.ref == channel.ref);
+                                if (index >= 0) _channels[index] = updated;
+                              });
+                            }
+                          }),
+                  icon: Icon(needsRekey
+                      ? Icons.sync_lock_rounded
+                      : Icons.lock_rounded),
+                  label: Text(needsRekey ? 'Rotate keys' : 'Enable'),
+                ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _permissions(KaedeChannel channel) async {

@@ -8,6 +8,17 @@ from app.core.types import EntityRef
 from app.federation.schemas import FederationDomain, SnowflakeString
 
 
+class VoiceTokenRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sender_device_id: str | None = Field(
+        default=None,
+        min_length=47,
+        max_length=47,
+        pattern=r"^ked_[A-Za-z0-9_-]{43}$",
+    )
+
+
 class VoiceTokenResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -21,6 +32,41 @@ class VoiceTokenResponse(BaseModel):
     # Defaults preserve compatibility with peers that predate the explicit
     # grant. New home instances always send the authoritative value.
     can_use_vad: bool = True
+    e2ee: bool = False
+    channel_id: SnowflakeString | None = None
+    channel_domain: FederationDomain | None = None
+    encryption_policy_generation: SnowflakeString | None = None
+    encryption_epoch: SnowflakeString | None = None
+    media_protocol: Literal["livekit-e2ee-v1"] | None = None
+    media_suite: Literal["AES-256-GCM"] | None = None
+    media_session_id: str | None = Field(
+        default=None,
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
+    media_epoch: SnowflakeString | None = None
+
+    @model_validator(mode="after")
+    def consistent_e2ee_context(self) -> VoiceTokenResponse:
+        context = (
+            self.channel_id,
+            self.channel_domain,
+            self.encryption_policy_generation,
+            self.encryption_epoch,
+            self.media_protocol,
+            self.media_suite,
+            self.media_session_id,
+            self.media_epoch,
+        )
+        if self.e2ee and any(item is None for item in context):
+            raise ValueError("encrypted voice grant requires complete room context")
+        if self.e2ee and self.media_epoch != self.encryption_epoch:
+            raise ValueError("encrypted voice grant media epoch does not match MLS epoch")
+        if not self.e2ee and any(item is not None for item in context[2:]):
+            raise ValueError("plaintext voice grant cannot carry an encryption epoch")
+        return self
+
     # Present for a federated guild session. Clients retain this opaque value
     # and only accept pushed move grants carrying the same correlation.
     move_session_id: str | None = Field(
@@ -91,6 +137,12 @@ class VoiceBrokerRequest(BaseModel):
         max_length=64,
         pattern=r"^[A-Za-z0-9_-]+$",
     )
+    sender_device_id: str | None = Field(
+        default=None,
+        min_length=47,
+        max_length=47,
+        pattern=r"^ked_[A-Za-z0-9_-]{43}$",
+    )
 
 
 class DMVoiceBrokerRequest(BaseModel):
@@ -99,6 +151,12 @@ class DMVoiceBrokerRequest(BaseModel):
     call_id: SnowflakeString
     actor_id: SnowflakeString
     actor_domain: FederationDomain
+    sender_device_id: str | None = Field(
+        default=None,
+        min_length=47,
+        max_length=47,
+        pattern=r"^ked_[A-Za-z0-9_-]{43}$",
+    )
 
 
 class VoiceOccupantState(BaseModel):

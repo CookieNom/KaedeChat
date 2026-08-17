@@ -379,6 +379,11 @@ def _validate_federation_budgets(values: dict[str, str]) -> None:
         raise DeploymentConfigurationError(
             "KAEDE_FEDERATION_HISTORY_IMPORT_ENABLED must be true or false"
         )
+    e2ee_activation_enabled = values.get("KAEDE_E2EE_ACTIVATION_ENABLED", "false")
+    if e2ee_activation_enabled.strip().lower() not in {"true", "false"}:
+        raise DeploymentConfigurationError(
+            "KAEDE_E2EE_ACTIVATION_ENABLED must be true or false"
+        )
 
     non_strict_bounds = (
         (

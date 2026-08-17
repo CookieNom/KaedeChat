@@ -103,9 +103,12 @@ message timestamp into the case, so later edits or deletion cannot erase the
 review record. The reporter cannot read the evidence snapshot, assignee, or
 internal resolution.
 
-E2EE message reports are disabled. The server cannot verify or safely copy
-plaintext it does not possess, and Kaede does not ask a client to upload
-locally decrypted content as server-trusted evidence.
+An E2EE message can be reported only after the reporter's client decrypts that
+specific message and the reporter explicitly confirms selective disclosure.
+The case stores the disclosed text, a fingerprint of the original ciphertext,
+and `server_verified=false`; moderators see that the evidence is
+reporter-supplied. Room keys, other messages, and surrounding history are never
+included automatically.
 
 The Trust & Safety queue is instance-level; guild moderators do not receive it.
 Authorized staff can triage, review, request more information, record action or

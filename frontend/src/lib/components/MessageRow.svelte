@@ -28,6 +28,7 @@
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import { preferredLocale } from '$lib/ui/locale';
   import { assetUrl } from '$lib/media/assets';
+  import { downloadEncryptedFile, type EncryptedFileManifest } from '$lib/e2ee/media';
   import {
     attachmentMediaPath,
     authenticatedMedia,
@@ -121,6 +122,9 @@
   let menuListenersActive = false;
   const closeExclusiveMenu = (restoreFocus: boolean) => closeMenu(restoreFocus);
   const groupSystemNotice = $derived([3, 4, 5].includes(message.message_type));
+  const renderedContent = $derived(
+    message.e2ee ? (message.decrypted_content ?? null) : message.content
+  );
 
   const editAvailable = $derived(
     !groupSystemNotice && canEdit && !message.deleted_at && !message.pending && !message.queued
@@ -128,16 +132,38 @@
   const menuAvailable = $derived(
     !groupSystemNotice && actionsEnabled && !message.pending && !message.queued
   );
+  // Content-derived network requests are intentionally disabled for E2EE.
+  // A manual, disclosed preview flow may be added later, but decrypted URLs
+  // must never be submitted to the server implicitly.
+  const previewableContent = $derived(message.e2ee ? null : renderedContent);
   const inviteReferences = $derived(
-    message.content ? inviteReferencesInMessage(message.content) : []
+    previewableContent ? inviteReferencesInMessage(previewableContent) : []
   );
-  const botInviteReferences = $derived(message.content ? botInvitesInMessage(message.content) : []);
-  const gifUrl = $derived(klipyGifUrl(message.content));
+  const botInviteReferences = $derived(
+    previewableContent ? botInvitesInMessage(previewableContent) : []
+  );
+  const gifUrl = $derived(klipyGifUrl(previewableContent));
   let gifFavorited = $derived(gifUrl ? isGifFavorite(gifUrl) : false);
-  const linkPreviewUrl = $derived(previewableLink(message.content));
+  const linkPreviewUrl = $derived(previewableLink(previewableContent));
 
   function attachmentKey(attachment: Attachment): string {
     return `${attachment.id}@${attachment.origin_domain}`;
+  }
+
+  async function downloadDecryptedAttachment(manifest: EncryptedFileManifest) {
+    attachmentActionError = '';
+    const matching = message.attachments?.find(
+      (item) =>
+        item.id === manifest.attachment_id && item.origin_domain === manifest.attachment_domain
+    );
+    try {
+      await downloadEncryptedFile(manifest, matching?.history_media_url);
+    } catch (caught) {
+      attachmentActionError = userErrorMessage(
+        caught,
+        'Could not decrypt this file on this device.'
+      );
+    }
   }
 
   function markMediaFailed(attachment: Attachment, event: Event) {
@@ -574,7 +600,9 @@
           <span
             >{referencedMessage.deleted_at
               ? 'Message removed'
-              : referencedMessage.content || 'Attachment'}</span
+              : referencedMessage.decrypted_content ||
+                referencedMessage.content ||
+                'Attachment'}</span
           >
         {:else}
           <span>Referenced message</span>
@@ -598,11 +626,23 @@
     {#if groupSystemNotice}
       <div class="group-system-message">
         <span class="group-system-icon" aria-hidden="true">✦</span>
-        <span>{message.content}</span>
+        <span>{renderedContent}</span>
         <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
       </div>
     {:else if message.deleted_at}
       <p class="message-removed">Message removed</p>
+    {:else if message.e2ee && !renderedContent}
+      <div class="encrypted-message-unavailable" role="status">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="5" y="10" width="14" height="10" rx="2" />
+          <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+        </svg>
+        <span>
+          <strong>Can’t decrypt this message on this device.</strong>
+          Verify or recover this device’s encryption keys, or update Kaede if this device does not support
+          the room’s encryption version.
+        </span>
+      </div>
     {:else if gifUrl}
       <div class="klipy-gif-wrap">
         <a class="klipy-gif" href={gifUrl} target="_blank" rel="noopener noreferrer">
@@ -618,8 +658,8 @@
           onclick={favoriteGif}>★</button
         >
       </div>
-    {:else if message.content}
-      <Markdown content={message.content} {mentionUsers} {mentionRoles} />
+    {:else if renderedContent}
+      <Markdown content={renderedContent} {mentionUsers} {mentionRoles} />
       {#each inviteReferences as reference (reference)}
         <InviteEmbed {reference} />
       {/each}
@@ -633,7 +673,9 @@
     {#if !message.deleted_at && message.attachments?.length}
       <div class="message-attachments">
         {#each message.attachments as attachment (`${attachment.id}@${attachment.origin_domain}`)}
-          {#if attachment.scan_status === 'pending'}
+          {#if attachment.encryption_mode === 'e2ee'}
+            <!-- The authenticated decrypted manifest below supplies the real name, type, and key. -->
+          {:else if attachment.scan_status === 'pending'}
             <span class="attachment-file">Scanning {attachment.filename}…</span>
           {:else if attachment.scan_status === 'infected'}
             <span class="attachment-file">Removed unsafe attachment</span>
@@ -713,6 +755,22 @@
               📎 {attachment.filename}
             </button>
           {/if}
+        {/each}
+      </div>
+      {#if attachmentActionError}
+        <p class="form-error" role="alert">{attachmentActionError}</p>
+      {/if}
+    {/if}
+    {#if !message.deleted_at && message.decrypted_attachments?.length}
+      <div class="message-attachments encrypted-attachments">
+        {#each message.decrypted_attachments as manifest (manifest.file_id)}
+          <button
+            type="button"
+            class="attachment-file"
+            onclick={() => void downloadDecryptedAttachment(manifest)}
+          >
+            🔒 {manifest.filename} · {Math.max(1, Math.ceil(manifest.plaintext_size / 1024))} KB
+          </button>
         {/each}
       </div>
       {#if attachmentActionError}
@@ -902,7 +960,7 @@
             </button>
           {/each}
         {/if}
-        {#if !message.e2ee && !message.deleted_at}
+        {#if renderedContent && !message.deleted_at}
           <button type="button" role="menuitem" tabindex="-1" onclick={openReportDialog}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M5 21V4m0 1h11l-2 4 2 4H5" />
@@ -961,13 +1019,13 @@
             {/if}
           {/if}
         {/if}
-        {#if message.content && !message.deleted_at}
+        {#if renderedContent && !message.deleted_at}
           <button
             class:menu-separator={editAvailable || Boolean(onMessageAuthor)}
             type="button"
             role="menuitem"
             tabindex="-1"
-            onclick={(event) => copy(message.content ?? '', event)}
+            onclick={(event) => copy(renderedContent ?? '', event)}
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M8 8h11v12H8z" />

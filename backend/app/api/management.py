@@ -240,6 +240,8 @@ async def update_channel(
                 }
             )
             guild.permission_generation += 1
+            if channel.encryption_mode == "e2ee" and channel.encryption_state == "active":
+                channel.encryption_state = "rekeying"
         if history_policy_changed:
             guild.history_policy_generation += 1
             from app.federation.history import revoke_history_exports
@@ -351,6 +353,8 @@ async def reorder_channels(
                     )
                 )
                 channel.permissions_synced = True
+            if channel.encryption_mode == "e2ee" and channel.encryption_state == "active":
+                channel.encryption_state = "rekeying"
             elif parent_changed and channel.permissions_synced:
                 source = await overwrite_source_channel(session, channel)
                 await copy_overwrites(session, source, channel)

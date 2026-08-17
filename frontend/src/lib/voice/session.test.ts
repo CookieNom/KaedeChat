@@ -31,6 +31,29 @@ describe('voice grant validation', () => {
       isUsableVoiceToken(grant({ move_session_id: ['a'.repeat(32)] as unknown as string }), 0)
     ).toBe(false);
   });
+
+  it('requires a complete, internally consistent encrypted media context', () => {
+    const encrypted = grant({
+      e2ee: true,
+      channel_id: '2',
+      channel_domain: 'chat.example',
+      encryption_policy_generation: '4',
+      encryption_epoch: '7',
+      media_protocol: 'livekit-e2ee-v1',
+      media_suite: 'AES-256-GCM',
+      media_session_id: 'a'.repeat(43),
+      media_epoch: '7'
+    });
+    expect(isUsableVoiceToken(encrypted, 0)).toBe(true);
+    expect(isUsableVoiceToken({ ...encrypted, media_epoch: '6' }, 0)).toBe(false);
+    expect(isUsableVoiceToken({ ...encrypted, media_session_id: 'short' }, 0)).toBe(false);
+    expect(
+      isUsableVoiceToken(
+        grant({ media_protocol: 'livekit-e2ee-v1', media_suite: 'AES-256-GCM' }),
+        0
+      )
+    ).toBe(false);
+  });
 });
 
 describe('voice connection timeout', () => {

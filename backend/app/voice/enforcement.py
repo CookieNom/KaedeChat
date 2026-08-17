@@ -42,6 +42,8 @@ async def enforce_room_permissions(
     changed = 0
     for occupant in await room_occupants(redis, settings.domain, room):
         try:
+            if channel.encryption_mode == "e2ee" and channel.encryption_state != "active":
+                raise HTTPException(status_code=409)
             user_id, user_domain = parse_participant_identity(occupant.identity)
             user = await session.get(User, (user_id, user_domain))
             if user is None:

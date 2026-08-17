@@ -369,6 +369,7 @@ final class KaedeRepository {
   Future<Map<String, Object?>> sendMessage(
     EntityRef channel, {
     String? content,
+    Map<String, Object?>? e2ee,
     List<EntityRef> attachments = const <EntityRef>[],
     EntityRef? replyTo,
     EntityRef? replyAuthor,
@@ -378,6 +379,7 @@ final class KaedeRepository {
       api.sendJson('POST', '/api/v1/channels/${channel.wire}/messages',
           data: <String, Object?>{
             if (content?.isNotEmpty == true) 'content': content,
+            if (e2ee != null) 'e2ee': e2ee,
             // Attachments are local to the channel's home instance. Unlike
             // user/message references, MessageCreate expects bare snowflakes.
             'attachment_ids': messageAttachmentIds(attachments),
@@ -389,15 +391,40 @@ final class KaedeRepository {
             'client_nonce': nonce ?? const Uuid().v4(),
           });
   Future<KaedeMessage> editMessage(
-          EntityRef channel, EntityRef message, String content) async =>
+    EntityRef channel,
+    EntityRef message,
+    String? content, {
+    Map<String, Object?>? e2ee,
+  }) async =>
       KaedeMessage.fromJson(await api.sendJson(
         'PATCH',
         '/api/v1/channels/${channel.wire}/messages/${message.wire}',
-        data: <String, Object?>{'content': content},
+        data: <String, Object?>{
+          if (content != null) 'content': content,
+          if (e2ee != null) 'e2ee': e2ee,
+        },
       ));
   Future<void> deleteMessage(EntityRef channel, EntityRef message) =>
       api.sendJson('DELETE',
           '/api/v1/channels/${channel.wire}/messages/${message.wire}');
+  Future<void> reportMessage(
+    EntityRef message, {
+    required String category,
+    String? description,
+    String? disclosedContent,
+    bool disclosureAcknowledged = false,
+  }) =>
+      api.sendJson('POST', '/api/v1/reports', data: {
+        'target_type': 'message',
+        'target_ref': message.wire,
+        'message_ref': message.wire,
+        'category': category,
+        if (description?.trim().isNotEmpty == true)
+          'description': description!.trim(),
+        if (disclosedContent != null) 'disclosed_content': disclosedContent,
+        if (disclosedContent != null)
+          'disclosure_acknowledged': disclosureAcknowledged,
+      });
   Future<void> react(EntityRef channel, EntityRef message, String emoji) =>
       api.sendJson(
         'POST',
@@ -759,8 +786,15 @@ final class KaedeRepository {
         data: <String, Object?>{'level': level},
       );
 
-  Future<Map<String, Object?>> voiceToken(EntityRef channel) =>
-      api.sendJson('POST', '/api/v1/channels/${channel.wire}/voice/token');
+  Future<Map<String, Object?>> voiceToken(
+    EntityRef channel, {
+    String? senderDeviceId,
+  }) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/voice/token',
+        data: <String, Object?>{'sender_device_id': senderDeviceId},
+      );
   Future<Map<String, Object?>> voiceOccupancy(EntityRef channel) =>
       api.getJson('/api/v1/channels/${channel.wire}/voice/occupancy');
   Future<void> updateMemberVoice(
@@ -817,9 +851,14 @@ final class KaedeRepository {
   Future<Map<String, Object?>> callAction(EntityRef call, String action) =>
       api.sendJson('POST', '/api/v1/calls/${call.wire}',
           data: <String, Object?>{'action': action});
-  Future<Map<String, Object?>> callVoiceToken(EntityRef call) => api.sendJson(
+  Future<Map<String, Object?>> callVoiceToken(
+    EntityRef call, {
+    String? senderDeviceId,
+  }) =>
+      api.sendJson(
         'POST',
         '/api/v1/calls/${call.wire}/voice/token',
+        data: <String, Object?>{'sender_device_id': senderDeviceId},
       );
   Future<KaedeChannel> createGroupDm(List<String> handles,
           {String? name}) async =>
@@ -856,13 +895,108 @@ final class KaedeRepository {
     required String filename,
     required String contentType,
     required int size,
+    String encryptionMode = 'plaintext',
+    String? encryptionProtocol,
   }) =>
       api.sendJson('POST', '/api/v1/channels/${channel.wire}/attachments',
           data: <String, Object?>{
             'filename': filename,
             'content_type': contentType,
             'size': size,
+            'encryption_mode': encryptionMode,
+            if (encryptionProtocol != null)
+              'encryption_protocol': encryptionProtocol,
           });
+
+  Future<Map<String, Object?>> e2eeDeviceChallenge({
+    required String identityKey,
+    required String credentialDigest,
+  }) =>
+      api.sendJson('POST', '/api/v1/e2ee/devices/challenge', data: {
+        'identity_key': identityKey,
+        'credential_digest': credentialDigest,
+      });
+
+  Future<Map<String, Object?>> registerE2eeDevice({
+    required String challengeId,
+    required String identityKey,
+    required String credential,
+    required String signature,
+    required String deviceName,
+    required String platform,
+  }) =>
+      api.sendJson('POST', '/api/v1/e2ee/devices', data: {
+        'challenge_id': challengeId,
+        'identity_key': identityKey,
+        'credential': credential,
+        'signature': signature,
+        'device_name': deviceName,
+        'platform': platform,
+        'capabilities': const ['e2ee-mls/1', 'e2ee-media/1'],
+      });
+
+  Future<Map<String, Object?>> e2eeDevices() =>
+      api.getJson('/api/v1/e2ee/devices');
+  Future<void> revokeE2eeDevice(String deviceId) => api.sendJson(
+        'DELETE',
+        '/api/v1/e2ee/devices/${Uri.encodeComponent(deviceId)}',
+      );
+
+  Future<void> uploadE2eeKeyPackages(
+    String deviceId, {
+    required String expiresAt,
+    required List<String> packages,
+    required String signature,
+  }) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/e2ee/devices/${Uri.encodeComponent(deviceId)}/key-packages',
+        data: {
+          'cipher_suite': 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519',
+          'expires_at': expiresAt,
+          'packages': packages,
+          'signature': signature,
+        },
+      );
+
+  Future<Map<String, Object?>> proposeE2eeRoom(
+          EntityRef channel, String deviceId) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/e2ee/channels/${channel.wire}/propose',
+        data: {'sender_device_id': deviceId},
+      );
+
+  Future<Map<String, Object?>> proposeE2eeRekey(
+          EntityRef channel, String deviceId) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/e2ee/channels/${channel.wire}/rekey/propose',
+        data: {'sender_device_id': deviceId},
+      );
+
+  Future<KaedeChannel> activateE2eeRoom(
+    EntityRef channel, {
+    required String deviceId,
+    required String generation,
+    required String commit,
+    required String welcome,
+    String? proposalId,
+  }) async =>
+      KaedeChannel.fromJson(await api.sendJson(
+        'POST',
+        proposalId == null
+            ? '/api/v1/e2ee/channels/${channel.wire}/activate'
+            : '/api/v1/e2ee/channels/${channel.wire}/rekey/activate',
+        data: {
+          if (proposalId != null) 'proposal_id': proposalId,
+          'sender_device_id': deviceId,
+          'policy_generation': generation,
+          'epoch': '1',
+          'commit': commit,
+          'welcome': welcome,
+        },
+      ));
 
   Future<EntityRef> uploadAttachment({
     required EntityRef channel,

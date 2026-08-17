@@ -51,6 +51,11 @@ def silence_blocks_path(path: str) -> bool:
     if path in {
         "/_kaede/v1/users/lookup",
         "/_kaede/v1/users/profile",
+        "/_kaede/v1/e2ee/key-packages/claim",
+        "/_kaede/v1/e2ee/rooms/propose",
+        "/_kaede/v1/e2ee/rooms/activate",
+        "/_kaede/v1/e2ee/rooms/rekey/propose",
+        "/_kaede/v1/e2ee/rooms/rekey/activate",
         "/_kaede/v1/invites/resolve",
     }:
         return True

@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
@@ -29,6 +30,250 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   var _biometricLock = false;
   var _biometricLockTimeout = 30;
   String? _loadError;
+
+  Future<String?> _secretPrompt(String title, String label) async {
+    final input = TextEditingController();
+    try {
+      return showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(title),
+          content: TextField(
+            controller: input,
+            obscureText: true,
+            autofocus: true,
+            decoration: InputDecoration(labelText: label),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, input.text),
+              child: const Text('Continue'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      input.dispose();
+    }
+  }
+
+  Future<void> _initializeEncryption() async {
+    setState(() => _saving = true);
+    try {
+      await ref.read(mobileControllerProvider.notifier).e2eeClient();
+      _showSuccess('This device is ready for end-to-end encryption.');
+    } on Object catch (error) {
+      _showError(error, summary: 'Could not initialize encryption');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _exportEncryptionRecovery() async {
+    final passphrase = await _secretPrompt(
+      'Create recovery backup',
+      'A new passphrase (12+ characters)',
+    );
+    if (passphrase == null) return;
+    try {
+      final bundle = await ref
+          .read(mobileControllerProvider.notifier)
+          .exportE2eeRecovery(passphrase);
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          title: const Text('Save your encrypted recovery backup'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Anyone with this backup and its passphrase can read your encrypted history. Store both separately. Do not import it while this device is still actively sending messages; use device transfer or revoke the old device first.',
+                ),
+                const SizedBox(height: 12),
+                SelectableText(bundle, maxLines: 8),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton.icon(
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: bundle));
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Recovery backup copied.')),
+                  );
+                }
+              },
+              icon: const Icon(Icons.copy_rounded),
+              label: const Text('Copy'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('I saved it'),
+            ),
+          ],
+        ),
+      );
+    } on Object catch (error) {
+      _showError(error, summary: 'Could not create the recovery backup');
+    }
+  }
+
+  Future<void> _importEncryptionRecovery() async {
+    final bundle = TextEditingController();
+    final passphrase = TextEditingController();
+    try {
+      final accepted = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Restore encrypted history'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Restoring replaces this phone’s current encryption state. Never run two devices from the same recovery backup at the same time.',
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: bundle,
+                  minLines: 4,
+                  maxLines: 8,
+                  decoration:
+                      const InputDecoration(labelText: 'Recovery backup'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: passphrase,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: 'Passphrase'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Replace and restore'),
+            ),
+          ],
+        ),
+      );
+      if (accepted != true) return;
+      setState(() => _saving = true);
+      await ref.read(mobileControllerProvider.notifier).importE2eeRecovery(
+            bundle.text.trim(),
+            passphrase.text,
+          );
+      _showSuccess('Encrypted history was restored on this phone.');
+    } on Object catch (error) {
+      _showError(error, summary: 'Could not restore encrypted history');
+    } finally {
+      bundle.dispose();
+      passphrase.dispose();
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _manageEncryptionDevices() async {
+    try {
+      final repository = ref.read(mobileControllerProvider.notifier).repository;
+      final controller = ref.read(mobileControllerProvider.notifier);
+      final currentDeviceId = await controller.currentE2eeDeviceId();
+      final response = await repository.e2eeDevices();
+      final devices = (response['devices'] as List? ?? const [])
+          .whereType<Map<Object?, Object?>>()
+          .map((item) => Map<String, Object?>.from(item))
+          .toList(growable: false);
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (context) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+            children: [
+              Text('Encryption devices',
+                  style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 6),
+              const Text(
+                'Revoking a device immediately pauses affected encrypted rooms until a member rotates their keys.',
+              ),
+              const SizedBox(height: 12),
+              for (final device in devices)
+                ListTile(
+                  leading: Icon(device['revoked_at'] == null
+                      ? Icons.verified_user_outlined
+                      : Icons.phonelink_erase_rounded),
+                  title: Text('${device['device_name'] ?? 'Kaede device'}'),
+                  subtitle: Text(
+                    '${device['platform'] ?? 'unknown'} · ${device['id']}'
+                    '${device['id'] == currentDeviceId ? ' · This device' : ''}',
+                  ),
+                  trailing: device['revoked_at'] != null
+                      ? const Text('Revoked')
+                      : IconButton(
+                          tooltip: 'Revoke device',
+                          onPressed: () async {
+                            final accepted = await showDialog<bool>(
+                              context: context,
+                              builder: (dialogContext) => AlertDialog(
+                                title: const Text('Revoke encryption device?'),
+                                content: Text(
+                                  device['id'] == currentDeviceId
+                                      ? 'This phone will immediately lose its local encrypted access. Affected rooms pause until their keys are rotated.'
+                                      : 'That device immediately loses future encrypted access. Affected rooms pause until their keys are rotated.',
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.pop(dialogContext, false),
+                                    child: const Text('Cancel'),
+                                  ),
+                                  FilledButton(
+                                    onPressed: () =>
+                                        Navigator.pop(dialogContext, true),
+                                    child: const Text('Revoke'),
+                                  ),
+                                ],
+                              ),
+                            );
+                            if (accepted != true) return;
+                            await repository
+                                .revokeE2eeDevice('${device['id']}');
+                            if (device['id'] == currentDeviceId) {
+                              await controller.clearLocalE2eeState();
+                            }
+                            if (context.mounted) Navigator.pop(context);
+                            _showSuccess(
+                              'Encryption device revoked. Rotate affected room keys before resuming.',
+                            );
+                          },
+                          icon: const Icon(Icons.delete_outline_rounded),
+                        ),
+                ),
+            ],
+          ),
+        ),
+      );
+    } on Object catch (error) {
+      _showError(error, summary: 'Could not load encryption devices');
+    }
+  }
 
   @override
   void initState() {
@@ -247,6 +492,45 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         icon: const Icon(Icons.enhanced_encryption_outlined),
                         label: const Text('Set up two-factor authentication'),
                       ),
+              ),
+            ],
+          ),
+        ),
+        _Section(
+          icon: Icons.lock_person_outlined,
+          title: 'End-to-end encryption',
+          subtitle:
+              'Device keys stay on your devices. Your instance cannot recover encrypted messages for you.',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Encrypted rooms disable server-side message search, link previews, bots, webhooks, server attachment scanning and server-side media thumbnails. Notifications do not contain message previews until this app decrypts them locally.',
+                style: TextStyle(color: KaedeColors.muted),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.tonalIcon(
+                onPressed: _saving ? null : _initializeEncryption,
+                icon: const Icon(Icons.key_rounded),
+                label: const Text('Set up this device'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _saving ? null : _manageEncryptionDevices,
+                icon: const Icon(Icons.devices_other_rounded),
+                label: const Text('Manage encryption devices'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _saving ? null : _exportEncryptionRecovery,
+                icon: const Icon(Icons.download_for_offline_outlined),
+                label: const Text('Create recovery backup'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _saving ? null : _importEncryptionRecovery,
+                icon: const Icon(Icons.restore_rounded),
+                label: const Text('Restore recovery backup'),
               ),
             ],
           ),

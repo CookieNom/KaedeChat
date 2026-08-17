@@ -17,6 +17,7 @@ from app.api.dependencies import (
 )
 from app.api.management import require_current_version
 from app.chat.audit import add_audit_entry
+from app.chat.e2ee_membership import pause_guild_e2ee_for_membership_change
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import (
     queue_guild_access_revocation,
@@ -142,6 +143,7 @@ async def leave_guild(
         )
     else:
         await session.delete(member)
+        await pause_guild_e2ee_for_membership_change(session, guild)
         await queue_guild_mutation(
             session,
             settings,

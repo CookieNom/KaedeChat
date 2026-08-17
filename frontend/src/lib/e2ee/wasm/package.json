@@ -1,0 +1,22 @@
+{
+  "name": "kaede-e2ee",
+  "type": "module",
+  "collaborators": [
+    "Kaede Chat contributors"
+  ],
+  "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kaede-chat/kaede-chat"
+  },
+  "files": [
+    "kaede_e2ee_bg.wasm",
+    "kaede_e2ee.js",
+    "kaede_e2ee.d.ts"
+  ],
+  "main": "kaede_e2ee.js",
+  "types": "kaede_e2ee.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

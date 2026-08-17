@@ -14,6 +14,7 @@ from app.api.dependencies import (
     get_snowflake,
     require_user,
 )
+from app.chat.e2ee import channel_encryption_policy_payload
 from app.chat.events import publish_dispatch, user_topic
 from app.chat.group_conversations import (
     apply_authoritative_group_mutation,
@@ -524,6 +525,7 @@ async def open_direct_message(
                         "origin_domain": settings.domain,
                         "pair_key": pair_key,
                         "authority_domain": authority,
+                        "encryption_policy": channel_encryption_policy_payload(channel),
                     },
                     "participants": [profile_from_user(user) for user in (auth.user, target)],
                 },
@@ -886,6 +888,7 @@ async def mutate_group(
     previous_owner = (conversation.owner_id, conversation.owner_domain)
     before, participants, deleted = await apply_authoritative_group_mutation(
         session,
+        redis,
         settings,
         conversation,
         channel,

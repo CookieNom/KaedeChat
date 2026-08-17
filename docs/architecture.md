@@ -249,38 +249,32 @@ the account has ever contacted. Clients label that coverage and offer complete
 authority search when the user opens a specific conversation.
 
 Channels marked `e2ee` are excluded at indexing, query, SQL hydration, and
-federation boundaries. The UI explains why search is disabled. A future E2EE
-protocol may define a separate opt-in client-side or privacy-preserving search
+federation boundaries. The UI explains why search is disabled. A later E2EE
+extension may define a separate opt-in client-side or privacy-preserving search
 design, but server plaintext indexing is not silently re-enabled for encrypted
 rooms.
 
-## Future end-to-end encryption compatibility
+## Optional end-to-end encryption
 
 Message storage and every local, gateway, federation, retained-history, and DM
-replication path accept a bounded, versioned opaque `e2ee` envelope instead of
+replication path accept a bounded, versioned `e2ee` envelope instead of
 plaintext. Plaintext and encrypted bodies are mutually exclusive, and deleted
-messages discard either representation. The server deliberately does not
-interpret or select a cipher suite. This leaves room for a future MLS-style
-guild protocol and per-device ratcheted DMs without another message-table
-rewrite or a federation envelope fork. Instances advertise this
-storage-and-relay behavior as `e2ee-transport/1`. That capability is narrow.
-It does not mean that Kaede currently implements E2EE,
-MLS, device identity, key packages, recovery, trust UX, membership epoch
-changes, or attachment encryption.
+messages discard either representation. Version 2 is the Kaede MLS 1.0
+application envelope; version 1 remains legacy opaque transport and is never
+presented as MLS encryption. Instances advertise storage and relay support as
+`e2ee-transport/1`, while device and encrypted-media capabilities are negotiated
+separately.
 
-An eventual encrypted-room protocol must define authenticated device
-identities, key/epoch state, and a canonical associated-data encoding. At
-minimum, ciphertext must be bound to: the protocol and cipher-suite versions,
-the composite guild/channel or DM reference, the sender user and device, the
-room-policy generation and cryptographic epoch, a stable message
-nonce/generation, the operation being performed, and any encrypted attachment
-manifest. Federation's instance-level Ed25519 signatures authenticate transport
-between servers. They do not authenticate a participant device and cannot
-substitute for ciphertext authentication.
+Each device has a proof-of-possession identity and one-use MLS KeyPackages. MLS
+authenticated data canonically binds the composite channel reference, group,
+policy generation, epoch, sender device, operation, edit target, and encrypted
+attachment manifest digest. The MLS credential binds the author account.
+Federation's instance-level Ed25519 signatures authenticate transport between
+servers; clients still verify MLS credentials and authenticated data.
 
-Downgrade resistance also belongs to that future protocol. Enabling encryption
-must create an authenticated, monotonic room-policy generation, and membership
-and device changes must advance the cryptographic epoch. Clients must reject
+Enabling encryption creates a monotonic room-policy generation, and membership
+and device changes pause writes until a fresh group excludes removed devices.
+Clients reject
 plaintext or stale epochs after the policy is enabled, and authorities and
 replicas must reject writes that do not match the current policy. Optional
 encryption must never be negotiated from an unauthenticated boolean or from the
@@ -292,8 +286,8 @@ separately designed privacy-preserving projection. None of those server
 features is a prerequisite for accepting an opaque envelope, so the present
 architecture does not force future encrypted rooms to reveal content.
 Notification text, mention recipients, link metadata, thumbnails, filenames,
-and attachment dimensions are projections too. The future protocol must omit
-them, encrypt them, or explicitly accept them as metadata leakage. Servers
+and attachment dimensions are projections too. Encrypted-room clients omit or
+encrypt them unless the user explicitly discloses selected content. Servers
 still learn routing metadata: the participating instances, composite room and
 sender references, timestamps, ciphertext sizes, and delivery activity. Padding
 and traffic analysis resistance are outside the current transport capability.
@@ -320,6 +314,8 @@ and traffic analysis resistance are outside the current transport capability.
 The production scope covers identity and authentication, single-instance chat,
 federation, media and webhooks, voice/video/screen sharing, Android and iOS
 clients, message search, group DMs, and the associated operational controls.
-Threads, MLS, and compressed gateway encoding are not currently implemented.
+Threads and compressed gateway encoding are not currently implemented. MLS 1.0
+messaging, encrypted attachments, recovery, and LiveKit frame encryption are
+implemented behind the operator activation gate documented in `docs/e2ee.md`.
 The mobile clients use the same home-instance API and gateway boundary as the
 web and desktop clients; they never call peer federation endpoints directly.

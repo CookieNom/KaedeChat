@@ -22,6 +22,7 @@ from app.api.dependencies import (
     require_user,
 )
 from app.api.guilds import guild_channel, local_guild
+from app.chat.e2ee import MessageEncryptionPolicyError, validate_message_encryption_policy
 from app.chat.events import guild_topic, publish_dispatch
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
 from app.chat.payloads import message_payload
@@ -305,6 +306,19 @@ async def execute_webhook(
     )
     if channel.type not in {0, 5}:
         raise HTTPException(status_code=400, detail={"code": "WEBHOOK_REQUIRES_TEXT_CHANNEL"})
+    try:
+        validate_message_encryption_policy(
+            channel.encryption_mode,
+            content=payload.content,
+            e2ee=None,
+            policy_generation=channel.encryption_policy_generation,
+            policy_epoch=channel.encryption_epoch,
+            policy_group_id=channel.encryption_group_id,
+        )
+    except MessageEncryptionPolicyError as exc:
+        # Traditional webhooks have no cryptographic device identity and may
+        # never inject plaintext into an encrypted room.
+        raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
     creator = await session.get(User, (webhook.creator_id, webhook.creator_domain))
     if creator is None:
         raise HTTPException(status_code=410, detail={"code": "WEBHOOK_CREATOR_MISSING"})
@@ -332,6 +346,8 @@ async def execute_webhook(
         author_id=creator.id,
         author_domain=creator.origin_domain,
         content=payload.content,
+        encryption_policy_generation=channel.encryption_policy_generation,
+        encryption_epoch=channel.encryption_epoch,
         message_type=2,
         webhook_id=webhook.id,
         webhook_name=webhook.name,

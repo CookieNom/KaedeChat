@@ -120,6 +120,53 @@ class RemoteUserProfile(BaseModel):
     bio: str | None = Field(default=None, max_length=500)
     custom_status: str | None = Field(default=None, max_length=128)
     profile_version: int = Field(default=1, ge=1, le=2_147_483_647)
+    e2ee_device_generation: int = Field(default=0, ge=0, le=MAX_DATABASE_SNOWFLAKE)
+
+
+class E2EEKeyPackageClaimRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel_id: SnowflakeString
+    channel_domain: FederationDomain
+    claimant_id: SnowflakeString
+    claimant_domain: FederationDomain
+    target_id: SnowflakeString
+    target_domain: FederationDomain
+    excluded_device_id: str | None = Field(
+        default=None,
+        pattern=r"^ked_[A-Za-z0-9_-]{43}$",
+    )
+    # Keep a conservative default for requests from peers upgrading from the
+    # first device-claim protocol revision.
+    max_devices: int = Field(default=48, ge=1, le=48)
+
+
+class E2EERoomProxyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel_id: SnowflakeString
+    channel_domain: FederationDomain
+    actor: RemoteUserProfile
+    sender_device_id: str = Field(pattern=r"^ked_[A-Za-z0-9_-]{43}$")
+    proposal_id: str | None = Field(
+        default=None,
+        min_length=32,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    policy_generation: SnowflakeString | None = None
+    epoch: SnowflakeString | None = None
+    commit: str | None = Field(default=None, min_length=2, max_length=87_384)
+    welcome: str | None = Field(default=None, min_length=2, max_length=87_384)
+
+    @model_validator(mode="after")
+    def complete_activation(self) -> E2EERoomProxyRequest:
+        activation = (self.policy_generation, self.epoch, self.commit, self.welcome)
+        if any(item is not None for item in activation) and any(
+            item is None for item in activation
+        ):
+            raise ValueError("room activation context is incomplete")
+        return self
 
 
 class RelationshipEventContent(BaseModel):

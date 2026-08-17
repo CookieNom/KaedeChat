@@ -28,6 +28,7 @@ from app.api.dependencies import (
 )
 from app.auth.security import new_token, token_hash
 from app.bots.auth import decode_urlsafe, encode_urlsafe, issue_bot_token, worker_assertion_message
+from app.chat.e2ee_membership import pause_guild_e2ee_for_membership_change
 from app.chat.events import guild_topic, publish_dispatch
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
 from app.chat.payloads import member_payload, role_payload, user_payload
@@ -2029,6 +2030,7 @@ async def _uninstall_bot_from_local_guild(
         )
         await session.delete(role)
     if member is not None:
+        await pause_guild_e2ee_for_membership_change(session, guild)
         await queue_guild_mutation(
             session,
             settings,

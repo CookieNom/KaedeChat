@@ -40,7 +40,13 @@ async def build_envelope(
 ) -> dict[str, Any]:
     remote_group_actor = (
         authority_attested_actor
-        and event_type in {"dm.group.state", "dm.group.message.committed", "dm.group.call.create"}
+        and event_type
+        in {
+            "dm.group.state",
+            "dm.group.message.committed",
+            "dm.group.call.create",
+            "e2ee.room-policy.changed",
+        }
         and actor.origin_domain != settings.domain
     )
     if actor.origin_domain != settings.domain and not remote_group_actor:
