@@ -29,9 +29,6 @@
   let invite = $state<Invite | null>(null);
   let unavailable = $state('');
   let generation = 0;
-  const installPath = $derived(
-    `/applications/${encodeURIComponent(reference.applicationRef)}/install/${encodeURIComponent(reference.templateSlug)}`
-  );
 
   $effect(() => {
     const target = reference;
@@ -77,7 +74,12 @@
       <span>{invite.template.scopes.length} API scopes</span>
       <span>{invite.template.e2ee_mode.replaceAll('_', ' ')} E2EE</span>
     </div>
-    <a href={resolve(installPath)}>Review and add</a>
+    <a
+      href={resolve('/(app)/applications/[applicationRef]/install/[templateSlug]', {
+        applicationRef: reference.applicationRef,
+        templateSlug: reference.templateSlug
+      })}>Review and add</a
+    >
   </aside>
 {:else if unavailable}
   <aside class="bot-invite unavailable">

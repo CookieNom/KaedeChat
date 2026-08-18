@@ -768,10 +768,14 @@ async def verify() -> None:
                             Guild, (int(guild_id), "alpha.localhost")
                         )
                         replica_state = (
-                            beta_guild.last_event_seq,
-                            beta_guild.snapshot_generation,
-                            beta_guild.sync_status,
-                            beta_guild.sync_error_code,
+                            None
+                            if beta_guild is None
+                            else (
+                                beta_guild.last_event_seq,
+                                beta_guild.snapshot_generation,
+                                beta_guild.sync_status,
+                                beta_guild.sync_error_code,
+                            )
                         )
                 finally:
                     await beta_engine.dispose()

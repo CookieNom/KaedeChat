@@ -25,7 +25,9 @@
   </nav>
   <div class="resources">
     <small>Resources</small>
-    <a href={resolve('/docs/bots-and-automations')}>Bot API guide ↗</a>
+    <a href="https://github.com/CookieNom/KaedeChat/blob/main/docs/bots-and-automations.md"
+      >Bot API guide ↗</a
+    >
   </div>
 </aside>
 
