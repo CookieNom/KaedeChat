@@ -18,11 +18,13 @@
       "brace-expansion@1.1.16": "1.1.18",
       "brace-expansion@5.0.7": "5.0.9",
       "cookie": "0.7.2",
+      "js-yaml@<4.3.1": "4.3.1",
+      "nanoid@<3.3.18": "3.3.18",
       "postcss": "8.5.23"
     }
   },
   "dependencies": {
-    "dompurify": "3.4.12",
+    "dompurify": "3.4.13",
     "emojibase-data": "17.0.0",
     "marked": "18.0.6",
     "livekit-client": "^2.20.1"
@@ -33,7 +35,7 @@
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@sveltejs/adapter-static": "^3.0.6",
-    "@sveltejs/kit": "^2.17.1",
+    "@sveltejs/kit": "^2.70.2",
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@types/node": "^22.13.4",
     "eslint": "^9.19.0",
