@@ -108,6 +108,11 @@ The desktop client checks `latest.json` after launch and every six hours. It
 never installs or restarts automatically: the user must choose **Update and
 restart**. This avoids interrupting calls, uploads, or unsent messages.
 
+The opt-in **Launch at sign-in** setting uses the operating system's startup
+registration. Sign-in launches keep the main window hidden in the system tray,
+but still restore the session and perform the normal immediate update check.
+Regular launches continue to open the main window.
+
 Do not publish unsigned Windows or macOS packages, unsigned updater artifacts,
 or a release without `latest.json` as a production release. Keep
 the Android upload key stable across releases or users will be unable to install

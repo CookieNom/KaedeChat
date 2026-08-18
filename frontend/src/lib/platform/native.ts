@@ -87,6 +87,10 @@ export interface NativeTaskbarPinStatus {
   pinned: boolean;
 }
 
+export interface NativeAutostartStatus {
+  enabled: boolean;
+}
+
 let nativeInitialization: Promise<NativeSessionBootstrap> | null = null;
 const LAST_NATIVE_ROUTE = 'kaede.native.last-route';
 

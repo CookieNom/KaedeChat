@@ -7,6 +7,7 @@
 
   onMount(() => {
     void desktopLifecycle.refreshTaskbarStatus(false);
+    void desktopLifecycle.refreshAutostartStatus();
     if (!desktopLifecycle.update && !desktopLifecycle.checking) {
       void desktopLifecycle.checkForUpdates(false);
     }
@@ -90,6 +91,28 @@
       <p class="desktop-error" role="alert">{displayError(desktopLifecycle.updateError)}</p>
     {/if}
 
+    <div class="settings-card-row desktop-autostart">
+      <div>
+        <strong>Launch at sign-in</strong>
+        <p>
+          Start Kaede in the system tray when you sign in. It stays out of the way and checks for
+          updates immediately.
+        </p>
+      </div>
+      <label class="desktop-toggle">
+        <input
+          type="checkbox"
+          checked={desktopLifecycle.autostart?.enabled ?? false}
+          disabled={!desktopLifecycle.autostart || desktopLifecycle.savingAutostart}
+          onchange={(event) => void desktopLifecycle.setAutostart(event.currentTarget.checked)}
+        />
+        <span>{desktopLifecycle.autostart?.enabled ? 'On' : 'Off'}</span>
+      </label>
+    </div>
+    {#if desktopLifecycle.autostartError}
+      <p class="desktop-error" role="alert">{desktopLifecycle.autostartError}</p>
+    {/if}
+
     {#if desktopLifecycle.taskbar}
       <div class="settings-card-row desktop-taskbar">
         <div>
@@ -136,9 +159,30 @@
     justify-items: end;
   }
 
+  .desktop-autostart,
   .desktop-taskbar {
     padding-top: 18px;
     border-top: 1px solid var(--line);
+  }
+
+  .desktop-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .desktop-toggle input {
+    width: 20px;
+    height: 20px;
+    accent-color: var(--accent);
+  }
+
+  .desktop-toggle:has(input:disabled) {
+    cursor: wait;
+    opacity: 0.7;
   }
 
   .desktop-error,

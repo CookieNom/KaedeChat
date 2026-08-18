@@ -2,6 +2,7 @@ import {
   isNativeDesktop,
   nativeError,
   nativeInvoke,
+  type NativeAutostartStatus,
   type NativePlatformInfo,
   type NativeTaskbarPinStatus,
   type NativeUpdateStatus
@@ -19,11 +20,14 @@ function errorMessage(caught: unknown, fallback: string): string {
 class DesktopLifecycle {
   update = $state<NativeUpdateStatus | null>(null);
   taskbar = $state<NativeTaskbarPinStatus | null>(null);
+  autostart = $state<NativeAutostartStatus | null>(null);
   checking = $state(false);
   installing = $state(false);
   pinning = $state(false);
+  savingAutostart = $state(false);
   updateError = $state('');
   pinError = $state('');
+  autostartError = $state('');
   checkedAt = $state<Date | null>(null);
   showTaskbarPrompt = $state(false);
   dismissedUpdateVersion = $state('');
@@ -35,7 +39,42 @@ class DesktopLifecycle {
     } catch {
       this.dismissedUpdateVersion = '';
     }
-    await Promise.allSettled([this.checkForUpdates(false), this.refreshTaskbarStatus(true)]);
+    await Promise.allSettled([
+      this.checkForUpdates(false),
+      this.refreshTaskbarStatus(true),
+      this.refreshAutostartStatus()
+    ]);
+  }
+
+  async refreshAutostartStatus(): Promise<void> {
+    if (!isNativeDesktop()) return;
+    this.autostartError = '';
+    try {
+      this.autostart = await nativeInvoke<NativeAutostartStatus>('native_autostart_status');
+    } catch (caught) {
+      this.autostartError = errorMessage(
+        caught,
+        'Kaede could not read the launch-at-sign-in setting.'
+      );
+    }
+  }
+
+  async setAutostart(enabled: boolean): Promise<void> {
+    if (!isNativeDesktop() || this.savingAutostart) return;
+    this.savingAutostart = true;
+    this.autostartError = '';
+    try {
+      this.autostart = await nativeInvoke<NativeAutostartStatus>('native_autostart_set', {
+        enabled
+      });
+    } catch (caught) {
+      this.autostartError = errorMessage(
+        caught,
+        'Kaede could not update the launch-at-sign-in setting.'
+      );
+    } finally {
+      this.savingAutostart = false;
+    }
   }
 
   async checkForUpdates(reportErrors = true): Promise<void> {

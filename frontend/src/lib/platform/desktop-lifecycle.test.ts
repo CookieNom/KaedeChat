@@ -47,6 +47,7 @@ describe('desktop lifecycle', () => {
       if (command === 'native_taskbar_pin_status') {
         return { supported: true, allowed: true, pinned: false };
       }
+      if (command === 'native_autostart_status') return { enabled: false };
       throw new Error(`Unexpected command: ${command}`);
     });
     vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
@@ -55,6 +56,7 @@ describe('desktop lifecycle', () => {
     await desktopLifecycle.initialize();
 
     expect(desktopLifecycle.update).toMatchObject({ available: true, version: '0.1.11' });
+    expect(desktopLifecycle.autostart).toEqual({ enabled: false });
     expect(desktopLifecycle.showTaskbarPrompt).toBe(true);
     desktopLifecycle.dismissUpdate();
     expect(storage.getItem('kaede.native.update-dismissed-version')).toBe('0.1.11');
@@ -70,5 +72,24 @@ describe('desktop lifecycle', () => {
 
     await desktopLifecycle.checkForUpdates(true);
     expect(desktopLifecycle.updateError).toBe('offline');
+  });
+
+  it('uses the native operating-system setting for launch at sign-in', async () => {
+    const invoke = vi.fn(async (command: string, args?: unknown) => {
+      if (command === 'native_autostart_status') return { enabled: false };
+      if (command === 'native_autostart_set') {
+        expect(args).toEqual({ enabled: true });
+        return { enabled: true };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
+    const { desktopLifecycle } = await import('./desktop-lifecycle.svelte');
+
+    await desktopLifecycle.refreshAutostartStatus();
+    expect(desktopLifecycle.autostart).toEqual({ enabled: false });
+
+    await desktopLifecycle.setAutostart(true);
+    expect(desktopLifecycle.autostart).toEqual({ enabled: true });
   });
 });

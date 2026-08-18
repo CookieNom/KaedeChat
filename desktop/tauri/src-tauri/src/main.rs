@@ -40,6 +40,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_notification::NotificationExt;
@@ -49,6 +50,14 @@ use tokio::sync::oneshot;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 type NativeSession = SessionManager<SystemCredentialVault, EmbeddedTurnstile>;
+
+const AUTOSTART_ARGUMENT: &str = "--kaede-autostart";
+
+fn is_autostart_launch(arguments: &[String]) -> bool {
+    arguments
+        .iter()
+        .any(|argument| argument == AUTOSTART_ARGUMENT)
+}
 
 struct NativeAccount {
     api: ApiClient,
@@ -294,6 +303,11 @@ struct NativeTaskbarPinStatus {
     pinned: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct NativeAutostartStatus {
+    enabled: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum VoiceControl {
@@ -319,6 +333,40 @@ fn native_platform_info() -> PlatformInfo {
         native_notifications: true,
         secure_credentials: true,
     }
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri injects AppHandle command arguments by value.
+fn native_autostart_status(app: AppHandle) -> Result<NativeAutostartStatus, NativeError> {
+    let enabled = app.autolaunch().is_enabled().map_err(|error| {
+        NativeError::operation(
+            "AUTOSTART_STATUS_FAILED",
+            "Kaede could not read the system sign-in startup setting.",
+            error,
+        )
+    })?;
+    Ok(NativeAutostartStatus { enabled })
+}
+
+#[tauri::command]
+fn native_autostart_set(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<NativeAutostartStatus, NativeError> {
+    let manager = app.autolaunch();
+    let result = if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    result.map_err(|error| {
+        NativeError::operation(
+            "AUTOSTART_UPDATE_FAILED",
+            "Kaede could not update the system sign-in startup setting.",
+            error,
+        )
+    })?;
+    native_autostart_status(app)
 }
 
 #[tauri::command]
@@ -1986,6 +2034,7 @@ fn main() {
         }
         return;
     }
+    let launched_at_sign_in = is_autostart_launch(&arguments);
 
     let paths = PlatformPaths::discover().unwrap_or_else(|error| {
         tracing::error!(%error, "private application directory could not be located");
@@ -2038,6 +2087,10 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![AUTOSTART_ARGUMENT]),
+        ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |_app, _shortcut, event| {
@@ -2050,8 +2103,10 @@ fn main() {
                 .build(),
         )
         .plugin(tauri_plugin_single_instance::init(
-            |app, _arguments, _working_directory| {
-                show_main_window(app);
+            |app, arguments, _working_directory| {
+                if !is_autostart_launch(&arguments) {
+                    show_main_window(app);
+                }
             },
         ))
         .manage(state)
@@ -2072,6 +2127,7 @@ fn main() {
                     .inner_size(1360.0, 860.0)
                     .min_inner_size(920.0, 620.0)
                     .resizable(true)
+                    .visible(!launched_at_sign_in)
                     .center()
                     .on_navigation(|url| {
                         cfg!(dev)
@@ -2148,6 +2204,8 @@ fn main() {
             native_platform_info,
             native_update_check,
             native_update_install,
+            native_autostart_status,
+            native_autostart_set,
             native_taskbar_pin_status,
             native_taskbar_pin_request,
             native_set_instance,
@@ -2195,7 +2253,16 @@ mod tests {
     use kaede_protocol::ApiError;
     use reqwest::StatusCode;
 
-    use super::{NativeError, validate_attachment_media_path};
+    use super::{NativeError, is_autostart_launch, validate_attachment_media_path};
+
+    #[test]
+    fn autostart_argument_is_detected_without_hiding_regular_launches() {
+        assert!(is_autostart_launch(&[
+            "kaede-chat".to_owned(),
+            "--kaede-autostart".to_owned()
+        ]));
+        assert!(!is_autostart_launch(&["kaede-chat".to_owned()]));
+    }
 
     #[test]
     fn attachment_media_paths_are_narrowly_scoped() {
