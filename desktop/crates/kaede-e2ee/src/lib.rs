@@ -16,7 +16,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::{OpenMlsProvider, signatures::Signer, types::Ciphersuite};
 use serde::{Deserialize, Serialize};
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;
@@ -96,18 +96,24 @@ impl DeviceIdentity {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Zeroize, ZeroizeOnDrop)]
 pub struct PendingCommit {
     pub commit: Vec<u8>,
     pub welcome: Vec<u8>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct KeyPackageIdentity {
+    pub credential: Vec<u8>,
+    pub signature_key: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum ProcessedMessage {
     Application {
-        bytes: Vec<u8>,
-        aad: Vec<u8>,
-        credential: Vec<u8>,
+        bytes: Zeroizing<Vec<u8>>,
+        aad: Zeroizing<Vec<u8>>,
+        credential: Zeroizing<Vec<u8>>,
     },
     Proposal,
     Commit,
@@ -266,6 +272,29 @@ impl MlsClient {
             .map_err(|error| MlsError::KeyPackage(error.to_string()))
     }
 
+    /// Validate a serialized `KeyPackage` and return the identity it authenticates.
+    ///
+    /// Clients compare this identity with the participant-home metadata before
+    /// adding the package. This rejects inconsistent relabeling. It does not
+    /// authenticate a first-seen account identity; users still verify the MLS
+    /// roster safety number through a separate trusted channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MlsError::KeyPackage`] when the bytes are not a valid package
+    /// for Kaede's pinned MLS protocol version and cipher suite.
+    pub fn inspect_key_package(&self, bytes: &[u8]) -> Result<KeyPackageIdentity, MlsError> {
+        let package = self.decode_key_package(bytes)?;
+        Ok(KeyPackageIdentity {
+            credential: package
+                .leaf_node()
+                .credential()
+                .serialized_content()
+                .to_vec(),
+            signature_key: package.leaf_node().signature_key().as_slice().to_vec(),
+        })
+    }
+
     /// Create a new MLS group with this device as its initial member.
     ///
     /// # Errors
@@ -295,15 +324,15 @@ impl MlsClient {
     ///
     /// Returns an [`MlsError`] if the group or a key package is invalid, or if
     /// the commit and Welcome messages cannot be created.
-    pub fn add_members(
+    pub fn add_members<T: AsRef<[u8]>>(
         &self,
         group_id: &[u8],
-        key_packages: &[Vec<u8>],
+        key_packages: &[T],
     ) -> Result<PendingCommit, MlsError> {
         let mut group = self.load_group(group_id)?;
         let packages = key_packages
             .iter()
-            .map(|bytes| self.decode_key_package(bytes))
+            .map(|bytes| self.decode_key_package(bytes.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
         let (commit, welcome, _) = group
             .add_members(&self.provider, &self.identity.signer, &packages)
@@ -474,9 +503,9 @@ impl MlsClient {
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(message) => {
                 Ok(ProcessedMessage::Application {
-                    bytes: message.into_bytes(),
-                    aad,
-                    credential,
+                    bytes: Zeroizing::new(message.into_bytes()),
+                    aad: Zeroizing::new(aad),
+                    credential: Zeroizing::new(credential),
                 })
             }
             ProcessedMessageContent::ProposalMessage(proposal)
@@ -580,9 +609,9 @@ mod tests {
         assert_eq!(
             bob.process(group_id, &ciphertext)?,
             ProcessedMessage::Application {
-                bytes: b"private hello".to_vec(),
-                aad: b"message-context".to_vec(),
-                credential: b"alice@example.test/device-a".to_vec(),
+                bytes: Zeroizing::new(b"private hello".to_vec()),
+                aad: Zeroizing::new(b"message-context".to_vec()),
+                credential: Zeroizing::new(b"alice@example.test/device-a".to_vec()),
             }
         );
 
@@ -604,11 +633,33 @@ mod tests {
                 &restored_alice.encrypt(group_id, b"after restart", b"restart-context")?
             )?,
             ProcessedMessage::Application {
-                bytes: b"after restart".to_vec(),
-                aad: b"restart-context".to_vec(),
-                credential: b"alice@example.test/device-a".to_vec(),
+                bytes: Zeroizing::new(b"after restart".to_vec()),
+                aad: Zeroizing::new(b"restart-context".to_vec()),
+                credential: Zeroizing::new(b"alice@example.test/device-a".to_vec()),
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn key_package_identity_is_available_only_after_mls_validation() -> Result<(), MlsError> {
+        let alice = MlsClient::generate(b"alice@example.test/device-a")?;
+        let bob = MlsClient::generate(b"bob@example.test/device-b")?;
+        let package = bob.generate_key_package()?;
+
+        assert_eq!(
+            alice.inspect_key_package(&package)?,
+            KeyPackageIdentity {
+                credential: b"bob@example.test/device-b".to_vec(),
+                signature_key: bob.identity().public_identity_key().to_vec(),
+            }
+        );
+        let mut tampered = package;
+        let last = tampered
+            .last_mut()
+            .ok_or_else(|| MlsError::KeyPackage("empty".into()))?;
+        *last ^= 1;
+        assert!(alice.inspect_key_package(&tampered).is_err());
         Ok(())
     }
 
@@ -634,6 +685,73 @@ mod tests {
                 &alice.encrypt(group_id, b"after removal", b"removal-context")?
             )
             .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn three_home_media_keys_rotate_and_exclude_a_removed_member() -> Result<(), MlsError> {
+        let alice_credential = br#"{"version":1,"account":"alice@alpha.test","nonce":"a"}"#;
+        let bob_credential = br#"{"version":1,"account":"bob@beta.test","nonce":"b"}"#;
+        let carol_credential = br#"{"version":1,"account":"carol@gamma.test","nonce":"c"}"#;
+        let alice = MlsClient::generate(alice_credential)?;
+        let bob = MlsClient::generate(bob_credential)?;
+        let carol = MlsClient::generate(carol_credential)?;
+        let group_id = b"kaede-three-home-media";
+        let media_context =
+            b"kaede-livekit-key-v1\0livekit-e2ee-v1\0AES-256-GCM\0session-a\x001\0g.10.20";
+
+        alice.create_group(group_id)?;
+        let added = alice.add_members(
+            group_id,
+            &[bob.generate_key_package()?, carol.generate_key_package()?],
+        )?;
+        alice.merge_pending_commit(group_id)?;
+        assert_eq!(bob.join_group(&added.welcome)?, group_id);
+        assert_eq!(carol.join_group(&added.welcome)?, group_id);
+
+        let alice_epoch_one =
+            alice.export_epoch_secret(group_id, "kaede livekit v1", media_context, 32)?;
+        let bob_epoch_one =
+            bob.export_epoch_secret(group_id, "kaede livekit v1", media_context, 32)?;
+        let carol_epoch_one =
+            carol.export_epoch_secret(group_id, "kaede livekit v1", media_context, 32)?;
+        assert_eq!(*alice_epoch_one, *bob_epoch_one);
+        assert_eq!(*alice_epoch_one, *carol_epoch_one);
+        assert_ne!(
+            *alice_epoch_one,
+            *alice.export_epoch_secret(
+                group_id,
+                "kaede livekit v1",
+                b"kaede-livekit-key-v1\0livekit-e2ee-v1\0AES-256-GCM\0session-b\x001\0g.10.20",
+                32,
+            )?
+        );
+
+        let removed = alice.remove_accounts(group_id, &["carol@gamma.test".into()])?;
+        alice.merge_pending_commit(group_id)?;
+        assert_eq!(
+            bob.process(group_id, &removed.commit)?,
+            ProcessedMessage::Commit
+        );
+        assert_eq!(
+            carol.process(group_id, &removed.commit)?,
+            ProcessedMessage::Commit
+        );
+
+        let alice_epoch_two =
+            alice.export_epoch_secret(group_id, "kaede livekit v1", media_context, 32)?;
+        let bob_epoch_two =
+            bob.export_epoch_secret(group_id, "kaede livekit v1", media_context, 32)?;
+        assert_eq!(*alice_epoch_two, *bob_epoch_two);
+        assert_ne!(*alice_epoch_one, *alice_epoch_two);
+        assert!(
+            carol
+                .process(
+                    group_id,
+                    &alice.encrypt(group_id, b"post-rotation media control", b"media-epoch-two",)?,
+                )
+                .is_err()
         );
         Ok(())
     }

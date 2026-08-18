@@ -11,7 +11,7 @@ class EntityRef:
     domain: str
 
     @classmethod
-    def parse(cls, value: str, *, default_domain: str | None = None) -> "EntityRef":
+    def parse(cls, value: str, *, default_domain: str | None = None) -> EntityRef:
         raw_id, separator, raw_domain = value.partition("@")
         if not raw_id.isdigit() or int(raw_id) < 0:
             raise ValueError("Kaede entity IDs are unsigned decimal snowflakes")
@@ -30,6 +30,10 @@ class User:
     username: str
     display_name: str | None = None
     bot: bool = False
+    avatar_hash: str | None = None
+    banner_hash: str | None = None
+    bio: str | None = None
+    custom_status: str | None = None
 
     @property
     def handle(self) -> str:
@@ -45,7 +49,7 @@ class User:
         return f"<@{self.ref}>"
 
     @classmethod
-    def from_payload(cls, payload: dict[str, object]) -> "User":
+    def from_payload(cls, payload: dict[str, object]) -> User:
         return cls(
             EntityRef(int(str(payload["id"])), str(payload["origin_domain"])),
             str(payload["username"]),
@@ -53,4 +57,14 @@ class User:
             if payload.get("display_name") is not None
             else None,
             bool(payload.get("bot", False)),
+            str(payload["avatar_hash"])
+            if payload.get("avatar_hash") is not None
+            else None,
+            str(payload["banner_hash"])
+            if payload.get("banner_hash") is not None
+            else None,
+            str(payload["bio"]) if payload.get("bio") is not None else None,
+            str(payload["custom_status"])
+            if payload.get("custom_status") is not None
+            else None,
         )

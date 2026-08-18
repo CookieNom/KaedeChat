@@ -55,6 +55,19 @@ const _pushApplicationId = String.fromEnvironment(
   defaultValue: 'chat.kaede.mobile',
 );
 
+typedef E2eeTeardownQueue = Future<void> Function({
+  Future<void> Function()? afterClose,
+});
+
+/// Keeps destructive reset work inside the E2EE lifecycle barrier so no new
+/// client can initialize between closing the old client and clearing/reseeding
+/// its remote and local vault state.
+Future<void> runE2eeResetAfterQuiescence({
+  required E2eeTeardownQueue queueTeardown,
+  required Future<void> Function() resetAndReplace,
+}) =>
+    queueTeardown(afterClose: resetAndReplace);
+
 String _randomPushToken() {
   final random = Random.secure();
   final bytes = List<int>.generate(32, (_) => random.nextInt(256));
@@ -503,6 +516,8 @@ final class MobileController extends StateNotifier<MobileState> {
   var _validGatewayEventsAfterWarning = 0;
   Future<MobileE2EEClient>? _e2eeFuture;
   String? _e2eeAccount;
+  Future<void> _e2eeLifecycleTail = Future<void>.value();
+  var _e2eeGeneration = 0;
 
   KaedeChannel? _channel(EntityRef ref) {
     for (final channel in state.dms) {
@@ -520,16 +535,63 @@ final class MobileController extends StateNotifier<MobileState> {
     final user = state.user;
     if (user == null) throw StateError('No active encryption account.');
     final account = user.ref.wire;
-    if (_e2eeFuture == null || _e2eeAccount != account) {
-      _e2eeAccount = account;
-      _e2eeFuture = MobileE2EEClient.initialize(repository, user)
-          .catchError((Object error, StackTrace stackTrace) {
+    final current = _e2eeFuture;
+    if (current != null && _e2eeAccount == account) return current;
+    if (current != null) {
+      // Account transitions normally tear down before replacing state, but
+      // retain this fail-closed guard for callers racing a session change.
+      unawaited(_queueE2eeTeardown());
+    }
+    final generation = ++_e2eeGeneration;
+    final lifecycleBarrier = _e2eeLifecycleTail;
+    late final Future<MobileE2EEClient> candidate;
+    candidate = (() async {
+      await lifecycleBarrier;
+      if (generation != _e2eeGeneration ||
+          _e2eeAccount != account ||
+          !identical(_e2eeFuture, candidate) ||
+          state.user?.ref.wire != account) {
+        throw StateError('The encryption session changed during startup.');
+      }
+      return MobileE2EEClient.initialize(repository, user);
+    })()
+        .catchError((Object error, StackTrace stackTrace) {
+      if (generation == _e2eeGeneration && identical(_e2eeFuture, candidate)) {
         _e2eeFuture = null;
         _e2eeAccount = null;
-        Error.throwWithStackTrace(error, stackTrace);
-      });
-    }
-    return _e2eeFuture!;
+      }
+      Error.throwWithStackTrace(error, stackTrace);
+    });
+    _e2eeAccount = account;
+    _e2eeFuture = candidate;
+    return candidate;
+  }
+
+  Future<void> _queueE2eeTeardown({
+    Future<void> Function()? afterClose,
+  }) {
+    final previous = _e2eeFuture;
+    _e2eeFuture = null;
+    _e2eeAccount = null;
+    _e2eeGeneration += 1;
+    final lifecycleBarrier = _e2eeLifecycleTail;
+    final teardown = () async {
+      await lifecycleBarrier;
+      if (previous != null) {
+        try {
+          await (await previous).close();
+        } on Object {
+          // Teardown and any requested secure-store deletion remain
+          // authoritative if initialization itself failed.
+        }
+      }
+      await afterClose?.call();
+    }();
+    _e2eeLifecycleTail = teardown.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return teardown;
   }
 
   Future<String> exportE2eeRecovery(String passphrase) async =>
@@ -538,38 +600,75 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<void> importE2eeRecovery(String bundle, String passphrase) async {
     final user = state.user;
     if (user == null) throw StateError('No active encryption account.');
-    final previous = _e2eeFuture;
-    _e2eeFuture = null;
-    _e2eeAccount = null;
-    if (previous != null) {
-      try {
-        (await previous).close();
-      } on Object {
-        // The imported state replaces an unavailable local client.
-      }
-    }
-    await const MobileE2EEStore().importRecovery(
-      user.ref.wire,
-      bundle,
-      passphrase,
+    await _queueE2eeTeardown(
+      afterClose: () async {
+        const store = MobileE2EEStore();
+        final recovered = await store.openRecovery(
+          user.ref.wire,
+          bundle,
+          passphrase,
+        );
+        final reset = await repository.resetE2eeIdentity();
+        final recoveryAuthorization = e2eeRecoveryAuthorizationFromReset(
+          reset,
+          user.ref.wire,
+        );
+        repository.stageE2eeRecoveryAuthorization(recoveryAuthorization);
+        await store.clearCheckpoint(user.ref.wire);
+        await store.save(recovered.rebasedAfterPasswordReset());
+      },
     );
     await e2eeClient();
   }
 
+  Future<void> resetE2eeIdentity() async {
+    final accountRef = state.user?.ref.wire;
+    if (accountRef == null) throw StateError('No active encryption account.');
+    await runE2eeResetAfterQuiescence(
+      queueTeardown: _queueE2eeTeardown,
+      resetAndReplace: () async {
+        repository.discardPendingE2eeRecoveryAuthorization();
+        final reset = await repository.resetE2eeIdentity();
+        e2eeRecoveryAuthorizationFromReset(reset, accountRef);
+        // Starting fresh creates a distinct identity and therefore does not use
+        // the same-identity recovery bearer. Its enrollment remains session-fenced.
+        repository.discardPendingE2eeRecoveryAuthorization();
+        const store = MobileE2EEStore();
+        await store.clearCheckpoint(accountRef);
+        await store.clear(accountRef);
+      },
+    );
+  }
+
   Future<void> clearLocalE2eeState() async {
-    final user = state.user;
-    if (user == null) return;
-    final previous = _e2eeFuture;
-    _e2eeFuture = null;
-    _e2eeAccount = null;
-    if (previous != null) {
-      try {
-        (await previous).close();
-      } on Object {
-        // Clearing the protected store remains authoritative locally.
-      }
-    }
-    await const MobileE2EEStore().clear(user.ref.wire);
+    final accountRef = state.user?.ref.wire ?? _e2eeAccount;
+    await _queueE2eeTeardown(
+      afterClose: accountRef == null
+          ? null
+          : () => const MobileE2EEStore().clear(accountRef),
+    );
+  }
+
+  Future<void> _discardAccountEncryption(String? accountRef) async {
+    repository.discardPendingPasswordKey();
+    repository.discardPendingE2eeRecoveryAuthorization();
+    await _queueE2eeTeardown(
+      afterClose: accountRef == null
+          ? null
+          : () async {
+              try {
+                await repository.passwordVault.clear(accountRef);
+              } on Object {
+                // Continue deleting the separately wrapped MLS state.
+              }
+              try {
+                await const MobileE2EEStore().clear(accountRef);
+              } on Object {
+                // Session teardown must continue even if platform storage is
+                // unavailable.
+              }
+            },
+    );
   }
 
   Future<String?> currentE2eeDeviceId() async {
@@ -759,6 +858,8 @@ final class MobileController extends StateNotifier<MobileState> {
         return;
       }
       if (error is KaedeException && error.status == 401) {
+        final accountRef = state.user?.ref.wire ?? tokens?.userRef?.wire;
+        await _discardAccountEncryption(accountRef);
         await api.clearTokens();
       }
       state =
@@ -1778,6 +1879,7 @@ final class MobileController extends StateNotifier<MobileState> {
     _sessionLoadGeneration += 1;
     _messageRequestGenerations.clear();
     final accountKey = api.tokens?.accountKey;
+    final accountRef = state.user?.ref.wire ?? api.tokens?.userRef?.wire;
     final pushDeviceId = _pushDeviceId;
     if (pushDeviceId != null) {
       try {
@@ -1820,22 +1922,19 @@ final class MobileController extends StateNotifier<MobileState> {
     await _gatewayHealthSubscription?.cancel();
     _gatewayHealthSubscription = null;
     await gateway.disconnect();
-    final e2ee = _e2eeFuture;
-    _e2eeFuture = null;
-    _e2eeAccount = null;
-    if (e2ee != null) {
+    await _discardAccountEncryption(accountRef);
+    try {
+      await repository.logout();
+    } finally {
       try {
-        (await e2ee).close();
-      } on Object {
-        // Signing out must not be blocked by unavailable device key state.
+        if (accountKey != null) {
+          await _queueCacheWrite(() => database.purgeAccount(accountKey));
+        }
+      } finally {
+        _activeAccountKey = null;
+        state = const MobileState(phase: SessionPhase.signedOut);
       }
     }
-    await repository.logout();
-    if (accountKey != null) {
-      await _queueCacheWrite(() => database.purgeAccount(accountKey));
-    }
-    _activeAccountKey = null;
-    state = const MobileState(phase: SessionPhase.signedOut);
   }
 
   Future<void> _cacheLists() async {
@@ -3558,6 +3657,10 @@ final class MobileController extends StateNotifier<MobileState> {
     _pendingAcknowledgements.clear();
     _acknowledgementsInFlight.clear();
     _gatewayHealthSubscription?.cancel();
+    // A synchronous provider disposal cannot await native MLS teardown. The
+    // lifecycle queue detaches this controller immediately, then waits for any
+    // in-flight E2EE operation before freeing native state and vault material.
+    unawaited(_queueE2eeTeardown());
     super.dispose();
   }
 
@@ -3586,6 +3689,7 @@ final class MobileController extends StateNotifier<MobileState> {
 
   Future<void> _expireSession() async {
     final accountKey = _activeAccountKey;
+    final accountRef = state.user?.ref.wire ?? api.tokens?.userRef?.wire;
     _authenticationGeneration += 1;
     _sessionLoadGeneration += 1;
     _messageRequestGenerations.clear();
@@ -3617,6 +3721,7 @@ final class MobileController extends StateNotifier<MobileState> {
     await _gatewayHealthSubscription?.cancel();
     _gatewayHealthSubscription = null;
     await gateway.disconnect();
+    await _discardAccountEncryption(accountRef);
     if (accountKey != null) {
       await _queueCacheWrite(() => database.purgeAccount(accountKey));
     }

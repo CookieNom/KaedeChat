@@ -1,5 +1,5 @@
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -274,6 +274,94 @@ def test_history_message_validation_binds_author_channel_and_range() -> None:
             after=0,
             upper_bound=message_snowflake,
         )
+
+
+def test_encrypted_history_operation_matches_the_message_projection() -> None:
+    created_at = datetime.now(UTC)
+    message_id = snowflake_at(created_at, 12)
+    raw = {
+        "id": str(message_id),
+        "origin_domain": "home.example",
+        "channel_id": "30",
+        "channel_domain": "home.example",
+        "author_id": "20",
+        "author_domain": "home.example",
+        "content": None,
+        "e2ee": {
+            "version": 2,
+            "protocol": "mls10",
+            "suite": "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+            "group_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "policy_generation": "1",
+            "epoch": "1",
+            "sender_device_id": "ked_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "operation": "create",
+            "ciphertext": "AQ",
+        },
+        "message_type": 0,
+        "flags": 0,
+        "mention_user_refs": [],
+        "attachments": [],
+        "reactions": [],
+        "pin": None,
+        "created_at": created_at.isoformat(),
+        "edited_at": None,
+        "deleted_at": None,
+        "history_author": {
+            "id": "20",
+            "origin_domain": "home.example",
+            "username": "member",
+            "display_name": None,
+            "avatar_hash": None,
+            "banner_hash": None,
+            "bio": None,
+            "custom_status": None,
+            "profile_version": 1,
+        },
+    }
+    _validate_history_message(
+        raw,
+        guild_origin="home.example",
+        channel_id=30,
+        after=0,
+        upper_bound=message_id,
+    )
+
+    message_ref = f"{message_id}@home.example"
+    edited = {
+        **raw,
+        "edited_at": (created_at + timedelta(microseconds=1)).isoformat(),
+        "e2ee": {**raw["e2ee"], "operation": "edit", "target_message": message_ref},
+    }
+    _validate_history_message(
+        edited,
+        guild_origin="home.example",
+        channel_id=30,
+        after=0,
+        upper_bound=message_id,
+    )
+
+    invalid = [
+        {**raw, "e2ee": {**raw["e2ee"], "target_message": None}},
+        {**raw, "e2ee": {**raw["e2ee"], "operation": "welcome"}},
+        {**edited, "e2ee": raw["e2ee"]},
+        {
+            **edited,
+            "e2ee": {
+                **edited["e2ee"],
+                "target_message": f"{message_id + 1}@home.example",
+            },
+        },
+    ]
+    for candidate in invalid:
+        with pytest.raises(ValueError, match="MLS (create|edit)"):
+            _validate_history_message(
+                candidate,
+                guild_origin="home.example",
+                channel_id=30,
+                after=0,
+                upper_bound=message_id,
+            )
 
 
 def test_history_attachment_metadata_uses_bounded_remote_media_shape() -> None:

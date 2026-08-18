@@ -16,6 +16,11 @@ from app.api.dependencies import (
     require_user,
 )
 from app.api.management import require_current_version
+from app.bots.installations import (
+    cleanup_installation_roles,
+    publish_deleted_installation_roles,
+    revoke_installations_for_guild_member,
+)
 from app.chat.audit import add_audit_entry
 from app.chat.e2ee_membership import pause_guild_e2ee_for_membership_change
 from app.chat.events import guild_topic, publish_dispatch, user_topic
@@ -112,6 +117,7 @@ async def leave_guild(
             detail={"code": "OWNER_MUST_TRANSFER_OR_DELETE_GUILD"},
         )
 
+    deleted_role_refs: list[tuple[int, str]] = []
     if guild.origin_domain != settings.domain:
         remote_guild_domain = guild.origin_domain
         await mark_remote_guild_departed(
@@ -142,6 +148,20 @@ async def leave_guild(
             user_domain=actor_domain,
         )
     else:
+        revoked_installations = await revoke_installations_for_guild_member(
+            session,
+            guild_id=guild.id,
+            guild_domain=guild.origin_domain,
+            user_id=actor_id,
+            user_domain=actor_domain,
+        )
+        deleted_role_refs = await cleanup_installation_roles(
+            session,
+            settings,
+            guild,
+            auth.user,
+            revoked_installations,
+        )
         await session.delete(member)
         await pause_guild_e2ee_for_membership_change(session, guild)
         await queue_guild_mutation(
@@ -157,6 +177,7 @@ async def leave_guild(
     await session.commit()
     if guild.origin_domain == settings.domain:
         await wake_queued_guild_federation(guild)
+        await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     else:
         from app.tasks import federation_deliver
 
@@ -200,7 +221,13 @@ async def transfer_guild_ownership(
         GuildMember,
         (guild.id, guild.origin_domain, target_id, target_domain),
     )
-    if target is None or not target.is_local or member is None:
+    if (
+        target is None
+        or not target.is_local
+        or target.account_type != "human"
+        or target.disabled_at is not None
+        or member is None
+    ):
         raise HTTPException(status_code=404, detail={"code": "GUILD_MEMBER_NOT_FOUND"})
 
     guild.permission_generation += 1

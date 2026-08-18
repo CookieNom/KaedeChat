@@ -2,12 +2,14 @@
   import { resolve } from '$app/paths';
   import { api, expireBrowserSession, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
+  import { loadPasswordKdfContext, preparePassword } from '$lib/auth/password-kdf';
   import type { UserSummary } from '$lib/chat/types';
   import Icon from '$lib/components/Icon.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import NativeVoiceSettings from '$lib/components/NativeVoiceSettings.svelte';
   import NativeDesktopSettings from '$lib/components/NativeDesktopSettings.svelte';
   import E2EESettings from '$lib/components/E2EESettings.svelte';
+  import { clearActiveE2EEState } from '$lib/e2ee/client';
   import { isNativeDesktop, nativeError, nativeInvoke } from '$lib/platform/native';
   import { assetUrl } from '$lib/media/assets';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
@@ -76,7 +78,7 @@
   let disableCode = $state('');
 
   onMount(() => {
-    void api('/administration/')
+    void api('/administration/@me')
       .then(() => (administrationAvailable = true))
       .catch(() => (administrationAvailable = false));
     const generation = ++lifecycle;
@@ -147,6 +149,15 @@
       ? fallback
       : `${fallback.replace(/\.$/, '')}. Try again.`;
     error = userErrorMessage(caught, actionableFallback);
+  }
+
+  async function currentPasswordPayload(password: string) {
+    if (!profile) throw new Error('Your account details are not loaded. Reload and try again.');
+    const prepared = await preparePassword(password, await loadPasswordKdfContext(profile.handle));
+    return {
+      password: prepared.authenticationSecret,
+      password_kdf_version: prepared.context.version
+    };
   }
 
   async function savePreferences() {
@@ -374,10 +385,11 @@
     const generation = lifecycle;
     beginAction();
     try {
+      const passwordPayload = await currentPasswordPayload(emailPassword);
       await api('/auth/email/change', {
         method: 'POST',
         signal: controller.signal,
-        body: JSON.stringify({ email: nextEmail.trim(), password: emailPassword })
+        body: JSON.stringify({ email: nextEmail.trim(), ...passwordPayload })
       });
       if (controller.signal.aborted || generation !== lifecycle) return;
       emailPassword = '';
@@ -397,11 +409,12 @@
     const generation = lifecycle;
     beginAction();
     try {
+      const passwordPayload = await currentPasswordPayload(mfaPassword);
       const setup = await api<MfaSetup>('/auth/mfa/setup', {
         method: 'POST',
         signal: controller.signal,
         body: JSON.stringify({
-          password: mfaPassword,
+          ...passwordPayload,
           current_code: mfaCurrentCode || null
         })
       });
@@ -449,10 +462,11 @@
     const generation = lifecycle;
     beginAction();
     try {
+      const passwordPayload = await currentPasswordPayload(disablePassword);
       await api('/auth/mfa/disable', {
         method: 'POST',
         signal: controller.signal,
-        body: JSON.stringify({ password: disablePassword, code: disableCode })
+        body: JSON.stringify({ ...passwordPayload, code: disableCode })
       });
       if (controller.signal.aborted || generation !== lifecycle) return;
       disablePassword = '';
@@ -481,16 +495,21 @@
   async function logout() {
     const controller = routeController;
     if (busy || !controller) return;
-    const generation = lifecycle;
     beginAction();
     try {
-      await api('/auth/logout', { method: 'POST', signal: controller.signal });
-      if (controller.signal.aborted || generation !== lifecycle) return;
-      expireBrowserSession();
-    } catch (caught) {
-      if (controller.signal.aborted || generation !== lifecycle) return;
-      actionError(caught, 'Could not sign out.');
-      busy = false;
+      try {
+        await api('/auth/logout', { method: 'POST', signal: controller.signal });
+      } catch {
+        // Explicit logout is locally authoritative. The server session expires
+        // independently, while local credentials and encryption state must be
+        // removed even when the instance is offline.
+      }
+    } finally {
+      try {
+        await clearActiveE2EEState();
+      } finally {
+        expireBrowserSession();
+      }
     }
   }
 

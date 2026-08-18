@@ -13,6 +13,16 @@ from app.core.settings import Settings
 from app.db.models import User
 
 VALID_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
+DERIVED_PASSWORD = "A" * 43
+AUTH_SALT = base64.urlsafe_b64encode(bytes(16)).decode().rstrip("=")
+VAULT_SALT = base64.urlsafe_b64encode(bytes([1]) * 16).decode().rstrip("=")
+PASSWORD_KDF = {
+    "version": 2,
+    "algorithm": "PBKDF2-SHA256",
+    "iterations": 600_000,
+    "auth_salt": AUTH_SALT,
+    "vault_salt": VAULT_SALT,
+}
 
 
 def settings(
@@ -84,7 +94,11 @@ async def test_disabled_email_registration_creates_no_delivery_intent(
 
     result = await auth_api.register(
         request,
-        RegisterRequest(username="maple", password="long-enough-password"),
+        RegisterRequest(
+            username="maple",
+            password=DERIVED_PASSWORD,
+            password_kdf=PASSWORD_KDF,
+        ),
         session,
         snowflake,
         config,

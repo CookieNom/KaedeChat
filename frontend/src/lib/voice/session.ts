@@ -1,6 +1,7 @@
 import { ExternalE2EEKeyProvider, Room, RoomEvent, Track, type Participant } from 'livekit-client';
 import type { LocalTrackPublication, RemoteTrack, RemoteTrackPublication } from 'livekit-client';
 import { userErrorMessage } from '$lib/api/client';
+import type { Channel } from '$lib/chat/types';
 import { isNativeDesktop, nativeInvoke, type NativeVoiceStatus } from '$lib/platform/native';
 import { base64url } from '$lib/e2ee/encoding';
 
@@ -100,6 +101,32 @@ export function isUsableVoiceToken(value: VoiceToken, now = Date.now()): boolean
         value.media_epoch === value.encryption_epoch) &&
     Number.isFinite(expires) &&
     expires > now
+  );
+}
+
+export function voiceGrantMatchesChannelPolicy(
+  grant: VoiceToken,
+  channel: Pick<
+    Channel,
+    | 'id'
+    | 'origin_domain'
+    | 'encryption_mode'
+    | 'encryption_state'
+    | 'encryption_policy_generation'
+    | 'encryption_epoch'
+  >
+): boolean {
+  return (
+    grant.e2ee === true &&
+    channel.encryption_mode === 'e2ee' &&
+    channel.encryption_state === 'active' &&
+    `${grant.channel_id}@${grant.channel_domain}` === `${channel.id}@${channel.origin_domain}` &&
+    grant.encryption_policy_generation === channel.encryption_policy_generation &&
+    grant.encryption_epoch === channel.encryption_epoch &&
+    grant.media_protocol === 'livekit-e2ee-v1' &&
+    grant.media_suite === 'AES-256-GCM' &&
+    /^[A-Za-z0-9_-]{43}$/.test(grant.media_session_id ?? '') &&
+    grant.media_epoch === grant.encryption_epoch
   );
 }
 

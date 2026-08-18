@@ -1,7 +1,8 @@
 use js_sys::{Array, Uint8Array};
 use wasm_bindgen::prelude::*;
+use zeroize::Zeroizing;
 
-use crate::{MlsClient, MlsError, PendingCommit, ProcessedMessage};
+use crate::{KeyPackageIdentity, MlsClient, MlsError, PendingCommit, ProcessedMessage};
 
 fn js_error(error: MlsError) -> JsError {
     JsError::new(&error.to_string())
@@ -9,15 +10,15 @@ fn js_error(error: MlsError) -> JsError {
 
 #[wasm_bindgen(js_name = KaedeMlsPendingCommit)]
 pub struct WasmPendingCommit {
-    commit: Vec<u8>,
-    welcome: Vec<u8>,
+    commit: Zeroizing<Vec<u8>>,
+    welcome: Zeroizing<Vec<u8>>,
 }
 
 impl From<PendingCommit> for WasmPendingCommit {
-    fn from(value: PendingCommit) -> Self {
+    fn from(mut value: PendingCommit) -> Self {
         Self {
-            commit: value.commit,
-            welcome: value.welcome,
+            commit: Zeroizing::new(std::mem::take(&mut value.commit)),
+            welcome: Zeroizing::new(std::mem::take(&mut value.welcome)),
         }
     }
 }
@@ -26,21 +27,49 @@ impl From<PendingCommit> for WasmPendingCommit {
 impl WasmPendingCommit {
     #[wasm_bindgen(getter)]
     pub fn commit(&self) -> Vec<u8> {
-        self.commit.clone()
+        self.commit.to_vec()
     }
 
     #[wasm_bindgen(getter)]
     pub fn welcome(&self) -> Vec<u8> {
-        self.welcome.clone()
+        self.welcome.to_vec()
+    }
+}
+
+#[wasm_bindgen(js_name = KaedeMlsKeyPackageIdentity)]
+pub struct WasmKeyPackageIdentity {
+    credential: Vec<u8>,
+    signature_key: Vec<u8>,
+}
+
+impl From<KeyPackageIdentity> for WasmKeyPackageIdentity {
+    fn from(value: KeyPackageIdentity) -> Self {
+        Self {
+            credential: value.credential,
+            signature_key: value.signature_key,
+        }
+    }
+}
+
+#[wasm_bindgen(js_class = KaedeMlsKeyPackageIdentity)]
+impl WasmKeyPackageIdentity {
+    #[wasm_bindgen(getter)]
+    pub fn credential(&self) -> Vec<u8> {
+        self.credential.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = signatureKey)]
+    pub fn signature_key(&self) -> Vec<u8> {
+        self.signature_key.clone()
     }
 }
 
 #[wasm_bindgen(js_name = KaedeMlsProcessedMessage)]
 pub struct WasmProcessedMessage {
     kind: &'static str,
-    application: Option<Vec<u8>>,
-    aad: Option<Vec<u8>>,
-    credential: Option<Vec<u8>>,
+    application: Option<Zeroizing<Vec<u8>>>,
+    aad: Option<Zeroizing<Vec<u8>>>,
+    credential: Option<Zeroizing<Vec<u8>>>,
 }
 
 #[wasm_bindgen(js_class = KaedeMlsProcessedMessage)]
@@ -52,17 +81,17 @@ impl WasmProcessedMessage {
 
     #[wasm_bindgen(getter)]
     pub fn application(&self) -> Option<Vec<u8>> {
-        self.application.clone()
+        self.application.as_ref().map(|value| value.to_vec())
     }
 
     #[wasm_bindgen(getter)]
     pub fn aad(&self) -> Option<Vec<u8>> {
-        self.aad.clone()
+        self.aad.as_ref().map(|value| value.to_vec())
     }
 
     #[wasm_bindgen(getter)]
     pub fn credential(&self) -> Option<Vec<u8>> {
-        self.credential.clone()
+        self.credential.as_ref().map(|value| value.to_vec())
     }
 }
 
@@ -111,6 +140,17 @@ impl WasmMlsClient {
     #[wasm_bindgen(js_name = generateKeyPackage)]
     pub fn generate_key_package(&self) -> Result<Vec<u8>, JsError> {
         self.inner.generate_key_package().map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = inspectKeyPackage)]
+    pub fn inspect_key_package(
+        &self,
+        key_package: &[u8],
+    ) -> Result<WasmKeyPackageIdentity, JsError> {
+        self.inner
+            .inspect_key_package(key_package)
+            .map(WasmKeyPackageIdentity::from)
+            .map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = createGroup)]

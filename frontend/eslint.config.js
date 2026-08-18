@@ -23,6 +23,7 @@ export default tseslint.config(
   {
     ignores: [
       'build/',
+      'build-prevalidation/',
       '.svelte-kit/',
       'src/lib/generated/',
       'src/lib/e2ee/wasm/kaede_e2ee.js',

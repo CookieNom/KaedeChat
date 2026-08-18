@@ -2,6 +2,11 @@
   import { resolve } from '$app/paths';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
+  import {
+    loadPasswordKdfContext,
+    preparePassword,
+    savePreparedVaultKey
+  } from '$lib/auth/password-kdf';
   import { safeReturnPath } from '$lib/auth/return-path';
   import TurnstileWidget from '$lib/components/TurnstileWidget.svelte';
   import NativeInstanceField from '$lib/components/NativeInstanceField.svelte';
@@ -27,6 +32,7 @@
   let turnstileWidget = $state<TurnstileWidget | null>(null);
   let codeInput = $state<HTMLInputElement | null>(null);
   let instanceField = $state<NativeInstanceField | null>(null);
+  let preparedVaultKey: CryptoKey | null = null;
 
   onMount(() => {
     const controller = new AbortController();
@@ -57,11 +63,18 @@
           body: JSON.stringify({ ticket, code })
         });
       } else {
+        const prepared = await preparePassword(
+          password,
+          await loadPasswordKdfContext(identifier.trim())
+        );
+        preparedVaultKey = prepared.vaultKey;
         const result = await api<LoginResult>('/auth/login', {
           method: 'POST',
           body: JSON.stringify({
             identifier,
-            password,
+            password: prepared.authenticationSecret,
+            password_kdf_version: prepared.context.version,
+            ...(prepared.passwordUpgrade ? { password_upgrade: prepared.passwordUpgrade } : {}),
             ...(turnstileRequired ? { turnstile_token: turnstileToken } : {})
           })
         });
@@ -73,6 +86,11 @@
           return;
         }
       }
+      if (!preparedVaultKey) {
+        throw new Error('Encryption keys could not be unlocked. Start sign-in again.');
+      }
+      await savePreparedVaultKey(preparedVaultKey);
+      preparedVaultKey = null;
       password = '';
       code = '';
       ticket = null;
@@ -80,6 +98,7 @@
       sessionStorage.removeItem('kaede.return-to');
       window.location.replace(safeReturnPath(returnTo, window.location.origin) ?? resolve('/home'));
     } catch (caught) {
+      if (!ticket) preparedVaultKey = null;
       if (caught instanceof ApiError) {
         error = caught.message;
         const needsChallenge =

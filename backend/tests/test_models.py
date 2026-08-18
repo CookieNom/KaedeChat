@@ -78,8 +78,13 @@ def test_complete_v1_schema_is_registered() -> None:
         "bot_tokens",
         "bot_interactions",
         "abuse_reports",
+        "e2ee_account_vaults",
+        "e2ee_account_vault_digests",
+        "e2ee_control_records",
         "e2ee_devices",
         "e2ee_key_packages",
+        "e2ee_package_claim_batches",
+        "e2ee_room_operations",
     }
     assert required == set(Base.metadata.tables)
 
@@ -325,6 +330,17 @@ def test_media_staging_objects_have_a_recoverable_cleanup_cursor() -> None:
 
 def test_local_user_tables_have_database_constraints() -> None:
     users = Base.metadata.tables["users"]
+    assert {
+        "e2ee_recovery_token_hash",
+        "e2ee_recovery_session_id",
+        "e2ee_recovery_generation",
+        "e2ee_recovery_expires_at",
+    } <= set(users.c.keys())
+    assert {
+        "ck_users_e2ee_recovery_token_hash_length",
+        "ck_users_e2ee_recovery_generation_positive",
+        "ck_users_e2ee_recovery_authorization_complete",
+    } <= constraint_names("users")
     assert any(
         isinstance(constraint, CheckConstraint)
         and constraint.name is not None

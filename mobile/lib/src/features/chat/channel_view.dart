@@ -42,6 +42,19 @@ List<EntityRef> mentionReferences(String content) {
   return List.unmodifiable(references);
 }
 
+/// Null means the MLS application is unavailable on this device. An exact
+/// empty string is successful decryption for an attachment-only message and
+/// remains valid report evidence after explicit consent.
+bool encryptedReportEvidenceAvailable(KaedeMessage message) =>
+    message.e2ee != null && message.content != null;
+
+bool canSubmitMessageReport(
+  KaedeMessage message, {
+  required bool disclosureAcknowledged,
+}) =>
+    message.e2ee == null ||
+    (encryptedReportEvidenceAvailable(message) && disclosureAcknowledged);
+
 const _automaticHistoryLoadThreshold = 320.0;
 const _defaultRecentReactions = <String>['❤️', '😂', '👍', '🔥'];
 const _reactionEmojiCategories = <String, List<String>>{
@@ -1225,6 +1238,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     var category = 'spam';
     var disclose = false;
     var submitting = false;
+    final encryptedEvidenceAvailable =
+        encryptedReportEvidenceAvailable(message);
     final description = TextEditingController();
     try {
       await showDialog<void>(
@@ -1239,19 +1254,21 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   if (message.e2ee != null) ...[
-                    const Text(
-                      'This message is end-to-end encrypted. Reporting can share only the decrypted text shown on this device with this instance’s Trust & Safety team. Encryption keys and other messages are not sent.',
+                    Text(
+                      encryptedEvidenceAvailable
+                          ? 'This message is end-to-end encrypted. Reporting shares the decrypted message evidence shown on this device with this instance’s Trust & Safety team. Attachment-only messages have empty disclosed text and can still be reported. Encryption keys, decrypted file contents, and other messages are not sent.'
+                          : 'This encrypted message has not decrypted on this device. Wait for its authenticated message evidence to decrypt, then try again.',
                     ),
                     const SizedBox(height: 12),
                     CheckboxListTile(
                       contentPadding: EdgeInsets.zero,
                       value: disclose,
-                      onChanged: submitting
+                      onChanged: submitting || !encryptedEvidenceAvailable
                           ? null
                           : (value) =>
                               setDialogState(() => disclose = value == true),
                       title: const Text(
-                        'I understand the decrypted text will be disclosed.',
+                        'I understand the decrypted message evidence will be disclosed.',
                       ),
                     ),
                   ] else
@@ -1295,9 +1312,10 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
               ),
               FilledButton(
                 onPressed: submitting ||
-                        (message.e2ee != null &&
-                            (!disclose ||
-                                message.content?.trim().isNotEmpty != true))
+                        !canSubmitMessageReport(
+                          message,
+                          disclosureAcknowledged: disclose,
+                        )
                     ? null
                     : () async {
                         setDialogState(() => submitting = true);

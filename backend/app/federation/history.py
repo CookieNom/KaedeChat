@@ -12,7 +12,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.chat.e2ee import validate_e2ee_envelope, validate_message_encryption_policy
+from app.chat.e2ee import (
+    validate_e2ee_envelope,
+    validate_e2ee_message_projection,
+    validate_message_encryption_policy,
+)
 from app.chat.payloads import message_payload, user_payload
 from app.chat.permissions import calculate_permissions
 from app.core.permissions import Permission
@@ -21,6 +25,7 @@ from app.core.snowflake import SnowflakeGenerator
 from app.db.models import (
     Attachment,
     Channel,
+    E2EEControlRecord,
     FederatedHistoryMessage,
     Guild,
     GuildEvent,
@@ -636,6 +641,12 @@ async def history_export_page(
                 message_filter,
                 Message.id <= grant.upper_bound_id,
                 Message.deleted_at.is_(None),
+                ~exists(
+                    select(E2EEControlRecord.id).where(
+                        E2EEControlRecord.id == Message.id,
+                        E2EEControlRecord.origin_domain == Message.origin_domain,
+                    )
+                ),
             )
             .order_by(Message.id.desc() if recent_first else Message.id)
             .limit(limit + 1)
@@ -1267,6 +1278,12 @@ def _validate_history_message(
             raise ValueError("historical message edit timestamp is invalid")
     content = raw.get("content")
     e2ee = validate_e2ee_envelope(raw.get("e2ee"))
+    validate_e2ee_message_projection(
+        e2ee,
+        message_id=message_id,
+        message_domain=guild_origin,
+        edited=edited_at is not None,
+    )
     attachments = raw.get("attachments", [])
     reactions = raw.get("reactions", [])
     pin = raw.get("pin")
@@ -1988,6 +2005,12 @@ async def _merge_history_import_batch(
         if channel is None or channel.guild_id != guild.id:
             raise RuntimeError("historical message channel disappeared")
         staged_e2ee = validate_e2ee_envelope(raw.get("e2ee"))
+        validate_e2ee_message_projection(
+            staged_e2ee,
+            message_id=staged.message_id,
+            message_domain=staged.message_domain,
+            edited=raw.get("edited_at") is not None,
+        )
         validate_message_encryption_policy(
             channel.encryption_mode,
             content=raw.get("content"),

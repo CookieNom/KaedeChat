@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import html
 import re
 import secrets
+from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
-from typing import NoReturn
+from typing import NoReturn, cast
 
 import pyotp
 from cryptography.exceptions import InvalidTag
@@ -31,6 +34,7 @@ from app.auth.schemas import (
     MfaLoginRequest,
     MfaSetupRequest,
     PasswordForgotRequest,
+    PasswordKdfLookupRequest,
     PasswordResetRequest,
     RefreshRequest,
     RegisterRequest,
@@ -78,11 +82,24 @@ from app.auth.turnstile import (
     TurnstileUnavailableError,
     verify_turnstile_token,
 )
+from app.chat.e2ee import (
+    ACCOUNT_VAULT_LEASE_TTL_SECONDS,
+    RELEASE_ACCOUNT_VAULT_LEASE,
+    account_vault_lease_key,
+)
 from app.core.proxy import resolve_client_ip
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
-from app.db.models import OneTimeToken, RecoveryCode, Session, User, UserSettings
+from app.db.models import (
+    E2EEAccountVault,
+    E2EEAccountVaultDigest,
+    OneTimeToken,
+    RecoveryCode,
+    Session,
+    User,
+    UserSettings,
+)
 from app.email.outbox import enqueue_email_intent
 from app.email.templates import email_change_confirmation, password_reset_email, verification_email
 from app.tasks import email_outbox_drain
@@ -127,6 +144,43 @@ def email_verification_required(user: User, settings: Settings) -> bool:
         and user.email is not None
         and user.email_verified_at is None
     )
+
+
+def decode_password_salt(value: str) -> bytes:
+    try:
+        decoded = base64.b64decode(value + "==", altchars=b"-_", validate=True)
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise auth_error(
+            "PASSWORD_KDF_INVALID",
+            "Password protection parameters are invalid",
+            422,
+        ) from exc
+    if len(decoded) != 16 or base64.urlsafe_b64encode(decoded).decode().rstrip("=") != value:
+        raise auth_error("PASSWORD_KDF_INVALID", "Password protection parameters are invalid", 422)
+    return decoded
+
+
+def encode_password_salt(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def fake_password_salt(settings: Settings, identifier: str, purpose: str) -> bytes:
+    return hmac.new(
+        settings.secret_key_bytes,
+        f"kaede-password-kdf:v2:{purpose}:{identifier}".encode(),
+        hashlib.sha256,
+    ).digest()[:16]
+
+
+def password_kdf_version(user: User | None) -> int:
+    return 2 if user is not None and user.password_kdf_version == 2 else 0
+
+
+def submitted_password_protocol_matches(user: User | None, submitted: int) -> bool:
+    # Unknown accounts deliberately behave like modern accounts so the public
+    # KDF lookup cannot be turned into a reliable account-enumeration oracle.
+    expected = password_kdf_version(user) if user is not None else 2
+    return secrets.compare_digest(str(expected), str(submitted))
 
 
 async def verify_submitted_password(password: str, password_hash: str | None) -> bool:
@@ -256,6 +310,74 @@ async def auth_configuration(settings: Settings = Depends(get_settings)) -> dict
     }
 
 
+@router.post("/key-derivation")
+async def password_key_derivation(
+    payload: PasswordKdfLookupRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    identifier = payload.identifier.strip().lower()
+    handle_username: str | None = None
+    if "@" in identifier:
+        candidate_username, candidate_domain = identifier.rsplit("@", 1)
+        if candidate_domain == settings.domain:
+            handle_username = candidate_username
+    # A local composite handle and its bare username are the same login
+    # identifier. Canonicalize before both the anonymous fake-salt path and
+    # rate limiting so their observable pattern cannot reveal whether that
+    # alias resolves to a real account.
+    canonical_identifier = handle_username or identifier
+    rate_key = hashlib.sha256(
+        f"{client_ip(request, settings)}:{canonical_identifier}".encode()
+    ).hexdigest()
+    if not await redis.set(f"auth:kdf:{rate_key}", "1", ex=1, nx=True):
+        raise auth_error("RATE_LIMITED", "Try again shortly", 429)
+    user = await session.scalar(
+        select(User)
+        .where(
+            User.is_local.is_(True),
+            User.account_type == "human",
+            or_(
+                func.lower(User.email) == identifier,
+                func.lower(User.username) == canonical_identifier,
+            ),
+        )
+        .with_for_update()
+    )
+    if user is None:
+        return {
+            "version": 2,
+            "algorithm": "PBKDF2-SHA256",
+            "iterations": 600_000,
+            "auth_salt": encode_password_salt(
+                fake_password_salt(settings, canonical_identifier, "auth")
+            ),
+            "vault_salt": encode_password_salt(
+                fake_password_salt(settings, canonical_identifier, "vault")
+            ),
+        }
+    if user.e2ee_vault_salt is None:
+        user.e2ee_vault_salt = secrets.token_bytes(16)
+        await session.commit()
+    if user.password_kdf_version == 2 and user.password_auth_salt is not None:
+        return {
+            "version": 2,
+            "algorithm": "PBKDF2-SHA256",
+            "iterations": 600_000,
+            "auth_salt": encode_password_salt(user.password_auth_salt),
+            "vault_salt": encode_password_salt(user.e2ee_vault_salt),
+        }
+    return {
+        "version": 0,
+        "algorithm": "legacy",
+        "iterations": 0,
+        "auth_salt": None,
+        "vault_salt": encode_password_salt(user.e2ee_vault_salt),
+    }
+
+
 @router.get("/native-challenge", response_class=HTMLResponse, include_in_schema=False)
 async def native_turnstile_challenge(
     action: str,
@@ -374,6 +496,9 @@ async def register(
         username=payload.username,
         email=email,
         password_hash=await hash_submitted_password(payload.password),
+        password_kdf_version=payload.password_kdf.version,
+        password_auth_salt=decode_password_salt(payload.password_kdf.auth_salt),
+        e2ee_vault_salt=decode_password_salt(payload.password_kdf.vault_salt),
     )
     session.add(user)
     try:
@@ -567,8 +692,10 @@ async def login(
             ip,
             turnstile_enabled=settings.turnstile_enabled,
         )
+    protocol_valid = submitted_password_protocol_matches(user, payload.password_kdf_version)
     password_valid = await verify_submitted_password(
-        payload.password, user.password_hash if user else None
+        payload.password if protocol_valid else "invalid-password-protocol",
+        user.password_hash if user else None,
     )
     if user is None or not password_valid:
         await reject_invalid_login(
@@ -597,6 +724,24 @@ async def login(
             failed_account_key=account_key,
         )
     user = locked_user
+    if not submitted_password_protocol_matches(user, payload.password_kdf_version):
+        await reject_invalid_login(
+            limiter,
+            admission_key,
+            ip,
+            turnstile_enabled=settings.turnstile_enabled,
+            failed_account_key=account_key,
+        )
+    credentials_upgraded = False
+    if user.password_kdf_version is None and payload.password_upgrade is not None:
+        user.password_hash = await hash_submitted_password(payload.password_upgrade.password)
+        user.password_kdf_version = payload.password_upgrade.password_kdf.version
+        user.password_auth_salt = decode_password_salt(
+            payload.password_upgrade.password_kdf.auth_salt
+        )
+        if user.e2ee_vault_salt is None:
+            user.e2ee_vault_salt = secrets.token_bytes(16)
+        credentials_upgraded = True
     if user.disabled_at is not None:
         await reject_invalid_login(
             limiter,
@@ -613,6 +758,11 @@ async def login(
     if user.totp_secret_encrypted is not None:
         if await mfa_attempt_locked(redis, user.id, user.origin_domain, ip):
             raise mfa_rate_limited()
+        # The MFA ticket is fingerprinted to the upgraded credentials. Persist
+        # them before returning the ticket so /auth/mfa observes the same
+        # fingerprint in its independent request/transaction.
+        if credentials_upgraded:
+            await session.commit()
         ticket = await issue_mfa_ticket(redis, user)
         return JSONResponse({"mfa_required": True, "mfa_ticket": ticket, "token_type": "opaque"})
     issued = await create_session(
@@ -848,16 +998,62 @@ async def reset_password(
         _, user = await consume_one_time_token(session, payload.token, purpose="password_reset")
     except InvalidTokenError as exc:
         raise auth_error("INVALID_TOKEN", "Token is invalid or expired", 400) from exc
-    user.password_hash = await hash_submitted_password(payload.password)
-    await session.execute(
-        delete(OneTimeToken).where(
-            OneTimeToken.user_id == user.id,
-            OneTimeToken.user_domain == user.origin_domain,
-            OneTimeToken.consumed_at.is_(None),
-        )
+    lease_key = account_vault_lease_key(user.id, user.origin_domain)
+    reset_token = secrets.token_urlsafe(32)
+    # Token consumption already holds the durable User row lock. Replace any
+    # old Redis holder with an unguessable reset sentinel while that lock is
+    # held. Vault writers re-read Redis only after acquiring the same row lock,
+    # so neither an expired holder nor a lease acquired mid-reset can repopulate
+    # the old-password vault after the reset commits.
+    await redis.set(
+        lease_key,
+        reset_token,
+        ex=ACCOUNT_VAULT_LEASE_TTL_SECONDS,
     )
-    await revoke_user_sessions(session, redis, settings, user)
-    return {"status": "password_updated"}
+    try:
+        user.password_hash = await hash_submitted_password(payload.password)
+        user.password_kdf_version = payload.password_kdf.version
+        user.password_auth_salt = decode_password_salt(payload.password_kdf.auth_salt)
+        # A recovery reset must not silently retain the portable MLS vault under a
+        # key derived from the old password. Existing trusted local state or an
+        # explicit recovery bundle can repopulate it after the next login.
+        user.e2ee_vault_salt = secrets.token_bytes(16)
+        # Any unfinished encryption reset was bound to a session revoked below.
+        # A newly authenticated recovery session can issue a fresh authorization
+        # through POST /e2ee/reset before restoring the same portable identity.
+        user.e2ee_recovery_token_hash = None
+        user.e2ee_recovery_session_id = None
+        user.e2ee_recovery_generation = None
+        user.e2ee_recovery_expires_at = None
+        await session.execute(
+            delete(E2EEAccountVaultDigest).where(
+                E2EEAccountVaultDigest.user_id == user.id,
+                E2EEAccountVaultDigest.user_domain == user.origin_domain,
+            )
+        )
+        await session.execute(
+            delete(E2EEAccountVault).where(
+                E2EEAccountVault.user_id == user.id,
+                E2EEAccountVault.user_domain == user.origin_domain,
+            )
+        )
+        await session.execute(
+            delete(OneTimeToken).where(
+                OneTimeToken.user_id == user.id,
+                OneTimeToken.user_domain == user.origin_domain,
+                OneTimeToken.consumed_at.is_(None),
+            )
+        )
+        await revoke_user_sessions(session, redis, settings, user)
+        return {
+            "status": "password_updated",
+            "account_ref": f"{user.id}@{user.origin_domain}",
+        }
+    finally:
+        await cast(
+            Awaitable[object],
+            redis.eval(RELEASE_ACCOUNT_VAULT_LEASE, 1, lease_key, reset_token),
+        )
 
 
 @router.post("/email/change")
@@ -882,6 +1078,7 @@ async def request_email_change(
     if (
         locked_user is None
         or locked_user.disabled_at is not None
+        or not submitted_password_protocol_matches(locked_user, payload.password_kdf_version)
         or not await verify_submitted_password(payload.password, locked_user.password_hash)
     ):
         raise auth_error("INVALID_CREDENTIALS", "Invalid credentials", 401)
@@ -975,7 +1172,9 @@ async def setup_mfa(
     ip = client_ip(request, settings)
     if await mfa_attempt_locked(redis, locked_user.id, locked_user.origin_domain, ip):
         raise mfa_rate_limited()
-    if not await verify_submitted_password(payload.password, locked_user.password_hash):
+    if not submitted_password_protocol_matches(
+        locked_user, payload.password_kdf_version
+    ) or not await verify_submitted_password(payload.password, locked_user.password_hash):
         await record_mfa_verification_failure(redis, locked_user.id, locked_user.origin_domain, ip)
         raise auth_error("INVALID_CREDENTIALS", "Invalid credentials", 401)
     if locked_user.totp_secret_encrypted is not None and (
@@ -1064,7 +1263,9 @@ async def disable_mfa(
     ip = client_ip(request, settings)
     if await mfa_attempt_locked(redis, locked_user.id, locked_user.origin_domain, ip):
         raise mfa_rate_limited()
-    if not await verify_submitted_password(payload.password, locked_user.password_hash):
+    if not submitted_password_protocol_matches(
+        locked_user, payload.password_kdf_version
+    ) or not await verify_submitted_password(payload.password, locked_user.password_hash):
         await record_mfa_verification_failure(redis, locked_user.id, locked_user.origin_domain, ip)
         raise auth_error("INVALID_CREDENTIALS", "Invalid credentials", 401)
     if not await verify_mfa_code(session, settings, locked_user, payload.code):

@@ -287,14 +287,18 @@ Supported scopes:
 
 - `applications.commands`
 - `interactions.respond`
-- `guilds.read`, `channels.read`, `members.read`, `roles.read`
+- `guilds.read`, `guilds.manage`
+- `channels.read`, `channels.manage`
+- `members.read`
+- `roles.read`, `roles.manage`
 - `messages.metadata`, `messages.content`, `messages.history`
 - `messages.send`, `messages.edit.own`, `messages.delete.own`
 - `messages.manage`
 - `attachments.read`, `attachments.write`
 - `reactions.read`, `reactions.write`
 - `moderation.members`, `moderation.messages`
-- `voice.states.read`
+- `voice.states.read`, `voice.moderate`
+- `invites.manage`, `webhooks.manage`, `emojis.manage`
 - `dm.send`
 
 Supported intents:
@@ -304,6 +308,7 @@ Supported intents:
 - `guild_messages`
 - `message_content` (privileged)
 - `message_reactions`
+- `guild_typing`
 - `voice_states`
 - `interactions`
 
@@ -314,8 +319,12 @@ privileged-intent review, an installation ceiling, operator policy, or E2EE
 consent.
 
 Guild bots do not gain access to members' direct messages. `dm.send` covers only
-the documented outbound flow. Ambient and inbound direct-message access are
-outside this contract, and there is no direct-message event intent.
+opening the documented outbound conversation and sending into it. Ambient and
+inbound direct-message access are outside this contract, there is no
+direct-message event intent, and bot attachment uploads require a guild
+installation. DM creation, sending, and typing bind to one caller-selected
+active installation; that exact installation must still grant `dm.send` and
+`messages.send` rather than relying on another guild's consent.
 
 ## REST API
 
@@ -367,12 +376,47 @@ Installation responses contain no worker or bot secret.
 
 Supported resource operations include:
 
-- Guild, channel, role, member, and permission lookup.
+- Guild, channel, role, member, and permission lookup, including opt-in member
+  presence hydration.
+- Guild update; channel and role create/update/reorder/delete; and member role
+  assignment, removal, and atomic replacement.
 - Cursor-paginated message history when every required grant allows it.
-- Message send and edit/delete-own operations.
-- Reactions and attachment metadata permitted by message-content grants.
+- Message send and edit/delete-own operations, plus explicitly scoped message
+  moderation.
+- Reactions and independently scoped attachment metadata/downloads.
+- Installation-owned upload tickets with installation-level byte accounting.
+- Guild invite, webhook, and emoji management.
+- Voice mute/deafen, disconnect, and move moderation.
+- Outbound direct-message creation without ambient DM reads.
 - Allowed-mention controls that default to no broad role or everyone mentions.
 - Typed `encrypted` and `content_unavailable` fields instead of empty content.
+
+The principal runtime routes are:
+
+| Capability         | Routes                                                                                                                                   |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Guild management   | `PATCH /api/v1/bots/guilds/{guild}`                                                                                                      |
+| Channel management | `POST/PATCH /api/v1/bots/guilds/{guild}/channels`; `PATCH/DELETE /api/v1/bots/guilds/{guild}/channels/{channel}`                         |
+| Role management    | `POST/PATCH /api/v1/bots/guilds/{guild}/roles`; `PATCH/DELETE /api/v1/bots/guilds/{guild}/roles/{role}`; member-role `PUT/DELETE` routes |
+| Attachments        | `POST /api/v1/bots/channels/{channel}/attachments`; `GET /api/v1/bots/attachments/{attachment}` and `/{variant}`                         |
+| Invites            | `POST/GET /api/v1/bots/guilds/{guild}/invites`; `DELETE .../invites/{code}`                                                              |
+| Webhooks           | create/list/update/rotate/delete below `/api/v1/bots/guilds/{guild}`                                                                     |
+| Emojis             | list, upload ticket, commit, and delete below `/api/v1/bots/guilds/{guild}/emojis`                                                       |
+| Voice moderation   | `PATCH/DELETE .../members/{user}/voice`; `POST .../voice/move`                                                                           |
+| Outbound DM        | `POST /api/v1/bots/dms`                                                                                                                  |
+
+Mutable guild, channel, and role payloads carry a `version`. Update requests
+must send it through `If-Match`; stale updates fail instead of silently
+overwriting another moderator's work. Role reorders carry one version per role.
+
+`attachments.write` does not invent a local-human storage owner for a remote
+bot identity. Pending and finalized bytes belong to the exact installation
+that created the ticket and use the instance's configured upload and storage
+limits. A bot cannot bind that ticket in another installation. Conversely,
+`attachments.read` may download a human-authored attachment only after it is
+bound to a message in a channel where that same installation still has normal
+view/history permissions. Signed object-storage redirects never receive bot
+tokens or DPoP proof headers.
 
 ## Commands and interactions
 
@@ -452,8 +496,14 @@ payload. The server retains a bounded topic backlog. A cursor older than that
 backlog receives an explicit `GAP` event instead of silently missing data.
 
 Intent selection controls delivery. Scopes and current installation grants
-control fields and actions. Message content and attachments are removed unless
-both the worker and installation have the content grant.
+control fields and actions. Message content and attachments are filtered
+independently. Content requires the privileged intent plus `messages.content`;
+attachment projections require `attachments.read`. The event category itself
+also requires its read scope on both the worker and installation (for example
+`messages.metadata`, `reactions.read`, `members.read`, or
+`voice.states.read`). Sparse presence and voice projections carry the
+canonical guild context from the authorized topic, so multi-instance workers
+do not have to infer an authority from a user or channel reference.
 
 Sessions have hard limits. Gateway session counts are atomically limited per
 worker, token expiry is checked while the connection is open, and frames are
@@ -565,9 +615,10 @@ The package provides:
 - direct multi-target token exchange and DPoP signing
 - heartbeat, cursor resume, bounded reconnect, and `Retry-After` handling
 - `Client.event` and `Client.command` decorators
-- typed `EntityRef`, `User`, `Message`, `Interaction`, and error classes
-- message send/edit/delete, history iteration primitives, reactions, and user
-  lookup
+- typed guild, channel, member, role, message, attachment, invite, webhook,
+  emoji, interaction, moderation, presence, and voice resources/events
+- scoped CRUD and moderation helpers, safe presigned uploads/downloads,
+  message history and reactions, and user lookup
 - `content_unavailable`, encrypted payload, and composite-reference handling
 
 A snowflake is never converted into a username. `fetch_user(EntityRef)`

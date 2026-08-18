@@ -10,7 +10,12 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.bots import installation_for_channel, user_auth
+from app.api.bots import (
+    installation_for_channel,
+    require_installation_scope,
+    require_owned_attachments_for_installation,
+    user_auth,
+)
 from app.api.channels import create_message
 from app.api.dependencies import (
     AuthenticatedUser,
@@ -20,6 +25,7 @@ from app.api.dependencies import (
     require_user,
 )
 from app.bots.auth import BotPrincipal, require_bot
+from app.bots.installations import installation_has_membership
 from app.chat.channel_access import load_channel_access
 from app.chat.e2ee import validate_e2ee_envelope
 from app.chat.events import guild_topic, publish_dispatch
@@ -124,11 +130,22 @@ async def _local_application_commands(
                 (BotApplication.id == ApplicationCommand.application_id)
                 & (BotApplication.origin_domain == ApplicationCommand.application_domain),
             )
+            .join(
+                User,
+                (User.id == BotInstallation.bot_user_id)
+                & (User.origin_domain == BotInstallation.bot_user_domain),
+            )
             .where(
                 BotInstallation.guild_id == guild.id,
                 BotInstallation.guild_domain == guild.origin_domain,
+                BotInstallation.bot_user_id == BotApplication.bot_user_id,
+                BotInstallation.bot_user_domain == BotApplication.bot_user_domain,
                 BotInstallation.status == "active",
+                installation_has_membership(),
                 BotInstallation.granted_scopes.contains(["applications.commands"]),
+                BotApplication.status == "active",
+                User.account_type == "bot",
+                User.disabled_at.is_(None),
                 ApplicationCommand.state == "active",
                 (
                     ApplicationCommand.guild_id.is_(None)
@@ -283,8 +300,14 @@ async def create_interaction(
                 BotInstallation.application_domain == app_domain,
                 BotInstallation.guild_id == access.guild.id,
                 BotInstallation.guild_domain == access.guild.origin_domain,
+                BotInstallation.bot_user_id == BotApplication.bot_user_id,
+                BotInstallation.bot_user_domain == BotApplication.bot_user_domain,
                 BotInstallation.status == "active",
+                installation_has_membership(),
                 BotInstallation.granted_scopes.contains(["applications.commands"]),
+                BotApplication.status == "active",
+                User.account_type == "bot",
+                User.disabled_at.is_(None),
                 ApplicationCommand.name == payload.command_name,
                 ApplicationCommand.type == payload.command_type,
                 ApplicationCommand.state == "active",
@@ -360,19 +383,51 @@ async def bot_interaction(
     session: AsyncSession,
     principal: BotPrincipal,
     interaction_id: int,
-) -> BotInteraction:
-    interaction = await session.get(BotInteraction, interaction_id, with_for_update=True)
+    *required_scopes: str,
+) -> tuple[BotInteraction, BotInstallation]:
+    for scope in required_scopes:
+        principal.require_scope(scope)
+    row = (
+        await session.execute(
+            select(BotInteraction, BotInstallation)
+            .join(BotInstallation, BotInstallation.id == BotInteraction.installation_id)
+            .where(
+                BotInteraction.id == interaction_id,
+                BotInteraction.application_id == principal.application.id,
+                BotInteraction.application_domain == principal.application.origin_domain,
+                BotInstallation.application_id == BotInteraction.application_id,
+                BotInstallation.application_domain == BotInteraction.application_domain,
+                BotInstallation.guild_id == BotInteraction.guild_id,
+                BotInstallation.guild_domain == BotInteraction.guild_domain,
+                BotInstallation.bot_user_id == principal.user.id,
+                BotInstallation.bot_user_domain == principal.user.origin_domain,
+                BotInstallation.status == "active",
+                installation_has_membership(),
+            )
+            .with_for_update()
+        )
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "INTERACTION_NOT_FOUND"})
+    interaction, installation = row
     if (
-        interaction is None
-        or interaction.application_id != principal.application.id
-        or interaction.application_domain != principal.application.origin_domain
+        interaction.installation_id != installation.id
+        or (installation.application_id, installation.application_domain)
+        != (principal.application.id, principal.application.origin_domain)
+        or (installation.bot_user_id, installation.bot_user_domain)
+        != (principal.user.id, principal.user.origin_domain)
+        or (installation.guild_id, installation.guild_domain)
+        != (interaction.guild_id, interaction.guild_domain)
+        or installation.status != "active"
     ):
         raise HTTPException(status_code=404, detail={"code": "INTERACTION_NOT_FOUND"})
+    for scope in required_scopes:
+        require_installation_scope(principal, installation, scope)
     if interaction.expires_at <= datetime.now(UTC):
         interaction.status = "expired"
         await session.commit()
         raise HTTPException(status_code=410, detail={"code": "INTERACTION_EXPIRED"})
-    return interaction
+    return interaction, installation
 
 
 @router.post("/bots/interactions/{interaction_id}/defer", status_code=204)
@@ -381,8 +436,12 @@ async def defer_interaction(
     principal: Annotated[BotPrincipal, Depends(require_bot)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
-    principal.require_scope("interactions.respond")
-    interaction = await bot_interaction(session, principal, interaction_id)
+    interaction, _ = await bot_interaction(
+        session,
+        principal,
+        interaction_id,
+        "interactions.respond",
+    )
     if interaction.status not in {"pending", "deferred"}:
         raise HTTPException(status_code=409, detail={"code": "INTERACTION_ALREADY_RESPONDED"})
     interaction.status = "deferred"
@@ -401,17 +460,33 @@ async def respond_interaction(
     snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, object]:
-    principal.require_scope("interactions.respond")
-    interaction = await bot_interaction(session, principal, interaction_id)
+    required_scopes = ["interactions.respond"]
+    if payload.message.attachment_ids:
+        required_scopes.append("attachments.write")
+    interaction, interaction_installation = await bot_interaction(
+        session,
+        principal,
+        interaction_id,
+        *required_scopes,
+    )
     if interaction.status not in {"pending", "deferred"}:
         raise HTTPException(status_code=409, detail={"code": "INTERACTION_ALREADY_RESPONDED"})
     channel_ref = EntityRef(f"{interaction.channel_id}@{interaction.channel_domain}")
-    await installation_for_channel(
+    _, channel_installation = await installation_for_channel(
         session,
         settings,
         principal,
         channel_ref,
         "interactions.respond",
+    )
+    if channel_installation is None or channel_installation.id != interaction_installation.id:
+        raise HTTPException(status_code=404, detail={"code": "INTERACTION_NOT_FOUND"})
+    await require_owned_attachments_for_installation(
+        session,
+        settings,
+        principal,
+        interaction_installation,
+        [int(attachment_id) for attachment_id in payload.message.attachment_ids],
     )
     result = await create_message(
         channel_ref,

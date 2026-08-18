@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import type { Channel } from '$lib/chat/types';
 
-import { isUsableVoiceToken, withVoiceConnectTimeout, type VoiceToken } from './session';
+import {
+  isUsableVoiceToken,
+  voiceGrantMatchesChannelPolicy,
+  withVoiceConnectTimeout,
+  type VoiceToken
+} from './session';
 
 function grant(overrides: Partial<VoiceToken> = {}): VoiceToken {
   return {
@@ -61,5 +67,65 @@ describe('voice connection timeout', () => {
     await expect(withVoiceConnectTimeout(new Promise(() => undefined), 1)).rejects.toThrow(
       'Voice connection timed out'
     );
+  });
+});
+
+describe('voice media key rotation', () => {
+  const channel = {
+    id: '2',
+    origin_domain: 'chat.example',
+    encryption_mode: 'e2ee',
+    encryption_state: 'active',
+    encryption_policy_generation: '4',
+    encryption_epoch: '7'
+  } satisfies Pick<
+    Channel,
+    | 'id'
+    | 'origin_domain'
+    | 'encryption_mode'
+    | 'encryption_state'
+    | 'encryption_policy_generation'
+    | 'encryption_epoch'
+  >;
+
+  const encrypted = grant({
+    e2ee: true,
+    channel_id: '2',
+    channel_domain: 'chat.example',
+    encryption_policy_generation: '4',
+    encryption_epoch: '7',
+    media_protocol: 'livekit-e2ee-v1',
+    media_suite: 'AES-256-GCM',
+    media_session_id: 'a'.repeat(43),
+    media_epoch: '7'
+  });
+
+  it('rejects the old grant after epoch rotation and accepts the replacement', () => {
+    expect(voiceGrantMatchesChannelPolicy(encrypted, channel)).toBe(true);
+    const rotatedChannel = {
+      ...channel,
+      encryption_policy_generation: '5',
+      encryption_epoch: '8'
+    };
+    expect(voiceGrantMatchesChannelPolicy(encrypted, rotatedChannel)).toBe(false);
+    expect(
+      voiceGrantMatchesChannelPolicy(
+        {
+          ...encrypted,
+          encryption_policy_generation: '5',
+          encryption_epoch: '8',
+          media_session_id: 'b'.repeat(43),
+          media_epoch: '8'
+        },
+        rotatedChannel
+      )
+    ).toBe(true);
+  });
+
+  it('rejects grants while the room is rekeying or for another channel', () => {
+    expect(
+      voiceGrantMatchesChannelPolicy(encrypted, { ...channel, encryption_state: 'rekeying' })
+    ).toBe(false);
+    expect(voiceGrantMatchesChannelPolicy({ ...encrypted, channel_id: '3' }, channel)).toBe(false);
   });
 });

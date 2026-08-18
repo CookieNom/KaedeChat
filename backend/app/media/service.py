@@ -7,8 +7,10 @@ from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bots.installations import installation_has_membership
 from app.core.settings import Settings
 from app.core.snowflake import SnowflakeGenerator
+from app.db.bot_models import BotInstallation
 from app.db.models import Attachment, User, UserStorageUsage
 from app.media.processing import normalize_declared_type, sanitize_filename
 from app.media.storage import S3Storage, StorageError
@@ -78,6 +80,36 @@ async def locked_usage(session: AsyncSession, settings: Settings, user: User) ->
     return usage
 
 
+async def locked_bot_installation(
+    session: AsyncSession,
+    user: User,
+    installation_id: int,
+) -> BotInstallation:
+    """Lock the durable quota ledger for one bot installation.
+
+    Bot users may be federated identities, so they must never be inserted into
+    the local-human ``user_storage_usage`` table.  The installation is the
+    stable authority-local billing and revocation boundary instead.
+    """
+
+    installation = await session.scalar(
+        select(BotInstallation)
+        .where(
+            BotInstallation.id == installation_id,
+            BotInstallation.status == "active",
+            installation_has_membership(),
+        )
+        .with_for_update()
+    )
+    if (
+        installation is None
+        or installation.status != "active"
+        or (installation.bot_user_id, installation.bot_user_domain) != (user.id, user.origin_domain)
+    ):
+        raise HTTPException(status_code=403, detail={"code": "BOT_NOT_INSTALLED"})
+    return installation
+
+
 async def create_upload_ticket(
     session: AsyncSession,
     settings: Settings,
@@ -90,17 +122,37 @@ async def create_upload_ticket(
     purpose: str = "attachment",
     encryption_mode: str = "plaintext",
     encryption_protocol: str | None = None,
+    bot_installation: BotInstallation | None = None,
 ) -> tuple[Attachment, str]:
     if size <= 0 or size > settings.media_max_attachment_bytes:
         raise HTTPException(status_code=413, detail={"code": "ATTACHMENT_TOO_LARGE"})
     declared_type = normalize_declared_type(content_type)
-    usage = await locked_usage(session, settings, user)
+    if bot_installation is None:
+        human_usage = await locked_usage(session, settings, user)
+        usage: UserStorageUsage | BotInstallation = human_usage
+        pending_query = (
+            select(func.count())
+            .select_from(Attachment)
+            .where(
+                Attachment.uploader_id == user.id,
+                Attachment.uploader_domain == user.origin_domain,
+                Attachment.bot_installation_id.is_(None),
+            )
+        )
+        pending_bytes = human_usage.pending_bytes
+        bytes_used = human_usage.bytes_used
+    else:
+        installation_usage = await locked_bot_installation(session, user, bot_installation.id)
+        usage = installation_usage
+        pending_query = (
+            select(func.count())
+            .select_from(Attachment)
+            .where(Attachment.bot_installation_id == installation_usage.id)
+        )
+        pending_bytes = installation_usage.media_pending_bytes
+        bytes_used = installation_usage.media_bytes_used
     pending_count = await session.scalar(
-        select(func.count())
-        .select_from(Attachment)
-        .where(
-            Attachment.uploader_id == user.id,
-            Attachment.uploader_domain == user.origin_domain,
+        pending_query.where(
             Attachment.finalized_at.is_(None),
             Attachment.deleted_at.is_(None),
             Attachment.upload_expires_at > func.now(),
@@ -108,9 +160,9 @@ async def create_upload_ticket(
     )
     if (pending_count or 0) >= settings.media_inflight_limit:
         raise HTTPException(status_code=429, detail={"code": "UPLOAD_INFLIGHT_LIMIT"})
-    if usage.pending_bytes + size > settings.media_inflight_quota_bytes:
+    if pending_bytes + size > settings.media_inflight_quota_bytes:
         raise HTTPException(status_code=413, detail={"code": "UPLOAD_INFLIGHT_QUOTA_EXCEEDED"})
-    if usage.bytes_used + usage.pending_bytes + size > settings.media_user_quota_bytes:
+    if bytes_used + pending_bytes + size > settings.media_user_quota_bytes:
         raise HTTPException(status_code=413, detail={"code": "USER_STORAGE_QUOTA_EXCEEDED"})
     attachment_id = await snowflake.mint()
     expires_at = datetime.now(UTC) + timedelta(seconds=settings.media_upload_ttl_seconds)
@@ -119,6 +171,7 @@ async def create_upload_ticket(
         origin_domain=settings.domain,
         uploader_id=user.id,
         uploader_domain=user.origin_domain,
+        bot_installation_id=(usage.id if isinstance(usage, BotInstallation) else None),
         filename=sanitize_filename(filename),
         content_type=declared_type,
         size=size,
@@ -132,7 +185,10 @@ async def create_upload_ticket(
         variants={},
     )
     session.add(attachment)
-    usage.pending_bytes += size
+    if isinstance(usage, UserStorageUsage):
+        usage.pending_bytes += size
+    else:
+        usage.media_pending_bytes += size
     await session.flush()
     try:
         upload_url = S3Storage(settings).presign(
@@ -189,13 +245,28 @@ async def finalize_attachment(
         stored_type = ""
     if stored_type != attachment.content_type:
         raise HTTPException(status_code=400, detail={"code": "UPLOAD_TYPE_MISMATCH"})
-    usage = await locked_usage(session, settings, user)
-    if usage.pending_bytes < attachment.size:
+    if attachment.bot_installation_id is None:
+        human_usage = await locked_usage(session, settings, user)
+        usage: UserStorageUsage | BotInstallation = human_usage
+        pending_bytes = human_usage.pending_bytes
+        bytes_used = human_usage.bytes_used
+    else:
+        installation_usage = await locked_bot_installation(
+            session, user, attachment.bot_installation_id
+        )
+        usage = installation_usage
+        pending_bytes = installation_usage.media_pending_bytes
+        bytes_used = installation_usage.media_bytes_used
+    if pending_bytes < attachment.size:
         raise RuntimeError("pending storage accounting underflow")
-    if usage.bytes_used + attachment.size > settings.media_user_quota_bytes:
+    if bytes_used + attachment.size > settings.media_user_quota_bytes:
         raise HTTPException(status_code=413, detail={"code": "USER_STORAGE_QUOTA_EXCEEDED"})
-    usage.pending_bytes -= attachment.size
-    usage.bytes_used += attachment.size
+    if isinstance(usage, UserStorageUsage):
+        usage.pending_bytes -= attachment.size
+        usage.bytes_used += attachment.size
+    else:
+        usage.media_pending_bytes -= attachment.size
+        usage.media_bytes_used += attachment.size
     attachment.finalized_at = now
     return attachment
 
@@ -224,19 +295,31 @@ async def bind_asset(
 async def discard_attachment(
     session: AsyncSession, settings: Settings, attachment: Attachment
 ) -> None:
-    usage = await session.scalar(
-        select(UserStorageUsage)
-        .where(
-            UserStorageUsage.user_id == attachment.uploader_id,
-            UserStorageUsage.user_domain == attachment.uploader_domain,
+    if attachment.bot_installation_id is None:
+        usage: UserStorageUsage | BotInstallation | None = await session.scalar(
+            select(UserStorageUsage)
+            .where(
+                UserStorageUsage.user_id == attachment.uploader_id,
+                UserStorageUsage.user_domain == attachment.uploader_domain,
+            )
+            .with_for_update()
         )
-        .with_for_update()
-    )
+    else:
+        usage = await session.scalar(
+            select(BotInstallation)
+            .where(BotInstallation.id == attachment.bot_installation_id)
+            .with_for_update()
+        )
     if usage is not None:
-        if attachment.finalized_at is None:
-            usage.pending_bytes = max(0, usage.pending_bytes - attachment.size)
+        if isinstance(usage, UserStorageUsage):
+            if attachment.finalized_at is None:
+                usage.pending_bytes = max(0, usage.pending_bytes - attachment.size)
+            else:
+                usage.bytes_used = max(0, usage.bytes_used - attachment.size)
+        elif attachment.finalized_at is None:
+            usage.media_pending_bytes = max(0, usage.media_pending_bytes - attachment.size)
         else:
-            usage.bytes_used = max(0, usage.bytes_used - attachment.size)
+            usage.media_bytes_used = max(0, usage.media_bytes_used - attachment.size)
     attachment.deleted_at = datetime.now(UTC)
 
 

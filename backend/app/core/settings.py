@@ -263,6 +263,15 @@ class Settings(BaseSettings):
     media_remote_cache_bucket: str = "kaede-remote-cache"
     media_clamav_host: str = "clamav"
     media_clamav_port: int = Field(default=3310, ge=1, le=65535)
+    photodna_enabled: bool = False
+    photodna_subscription_key: SecretStr | None = None
+    photodna_sdk_root: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("PHOTODNA_EDGEHASHGENERATOR", "photodna_sdk_root"),
+    )
+    photodna_match_url: str = "https://api.microsoftmoderator.com/photodna/v1.0/MatchHash"
+    photodna_hash_timeout_seconds: int = Field(default=30, ge=5, le=120)
+    photodna_match_timeout_seconds: int = Field(default=20, ge=5, le=120)
     media_remote_cache_bytes: int = Field(default=100 * 1024 * 1024 * 1024, ge=1)
     media_remote_cache_ttl_days: int = Field(default=30, ge=1, le=365)
     media_retention_days: int | None = Field(default=None, ge=1)
@@ -331,6 +340,8 @@ class Settings(BaseSettings):
         "media_s3_access_key",
         "media_s3_secret_key",
         "media_s3_session_token",
+        "photodna_subscription_key",
+        "photodna_sdk_root",
         "media_s3_create_buckets",
         "media_retention_days",
         "voice_public_url",
@@ -653,6 +664,44 @@ class Settings(BaseSettings):
             raise ValueError("must be a valid SigV4 region identifier")
         return value
 
+    @field_validator("photodna_subscription_key")
+    @classmethod
+    def validate_photodna_subscription_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw = value.get_secret_value()
+        if not 16 <= len(raw) <= 256 or any(
+            ord(character) < 33 or ord(character) > 126 for character in raw
+        ):
+            raise ValueError("must be a printable 16-256 character PhotoDNA subscription key")
+        return value
+
+    @field_validator("photodna_sdk_root")
+    @classmethod
+    def validate_photodna_sdk_root(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.startswith("/") or "\x00" in value:
+            raise ValueError("must be an absolute path to the mounted PhotoDNA SDK root")
+        return value.rstrip("/") or "/"
+
+    @field_validator("photodna_match_url")
+    @classmethod
+    def validate_photodna_match_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "api.microsoftmoderator.com"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in {None, 443}
+            or parsed.path != "/photodna/v1.0/MatchHash"
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("must be the HTTPS Microsoft PhotoDNA MatchHash endpoint")
+        return value
+
     @field_validator("smtp_url")
     @classmethod
     def validate_smtp_url(cls, value: SecretStr | None) -> SecretStr | None:
@@ -906,6 +955,18 @@ class Settings(BaseSettings):
         if self.media_public_base_url is None:
             scheme = "https" if self.environment == "production" else "http"
             self.media_public_base_url = f"{scheme}://media.{self.domain}"
+        if self.photodna_enabled and media_runtime:
+            if self.photodna_subscription_key is None:
+                raise ValueError(
+                    "photodna_subscription_key is required when PhotoDNA scanning is enabled"
+                )
+            if self.photodna_sdk_root is None:
+                raise ValueError(
+                    "PHOTODNA_EDGEHASHGENERATOR is required when PhotoDNA scanning is enabled"
+                )
+            key = self.photodna_subscription_key.get_secret_value().lower()
+            if key.startswith(("replace", "change-me")):
+                raise ValueError("photodna_subscription_key must not be a placeholder when enabled")
         if self.voice_public_url is None:
             scheme = "wss" if self.environment == "production" else "ws"
             self.voice_public_url = f"{scheme}://{self.domain}/livekit"

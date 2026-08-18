@@ -19,6 +19,7 @@ export { ApiError, userErrorMessage } from './errors';
 
 const PUBLIC_AUTH_PATHS = new Set([
   '/auth/config',
+  '/auth/key-derivation',
   '/auth/login',
   '/auth/mfa',
   '/auth/register',

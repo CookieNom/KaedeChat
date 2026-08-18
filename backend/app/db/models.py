@@ -155,6 +155,9 @@ class User(Base, FederatedIdMixin, TimestampMixin):
     bio: Mapped[str | None] = mapped_column(String(500))
     custom_status: Mapped[str | None] = mapped_column(String(128))
     password_hash: Mapped[str | None] = mapped_column(Text)
+    password_kdf_version: Mapped[int | None] = mapped_column(SmallInteger)
+    password_auth_salt: Mapped[bytes | None] = mapped_column(LargeBinary(16))
+    e2ee_vault_salt: Mapped[bytes | None] = mapped_column(LargeBinary(16))
     email: Mapped[str | None] = mapped_column(String(320))
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
@@ -163,6 +166,14 @@ class User(Base, FederatedIdMixin, TimestampMixin):
     e2ee_device_generation: Mapped[int] = mapped_column(
         BigInteger, server_default="0", nullable=False
     )
+    # A reset fences portable-identity enrollment and replacement-vault writes
+    # to the authenticated session that requested it until both artifacts are
+    # durable. Only a digest of the one-time recovery bearer is retained; the
+    # cleartext authorization is returned once to the client.
+    e2ee_recovery_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary(32))
+    e2ee_recovery_session_id: Mapped[str | None] = mapped_column(String(64))
+    e2ee_recovery_generation: Mapped[int | None] = mapped_column(BigInteger)
+    e2ee_recovery_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     profile_resolved: Mapped[bool] = mapped_column(Boolean, server_default=true(), nullable=False)
     # Charge a remote identity to the authenticated peer that introduced it
     # until the User row is physically garbage-collected. For a profile learned
@@ -196,6 +207,42 @@ class User(Base, FederatedIdMixin, TimestampMixin):
         CheckConstraint("id >= 0", name="nonnegative_id"),
         CheckConstraint("profile_version >= 1", name="positive_profile_version"),
         CheckConstraint("e2ee_device_generation >= 0", name="e2ee_device_generation_nonnegative"),
+        CheckConstraint(
+            "e2ee_recovery_token_hash IS NULL OR octet_length(e2ee_recovery_token_hash) = 32",
+            name="e2ee_recovery_token_hash_length",
+        ),
+        CheckConstraint(
+            "e2ee_recovery_generation IS NULL OR e2ee_recovery_generation > 0",
+            name="e2ee_recovery_generation_positive",
+        ),
+        CheckConstraint(
+            "(e2ee_recovery_token_hash IS NULL AND "
+            "e2ee_recovery_session_id IS NULL AND "
+            "e2ee_recovery_generation IS NULL AND "
+            "e2ee_recovery_expires_at IS NULL) OR "
+            "(e2ee_recovery_token_hash IS NOT NULL AND "
+            "e2ee_recovery_session_id IS NOT NULL AND "
+            "e2ee_recovery_generation IS NOT NULL AND "
+            "e2ee_recovery_expires_at IS NOT NULL)",
+            name="e2ee_recovery_authorization_complete",
+        ),
+        CheckConstraint(
+            "password_kdf_version IS NULL OR password_kdf_version = 2",
+            name="password_kdf_version_value",
+        ),
+        CheckConstraint(
+            "password_auth_salt IS NULL OR octet_length(password_auth_salt) = 16",
+            name="password_auth_salt_length",
+        ),
+        CheckConstraint(
+            "e2ee_vault_salt IS NULL OR octet_length(e2ee_vault_salt) = 16",
+            name="e2ee_vault_salt_length",
+        ),
+        CheckConstraint(
+            "(password_kdf_version IS NULL AND password_auth_salt IS NULL) OR "
+            "(password_kdf_version = 2 AND password_auth_salt IS NOT NULL)",
+            name="password_kdf_fields_complete",
+        ),
         CheckConstraint(
             "is_local OR profile_resolved OR username LIKE 'history_%'",
             name="unresolved_history_handle",
@@ -474,6 +521,55 @@ class Session(Base, LocalUserMixin):
     )
 
 
+class E2EEAccountVault(Base, LocalUserMixin):
+    """Password-encrypted portable MLS state; the server never receives its key."""
+
+    __tablename__ = "e2ee_account_vaults"
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), primary_key=True)
+    user_is_local: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
+    format_version: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="2")
+    nonce: Mapped[bytes] = mapped_column(LargeBinary(12), nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        *LocalUserMixin.locality_constraints("e2ee_account_vaults"),
+        CheckConstraint("revision > 0", name="e2ee_account_vault_revision_positive"),
+        CheckConstraint("format_version = 2", name="e2ee_account_vault_format_value"),
+        CheckConstraint("octet_length(nonce) = 12", name="e2ee_account_vault_nonce_length"),
+        CheckConstraint(
+            "octet_length(ciphertext) BETWEEN 17 AND 33554448",
+            name="e2ee_account_vault_ciphertext_length",
+        ),
+    )
+
+
+class E2EEAccountVaultDigest(Base, LocalUserMixin):
+    """Append-only compact commitment history for the opaque account vault."""
+
+    __tablename__ = "e2ee_account_vault_digests"
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), primary_key=True)
+    revision: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_is_local: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
+    digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (
+        *LocalUserMixin.locality_constraints("e2ee_account_vault_digests"),
+        CheckConstraint("revision > 0", name="e2ee_account_vault_digest_revision_positive"),
+        CheckConstraint("octet_length(digest) = 32", name="e2ee_account_vault_digest_length"),
+    )
+
+
 class E2EEDevice(Base, LocalUserMixin):
     """A separately revocable cryptographic endpoint, not an auth session."""
 
@@ -552,6 +648,8 @@ class E2EEKeyPackage(Base, LocalUserMixin):
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     claimed_by_id: Mapped[int | None] = mapped_column(BigInteger)
     claimed_by_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    claimed_operation_id: Mapped[str | None] = mapped_column(String(47))
+    claimed_operation_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -576,6 +674,18 @@ class E2EEKeyPackage(Base, LocalUserMixin):
             "(claimed_at IS NULL) = (claimed_by_id IS NULL)",
             name="e2ee_key_package_claim_state",
         ),
+        CheckConstraint(
+            "(claimed_operation_id IS NULL) = (claimed_operation_domain IS NULL)",
+            name="e2ee_key_package_operation_complete",
+        ),
+        CheckConstraint(
+            "claimed_at IS NULL OR claimed_operation_id IS NOT NULL",
+            name="e2ee_key_package_claim_has_operation",
+        ),
+        CheckConstraint(
+            "claimed_operation_id IS NULL OR claimed_operation_id ~ '^keo_[A-Za-z0-9_-]{43}$'",
+            name="e2ee_key_package_operation_id_format",
+        ),
         CheckConstraint("expires_at > created_at", name="e2ee_key_package_positive_lifetime"),
         Index(
             "ix_e2ee_key_packages_available",
@@ -584,6 +694,188 @@ class E2EEKeyPackage(Base, LocalUserMixin):
             "device_id",
             "expires_at",
             postgresql_where=text("claimed_at IS NULL"),
+        ),
+        Index(
+            "ix_e2ee_key_packages_operation",
+            "claimed_operation_id",
+            "claimed_operation_domain",
+            postgresql_where=text("claimed_operation_id IS NOT NULL"),
+        ),
+    )
+
+
+class E2EERoomOperation(Base, TimestampMixin):
+    """Durable, idempotent MLS activation/rekey operation at room authority."""
+
+    __tablename__ = "e2ee_room_operations"
+    id: Mapped[str] = mapped_column(String(47), primary_key=True)
+    authority_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    actor_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    sender_device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="claiming", server_default="claiming"
+    )
+    request_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    base_policy_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    policy_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    group_id: Mapped[str] = mapped_column(String(43), nullable=False)
+    participant_refs: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    key_packages: Mapped[list[dict[str, str]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    prepared_response: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    activation_request_digest: Mapped[bytes | None] = mapped_column(LargeBinary(32))
+    prepared_vault_revision: Mapped[int | None] = mapped_column(BigInteger)
+    prepared_vault_digest: Mapped[bytes | None] = mapped_column(LargeBinary(32))
+    committed_response: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain"],
+            ["channels.id", "channels.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "kind IN ('activate','rekey')",
+            name="e2ee_room_operation_kind_value",
+        ),
+        CheckConstraint(
+            "id ~ '^keo_[A-Za-z0-9_-]{43}$'",
+            name="e2ee_room_operation_id_format",
+        ),
+        CheckConstraint(
+            "sender_device_id ~ '^ked_[A-Za-z0-9_-]{43}$'",
+            name="e2ee_room_operation_sender_device_id_format",
+        ),
+        CheckConstraint(
+            "status IN ('claiming','prepared','committed','failed')",
+            name="e2ee_room_operation_status_value",
+        ),
+        CheckConstraint(
+            "octet_length(request_digest) = 32",
+            name="e2ee_room_operation_request_digest_length",
+        ),
+        CheckConstraint(
+            "activation_request_digest IS NULL OR octet_length(activation_request_digest) = 32",
+            name="e2ee_room_operation_activation_digest_length",
+        ),
+        CheckConstraint(
+            "prepared_vault_digest IS NULL OR octet_length(prepared_vault_digest) = 32",
+            name="e2ee_room_operation_vault_digest_length",
+        ),
+        CheckConstraint(
+            "base_policy_generation >= 0 AND policy_generation > base_policy_generation",
+            name="e2ee_room_operation_generation_order",
+        ),
+        CheckConstraint(
+            "char_length(group_id) = 43",
+            name="e2ee_room_operation_group_id_length",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(participant_refs) = 'array' AND jsonb_typeof(key_packages) = 'array'",
+            name="e2ee_room_operation_collections",
+        ),
+        CheckConstraint(
+            "prepared_response IS NULL OR jsonb_typeof(prepared_response) = 'object'",
+            name="e2ee_room_operation_prepared_response_object",
+        ),
+        CheckConstraint(
+            "committed_response IS NULL OR jsonb_typeof(committed_response) = 'object'",
+            name="e2ee_room_operation_committed_response_object",
+        ),
+        CheckConstraint(
+            "(status <> 'prepared' OR prepared_response IS NOT NULL) AND "
+            "(status <> 'committed' OR (prepared_response IS NOT NULL AND "
+            "activation_request_digest IS NOT NULL AND prepared_vault_revision IS NOT NULL AND "
+            "prepared_vault_revision > 0 AND prepared_vault_digest IS NOT NULL AND "
+            "committed_response IS NOT NULL AND committed_at IS NOT NULL))",
+            name="e2ee_room_operation_status_consistent",
+        ),
+        Index(
+            "uq_e2ee_room_operations_active_channel",
+            "channel_id",
+            "channel_domain",
+            unique=True,
+            postgresql_where=text("status IN ('claiming','prepared')"),
+        ),
+        Index(
+            "ix_e2ee_room_operations_actor",
+            "actor_id",
+            "actor_domain",
+            "created_at",
+        ),
+    )
+
+
+class E2EEPackageClaimBatch(Base):
+    """Exact idempotent package-claim response retained on each target home."""
+
+    __tablename__ = "e2ee_package_claim_batches"
+    operation_id: Mapped[str] = mapped_column(String(47))
+    operation_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    target_id: Mapped[int] = mapped_column(BigInteger)
+    target_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    target_is_local: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    claimant_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    claimant_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    excluded_device_id: Mapped[str | None] = mapped_column(String(64))
+    max_devices: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    request_digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    response: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "operation_id",
+            "operation_domain",
+            "target_id",
+            "target_domain",
+        ),
+        ForeignKeyConstraint(
+            ["target_id", "target_domain", "target_is_local"],
+            ["users.id", "users.origin_domain", "users.is_local"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain"],
+            ["channels.id", "channels.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "target_is_local",
+            name="e2ee_package_claim_batch_target_is_local",
+        ),
+        CheckConstraint(
+            "operation_id ~ '^keo_[A-Za-z0-9_-]{43}$'",
+            name="e2ee_package_claim_batch_operation_id_format",
+        ),
+        CheckConstraint(
+            "octet_length(request_digest) = 32",
+            name="e2ee_package_claim_batch_request_digest_length",
+        ),
+        CheckConstraint(
+            "max_devices BETWEEN 1 AND 48",
+            name="e2ee_package_claim_batch_max_devices",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(response) = 'object'",
+            name="e2ee_package_claim_batch_response_object",
+        ),
+        Index(
+            "ix_e2ee_package_claim_batches_channel",
+            "channel_id",
+            "channel_domain",
+            "created_at",
         ),
     )
 
@@ -1377,6 +1669,68 @@ class Message(Base, FederatedIdMixin):
     )
 
 
+class E2EEControlRecord(Base, FederatedIdMixin):
+    """Immutable sparse MLS controls retained independently of chat history."""
+
+    __tablename__ = "e2ee_control_records"
+    channel_id: Mapped[int] = mapped_column(BigInteger)
+    channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    author_id: Mapped[int] = mapped_column(BigInteger)
+    author_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    policy_generation: Mapped[int] = mapped_column(BigInteger)
+    epoch: Mapped[int] = mapped_column(BigInteger)
+    operation: Mapped[str] = mapped_column(String(16))
+    apply_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    room_operation_id: Mapped[str | None] = mapped_column(String(47))
+    room_operation_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    envelope: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "origin_domain"),
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain"],
+            ["channels.id", "channels.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("id >= 0", name="nonnegative_id"),
+        CheckConstraint("policy_generation > 0", name="positive_policy_generation"),
+        CheckConstraint("epoch >= 0", name="nonnegative_epoch"),
+        CheckConstraint("operation IN ('welcome','commit')", name="operation_value"),
+        CheckConstraint(
+            "(operation = 'welcome' AND apply_mode = 'join') OR "
+            "(operation = 'commit' AND apply_mode IN ('process','audit'))",
+            name="apply_mode_value",
+        ),
+        CheckConstraint(
+            "(room_operation_id IS NULL) = (room_operation_domain IS NULL)",
+            name="room_operation_ref_complete",
+        ),
+        CheckConstraint(
+            "room_operation_id IS NULL OR room_operation_id ~ '^keo_[A-Za-z0-9_-]{43}$'",
+            name="room_operation_id_format",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(envelope) = 'object' AND envelope->>'operation' = operation",
+            name="envelope_matches_operation",
+        ),
+        Index(
+            "ix_e2ee_control_records_channel_order",
+            "channel_id",
+            "channel_domain",
+            "id",
+            "origin_domain",
+        ),
+        UniqueConstraint(
+            "room_operation_id",
+            "room_operation_domain",
+            "operation",
+            name="uq_e2ee_control_records_room_operation_kind",
+        ),
+    )
+
+
 class MessageProjection(Base):
     """Durable, idempotent post-commit cursor and mention projection work."""
 
@@ -1642,6 +1996,7 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
     message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
     uploader_id: Mapped[int] = mapped_column(BigInteger)
     uploader_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    bot_installation_id: Mapped[int | None] = mapped_column(BigInteger)
     filename: Mapped[str] = mapped_column(String(255))
     content_type: Mapped[str] = mapped_column(String(255))
     size: Mapped[int] = mapped_column(BigInteger)
@@ -1675,6 +2030,11 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
             ["uploader_id", "uploader_domain"],
             ["users.id", "users.origin_domain"],
         ),
+        ForeignKeyConstraint(
+            ["bot_installation_id"],
+            ["bot_installations.id"],
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "(message_id IS NULL) = (message_domain IS NULL)",
             name="message_ref_complete",
@@ -1685,7 +2045,7 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
             name="positive_dimensions",
         ),
         CheckConstraint(
-            "scan_status IN ('pending','clean','infected','failed','encrypted')",
+            "scan_status IN ('pending','clean','infected','failed','encrypted','quarantined')",
             name="scan_status",
         ),
         CheckConstraint(
@@ -1696,7 +2056,7 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
             "(encryption_mode = 'plaintext' AND encryption_protocol IS NULL AND "
             "scan_status <> 'encrypted') OR "
             "(encryption_mode = 'e2ee' AND encryption_protocol = 'kaede-file-v1' AND "
-            "scan_status NOT IN ('clean','infected'))",
+            "scan_status IN ('pending','failed','encrypted'))",
             name="attachment_encryption_policy_consistent",
         ),
         CheckConstraint(
@@ -1721,6 +2081,7 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
             postgresql_where=text("staging_object_key IS NOT NULL"),
         ),
         Index("ix_attachments_uploader_usage", "uploader_id", "uploader_domain"),
+        Index("ix_attachments_bot_installation_usage", "bot_installation_id"),
         Index(
             "ix_attachments_live_message",
             "message_id",

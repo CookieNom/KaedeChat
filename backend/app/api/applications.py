@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 from redis.asyncio import Redis
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.bot_federation import (
@@ -28,6 +28,11 @@ from app.api.dependencies import (
 )
 from app.auth.security import new_token, token_hash
 from app.bots.auth import decode_urlsafe, encode_urlsafe, issue_bot_token, worker_assertion_message
+from app.bots.installations import (
+    active_installation_exists,
+    cleanup_installation_roles,
+    publish_deleted_installation_roles,
+)
 from app.chat.e2ee_membership import pause_guild_e2ee_for_membership_change
 from app.chat.events import guild_topic, publish_dispatch
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
@@ -50,8 +55,9 @@ from app.db.bot_models import (
     DeveloperTeamMember,
 )
 from app.db.models import (
-    ChannelOverwrite,
+    Ban,
     Guild,
+    GuildInstanceBan,
     GuildMember,
     InstanceBlock,
     MemberRole,
@@ -82,9 +88,12 @@ SUPPORTED_SCOPES = frozenset(
         "applications.commands",
         "interactions.respond",
         "guilds.read",
+        "guilds.manage",
         "channels.read",
+        "channels.manage",
         "members.read",
         "roles.read",
+        "roles.manage",
         "messages.metadata",
         "messages.content",
         "messages.history",
@@ -99,6 +108,10 @@ SUPPORTED_SCOPES = frozenset(
         "moderation.members",
         "moderation.messages",
         "voice.states.read",
+        "voice.moderate",
+        "invites.manage",
+        "webhooks.manage",
+        "emojis.manage",
         "dm.send",
     }
 )
@@ -110,6 +123,7 @@ SUPPORTED_INTENTS = frozenset(
         "guild_messages",
         "message_content",
         "message_reactions",
+        "guild_typing",
         "voice_states",
         "interactions",
     }
@@ -127,6 +141,65 @@ def normalize_values(values: list[str], supported: frozenset[str], label: str) -
 
 def default_guild_contexts() -> list[Literal["guild"]]:
     return ["guild"]
+
+
+async def ensure_bot_install_allowed(
+    session: AsyncSession,
+    guild: Guild,
+    bot: User,
+) -> None:
+    """Fail closed while a bot identity or its whole home is banned.
+
+    The caller holds the authoritative guild row lock.  Ban writers take the
+    same lock, so checking and then creating/reactivating the membership and
+    installation is serialized with both per-user and instance-wide bans.
+    The matching ban rows are locked as an additional defense and to make the
+    lock contract explicit to future mutation paths.
+    """
+
+    now = datetime.now(UTC)
+    user_ban = await session.scalar(
+        select(Ban.user_id)
+        .where(
+            Ban.guild_id == guild.id,
+            Ban.guild_domain == guild.origin_domain,
+            Ban.user_id == bot.id,
+            Ban.user_domain == bot.origin_domain,
+            or_(Ban.expires_at.is_(None), Ban.expires_at > now),
+        )
+        .with_for_update()
+    )
+    if user_ban is not None:
+        raise HTTPException(status_code=403, detail={"code": "BOT_USER_BANNED"})
+    instance_ban = await session.scalar(
+        select(GuildInstanceBan.instance_domain)
+        .where(
+            GuildInstanceBan.guild_id == guild.id,
+            GuildInstanceBan.guild_domain == guild.origin_domain,
+            GuildInstanceBan.instance_domain == bot.origin_domain,
+            or_(GuildInstanceBan.expires_at.is_(None), GuildInstanceBan.expires_at > now),
+        )
+        .with_for_update()
+    )
+    if instance_ban is not None:
+        raise HTTPException(status_code=403, detail={"code": "BOT_INSTANCE_BANNED"})
+
+
+async def locked_guild_mutation_signer(session: AsyncSession, guild: Guild) -> User:
+    """Lock the local owner used to sign authoritative membership mutations."""
+
+    signer = await session.scalar(
+        select(User)
+        .where(
+            User.id == guild.owner_id,
+            User.origin_domain == guild.owner_domain,
+            User.is_local.is_(True),
+        )
+        .with_for_update()
+    )
+    if signer is None:
+        raise RuntimeError("local guild owner is unavailable for bot mutation signing")
+    return signer
 
 
 class ApplicationCreate(BaseModel):
@@ -1337,6 +1410,23 @@ async def install_bot(
     if app_domain != settings.domain:
         manifest = await fetch_bot_manifest(session, settings, app_id, app_domain, template_slug)
         await materialize_remote_manifest(session, manifest, settings)
+    # Serialize the authorization decision and every following membership,
+    # role, and installation mutation with kicks/bans/instance bans.  The
+    # preliminary permission check above avoids fetching an untrusted remote
+    # manifest for an unauthorized caller; permissions are re-evaluated after
+    # the lock in case they changed while federation I/O was in flight.
+    guild = await session.scalar(
+        select(Guild)
+        .where(Guild.id == guild_id, Guild.origin_domain == guild_domain)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if guild is None:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    permissions = await get_permissions(session, redis, guild, auth.user)
+    if not permissions & Permission.MANAGE_GUILD:
+        raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
+    mutation_signer = await locked_guild_mutation_signer(session, guild)
     row = (
         await session.execute(
             select(BotApplication, BotInstallTemplate, User)
@@ -1356,26 +1446,41 @@ async def install_bot(
                 BotApplication.status == "active",
                 BotInstallTemplate.slug == template_slug,
                 BotInstallTemplate.active.is_(True),
+                User.account_type == "bot",
+                User.disabled_at.is_(None),
             )
+            .with_for_update(of=(BotApplication, BotInstallTemplate, User))
         )
     ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "BOT_INVITE_NOT_FOUND"})
     app, template, bot = row
+    if bot.account_type != "bot" or bot.disabled_at is not None:
+        raise HTTPException(status_code=404, detail={"code": "BOT_INVITE_NOT_FOUND"})
     if await session.get(InstanceBlock, app.origin_domain) is not None:
         raise HTTPException(status_code=403, detail={"code": "BOT_INSTANCE_BLOCKED"})
+    await ensure_bot_install_allowed(session, guild, bot)
     existing = await session.scalar(
-        select(BotInstallation).where(
+        select(BotInstallation)
+        .where(
             BotInstallation.application_id == app.id,
             BotInstallation.application_domain == app.origin_domain,
             BotInstallation.guild_id == guild.id,
             BotInstallation.guild_domain == guild.origin_domain,
         )
+        .with_for_update()
     )
     if existing is not None and existing.status == "active":
         raise HTTPException(status_code=409, detail={"code": "BOT_ALREADY_INSTALLED"})
     if template.permissions & ~int(permissions):
         raise HTTPException(status_code=403, detail={"code": "CANNOT_GRANT_PERMISSIONS"})
+    deleted_role_refs = await cleanup_installation_roles(
+        session,
+        settings,
+        guild,
+        mutation_signer,
+        [existing] if existing is not None else [],
+    )
     existing_roles = list(
         await session.scalars(
             select(Role)
@@ -1389,8 +1494,15 @@ async def install_bot(
     )
     for existing_role in existing_roles:
         existing_role.position += 1
-    member = await session.get(
-        GuildMember, (guild.id, guild.origin_domain, bot.id, bot.origin_domain)
+    member = await session.scalar(
+        select(GuildMember)
+        .where(
+            GuildMember.guild_id == guild.id,
+            GuildMember.guild_domain == guild.origin_domain,
+            GuildMember.user_id == bot.id,
+            GuildMember.user_domain == bot.origin_domain,
+        )
+        .with_for_update()
     )
     if member is None:
         member = GuildMember(
@@ -1399,6 +1511,7 @@ async def install_bot(
             user_id=bot.id,
             user_domain=bot.origin_domain,
             joined_at=datetime.now(UTC),
+            member_version=1,
         )
         session.add(member)
     role_id = await snowflake.mint()
@@ -1462,7 +1575,7 @@ async def install_bot(
         session,
         settings,
         guild,
-        auth.user,
+        mutation_signer,
         "guild.role.create",
         {"role": role_payload(role)},
         snapshot_required=True,
@@ -1471,7 +1584,7 @@ async def install_bot(
         session,
         settings,
         guild,
-        auth.user,
+        mutation_signer,
         "guild.member.add",
         {"user": profile_from_user(bot), "joined_at": member.joined_at.isoformat()},
     )
@@ -1479,7 +1592,7 @@ async def install_bot(
         session,
         settings,
         guild,
-        auth.user,
+        mutation_signer,
         "guild.member.role.add",
         {
             "user": {"id": str(bot.id), "origin_domain": bot.origin_domain},
@@ -1490,6 +1603,7 @@ async def install_bot(
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     for existing_role in existing_roles:
         await publish_dispatch(
             redis,
@@ -1541,11 +1655,16 @@ async def create_bot_token(
         )
     row = (
         await session.execute(
-            select(BotWorker, BotApplication)
+            select(BotWorker, BotApplication, User)
             .join(
                 BotApplication,
                 (BotApplication.id == BotWorker.application_id)
                 & (BotApplication.origin_domain == BotWorker.application_domain),
+            )
+            .join(
+                User,
+                (User.id == BotApplication.bot_user_id)
+                & (User.origin_domain == BotApplication.bot_user_domain),
             )
             .where(
                 BotWorker.id == payload.worker_id,
@@ -1554,12 +1673,16 @@ async def create_bot_token(
                 BotWorker.revoked_at.is_(None),
                 (BotWorker.expires_at.is_(None)) | (BotWorker.expires_at > datetime.now(UTC)),
                 BotApplication.status == "active",
+                User.account_type == "bot",
+                User.disabled_at.is_(None),
             )
         )
     ).one_or_none()
     if row is None:
         raise HTTPException(status_code=401, detail={"code": "BOT_ASSERTION_INVALID"})
-    worker, app = row
+    worker, app, bot_user = row
+    if bot_user.account_type != "bot" or bot_user.disabled_at is not None:
+        raise HTTPException(status_code=401, detail={"code": "BOT_ASSERTION_INVALID"})
     if worker.target_domains and settings.domain not in worker.target_domains:
         raise HTTPException(status_code=403, detail={"code": "BOT_TARGET_NOT_DELEGATED"})
     replay_digest = hashlib.sha256(payload.nonce.encode()).hexdigest()
@@ -1582,13 +1705,14 @@ async def create_bot_token(
         await redis.delete(replay_key)
         raise HTTPException(status_code=401, detail={"code": "BOT_ASSERTION_INVALID"}) from None
     if not await session.scalar(
-        select(BotInstallation.id)
-        .where(
-            BotInstallation.application_id == app.id,
-            BotInstallation.application_domain == app.origin_domain,
-            BotInstallation.status == "active",
+        select(
+            active_installation_exists(
+                application_id=app.id,
+                application_domain=app.origin_domain,
+                bot_user_id=bot_user.id,
+                bot_user_domain=bot_user.origin_domain,
+            )
         )
-        .limit(1)
     ):
         raise HTTPException(status_code=403, detail={"code": "BOT_NOT_INSTALLED"})
     thumbprint = encode_urlsafe(hashlib.sha256(worker.public_key).digest())
@@ -1978,6 +2102,7 @@ async def _uninstall_bot_from_local_guild(
     permissions = await get_permissions(session, redis, guild, auth.user)
     if not permissions & Permission.MANAGE_GUILD:
         raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
+    mutation_signer = await locked_guild_mutation_signer(session, guild)
     app_id, app_domain = application_ref.resolve(settings.domain)
     installation = await session.scalar(
         select(BotInstallation)
@@ -1991,10 +2116,23 @@ async def _uninstall_bot_from_local_guild(
     )
     if installation is None or installation.status == "revoked":
         return
-    role = (
-        await session.get(Role, (installation.role_id, installation.role_domain))
-        if installation.role_id is not None and installation.role_domain is not None
-        else None
+    if (installation.bot_user_id, installation.bot_user_domain) == (
+        guild.owner_id,
+        guild.owner_domain,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "OWNER_MUST_TRANSFER_OR_DELETE_GUILD"},
+        )
+    installation.status = "revoked"
+    installation.revoked_at = datetime.now(UTC)
+    installation.grant_revision += 1
+    deleted_role_refs = await cleanup_installation_roles(
+        session,
+        settings,
+        guild,
+        mutation_signer,
+        [installation],
     )
     member = await session.get(
         GuildMember,
@@ -2005,37 +2143,13 @@ async def _uninstall_bot_from_local_guild(
             installation.bot_user_domain,
         ),
     )
-    installation.status = "revoked"
-    installation.revoked_at = datetime.now(UTC)
-    installation.grant_revision += 1
-    installation.role_id = None
-    installation.role_domain = None
-    guild.permission_generation += 1
-    if role is not None:
-        await queue_guild_mutation(
-            session,
-            settings,
-            guild,
-            auth.user,
-            "guild.role.delete",
-            {"role": {"id": str(role.id), "origin_domain": role.origin_domain}},
-            snapshot_required=True,
-        )
-        await session.execute(
-            delete(ChannelOverwrite).where(
-                ChannelOverwrite.target_id == role.id,
-                ChannelOverwrite.target_domain == role.origin_domain,
-                ChannelOverwrite.target_type == "role",
-            )
-        )
-        await session.delete(role)
     if member is not None:
         await pause_guild_e2ee_for_membership_change(session, guild)
         await queue_guild_mutation(
             session,
             settings,
             guild,
-            auth.user,
+            mutation_signer,
             "guild.member.remove",
             {
                 "user": {
@@ -2048,18 +2162,7 @@ async def _uninstall_bot_from_local_guild(
         await session.delete(member)
     await session.commit()
     await wake_queued_guild_federation(guild)
-    if role is not None:
-        await publish_dispatch(
-            redis,
-            guild_topic(guild.origin_domain, guild.id),
-            "GUILD_ROLE_DELETE",
-            {
-                "id": str(role.id),
-                "origin_domain": role.origin_domain,
-                "guild_id": str(guild.id),
-                "guild_domain": guild.origin_domain,
-            },
-        )
+    await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     if member is not None:
         await publish_dispatch(
             redis,

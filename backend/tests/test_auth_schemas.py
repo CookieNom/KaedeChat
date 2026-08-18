@@ -1,19 +1,39 @@
+import base64
+
 import pytest
 from pydantic import ValidationError
 
 from app.auth.schemas import MfaSetupRequest, RegisterRequest, SettingsPatch
 
+DERIVED_PASSWORD = "A" * 43
+AUTH_SALT = base64.urlsafe_b64encode(bytes(16)).decode().rstrip("=")
+VAULT_SALT = base64.urlsafe_b64encode(bytes([1]) * 16).decode().rstrip("=")
+PASSWORD_KDF = {
+    "version": 2,
+    "algorithm": "PBKDF2-SHA256",
+    "iterations": 600_000,
+    "auth_salt": AUTH_SALT,
+    "vault_salt": VAULT_SALT,
+}
+
 
 def test_registration_normalizes_username_and_email() -> None:
     payload = RegisterRequest(
-        username="Maple.Leaf", email="USER@example.com", password="long-enough-password"
+        username="Maple.Leaf",
+        email="USER@example.com",
+        password=DERIVED_PASSWORD,
+        password_kdf=PASSWORD_KDF,
     )
     assert payload.username == "maple.leaf"
     assert str(payload.email) == "USER@example.com"
 
 
 def test_registration_schema_allows_omitting_email() -> None:
-    payload = RegisterRequest(username="maple", password="long-enough-password")
+    payload = RegisterRequest(
+        username="maple",
+        password=DERIVED_PASSWORD,
+        password_kdf=PASSWORD_KDF,
+    )
     assert payload.email is None
 
 
@@ -21,7 +41,10 @@ def test_registration_schema_allows_omitting_email() -> None:
 def test_registration_rejects_invalid_usernames(username: str) -> None:
     with pytest.raises(ValidationError):
         RegisterRequest(
-            username=username, email="user@example.com", password="long-enough-password"
+            username=username,
+            email="user@example.com",
+            password=DERIVED_PASSWORD,
+            password_kdf=PASSWORD_KDF,
         )
 
 

@@ -14,6 +14,7 @@ use kaede_platform::{
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
@@ -47,6 +48,9 @@ pub struct TurnstileConfig {
 struct LoginRequest<'a> {
     identifier: &'a str,
     password: &'a str,
+    password_kdf_version: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password_upgrade: Option<&'a Value>,
     device_name: &'a str,
     turnstile_token: Option<&'a str>,
 }
@@ -61,6 +65,8 @@ struct RegisterRequest<'a> {
     username: &'a str,
     email: Option<&'a str>,
     password: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password_kdf: Option<&'a Value>,
     turnstile_token: Option<&'a str>,
 }
 
@@ -162,6 +168,22 @@ where
         password: &str,
         challenge_token: Option<&SecretString>,
     ) -> Result<RegistrationResult, AuthError> {
+        self.register_with_password_protocol(username, email, password, None, challenge_token)
+            .await
+    }
+
+    /// Register using password material and KDF metadata prepared by a trusted
+    /// frontend. The original `register` entry point remains source-compatible
+    /// for native callers that have not adopted versioned metadata yet; server
+    /// policy still decides whether an unversioned registration is accepted.
+    pub async fn register_with_password_protocol(
+        &self,
+        username: &str,
+        email: Option<&str>,
+        password: &str,
+        password_kdf: Option<&Value>,
+        challenge_token: Option<&SecretString>,
+    ) -> Result<RegistrationResult, AuthError> {
         self.api
             .post(
                 "auth/register",
@@ -169,6 +191,7 @@ where
                     username,
                     email,
                     password,
+                    password_kdf,
                     turnstile_token: challenge_token.map(ExposeSecret::expose_secret),
                 },
             )
@@ -293,6 +316,29 @@ where
         device_name: &str,
         challenge_token: Option<&SecretString>,
     ) -> Result<LoginOutcome, AuthError> {
+        self.login_with_password_protocol(
+            identifier,
+            password,
+            0,
+            None,
+            device_name,
+            challenge_token,
+        )
+        .await
+    }
+
+    /// Authenticate with password material prepared by the frontend. Keeping
+    /// this separate from `login` preserves the legacy native API while the
+    /// Tauri webview forwards the versioned password protocol explicitly.
+    pub async fn login_with_password_protocol(
+        &self,
+        identifier: &str,
+        password: &str,
+        password_kdf_version: u8,
+        password_upgrade: Option<&Value>,
+        device_name: &str,
+        challenge_token: Option<&SecretString>,
+    ) -> Result<LoginOutcome, AuthError> {
         let response = self
             .api
             .post::<_, TokenResponse>(
@@ -300,6 +346,8 @@ where
                 &LoginRequest {
                     identifier,
                     password,
+                    password_kdf_version,
+                    password_upgrade,
                     device_name,
                     turnstile_token: challenge_token.map(ExposeSecret::expose_secret),
                 },
@@ -438,4 +486,56 @@ pub enum AuthError {
     NotAuthenticated,
     #[error("the server returned an unexpected authentication state")]
     UnexpectedAuthState,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{LoginRequest, RegisterRequest};
+
+    #[test]
+    fn password_protocol_fields_are_serialized_without_weakening_legacy_callers() {
+        let upgrade = json!({
+            "password": "new-secret",
+            "password_kdf": {"version": 2}
+        });
+        let Ok(login) = serde_json::to_value(LoginRequest {
+            identifier: "turtle",
+            password: "authentication-secret",
+            password_kdf_version: 2,
+            password_upgrade: Some(&upgrade),
+            device_name: "Kaede Desktop",
+            turnstile_token: None,
+        }) else {
+            panic!("login request should serialize");
+        };
+        assert_eq!(login["password_kdf_version"], 2);
+        assert_eq!(login["password_upgrade"], upgrade);
+
+        let Ok(legacy_login) = serde_json::to_value(LoginRequest {
+            identifier: "turtle",
+            password: "literal-password",
+            password_kdf_version: 0,
+            password_upgrade: None,
+            device_name: "Kaede Desktop",
+            turnstile_token: None,
+        }) else {
+            panic!("legacy login request should serialize");
+        };
+        assert_eq!(legacy_login["password_kdf_version"], 0);
+        assert!(legacy_login.get("password_upgrade").is_none());
+
+        let kdf = json!({"version": 2, "algorithm": "PBKDF2-SHA256"});
+        let Ok(registration) = serde_json::to_value(RegisterRequest {
+            username: "turtle",
+            email: None,
+            password: "authentication-secret",
+            password_kdf: Some(&kdf),
+            turnstile_token: None,
+        }) else {
+            panic!("registration request should serialize");
+        };
+        assert_eq!(registration["password_kdf"], kdf);
+    }
 }

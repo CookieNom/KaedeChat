@@ -14,7 +14,7 @@ from anyio import CapacityLimiter, WouldBlock
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from fastapi.responses import RedirectResponse
 from redis.asyncio import Redis
-from sqlalchemy import delete, exists, func, select
+from sqlalchemy import delete, exists, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +38,7 @@ from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef, EntityReference, Snowflake
+from app.db.bot_models import AbuseReport
 from app.db.models import (
     Attachment,
     DMConversation,
@@ -55,6 +56,7 @@ from app.federation.client import signed_request, signed_stream_request
 from app.federation.dm_history import history_media_capability_status, history_media_path
 from app.federation.network import FederationNetworkError, normalize_domain
 from app.federation.relationships import queue_friend_profile_updates
+from app.media.photodna import PhotoDNAInputRejected, photodna_report_values, scan_image
 from app.media.processing import (
     IMAGE_TYPES,
     MediaValidationError,
@@ -869,6 +871,93 @@ def remote_media_federation_query(
     return query or None
 
 
+async def known_photodna_match(
+    session: AsyncSession,
+    origin_domain: str,
+    attachment_id: int,
+) -> bool:
+    """Return the durable attachment-wide decision, never a variant decision."""
+
+    return (
+        await session.scalar(
+            select(AbuseReport.id)
+            .where(
+                AbuseReport.source == "photodna",
+                AbuseReport.target_type == "attachment",
+                AbuseReport.target_ref == f"{attachment_id}@{origin_domain}",
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
+async def acquire_remote_photodna_lock(
+    session: AsyncSession,
+    origin_domain: str,
+    attachment_id: int,
+) -> None:
+    """Serialize a positive decision with final cache admission."""
+
+    await session.scalar(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended(
+                    f"kaede-remote-media-photodna:{origin_domain}:{attachment_id}", 0
+                )
+            )
+        )
+    )
+
+
+async def retire_remote_media_variants(
+    session: AsyncSession,
+    *,
+    origin_domain: str,
+    attachment_id: int,
+) -> None:
+    """Make every previously cached representation unreachable and GC-able."""
+
+    rows = list(
+        await session.scalars(
+            select(RemoteMediaCache)
+            .where(
+                RemoteMediaCache.origin_domain == origin_domain,
+                RemoteMediaCache.attachment_id == attachment_id,
+            )
+            .with_for_update()
+        )
+    )
+    for item in rows:
+        await session.execute(
+            pg_insert(RemoteMediaOrphan)
+            .values(object_key=item.object_key, size=item.size)
+            .on_conflict_do_nothing(index_elements=["object_key"])
+        )
+        await session.delete(item)
+    if rows:
+        await session.commit()
+        await enqueue_best_effort(media_cache_gc)
+
+
+async def reject_known_photodna_match(
+    session: AsyncSession,
+    *,
+    origin_domain: str,
+    attachment_id: int,
+) -> None:
+    """Block and retire every cached representation after one positive match."""
+
+    if not await known_photodna_match(session, origin_domain, attachment_id):
+        return
+    await retire_remote_media_variants(
+        session,
+        origin_domain=origin_domain,
+        attachment_id=attachment_id,
+    )
+    raise HTTPException(status_code=422, detail={"code": "REMOTE_MEDIA_REJECTED"})
+
+
 async def cache_remote_media(
     session: AsyncSession,
     settings: Settings,
@@ -880,9 +969,21 @@ async def cache_remote_media(
     dm_history_scope: tuple[tuple[int, str], tuple[int, str]] | None = None,
     requester: tuple[int, str] | None = None,
     encrypted_transport: bool = False,
+    snowflake: SnowflakeGenerator | None = None,
+    message_ref: tuple[int, str] | None = None,
+    uploader_ref: tuple[int, str] | None = None,
 ) -> RemoteMediaCache:
     if await session.get(RemoteMediaTombstone, (origin_domain, attachment_id)) is not None:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    # A prior positive decision applies to every representation of the same
+    # authoritative attachment, even if an origin later changes its declared
+    # encryption mode. Retire variants cached before the match as well as
+    # refusing another download.
+    await reject_known_photodna_match(
+        session,
+        origin_domain=origin_domain,
+        attachment_id=attachment_id,
+    )
     with tempfile.NamedTemporaryFile(
         prefix="kaede-remote-media-", suffix=".spool", delete=False
     ) as temporary:
@@ -972,6 +1073,76 @@ async def cache_remote_media(
                     status_code=422,
                     detail={"code": "REMOTE_MEDIA_REJECTED"},
                 ) from exc
+
+            if detected_type in IMAGE_TYPES:
+                try:
+                    image_bytes = await anyio.Path(temporary_path).read_bytes()
+                    finding = await scan_image(image_bytes, settings)
+                except PhotoDNAInputRejected as exc:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"code": "REMOTE_MEDIA_REJECTED"},
+                    ) from exc
+                except RuntimeError as exc:
+                    # Matching is fail-closed: bytes do not enter the local
+                    # cache when the licensed generator or Microsoft service
+                    # cannot return a trustworthy terminal decision.
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"code": "REMOTE_MEDIA_UNAVAILABLE"},
+                    ) from exc
+                if finding is not None:
+                    if snowflake is None:
+                        raise RuntimeError(
+                            "PhotoDNA remote scanning requires a snowflake generator"
+                        )
+                    attachment_ref = f"{attachment_id}@{origin_domain}"
+                    report_values = photodna_report_values(
+                        report_id=await snowflake.mint(),
+                        attachment_ref=attachment_ref,
+                        finding=finding,
+                        uploader_ref=(
+                            f"{uploader_ref[0]}@{uploader_ref[1]}"
+                            if uploader_ref is not None
+                            else None
+                        ),
+                        message_ref=(
+                            f"{message_ref[0]}@{message_ref[1]}"
+                            if message_ref is not None
+                            else None
+                        ),
+                        detected_content_type=detected_type,
+                        content_sha256=digest_builder.hexdigest(),
+                        remote_variant=variant,
+                    )
+                    # A clean representation may be finishing in another API
+                    # worker. Sharing this transaction lock with final cache
+                    # admission ensures it either lands before this report and
+                    # is retired, or sees the report and remains an orphan.
+                    await acquire_remote_photodna_lock(
+                        session,
+                        origin_domain,
+                        attachment_id,
+                    )
+                    await session.execute(
+                        pg_insert(AbuseReport)
+                        .values(**report_values)
+                        .on_conflict_do_nothing(
+                            index_elements=["source", "target_type", "target_ref"],
+                            index_where=text("source = 'photodna'"),
+                        )
+                    )
+                    await session.commit()
+                    await increment_metric(redis, "media_photodna_matches")
+                    await retire_remote_media_variants(
+                        session,
+                        origin_domain=origin_domain,
+                        attachment_id=attachment_id,
+                    )
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"code": "REMOTE_MEDIA_REJECTED"},
+                    )
 
         digest = digest_builder.hexdigest()
         cache_key = f"{origin_domain}/{attachment_id}/{variant}/{digest}"
@@ -1082,6 +1253,12 @@ async def cache_remote_media(
                 is not None
             ):
                 raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+            await acquire_remote_photodna_lock(session, origin_domain, attachment_id)
+            await reject_known_photodna_match(
+                session,
+                origin_domain=origin_domain,
+                attachment_id=attachment_id,
+            )
             stored_at = datetime.now(UTC)
             expires_at = stored_at + timedelta(days=settings.media_remote_cache_ttl_days)
             if existing_key is not None and existing_key != cache_key:
@@ -1169,6 +1346,7 @@ async def authorized_attachment(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
 ) -> RedirectResponse:
     try:
         origin_domain = normalize_domain(origin_domain)
@@ -1216,6 +1394,11 @@ async def authorized_attachment(
         is not None
     ):
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    await reject_known_photodna_match(
+        session,
+        origin_domain=origin_domain,
+        attachment_id=remote_attachment_id,
+    )
     cached = await session.get(RemoteMediaCache, (origin_domain, remote_attachment_id, variant))
     checked_at = datetime.now(UTC)
     if cached is not None and (cached.expires_at <= checked_at or cached.scan_status != "clean"):
@@ -1259,9 +1442,23 @@ async def authorized_attachment(
                         variant=variant,
                         requester=(auth.user.id, auth.user.origin_domain),
                         encrypted_transport=attachment.encryption_mode == "e2ee",
+                        snowflake=snowflake,
+                        message_ref=(attachment.message_id, attachment.message_domain),
+                        uploader_ref=(attachment.uploader_id, attachment.uploader_domain),
                     )
     if cached is None:
         raise RuntimeError("remote media cache write did not converge")
+    # Recheck immediately before minting a capability so a match discovered
+    # while this request was fetching another representation retires this row.
+    # Holding the same transaction lock as the positive-decision writer makes
+    # the order explicit: this capability either predates that decision, or
+    # waits and observes it. It can never race past an in-flight report commit.
+    await acquire_remote_photodna_lock(session, origin_domain, remote_attachment_id)
+    await reject_known_photodna_match(
+        session,
+        origin_domain=origin_domain,
+        attachment_id=remote_attachment_id,
+    )
     cached.last_accessed_at = datetime.now(UTC)
     try:
         url = S3Storage(settings).presign(
@@ -1293,6 +1490,7 @@ async def authorized_dm_history_media(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
 ) -> RedirectResponse:
     """Stream old authority-page media through the user's authenticated home."""
 
@@ -1331,6 +1529,11 @@ async def authorized_dm_history_media(
 
     origin_domain = attachment_key[1]
     attachment_id = attachment_key[0]
+    await reject_known_photodna_match(
+        session,
+        origin_domain=origin_domain,
+        attachment_id=attachment_id,
+    )
     try:
         authorization = await signed_request(
             session,
@@ -1397,9 +1600,17 @@ async def authorized_dm_history_media(
                         encrypted_transport=(
                             authorization.headers.get("X-Kaede-Media-Encryption") == "e2ee"
                         ),
+                        snowflake=snowflake,
+                        message_ref=message_key,
                     )
     if cached is None:
         raise RuntimeError("remote history media cache write did not converge")
+    await acquire_remote_photodna_lock(session, origin_domain, attachment_id)
+    await reject_known_photodna_match(
+        session,
+        origin_domain=origin_domain,
+        attachment_id=attachment_id,
+    )
     cached.last_accessed_at = datetime.now(UTC)
     try:
         url = S3Storage(settings).presign(

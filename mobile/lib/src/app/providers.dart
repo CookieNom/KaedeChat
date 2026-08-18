@@ -17,9 +17,11 @@ final sessionVaultProvider =
 final apiClientProvider = Provider<KaedeApiClient>(
   (ref) => KaedeApiClient(vault: ref.watch(sessionVaultProvider)),
 );
-final repositoryProvider = Provider<KaedeRepository>(
-  (ref) => KaedeRepository(ref.watch(apiClientProvider)),
-);
+final repositoryProvider = Provider<KaedeRepository>((ref) {
+  final repository = KaedeRepository(ref.watch(apiClientProvider));
+  ref.onDispose(repository.dispose);
+  return repository;
+});
 final gatewayProvider = Provider<GatewayClient>((ref) {
   final api = ref.watch(apiClientProvider);
   final gateway = GatewayClient(

@@ -85,6 +85,13 @@ final class NativeMlsPendingCommit {
   final Uint8List welcome;
 }
 
+final class NativeMlsKeyPackageIdentity {
+  const NativeMlsKeyPackageIdentity(this.credential, this.signatureKey);
+
+  final Uint8List credential;
+  final Uint8List signatureKey;
+}
+
 final class NativeMlsClient {
   NativeMlsClient._(this._handle);
 
@@ -179,6 +186,16 @@ final class NativeMlsClient {
       })['bytes']);
   Uint8List generateKeyPackage() =>
       _bytes(_request('generate_key_package', const {})['bytes']);
+
+  NativeMlsKeyPackageIdentity inspectKeyPackage(Uint8List keyPackage) {
+    final result = _request('inspect_key_package', <String, Object?>{
+      'key_package': _base64url(keyPackage),
+    });
+    return NativeMlsKeyPackageIdentity(
+      _bytes(result['credential']),
+      _bytes(result['signature_key']),
+    );
+  }
 
   void createGroup(Uint8List groupId) =>
       _request('create_group', <String, Object?>{

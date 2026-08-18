@@ -109,13 +109,15 @@ desktop-lint:
 		-p kaede-protocol -p kaede-core -p kaede-platform -p kaede-api \
 		-p kaede-cache -p kaede-auth -p kaede-media -p kaede-gateway \
 		-p kaede-capture -p kaede-audio -p kaede-voice -p kaede-turnstile \
+		-p kaede-e2ee -p kaede-e2ee-ffi \
 		-p kaede-tauri --all-targets -- -D warnings
 
 desktop-test:
 	cargo +1.92.0 test --locked --manifest-path desktop/Cargo.toml \
 		-p kaede-protocol -p kaede-core -p kaede-platform -p kaede-api \
 		-p kaede-cache -p kaede-auth -p kaede-media -p kaede-app \
-		-p kaede-gateway -p kaede-capture -p kaede-audio -p kaede-voice
+		-p kaede-gateway -p kaede-capture -p kaede-audio -p kaede-voice \
+		-p kaede-e2ee -p kaede-e2ee-ffi
 
 desktop-build:
 	pnpm --dir frontend install --frozen-lockfile

@@ -16,16 +16,25 @@ export function utf8(value: string): Bytes {
 }
 
 export function decodeUtf8(value: ByteSource): string {
-  return decoder.decode(ownedBytes(value));
+  const bytes = ownedBytes(value);
+  try {
+    return decoder.decode(bytes);
+  } finally {
+    clearBytes(bytes);
+  }
 }
 
 export function base64url(value: ByteSource): string {
   const bytes = ownedBytes(value);
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  try {
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+  } finally {
+    clearBytes(bytes);
   }
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
 }
 
 export function fromBase64url(value: string, maximum = 4 * 1024 * 1024): Bytes {
@@ -51,7 +60,12 @@ export function concatBytes(...values: readonly Uint8Array<ArrayBufferLike>[]): 
 }
 
 export async function sha256(value: ByteSource): Promise<Bytes> {
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', ownedBytes(value)));
+  const bytes = ownedBytes(value);
+  try {
+    return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  } finally {
+    clearBytes(bytes);
+  }
 }
 
 export function randomBytes(length: number): Bytes {

@@ -64,9 +64,12 @@
     'applications.commands',
     'interactions.respond',
     'guilds.read',
+    'guilds.manage',
     'channels.read',
+    'channels.manage',
     'members.read',
     'roles.read',
+    'roles.manage',
     'messages.metadata',
     'messages.content',
     'messages.history',
@@ -81,6 +84,10 @@
     'moderation.members',
     'moderation.messages',
     'voice.states.read',
+    'voice.moderate',
+    'invites.manage',
+    'webhooks.manage',
+    'emojis.manage',
     'dm.send'
   ];
   const intents = [
@@ -90,6 +97,7 @@
     'guild_messages',
     'message_content',
     'message_reactions',
+    'guild_typing',
     'voice_states',
     'interactions'
   ];

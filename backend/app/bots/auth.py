@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_redis, get_session
 from app.auth.security import token_hash
+from app.bots.installations import active_installation_exists
 from app.core.rate_limits import ClientRateLimit, enforce_keyed_rate_limit
 from app.db.bot_models import BotApplication, BotToken, BotWorker
 from app.db.models import User
@@ -141,14 +142,26 @@ async def require_bot(
                 BotToken.revoked_at.is_(None),
                 BotToken.expires_at > now,
                 BotWorker.revoked_at.is_(None),
+                (BotWorker.expires_at.is_(None)) | (BotWorker.expires_at > now),
                 BotApplication.status == "active",
                 User.account_type == "bot",
+                User.disabled_at.is_(None),
+                active_installation_exists(
+                    application_id=BotApplication.id,
+                    application_domain=BotApplication.origin_domain,
+                    bot_user_id=User.id,
+                    bot_user_domain=User.origin_domain,
+                ),
             )
         )
     ).one_or_none()
     if row is None:
         raise HTTPException(status_code=401, detail={"code": "BOT_TOKEN_INVALID"})
     token, worker, application, user = row
+    if user.account_type != "bot" or user.disabled_at is not None:
+        # Retain a runtime fence as well as the SQL predicate so a stale ORM
+        # identity can never turn an administratively disabled bot back on.
+        raise HTTPException(status_code=401, detail={"code": "BOT_TOKEN_INVALID"})
     timestamp_raw = request.headers.get("X-Kaede-Bot-Timestamp", "")
     nonce = request.headers.get("X-Kaede-Bot-Nonce", "")
     proof_raw = request.headers.get("X-Kaede-Bot-Proof", "")

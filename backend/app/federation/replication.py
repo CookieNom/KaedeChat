@@ -15,6 +15,7 @@ from app.chat.e2ee import (
     validate_channel_encryption_policy,
     validate_channel_encryption_policy_transition,
     validate_e2ee_envelope,
+    validate_e2ee_message_projection,
     validate_message_encryption_policy,
 )
 from app.chat.events import publish_dispatch, user_topic
@@ -1023,8 +1024,6 @@ async def replicate_dm_message(
     origin_domain = str(raw.get("origin_domain"))
     if (author_id, author_domain) != (author.id, author.origin_domain):
         raise ValueError("DM message author reference does not match its profile")
-    if origin_domain != author.origin_domain:
-        raise ValueError("DM message snowflake was not minted by its author instance")
     message_content = raw.get("content")
     e2ee = validate_e2ee_envelope(raw.get("e2ee"))
     raw_attachments = raw.get("attachments", [])
@@ -1078,6 +1077,16 @@ async def replicate_dm_message(
     conversation = await session.get(DMConversation, (channel.id, channel.origin_domain))
     if conversation is None or conversation.type not in {"direct", "group"}:
         raise ValueError("DM conversation is not replicated")
+    authority_control = (
+        e2ee is not None
+        and e2ee.get("operation") in {"welcome", "commit"}
+        and message_type == 7
+        and flags == 4
+        and origin_domain == event_origin
+        and event_origin == conversation.authority_domain
+    )
+    if origin_domain != author.origin_domain and not authority_control:
+        raise ValueError("DM message snowflake was not minted by its author instance")
     await lock_federated_dm_authority(session, conversation.authority_domain)
     raw_policy = content.get("encryption_policy")
     if raw_policy is not None:
@@ -1107,6 +1116,13 @@ async def replicate_dm_message(
         policy_epoch=channel.encryption_epoch,
         policy_group_id=channel.encryption_group_id,
     )
+    if e2ee is not None and e2ee.get("operation") not in {"welcome", "commit"}:
+        validate_e2ee_message_projection(
+            e2ee,
+            message_id=message_id,
+            message_domain=origin_domain,
+            edited=False,
+        )
     author_participates = await session.get(
         DMParticipant,
         (channel.id, channel.origin_domain, author.id, author.origin_domain),

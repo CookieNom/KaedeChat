@@ -18,7 +18,10 @@ const config = {
         'base-uri': ['none'],
         'object-src': ['none'],
         'form-action': ['self'],
-        'script-src': ['self', 'https://challenges.cloudflare.com'],
+        // OpenMLS loads its audited WebAssembly module at runtime. This CSP
+        // keyword permits WebAssembly compilation without enabling JavaScript
+        // string evaluation (`unsafe-eval`).
+        'script-src': ['self', 'wasm-unsafe-eval', 'https://challenges.cloudflare.com'],
         'style-src': ['self'],
         // SvelteKit's accessibility announcer has one framework-owned static
         // style attribute. Authorize only that exact value rather than all

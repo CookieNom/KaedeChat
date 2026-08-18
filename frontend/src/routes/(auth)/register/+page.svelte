@@ -2,6 +2,7 @@
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
   import { loadAuthConfiguration } from '$lib/auth/config';
+  import { prepareRegistrationPassword } from '$lib/auth/password-kdf';
   import TurnstileWidget from '$lib/components/TurnstileWidget.svelte';
   import NativeInstanceField from '$lib/components/NativeInstanceField.svelte';
   import {
@@ -86,12 +87,14 @@
     busy = true;
     error = '';
     try {
+      const prepared = await prepareRegistrationPassword(password);
       const result = await api<RegistrationResult>('/auth/register', {
         method: 'POST',
         body: JSON.stringify({
           username,
           ...(emailRequired ? { email } : {}),
-          password,
+          password: prepared.authenticationSecret,
+          password_kdf: prepared.context,
           ...(turnstileEnabled ? { turnstile_token: turnstileToken } : {})
         })
       });

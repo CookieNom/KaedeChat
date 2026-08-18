@@ -13,6 +13,7 @@ crate-type = ["cdylib", "staticlib"]
 base64.workspace = true
 kaede-e2ee = { path = "../kaede-e2ee" }
 serde_json.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

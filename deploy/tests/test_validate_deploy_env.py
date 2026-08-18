@@ -294,6 +294,39 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(DeploymentConfigurationError, "must be true"):
             validate_values(values, observability=False)
 
+    def test_photodna_is_optional_but_enabled_matching_requires_private_material(self) -> None:
+        validate_values(
+            self.production
+            | {
+                "KAEDE_PHOTODNA_ENABLED": "false",
+                "KAEDE_PHOTODNA_SUBSCRIPTION_KEY": "replace-with-photodna-key",
+            },
+            observability=False,
+        )
+        configured = self.production | {
+            "KAEDE_PHOTODNA_ENABLED": "true",
+            "KAEDE_PHOTODNA_SUBSCRIPTION_KEY": "p" * 32,
+            "PHOTODNA_EDGEHASHGENERATOR": "/srv/private/photodna-sdk",
+        }
+        validate_values(configured, observability=False)
+        for overrides in (
+            {"KAEDE_PHOTODNA_ENABLED": "sometimes"},
+            {"KAEDE_PHOTODNA_SUBSCRIPTION_KEY": ""},
+            {"KAEDE_PHOTODNA_SUBSCRIPTION_KEY": "replace-with-photodna-key"},
+            {"PHOTODNA_EDGEHASHGENERATOR": "relative/sdk"},
+        ):
+            with (
+                self.subTest(overrides=overrides),
+                self.assertRaises(DeploymentConfigurationError),
+            ):
+                validate_values(configured | overrides, observability=False)
+
+        repository = Path(__file__).resolve().parents[2]
+        setup = (repository / "setup.sh").read_text(encoding="utf-8")
+        self.assertIn("Enable Microsoft PhotoDNA matching for plaintext images?", setup)
+        self.assertIn('emit KAEDE_PHOTODNA_ENABLED "$PHOTODNA_ENABLED"', setup)
+        self.assertIn('emit PHOTODNA_EDGEHASHGENERATOR "$PHOTODNA_SDK_ROOT"', setup)
+
     def test_documented_secret_placeholder_is_rejected(self) -> None:
         values = self.production | {"KAEDE_ADMIN_TOKEN": "replace-with-a-token"}
         with self.assertRaisesRegex(DeploymentConfigurationError, "placeholder"):

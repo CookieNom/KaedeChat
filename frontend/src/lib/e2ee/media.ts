@@ -85,41 +85,50 @@ export async function encryptFile(
   const salt = randomBytes(16);
   const noncePrefix = randomBytes(8);
   const fileHeader = header(file.size, chunkSize, salt, noncePrefix);
-  const key = await contentKey(rawKey, salt);
-  const count = Math.ceil(file.size / chunkSize);
-  const parts: BlobPart[] = [fileHeader];
-  for (let index = 0; index < count; index += 1) {
-    const plaintext = await file
-      .slice(index * chunkSize, Math.min(file.size, (index + 1) * chunkSize))
-      .arrayBuffer();
-    const encrypted = await crypto.subtle.encrypt(
-      {
-        name: 'AES-GCM',
-        iv: chunkNonce(noncePrefix, index),
-        additionalData: chunkAad(fileHeader, index, count),
-        tagLength: 128
-      },
-      key,
-      plaintext
-    );
-    parts.push(u32(encrypted.byteLength), encrypted);
+  try {
+    const key = await contentKey(rawKey, salt);
+    const count = Math.ceil(file.size / chunkSize);
+    const parts: BlobPart[] = [fileHeader];
+    for (let index = 0; index < count; index += 1) {
+      const plaintext = new Uint8Array(
+        await file
+          .slice(index * chunkSize, Math.min(file.size, (index + 1) * chunkSize))
+          .arrayBuffer()
+      );
+      try {
+        const encrypted = await crypto.subtle.encrypt(
+          {
+            name: 'AES-GCM',
+            iv: chunkNonce(noncePrefix, index),
+            additionalData: chunkAad(fileHeader, index, count),
+            tagLength: 128
+          },
+          key,
+          plaintext
+        );
+        parts.push(u32(encrypted.byteLength), encrypted);
+      } finally {
+        plaintext.fill(0);
+      }
+    }
+    const ciphertext = new Blob(parts, { type: 'application/octet-stream' });
+    const bytes = await ciphertext.arrayBuffer();
+    const manifest: EncryptedFileManifest = {
+      version: 1,
+      protocol: 'kaede-file-v1',
+      file_id: base64url(fileId),
+      key: base64url(rawKey),
+      filename: file.name?.trim() || 'file',
+      content_type: file.type || 'application/octet-stream',
+      plaintext_size: file.size,
+      ciphertext_size: ciphertext.size,
+      ciphertext_sha256: base64url(await sha256(bytes)),
+      chunk_size: chunkSize
+    };
+    return { ciphertext, manifest };
+  } finally {
+    rawKey.fill(0);
   }
-  const ciphertext = new Blob(parts, { type: 'application/octet-stream' });
-  const bytes = await ciphertext.arrayBuffer();
-  const manifest: EncryptedFileManifest = {
-    version: 1,
-    protocol: 'kaede-file-v1',
-    file_id: base64url(fileId),
-    key: base64url(rawKey),
-    filename: file.name?.trim() || 'file',
-    content_type: file.type || 'application/octet-stream',
-    plaintext_size: file.size,
-    ciphertext_size: ciphertext.size,
-    ciphertext_sha256: base64url(await sha256(bytes)),
-    chunk_size: chunkSize
-  };
-  rawKey.fill(0);
-  return { ciphertext, manifest };
 }
 
 export async function decryptFile(
@@ -148,9 +157,13 @@ export async function decryptFile(
   const salt = all.slice(17, 33);
   const noncePrefix = all.slice(33, 41);
   const rawKey = fromBase64url(manifest.key, 32);
-  if (rawKey.length !== 32) throw new Error('Encrypted file key is invalid.');
-  const key = await contentKey(rawKey, salt);
-  rawKey.fill(0);
+  let key: CryptoKey;
+  try {
+    if (rawKey.length !== 32) throw new Error('Encrypted file key is invalid.');
+    key = await contentKey(rawKey, salt);
+  } finally {
+    rawKey.fill(0);
+  }
   const count = Math.ceil(plainSize / chunkSize);
   const parts: ArrayBuffer[] = [];
   let offset = HEADER_SIZE;

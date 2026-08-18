@@ -6,6 +6,7 @@ import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/auth/turnstile_actions.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/e2ee/store.dart';
 import 'package:kaede_mobile/src/features/auth/turnstile_challenge.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -121,24 +122,30 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
         }
       }
     } on MfaRequired catch (mfa) {
-      if (!mounted) return;
-      final code = await showDialog<String>(
-          context: context, builder: (_) => const _MfaDialog());
-      if (code != null) {
-        try {
+      final repository = ref.read(repositoryProvider);
+      if (!mounted) {
+        repository.discardPendingPasswordKey();
+        return;
+      }
+      try {
+        final code = await showDialog<String>(
+            context: context, builder: (_) => const _MfaDialog());
+        if (code != null) {
           await ref
               .read(mobileControllerProvider.notifier)
               .finishMfa(_domain(), mfa.ticket, code);
-        } on Object catch (error) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text(userFacingError(
-                error,
-                summary: 'Could not verify the authentication code',
-              )),
-            ));
-          }
         }
+      } on Object catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(userFacingError(
+              error,
+              summary: 'Could not verify the authentication code',
+            )),
+          ));
+        }
+      } finally {
+        repository.discardPendingPasswordKey();
       }
     } on Object catch (error) {
       if (mounted) {
@@ -208,11 +215,41 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
           'Choose a new password', 'At least 10 characters',
           secret: true);
       if (replacement == null) return;
-      await ref.read(repositoryProvider).resetPassword(token, replacement);
+      if (!mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Reset password and encryption vault?'),
+          content: const Text(
+            'Resetting your password rotates the account-vault key and deletes the remote encrypted vault. Encrypted history may be recoverable only from an enrolled client that still has it or from a recovery backup.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Reset password'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      final accountRef = await ref
+          .read(repositoryProvider)
+          .resetPassword(domain, token, replacement);
+      final localStateRebased =
+          await const MobileE2EEStore().rebaseAfterPasswordReset(accountRef);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Password updated. You can sign in now.')),
+          SnackBar(
+            content: Text(
+              localStateRebased
+                  ? 'Password updated and the remote encryption vault was reset. This phone’s trusted encrypted state will repopulate it after you sign in.'
+                  : 'Password updated and the remote encryption vault was reset. Restore encrypted history from an enrolled client or recovery backup after signing in.',
+            ),
+          ),
         );
       }
     } on Object catch (error) {
@@ -246,7 +283,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
               child: const Text('Cancel')),
           FilledButton(
               onPressed: () {
-                final value = controller.text.trim();
+                final value = secret ? controller.text : controller.text.trim();
                 if (value.isEmpty) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text('Enter $hint.')),

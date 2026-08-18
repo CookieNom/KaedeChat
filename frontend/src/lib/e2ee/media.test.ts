@@ -59,4 +59,31 @@ describe('encrypted attachments', () => {
       await encryptedManifestDigest([{ ...first, key: second.key }])
     );
   });
+
+  it('clears the generated raw file key when key import fails', async () => {
+    let imported: Uint8Array | null = null;
+    const failingCrypto = {
+      getRandomValues: webcrypto.getRandomValues.bind(webcrypto),
+      subtle: {
+        importKey: async (
+          _format: string,
+          keyData: ArrayBuffer | ArrayBufferView
+        ): Promise<CryptoKey> => {
+          imported = keyData as Uint8Array;
+          throw new Error('import failed');
+        }
+      }
+    };
+    Object.defineProperty(globalThis, 'crypto', { value: failingCrypto, configurable: true });
+    try {
+      const file = Object.assign(new Blob(['secret'], { type: 'text/plain' }), {
+        name: 'secret.txt'
+      });
+      await expect(encryptFile(file)).rejects.toThrow('import failed');
+      expect(imported).not.toBeNull();
+      expect([...imported!]).toEqual(new Array(32).fill(0));
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
+    }
+  });
 });

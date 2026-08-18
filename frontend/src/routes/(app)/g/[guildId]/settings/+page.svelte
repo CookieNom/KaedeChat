@@ -17,6 +17,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { initializeE2EE } from '$lib/e2ee/client';
+  import { acknowledgeEncryptedRoom } from '$lib/e2ee/disclosures';
   import { PERMISSION_METADATA, Permission } from '$lib/generated/permissions';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
@@ -224,6 +225,7 @@
   let overwriteSearch = $state('');
   let permissionSearch = $state('');
   let channelEditorPanel = $state<ChannelSettingsPanel>('overview');
+  let channelSafetyNumber = $state('');
 
   let selectedRole = $state<Role | null>(null);
   let roleName = $state('');
@@ -565,6 +567,7 @@
         : '';
     channelSlowmode = channel.rate_limit_per_user;
     channelHistoryPolicy = channel.federated_history_policy ?? 'inherit';
+    channelSafetyNumber = '';
     error = '';
     notice = '';
     channelOverwrites = [];
@@ -718,8 +721,8 @@
     if (channel.encryption_mode === 'e2ee' && !rekey) return;
     const activationWarning =
       channel.type === 2
-        ? 'Turn on end-to-end encryption for this voice channel? This is permanent. Microphone, camera, screen video, and screen audio will be encrypted on participant devices. Recording, transcription, server media moderation, and unsupported clients will stop working. Participant, timing, track, and traffic metadata remains visible. Anyone can still record content on their own device.'
-        : 'Turn on end-to-end encryption for this channel? This is permanent and protects only new content; existing history stays readable to the server. Server search, link and GIF previews, bots, webhooks, file previews, and malware scanning will stop. Notifications become generic, while participants, timing, and message-size metadata remain visible. Losing every enrolled device and recovery backup loses encrypted history. Removed members keep content they already received.';
+        ? 'Turn on end-to-end encryption for this voice channel? This is permanent. Microphone, camera, screen video, and screen audio will be encrypted on participant devices. Recording, transcription, server media moderation, and unsupported clients will stop working. Participant, timing, track, and traffic metadata remains visible. Anyone can still record content on their own device. Participant identities remain unverified until members compare the safety number through a separate trusted channel; repeat that comparison after membership or identity changes to detect key substitution by an actively malicious instance.'
+        : 'Turn on end-to-end encryption for this channel? This is permanent and protects only new content; existing history stays readable to the server. Server search, link and GIF previews, bots, webhooks, file previews, malware scanning, and PhotoDNA scanning will stop. Notifications become generic, while participants, timing, and message-size metadata remain visible. Participant identities remain unverified until members compare the safety number through a separate trusted channel; repeat that comparison after membership or identity changes to detect key substitution by an actively malicious instance. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted history. Removed members keep content they already received.';
     if (
       !window.confirm(
         rekey
@@ -732,10 +735,8 @@
       const client = await initializeE2EE(user);
       const updated = rekey
         ? await client.rekeyRoom(entityRef(channel))
-        : await client.activateRoom(
-            entityRef(channel),
-            await client.createRoomProposal(entityRef(channel))
-          );
+        : await client.activateRoom(entityRef(channel));
+      if (!rekey) acknowledgeEncryptedRoom(entityRef(user), entityRef(updated));
       if (generation !== loadGeneration || !guild) return;
       guild = {
         ...guild,
@@ -747,6 +748,24 @@
       notice = rekey
         ? 'Fresh encryption keys are active for the current channel members.'
         : 'End-to-end encryption is now on for this channel.';
+    });
+  }
+
+  function verifyChannelSafetyNumber() {
+    if (!selectedChannel || !signedInUser || selectedChannel.encryption_state !== 'active') return;
+    const channel = selectedChannel;
+    const user = signedInUser;
+    return run(async (_guildRef, generation) => {
+      const client = await initializeE2EE(user);
+      const safetyNumber = await client.safetyNumber(channel);
+      if (
+        generation === loadGeneration &&
+        selectedChannel &&
+        entityKey(selectedChannel) === entityKey(channel)
+      ) {
+        channelSafetyNumber = safetyNumber;
+        notice = 'Compare this safety number with members through a separate trusted channel.';
+      }
     });
   }
 
@@ -2719,8 +2738,19 @@
                               <p>
                                 {selectedChannel.encryption_state === 'rekeying'
                                   ? 'Paused after a membership change. Secure the current member list before messaging resumes.'
-                                  : 'On. Only enrolled member devices can read messages and files.'}
+                                  : 'On. Participant identities remain unverified until members compare the safety number.'}
                               </p>
+                              {#if channelSafetyNumber}
+                                <code class="e2ee-safety-number">{channelSafetyNumber}</code>
+                              {/if}
+                              {#if selectedChannel.encryption_state === 'active'}
+                                <button
+                                  class="secondary-button"
+                                  type="button"
+                                  disabled={busy}
+                                  onclick={verifyChannelSafetyNumber}>Show safety number</button
+                                >
+                              {/if}
                               {#if selectedChannel.encryption_state === 'rekeying'}
                                 <button
                                   class="secondary-button"

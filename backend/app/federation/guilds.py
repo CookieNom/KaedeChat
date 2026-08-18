@@ -20,6 +20,7 @@ from app.chat.e2ee import (
     validate_channel_encryption_policy,
     validate_channel_encryption_policy_transition,
     validate_e2ee_envelope,
+    validate_e2ee_message_projection,
     validate_message_encryption_policy,
 )
 from app.chat.e2ee_membership import (
@@ -739,6 +740,13 @@ async def apply_guild_message_event(
         policy_epoch=channel.encryption_epoch,
         policy_group_id=channel.encryption_group_id,
     )
+    if e2ee is not None and e2ee.get("operation") not in {"welcome", "commit"}:
+        validate_e2ee_message_projection(
+            e2ee,
+            message_id=message_id,
+            message_domain=message_origin,
+            edited=False,
+        )
     message_type = raw.get("message_type", 0)
     flags = raw.get("flags", 0)
     client_nonce = raw.get("client_nonce")
@@ -1765,6 +1773,12 @@ async def apply_guild_mutation_event(
                     policy_generation=channel.encryption_policy_generation,
                     policy_epoch=channel.encryption_epoch,
                     policy_group_id=channel.encryption_group_id,
+                )
+                validate_e2ee_message_projection(
+                    e2ee,
+                    message_id=message_ref[0],
+                    message_domain=message_ref[1],
+                    edited=True,
                 )
                 edited_at = _event_datetime(raw_message.get("edited_at"), "message edit")
                 if edited_at is None:

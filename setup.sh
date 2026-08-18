@@ -1007,6 +1007,31 @@ else
   TURNSTILE_SECRET_VALUE=
 fi
 
+section 'Photo safety matching' \
+  'Microsoft PhotoDNA can check plaintext image uploads before publication. It requires a separately licensed Edge Hash SDK installed on this host and sends only an Edge Hash V2 to Microsoft. End-to-end encrypted attachments cannot be scanned.'
+if confirm 'Enable Microsoft PhotoDNA matching for plaintext images?' "$([[ $(old KAEDE_PHOTODNA_ENABLED false) == true ]] && printf true || printf false)"; then
+  PHOTODNA_ENABLED=true
+  EXISTING_PHOTODNA_KEY=$(old KAEDE_PHOTODNA_SUBSCRIPTION_KEY '')
+  if [[ -n $EXISTING_PHOTODNA_KEY && $EXISTING_PHOTODNA_KEY != replace-* && $EXISTING_PHOTODNA_KEY != change-me* ]] && \
+    confirm 'Reuse existing Microsoft PhotoDNA subscription key?' true; then
+    PHOTODNA_SUBSCRIPTION_KEY=$EXISTING_PHOTODNA_KEY
+  else
+    PHOTODNA_SUBSCRIPTION_KEY=$(ask_provider_secret 'Microsoft PhotoDNA subscription key' 16)
+  fi
+  DEFAULT_PHOTODNA_SDK_ROOT=$(old PHOTODNA_EDGEHASHGENERATOR "$ROOT/vendor/photodna-sdk")
+  while :; do
+    PHOTODNA_SDK_ROOT=$(ask_path 'Absolute PhotoDNA Edge Hash SDK root' "$DEFAULT_PHOTODNA_SDK_ROOT")
+    if [[ -d $PHOTODNA_SDK_ROOT/clientlibrary/python ]]; then
+      break
+    fi
+    warn 'The SDK root must already contain clientlibrary/python. The confidential SDK is mounted read-only and is never copied into Kaede images.'
+  done
+else
+  PHOTODNA_ENABLED=false
+  PHOTODNA_SUBSCRIPTION_KEY=
+  PHOTODNA_SDK_ROOT=
+fi
+
 PUSH_CHOICE=$(choose 'Closed-app mobile notifications' \
   'Official Kaede Push Relay (recommended)' \
   'Direct Firebase for a custom/community app build' \
@@ -1370,6 +1395,13 @@ emit() {
   emit KAEDE_MEDIA_MAX_ATTACHMENT_BYTES "$((ATTACHMENT_MIB * 1048576))"
   emit KAEDE_MEDIA_USER_QUOTA_BYTES "$((USER_QUOTA_MIB * 1048576))"
   emit KAEDE_MEDIA_SCAN_ENABLED true
+  emit KAEDE_PHOTODNA_ENABLED "$PHOTODNA_ENABLED"
+  if [[ $PHOTODNA_ENABLED == true ]]; then
+    emit KAEDE_PHOTODNA_SUBSCRIPTION_KEY "$PHOTODNA_SUBSCRIPTION_KEY"
+    emit PHOTODNA_EDGEHASHGENERATOR "$PHOTODNA_SDK_ROOT"
+  fi
+  emit KAEDE_PHOTODNA_HASH_TIMEOUT_SECONDS "$(old_uint KAEDE_PHOTODNA_HASH_TIMEOUT_SECONDS 30)"
+  emit KAEDE_PHOTODNA_MATCH_TIMEOUT_SECONDS "$(old_uint KAEDE_PHOTODNA_MATCH_TIMEOUT_SECONDS 20)"
   emit KAEDE_MEDIA_INFLIGHT_LIMIT "$(old_uint KAEDE_MEDIA_INFLIGHT_LIMIT 10)"
   emit KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES "${QUOTA[KAEDE_MEDIA_INFLIGHT_QUOTA_BYTES]}"
   emit KAEDE_MEDIA_UPLOAD_TTL_SECONDS "$(old_uint KAEDE_MEDIA_UPLOAD_TTL_SECONDS 900)"

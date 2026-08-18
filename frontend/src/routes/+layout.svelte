@@ -13,6 +13,7 @@
   } from '$lib/platform/native';
   import { applyTheme, storedTheme } from '$lib/ui/theme';
   import NativeDesktopLifecycle from '$lib/components/NativeDesktopLifecycle.svelte';
+  import { clearActiveE2EEState } from '$lib/e2ee/client';
   import { onMount } from 'svelte';
 
   let { children } = $props();
@@ -47,7 +48,15 @@
     const colorSchemeChanged = () => {
       if (storedTheme() === 'system') applyTheme('system', false);
     };
-    const sessionExpired = () => window.location.replace(resolve('/login'));
+    let clearingExpiredSession = false;
+    const sessionExpired = () => {
+      if (clearingExpiredSession) return;
+      clearingExpiredSession = true;
+      // IndexedDB is not guaranteed to finish once navigation tears down this
+      // document. Remove the password-derived vault key and MLS state first,
+      // then leave the protected route even if local storage itself is broken.
+      void clearActiveE2EEState().finally(() => window.location.replace(resolve('/login')));
+    };
     const pageRestored = (event: PageTransitionEvent) => {
       // Never reveal a protected in-memory view restored from the back-forward
       // cache after logout; reload it so the API session guard runs again.

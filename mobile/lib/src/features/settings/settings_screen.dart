@@ -95,7 +95,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Anyone with this backup and its passphrase can read your encrypted history. Store both separately. Do not import it while this device is still actively sending messages; use device transfer or revoke the old device first.',
+                  'Anyone with this backup and its passphrase can read your encrypted history. Store both separately. Restore it only as a recovery action; Kaede will reconcile it with the shared account vault. The portable plaintext cache retains at most 2,000 recent messages or 8 MiB, so older history may require another trusted client.',
                 ),
                 const SizedBox(height: 12),
                 SelectableText(bundle, maxLines: 8),
@@ -140,7 +140,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 const Text(
-                  'Restoring replaces this phone’s current encryption state. Never run two devices from the same recovery backup at the same time.',
+                  'Use a recovery backup when automatic account-vault recovery is unavailable. Restoring replaces this client’s cached state and resumes the same portable account identity. Backups carry at most 2,000 recent decrypted messages or 8 MiB of cached plaintext.',
                 ),
                 const SizedBox(height: 12),
                 TextField(
@@ -207,11 +207,11 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             shrinkWrap: true,
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
             children: [
-              Text('Encryption devices',
+              Text('Encryption identity',
                   style: Theme.of(context).textTheme.titleLarge),
               const SizedBox(height: 6),
               const Text(
-                'Revoking a device immediately pauses affected encrypted rooms until a member rotates their keys.',
+                'Your signed-in clients share one portable MLS identity. Rotating it abandons unavailable encrypted history and pauses affected rooms until a member rotates their keys.',
               ),
               const SizedBox(height: 12),
               for (final device in devices)
@@ -219,24 +219,23 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   leading: Icon(device['revoked_at'] == null
                       ? Icons.verified_user_outlined
                       : Icons.phonelink_erase_rounded),
-                  title: Text('${device['device_name'] ?? 'Kaede device'}'),
+                  title: const Text('Portable account identity'),
                   subtitle: Text(
-                    '${device['platform'] ?? 'unknown'} · ${device['id']}'
-                    '${device['id'] == currentDeviceId ? ' · This device' : ''}',
+                    'Last enrolled from ${device['device_name'] ?? 'Kaede'} (${device['platform'] ?? 'unknown'}) · ${device['id']}'
+                    '${device['id'] == currentDeviceId ? ' · Loaded here' : ''}',
                   ),
                   trailing: device['revoked_at'] != null
                       ? const Text('Revoked')
                       : IconButton(
-                          tooltip: 'Revoke device',
+                          tooltip: 'Rotate encryption identity',
                           onPressed: () async {
                             final accepted = await showDialog<bool>(
                               context: context,
                               builder: (dialogContext) => AlertDialog(
-                                title: const Text('Revoke encryption device?'),
-                                content: Text(
-                                  device['id'] == currentDeviceId
-                                      ? 'This phone will immediately lose its local encrypted access. Affected rooms pause until their keys are rotated.'
-                                      : 'That device immediately loses future encrypted access. Affected rooms pause until their keys are rotated.',
+                                title: const Text(
+                                    'Start a new encryption identity?'),
+                                content: const Text(
+                                  'This abandons encrypted history that is unavailable from an enrolled client or recovery backup. Every signed-in client must load the new identity, and affected rooms pause until their keys are rotated.',
                                 ),
                                 actions: [
                                   TextButton(
@@ -247,21 +246,26 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                                   FilledButton(
                                     onPressed: () =>
                                         Navigator.pop(dialogContext, true),
-                                    child: const Text('Revoke'),
+                                    child: const Text('Start fresh'),
                                   ),
                                 ],
                               ),
                             );
                             if (accepted != true) return;
-                            await repository
-                                .revokeE2eeDevice('${device['id']}');
-                            if (device['id'] == currentDeviceId) {
-                              await controller.clearLocalE2eeState();
+                            try {
+                              await controller.resetE2eeIdentity();
+                              await controller.e2eeClient();
+                              if (context.mounted) Navigator.pop(context);
+                              _showSuccess(
+                                'A new encryption identity is active. Rotate affected room keys before resuming.',
+                              );
+                            } on Object catch (error) {
+                              _showError(
+                                error,
+                                summary:
+                                    'Could not create a new encryption identity',
+                              );
                             }
-                            if (context.mounted) Navigator.pop(context);
-                            _showSuccess(
-                              'Encryption device revoked. Rotate affected room keys before resuming.',
-                            );
                           },
                           icon: const Icon(Icons.delete_outline_rounded),
                         ),
@@ -271,7 +275,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
       );
     } on Object catch (error) {
-      _showError(error, summary: 'Could not load encryption devices');
+      _showError(error, summary: 'Could not load encryption identity');
     }
   }
 
@@ -500,7 +504,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           icon: Icons.lock_person_outlined,
           title: 'End-to-end encryption',
           subtitle:
-              'Device keys stay on your devices. Your instance cannot recover encrypted messages for you.',
+              'Your password unlocks an encrypted account vault on each trusted device. Your instance stores only ciphertext and cannot decrypt or recover it.',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -518,7 +522,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               OutlinedButton.icon(
                 onPressed: _saving ? null : _manageEncryptionDevices,
                 icon: const Icon(Icons.devices_other_rounded),
-                label: const Text('Manage encryption devices'),
+                label: const Text('Manage encryption identity'),
               ),
               const SizedBox(height: 8),
               OutlinedButton.icon(
@@ -993,9 +997,12 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   ? FilledButton.styleFrom(backgroundColor: KaedeColors.danger)
                   : null,
               onPressed: () {
-                final values = controllers.map(
-                  (key, controller) => MapEntry(key, controller.text.trim()),
-                );
+                final values = <String, String>{
+                  for (final field in fields)
+                    field.key: field.obscure
+                        ? controllers[field.key]!.text
+                        : controllers[field.key]!.text.trim(),
+                };
                 if (values.values.any((value) => value.isEmpty)) {
                   ScaffoldMessenger.of(dialogContext).showSnackBar(
                     const SnackBar(

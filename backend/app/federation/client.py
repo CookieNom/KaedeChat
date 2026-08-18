@@ -56,6 +56,7 @@ def silence_blocks_path(path: str) -> bool:
         "/_kaede/v1/e2ee/rooms/activate",
         "/_kaede/v1/e2ee/rooms/rekey/propose",
         "/_kaede/v1/e2ee/rooms/rekey/activate",
+        "/_kaede/v1/e2ee/rooms/operations/status",
         "/_kaede/v1/invites/resolve",
     }:
         return True

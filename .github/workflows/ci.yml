@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+  FLUTTER_VERSION: "3.41.4"
+  RUST_VERSION: "1.92.0"
+
 jobs:
   backend:
     runs-on: ubuntu-24.04
@@ -46,20 +51,54 @@ jobs:
       - name: Install pinned Flutter SDK
         working-directory: ${{ runner.temp }}
         run: |
-          git clone --depth 1 --branch 3.41.4 https://github.com/flutter/flutter.git flutter
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git flutter
           echo "${{ runner.temp }}/flutter/bin" >> "$GITHUB_PATH"
+      - name: Cache pinned Flutter runtime artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/flutter/bin/cache
+          key: flutter-android-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}
       - name: Install pinned Rust Android targets
         run: |
-          rustup toolchain install 1.92.0 --profile minimal
-          rustup target add --toolchain 1.92.0 \
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup target add --toolchain "$RUST_VERSION" \
             aarch64-linux-android \
             armv7-linux-androideabi \
             x86_64-linux-android
+      - name: Cache Cargo downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: cargo-download-v1-rust-${{ env.RUST_VERSION }}-${{ hashFiles('desktop/Cargo.lock') }}
+          enableCrossOsArchive: true
+      - name: Cache Dart packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.pub-cache/hosted
+            ~/.pub-cache/git
+          key: dart-pub-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('mobile/pubspec.lock') }}
+      - name: Cache Android dependency downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2/files-2.1
+            ~/.gradle/caches/modules-2/metadata-*
+            ~/.gradle/wrapper/dists
+          key: gradle-download-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('mobile/pubspec.lock', 'mobile/android/**/*.gradle*', 'mobile/android/gradle/wrapper/gradle-wrapper.properties') }}
       - run: flutter pub get
       - run: dart format --output=none --set-exit-if-changed lib test
       - run: flutter analyze
       - run: flutter test
       - run: flutter build apk --debug
+      - name: Enforce mobile cache size budgets
+        if: always()
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: bash .github/scripts/enforce-cache-budgets.sh mobile
 
   frontend:
     runs-on: ubuntu-24.04
@@ -79,6 +118,7 @@ jobs:
       - run: pnpm lint
       - run: pnpm check
       - run: pnpm test
+      - run: pnpm check:e2ee-wasm
       - run: pnpm build
       - run: pnpm check:csp
       - run: pnpm audit --audit-level=moderate
@@ -100,19 +140,23 @@ jobs:
       - run: pnpm --dir frontend build
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.92.0 --profile minimal
-          rustup component add --toolchain 1.92.0 rustfmt clippy
-      - name: Cache Cargo artifacts
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup component add --toolchain "$RUST_VERSION" rustfmt clippy
+      - name: Cache Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            desktop/target
-          key: desktop-${{ runner.os }}-${{ hashFiles('desktop/Cargo.lock') }}
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: cargo-download-v1-rust-${{ env.RUST_VERSION }}-${{ hashFiles('desktop/Cargo.lock') }}
+          enableCrossOsArchive: true
       - run: make desktop-check
       - run: make desktop-lint
       - run: make desktop-test
+      - name: Enforce Cargo cache size budget
+        if: always()
+        run: bash .github/scripts/enforce-cache-budgets.sh cargo
 
   desktop-native:
     strategy:
@@ -133,12 +177,25 @@ jobs:
       - run: pnpm --dir frontend install --frozen-lockfile
       - run: pnpm --dir frontend build
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.92.0 --profile minimal
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+      - name: Cache Cargo downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: cargo-download-v1-rust-${{ env.RUST_VERSION }}-${{ hashFiles('desktop/Cargo.lock') }}
+          enableCrossOsArchive: true
       - name: Check native desktop stack
         run: cargo +1.92.0 check --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
       - name: Test native audio and capture boundaries
         if: runner.os == 'Linux'
         run: cargo +1.92.0 test --locked --manifest-path desktop/Cargo.toml -p kaede-audio -p kaede-capture
+      - name: Enforce Cargo cache size budget
+        if: always()
+        shell: bash
+        run: bash .github/scripts/enforce-cache-budgets.sh cargo
 
   migrations:
     runs-on: ubuntu-24.04

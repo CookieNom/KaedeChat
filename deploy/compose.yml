@@ -341,6 +341,11 @@ services:
       <<: *backend-environment
       ALLOW_NONPRODUCTION_DEPLOYMENT: ${ALLOW_NONPRODUCTION_DEPLOYMENT:-false}
       KAEDE_SERVICE_ROLE: preflight
+      KAEDE_PHOTODNA_ENABLED: ${KAEDE_PHOTODNA_ENABLED:-false}
+      KAEDE_PHOTODNA_SUBSCRIPTION_KEY: ${KAEDE_PHOTODNA_SUBSCRIPTION_KEY:-}
+      KAEDE_PHOTODNA_HASH_TIMEOUT_SECONDS: ${KAEDE_PHOTODNA_HASH_TIMEOUT_SECONDS:-30}
+      KAEDE_PHOTODNA_MATCH_TIMEOUT_SECONDS: ${KAEDE_PHOTODNA_MATCH_TIMEOUT_SECONDS:-20}
+      PHOTODNA_EDGEHASHGENERATOR: /opt/photodna
       KAEDE_EDGE_SECRET: ${KAEDE_EDGE_SECRET:?set KAEDE_EDGE_SECRET}
       KAEDE_GATEWAY_SECRET_KEY: ${KAEDE_GATEWAY_SECRET_KEY:?set KAEDE_GATEWAY_SECRET_KEY}
       KAEDE_ADMIN_TOKEN: ${KAEDE_ADMIN_TOKEN:-}
@@ -351,6 +356,10 @@ services:
     volumes:
       - ${KAEDE_OPERATOR_ENV_FILE:-../.env}:/run/kaede/operator.env:ro
       - ./validate_deploy_env.py:/run/kaede/validate_deploy_env.py:ro
+      - type: bind
+        source: ${PHOTODNA_EDGEHASHGENERATOR:-/dev/null}
+        target: /opt/photodna
+        read_only: true
     command:
       [
         "sh",
@@ -441,10 +450,23 @@ services:
 
   api:
     <<: *backend
+    # Keep the image's dedicated uid 10001. The SDK stays owned by the host
+    # operator and is readable only through that operator's supplemental group.
+    group_add: ["${OPERATOR_ENV_GID:-1000}"]
     environment:
       <<: *backend-core-environment
       KAEDE_SERVICE_ROLE: api
       KAEDE_ADMIN_TOKEN: ${KAEDE_ADMIN_TOKEN:-}
+      KAEDE_PHOTODNA_ENABLED: ${KAEDE_PHOTODNA_ENABLED:-false}
+      KAEDE_PHOTODNA_SUBSCRIPTION_KEY: ${KAEDE_PHOTODNA_SUBSCRIPTION_KEY:-}
+      KAEDE_PHOTODNA_HASH_TIMEOUT_SECONDS: ${KAEDE_PHOTODNA_HASH_TIMEOUT_SECONDS:-30}
+      KAEDE_PHOTODNA_MATCH_TIMEOUT_SECONDS: ${KAEDE_PHOTODNA_MATCH_TIMEOUT_SECONDS:-20}
+      PHOTODNA_EDGEHASHGENERATOR: /opt/photodna
+    volumes:
+      - type: bind
+        source: ${PHOTODNA_EDGEHASHGENERATOR:-/dev/null}
+        target: /opt/photodna
+        read_only: true
     networks: [edge, data, egress]
     command:
       [
@@ -503,11 +525,22 @@ services:
 
   worker:
     <<: *backend
+    group_add: ["${OPERATOR_ENV_GID:-1000}"]
     environment:
       <<: *backend-environment
       KAEDE_SERVICE_ROLE: worker
+      KAEDE_PHOTODNA_ENABLED: ${KAEDE_PHOTODNA_ENABLED:-false}
+      KAEDE_PHOTODNA_SUBSCRIPTION_KEY: ${KAEDE_PHOTODNA_SUBSCRIPTION_KEY:-}
+      KAEDE_PHOTODNA_HASH_TIMEOUT_SECONDS: ${KAEDE_PHOTODNA_HASH_TIMEOUT_SECONDS:-30}
+      KAEDE_PHOTODNA_MATCH_TIMEOUT_SECONDS: ${KAEDE_PHOTODNA_MATCH_TIMEOUT_SECONDS:-20}
+      PHOTODNA_EDGEHASHGENERATOR: /opt/photodna
       # Only the relay sender worker receives the official provider credential.
       KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64: ${KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64:-}
+    volumes:
+      - type: bind
+        source: ${PHOTODNA_EDGEHASHGENERATOR:-/dev/null}
+        target: /opt/photodna
+        read_only: true
     networks: [data, egress]
     command: ["taskiq", "worker", "app.tasks:broker"]
     depends_on:
@@ -785,6 +818,8 @@ services:
     volumes:
       - "../backend:/workspace"
       - "../frontend:/frontend:ro"
+      - "../desktop:/desktop:ro"
+      - "../mobile:/mobile:ro"
       - "../.env.example:/repository/.env.example:ro"
       - "../.env.s3.example:/repository/.env.s3.example:ro"
       - "./reference.env.example:/repository/deploy/reference.env.example:ro"
@@ -801,6 +836,8 @@ services:
     volumes:
       - "../backend:/workspace"
       - "../frontend:/frontend:ro"
+      - "../desktop:/desktop:ro"
+      - "../mobile:/mobile:ro"
       - "../.env.example:/repository/.env.example:ro"
       - "../.env.s3.example:/repository/.env.s3.example:ro"
       - "./reference.env.example:/repository/deploy/reference.env.example:ro"
@@ -814,13 +851,20 @@ services:
     build: { context: ../frontend, target: development }
     profiles: [validation]
     logging: *default-logging
-    command: ["sh", "-ec", "pnpm lint && pnpm check && pnpm test && pnpm build && pnpm check:csp"]
+    command:
+      [
+        "sh",
+        "-ec",
+        "pnpm lint && pnpm check && pnpm test && pnpm build && pnpm check:csp && pnpm check:e2ee-wasm",
+      ]
     environment:
       KAEDE_MEDIA_PUBLIC_BASE_URL: ${KAEDE_MEDIA_PUBLIC_BASE_URL:-http://media.schema.localhost}
       KAEDE_MEDIA_S3_ADDRESSING_STYLE: ${KAEDE_MEDIA_S3_ADDRESSING_STYLE:-path}
       KAEDE_MEDIA_ATTACHMENTS_BUCKET: ${KAEDE_MEDIA_ATTACHMENTS_BUCKET:-kaede-attachments}
     networks: [data, egress]
-    volumes: ["../deploy:/deploy:ro"]
+    volumes:
+      - "../deploy:/deploy:ro"
+      - "../desktop:/desktop:ro"
 
   frontend-test:
     build: { context: ../frontend, target: development }

@@ -10,6 +10,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
+import 'package:kaede_mobile/src/e2ee/disclosures.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/message_search_screen.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
@@ -77,12 +78,25 @@ Future<void> _showE2eeRoomSettings(
                 children: [
                   Text(
                     active
-                        ? 'Encryption is active. Only enrolled participant devices can read message, file, voice, video, and screen-share content.'
+                        ? channel.type == ChannelType.voice
+                            ? 'Encryption is active for microphone, camera, screen video, and screen audio.'
+                            : 'Encryption is active for new messages, files, and supported calls in this channel.'
                         : needsRekey
                             ? 'Encrypted activity is paused until a member rotates the room keys.'
                             : encrypted
                                 ? 'Encryption is being prepared. Messaging remains paused until setup completes.'
-                                : 'Encryption is optional and cannot be turned off after it is enabled for this conversation.',
+                                : channel.type == ChannelType.voice
+                                    ? 'Encryption is optional and cannot be turned off after it is enabled for this voice channel.'
+                                    : 'Encryption is optional and cannot be turned off after it is enabled for this conversation.',
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Identity verification',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Until participants compare the safety number through a separate trusted channel, content is encrypted but identities are unverified. Comparing it is what detects first-contact or active-instance key substitution.',
                   ),
                   const SizedBox(height: 12),
                   if (!encrypted) ...[
@@ -91,13 +105,18 @@ Future<void> _showE2eeRoomSettings(
                       style: TextStyle(fontWeight: FontWeight.w800),
                     ),
                     const SizedBox(height: 6),
-                    const Text(
-                      '• Server message search, link previews, bots, webhooks, server-side file previews and malware scanning will be unavailable.\n'
-                      '• Notification wakes contain no message content.\n'
-                      '• Existing history stays plaintext; new content is encrypted.\n'
-                      '• Metadata such as participants, timing, and message size remains visible.\n'
-                      '• Losing every enrolled device without a recovery backup permanently loses encrypted history.\n'
-                      '• Removed members retain content already received.',
+                    Text(
+                      channel.type == ChannelType.voice
+                          ? '• Server recording, transcription, and media moderation will be unavailable.\n'
+                              '• Unsupported clients cannot join.\n'
+                              '• Participants, timing, track types, and traffic metadata remain visible.\n'
+                              '• Anyone can still record media on their own device.'
+                          : '• Server message search, link previews, bots, webhooks, server-side file previews and malware scanning will be unavailable.\n'
+                              '• Notification wakes contain no message content.\n'
+                              '• Existing history stays plaintext; new content is encrypted.\n'
+                              '• Metadata such as participants, timing, and message size remains visible.\n'
+                              '• Losing the synchronized encrypted vault, every trusted client’s local state, and the recovery backup permanently loses encrypted history.\n'
+                              '• Removed members retain content already received.',
                     ),
                   ],
                   if (safetyNumber != null) ...[
@@ -146,6 +165,25 @@ Future<void> _showE2eeRoomSettings(
                           channel = needsRekey
                               ? await client.rekeyRoom(channel)
                               : await client.enableRoom(channel);
+                          if (!needsRekey) {
+                            final accountRef = ref
+                                    .read(mobileControllerProvider)
+                                    .user
+                                    ?.ref
+                                    .wire ??
+                                ref
+                                    .read(mobileControllerProvider.notifier)
+                                    .api
+                                    .tokens
+                                    ?.userRef
+                                    ?.wire;
+                            if (accountRef != null) {
+                              await acknowledgeEncryptedRoom(
+                                accountRef,
+                                channel.ref.wire,
+                              );
+                            }
+                          }
                         }),
                 icon: Icon(
                     needsRekey ? Icons.sync_lock_rounded : Icons.lock_rounded),
@@ -369,6 +407,7 @@ final class _MobileShellState extends ConsumerState<MobileShell>
                       ? const Center(child: Text('Choose a conversation.'))
                       : _ConversationScreen(
                           channel: activeChannel,
+                          visible: _messagePage == 1,
                           onBack: _openNavigation,
                           onMembers: activeChannel.guildRef == null
                               ? null
@@ -477,11 +516,13 @@ final class _SectionScreen extends StatelessWidget {
 final class _ConversationScreen extends ConsumerStatefulWidget {
   const _ConversationScreen({
     required this.channel,
+    required this.visible,
     required this.onBack,
     this.onMembers,
   });
 
   final KaedeChannel channel;
+  final bool visible;
   final VoidCallback onBack;
   final VoidCallback? onMembers;
 
@@ -494,6 +535,7 @@ final class _ConversationScreenState
     extends ConsumerState<_ConversationScreen> {
   Map<String, Object?>? _activeCall;
   var _callBusy = false;
+  String? _disclosureInFlight;
 
   bool get _isGroup => widget.channel.conversationType == 'group';
 
@@ -507,10 +549,22 @@ final class _ConversationScreenState
         (names.length > 3 ? ' +${names.length - 3}' : '');
   }
 
+  String? get _subtitle {
+    final ordinary = _isGroup
+        ? '${widget.channel.recipients.length + 1} members'
+        : widget.channel.topic?.trim();
+    if (widget.channel.encryptionMode != 'e2ee') return ordinary;
+    final status = widget.channel.encryptionState == 'active'
+        ? 'Encrypted · identities unverified'
+        : 'Encryption paused · key rotation required';
+    return ordinary?.isNotEmpty == true ? '$status · $ordinary' : status;
+  }
+
   @override
   void initState() {
     super.initState();
     unawaited(_loadCall());
+    _scheduleEncryptedRoomDisclosure();
   }
 
   @override
@@ -519,6 +573,78 @@ final class _ConversationScreenState
     if (oldWidget.channel.ref != widget.channel.ref ||
         !identical(oldWidget.channel, widget.channel)) {
       unawaited(_loadCall());
+    }
+    if (oldWidget.channel.ref != widget.channel.ref ||
+        (!oldWidget.visible && widget.visible) ||
+        oldWidget.channel.encryptionMode != widget.channel.encryptionMode) {
+      _scheduleEncryptedRoomDisclosure();
+    }
+  }
+
+  void _scheduleEncryptedRoomDisclosure() {
+    if (!widget.visible || widget.channel.encryptionMode != 'e2ee') return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_showEncryptedRoomDisclosure());
+    });
+  }
+
+  Future<void> _showEncryptedRoomDisclosure() async {
+    if (!widget.visible ||
+        widget.channel.encryptionMode != 'e2ee' ||
+        _disclosureInFlight != null) {
+      return;
+    }
+    final channel = widget.channel;
+    final accountRef = ref.read(mobileControllerProvider).user?.ref.wire ??
+        ref.read(mobileControllerProvider.notifier).api.tokens?.userRef?.wire;
+    if (accountRef == null) return;
+    final disclosureKey = '$accountRef|${channel.ref.wire}';
+    _disclosureInFlight = disclosureKey;
+    try {
+      if (await hasAcknowledgedEncryptedRoom(accountRef, channel.ref.wire)) {
+        return;
+      }
+      if (!mounted || !widget.visible || widget.channel.ref != channel.ref) {
+        return;
+      }
+      final kind = channel.guildRef == null
+          ? EncryptedRoomKind.conversation
+          : channel.type == ChannelType.voice
+              ? EncryptedRoomKind.media
+              : EncryptedRoomKind.messages;
+      final accepted = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.lock_rounded),
+          title: const Text('Encrypted room'),
+          content: SingleChildScrollView(
+            child: Text(encryptedRoomJoinWarning(kind)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Go back'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Continue'),
+            ),
+          ],
+        ),
+      );
+      if (accepted == true) {
+        await acknowledgeEncryptedRoom(accountRef, channel.ref.wire);
+      } else if (mounted && widget.channel.ref == channel.ref) {
+        widget.onBack();
+      }
+    } finally {
+      if (_disclosureInFlight == disclosureKey) {
+        _disclosureInFlight = null;
+      }
+      if (mounted && widget.channel.ref != channel.ref) {
+        _scheduleEncryptedRoomDisclosure();
+      }
     }
   }
 
@@ -637,14 +763,12 @@ final class _ConversationScreenState
                   child: UserAvatar(user: recipient),
                 ),
           title: _title,
-          subtitle: _isGroup
-              ? '${widget.channel.recipients.length + 1} members'
-              : widget.channel.topic,
+          subtitle: _subtitle,
           actions: [
             if (widget.channel.encryptionMode == 'e2ee' || activationEnabled)
               IconButton(
                 tooltip: widget.channel.encryptionMode == 'e2ee'
-                    ? 'Encryption settings'
+                    ? 'End-to-end encrypted · view safety number'
                     : 'Enable end-to-end encryption',
                 onPressed: _showEncryptionSettings,
                 icon: Icon(widget.channel.encryptionMode == 'e2ee'

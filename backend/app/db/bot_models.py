@@ -17,6 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     false,
     func,
+    text,
     true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -357,6 +358,8 @@ class BotInstallation(Base, TimestampMixin):
     )
     e2ee_mode: Mapped[str] = mapped_column(String(24), nullable=False, server_default="disabled")
     grant_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
+    media_bytes_used: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    media_pending_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
@@ -379,7 +382,8 @@ class BotInstallation(Base, TimestampMixin):
             name="bot_installation_role_ref_complete",
         ),
         CheckConstraint(
-            "granted_permissions >= 0 AND grant_revision >= 1",
+            "granted_permissions >= 0 AND grant_revision >= 1 "
+            "AND media_bytes_used >= 0 AND media_pending_bytes >= 0",
             name="bot_installation_positive_values",
         ),
         CheckConstraint(
@@ -486,9 +490,10 @@ class BotInteraction(Base, TimestampMixin):
 class AbuseReport(Base, TimestampMixin):
     __tablename__ = "abuse_reports"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    reporter_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    reporter_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
-    reporter_is_local: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=true())
+    source: Mapped[str] = mapped_column(String(24), nullable=False, server_default="user")
+    reporter_id: Mapped[int | None] = mapped_column(BigInteger)
+    reporter_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    reporter_is_local: Mapped[bool | None] = mapped_column(Boolean)
     target_type: Mapped[str] = mapped_column(String(24), nullable=False)
     target_ref: Mapped[str] = mapped_column(String(320), nullable=False)
     category: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -508,9 +513,18 @@ class AbuseReport(Base, TimestampMixin):
             ["reporter_id", "reporter_domain", "reporter_is_local"],
             ["users.id", "users.origin_domain", "users.is_local"],
         ),
-        CheckConstraint("reporter_is_local", name="abuse_report_reporter_is_local"),
+        CheckConstraint("source IN ('user','photodna')", name="abuse_report_source_value"),
         CheckConstraint(
-            "target_type IN ('message','user','bot','application','guild','instance','invite')",
+            "(source = 'user' AND reporter_id IS NOT NULL AND reporter_domain IS NOT NULL "
+            "AND reporter_is_local) OR (source = 'photodna' AND reporter_id IS NULL "
+            "AND reporter_domain IS NULL AND reporter_is_local IS NULL "
+            "AND target_type = 'attachment' AND category = 'illegal_content' "
+            "AND encryption_mode = 'plaintext')",
+            name="abuse_report_source_reporter_policy",
+        ),
+        CheckConstraint(
+            "target_type IN "
+            "('message','user','bot','application','guild','instance','invite','attachment')",
             name="abuse_report_target_type_value",
         ),
         CheckConstraint(
@@ -526,4 +540,12 @@ class AbuseReport(Base, TimestampMixin):
             name="abuse_report_status_value",
         ),
         Index("ix_abuse_reports_queue", "status", "created_at"),
+        Index(
+            "uq_abuse_reports_photodna_target",
+            "source",
+            "target_type",
+            "target_ref",
+            unique=True,
+            postgresql_where=text("source = 'photodna'"),
+        ),
     )

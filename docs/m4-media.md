@@ -19,9 +19,17 @@ is normative in [kaede-fed-v1.md](kaede-fed-v1.md).
   an owned, unexpired, single-use ticket whose object-store `HEAD` length
   matches.
 - Taskiq processing sniffs magic bytes, rejects executable and active content,
-  and scans through ClamAV INSTREAM. An original is never exposed until it is
-  clean. Browser `PUT` credentials address staging-only keys; after validation,
-  the worker writes the exact in-memory bytes that passed scanning to a
+  and scans through ClamAV INSTREAM. When the separately licensed Microsoft
+  PhotoDNA integration is enabled, plaintext images also receive an Edge Hash
+  V2 match decision before promotion. A positive result is quarantined and
+  creates a metadata-only automated report; the image and PhotoDNA hash are not
+  retained. Images below 160x160 pixels and provider status 3208 are terminally
+  ineligible; source files are not exempted merely for exceeding 4 MB because
+  MatchHash receives the fixed-size Edge Hash. Provider-ineligible images
+  continue through MIME, ClamAV, and ordinary image validation without a
+  permanent retry. An original is never exposed until it is clean. Browser `PUT`
+  credentials address staging-only keys; after validation, the worker writes
+  the exact in-memory bytes that passed scanning to a
   content-addressed clean key that has never been disclosed to the browser,
   then atomically switches the database reference to that key.
 - pyvips emits animated-preserving WebP variants at 128, 512, and 1024 pixels
@@ -46,8 +54,9 @@ is normative in [kaede-fed-v1.md](kaede-fed-v1.md).
 - Remote attachment identities remain `(origin_domain, attachment_id,
   variant)`. Fetches use a fixed signed `/_kaede/v1/media/...` path through the
   shared DNS-pinning SSRF guard, reject redirects and oversized responses,
-  re-sniff and re-scan bytes locally, and cache them in the selected store with
-  a 100 GiB LRU ceiling and 30-day TTL by default.
+  re-sniff and re-scan bytes locally (including PhotoDNA for plaintext images
+  when enabled), and cache them in the selected store with a 100 GiB LRU
+  ceiling and 30-day TTL by default.
 - Cache hits bypass fetch admission. Misses use a per-user Dragonfly bucket and
   one of eight process-local fetch/scan/store permits, so distinct uncached
   objects cannot exhaust API memory or outbound capacity. Authenticated
@@ -78,6 +87,11 @@ never the clean object served by Kaede. The cleanup sweep retains the
 staging-key reference until the presigned `PUT` has expired and then retries
 deletion, covering a client that rewrites staging after the worker's
 best-effort immediate deletion.
+
+E2EE attachments deliberately bypass content scanners: only ciphertext is
+available to the server. Clients warn about that loss before irreversible E2EE
+activation. Kaede never sends user-decrypted E2EE attachment bytes to ClamAV or
+PhotoDNA behind the user's back.
 
 Federation media authorization discloses no attachment existence to a peer that
 has no participating DM user or guild member with channel visibility. Cache

@@ -2,6 +2,7 @@
   import { api, userErrorMessage } from '$lib/api/client';
   import type { Message } from '$lib/chat/types';
   import { entityRef } from '$lib/chat/refs';
+  import { encryptedReportDisclosure } from '$lib/reports/message-evidence';
   import { portal } from '$lib/ui/portal';
 
   let {
@@ -34,13 +35,12 @@
   let busy = $state(false);
   let error = $state('');
   const encrypted = $derived(Boolean(message.e2ee));
-  const disclosedContent = $derived(message.decrypted_content ?? '');
-  const hasDisclosedContent = $derived(Boolean(disclosedContent.trim()));
+  const disclosure = $derived(encryptedReportDisclosure(message));
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (busy) return;
-    if (encrypted && (!hasDisclosedContent || !disclosureAcknowledged)) return;
+    if (encrypted && (!disclosure.available || !disclosureAcknowledged)) return;
     busy = true;
     error = '';
     try {
@@ -55,7 +55,7 @@
           description: description.trim() || null,
           ...(encrypted
             ? {
-                disclosed_content: disclosedContent,
+                disclosed_content: disclosure.content,
                 disclosure_acknowledged: true
               }
             : {})
@@ -86,13 +86,22 @@
     </header>
     {#if encrypted}
       <div class="encrypted-disclosure">
-        <strong>Share decrypted message?</strong>
-        <p>
-          This message is end-to-end encrypted. Reporting it sends only the decrypted text shown on
-          this device and basic message context to this instance's Trust &amp; Safety team. It does
-          not send your encryption keys or other messages. The server will label the text as
-          reporter-supplied evidence.
-        </p>
+        {#if disclosure.available}
+          <strong>Share decrypted message evidence?</strong>
+          <p>
+            This message is end-to-end encrypted. Reporting it sends the decrypted text shown on
+            this device and basic message context to this instance's Trust &amp; Safety team. For an
+            attachment-only message, the disclosed text is empty but the message can still be
+            reported. It does not send your encryption keys, decrypted file contents, or other
+            messages. The server labels this as reporter-supplied evidence.
+          </p>
+        {:else}
+          <strong>Message not decrypted on this device</strong>
+          <p>
+            Kaede cannot submit this encrypted message until its authenticated message evidence has
+            decrypted here. Close this dialog, wait for the message to decrypt, and try again.
+          </p>
+        {/if}
       </div>
     {:else}
       <p>
@@ -115,8 +124,14 @@
       </label>
       {#if encrypted}
         <label class="disclosure-consent">
-          <input type="checkbox" bind:checked={disclosureAcknowledged} />
-          <span>I understand the decrypted text will be shared with Trust &amp; Safety.</span>
+          <input
+            type="checkbox"
+            bind:checked={disclosureAcknowledged}
+            disabled={busy || !disclosure.available}
+          />
+          <span
+            >I understand the decrypted message evidence will be shared with Trust &amp; Safety.</span
+          >
         </label>
       {/if}
       {#if error}<div class="report-error" role="alert">{error}</div>{/if}
@@ -125,7 +140,7 @@
         <button
           type="submit"
           class="danger"
-          disabled={busy || (encrypted && (!hasDisclosedContent || !disclosureAcknowledged))}
+          disabled={busy || (encrypted && (!disclosure.available || !disclosureAcknowledged))}
           >{busy ? 'Submitting…' : 'Submit report'}</button
         >
       </footer>

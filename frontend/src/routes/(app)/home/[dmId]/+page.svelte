@@ -75,6 +75,7 @@
     initializeE2EE,
     type KaedeE2EEClient
   } from '$lib/e2ee/client';
+  import { acknowledgeEncryptedRoom, confirmEncryptedRoomJoin } from '$lib/e2ee/disclosures';
   import { uploadEncryptedChannelFile } from '$lib/e2ee/media';
   import { uploadChannelFile, type PendingUpload } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
@@ -941,6 +942,16 @@
       hasLater = Boolean(targetAround && loadedMessages.length > 0);
       let orderedMessages = loadedMessages.reverse().sort(compareMessages);
       if (loadedChannel?.encryption_mode === 'e2ee') {
+        if (
+          !confirmEncryptedRoomJoin(
+            entityRef(loadedCurrentUser),
+            entityRef(loadedChannel),
+            'conversation'
+          )
+        ) {
+          window.location.assign(resolve('/home'));
+          return;
+        }
         const client = await initializeE2EE(loadedCurrentUser);
         if (routeGeneration !== loadGeneration || targetRef !== dmId) return;
         e2eeClient = client;
@@ -1568,17 +1579,17 @@
     )
       return;
     const confirmed = window.confirm(
-      'Turn on end-to-end encryption for this conversation? This cannot be turned off and protects only new content; existing history stays readable to the server. New messages, files, and supported calls will be encrypted. Search, link and GIF previews, bots, webhooks, file previews, malware scanning, call recording, and transcription will stop; unsupported clients cannot participate. Notifications become generic, while participants, timing, message-size, track, and traffic metadata remain visible. Anyone can still record content on their own device. Losing every enrolled device and recovery backup loses encrypted history. Removed members keep content they already received.'
+      'Turn on end-to-end encryption for this conversation? This cannot be turned off and protects only new content; existing history stays readable to the server. New messages, files, and supported calls will be encrypted. Search, link and GIF previews, bots, webhooks, file previews, malware and PhotoDNA scanning, call recording, and transcription will stop; unsupported clients cannot participate. Notifications become generic, while participants, timing, message-size, track, and traffic metadata remain visible. Anyone can still record content on their own device. Participant identities remain unverified until everyone compares the safety number through a separate trusted channel; repeat that comparison after membership or identity changes to detect key substitution by an actively malicious instance. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted history. Removed members keep content they already received.'
     );
     if (!confirmed) return;
     groupBusy = true;
     groupError = '';
     try {
       const client = await initializeE2EE(currentUser);
-      const proposal = await client.createRoomProposal(entityRef(channel));
-      const updated = await client.activateRoom(entityRef(channel), proposal);
+      const updated = await client.activateRoom(entityRef(channel));
       e2eeClient = client;
       entities.channels.upsert(updated);
+      acknowledgeEncryptedRoom(entityRef(currentUser), entityRef(updated));
       e2eeSafetyNumber = await client.safetyNumber(updated);
     } catch (caught) {
       const message = userErrorMessage(
@@ -1609,10 +1620,19 @@
     }
   }
 
-  function showEncryptionInfo() {
+  async function showEncryptionInfo() {
     if (!channel || channel.encryption_mode !== 'e2ee') return;
+    if (currentUser) {
+      try {
+        const client = e2eeClient ?? (await initializeE2EE(currentUser));
+        e2eeClient = client;
+        e2eeSafetyNumber = await client.safetyNumber(channel);
+      } catch {
+        // The cached number or an explicit unavailable state remains useful.
+      }
+    }
     window.alert(
-      `End-to-end encryption is on. Compare this safety number with the other members using a separate trusted channel:\n\n${e2eeSafetyNumber || 'Safety number unavailable on this device.'}`
+      `End-to-end encryption is on, but participant identities remain unverified until this safety number is compared with the other members using a separate trusted channel. A match detects first-contact key substitution by an actively malicious instance. Compare it again after membership or identity changes:\n\n${e2eeSafetyNumber || 'Safety number unavailable on this device.'}`
     );
   }
 
@@ -2068,9 +2088,10 @@
         </div>
       </div>
       <div class="channel-header-actions">
-        {#if !groupConversation && channel && (channel.encryption_mode === 'e2ee' || e2eeActivationEnabled)}
+        {#if channel && (channel.encryption_mode === 'e2ee' || (!groupConversation && e2eeActivationEnabled))}
           <button
             class:active={channel.encryption_mode === 'e2ee'}
+            class:e2ee-status-button={channel.encryption_mode === 'e2ee'}
             class="icon-button"
             type="button"
             disabled={groupBusy}
@@ -2083,6 +2104,9 @@
             onclick={channel.encryption_mode === 'e2ee' ? showEncryptionInfo : enableEncryption}
           >
             <Icon name="lock" size={18} />
+            {#if channel.encryption_mode === 'e2ee'}
+              <span>{channel.encryption_state === 'active' ? 'Encrypted' : 'Rekey needed'}</span>
+            {/if}
           </button>
         {/if}
         {#if groupConversation}
@@ -2478,13 +2502,14 @@
           <small>
             {channel.encryption_state === 'rekeying'
               ? 'Paused · The member list changed and requires fresh device keys.'
-              : 'On · Messages, files, and supported calls are readable only on members’ enrolled devices.'}
+              : 'On · Encrypted with participant identities unverified until the safety number is compared.'}
           </small>
           {#if e2eeSafetyNumber}<code class="e2ee-safety-number">{e2eeSafetyNumber}</code>{/if}
         {:else}
           <small>
             Optional and permanent. Disables server message search, previews, bots, webhooks, and
-            file scanning. Losing every device key and recovery backup loses message access.
+            file scanning. Losing the synchronized account vault, all trusted local state, and the
+            recovery backup loses message access.
           </small>
         {/if}
       </div>

@@ -17,6 +17,7 @@ from fastapi import HTTPException
 import app.api.media as media_api
 import app.media.jobs as media_jobs
 from app.db.models import RemoteMediaCache, RemoteMediaOrphan
+from app.media.photodna import PhotoDNAFinding, PhotoDNAMatchFlag
 from app.media.storage import StorageError
 
 
@@ -77,14 +78,22 @@ class CacheSession:
         *,
         total: int = 0,
         reservation: RemoteMediaOrphan | None = None,
+        photodna_report: int | None = None,
+        photodna_reports: list[int | None] | None = None,
+        cached_variants: list[RemoteMediaCache] | None = None,
     ) -> None:
         self.cached = cached
         self.total = total
         self.reservation = reservation
+        self.photodna_report = photodna_report
+        self.photodna_reports = list(photodna_reports or [])
+        self.cached_variants = cached_variants or []
         self.cache_gets = 0
         self.commits = 0
         self.executed = False
+        self.statements: list[object] = []
         self.added: list[object] = []
+        self.deleted: list[object] = []
 
     async def get(self, model: object, _key: object, **_kwargs: object) -> object | None:
         if model is media_api.RemoteMediaTombstone:
@@ -97,12 +106,25 @@ class CacheSession:
         raise AssertionError("unexpected cache model lookup")
 
     async def scalar(self, statement: object) -> object:
+        if "FROM abuse_reports" in str(statement):
+            if self.photodna_reports:
+                return self.photodna_reports.pop(0)
+            return self.photodna_report
         if "FROM remote_media_orphans" in str(statement) and "sum(" not in str(statement):
             return self.reservation
         return self.total if "sum(remote_media_cache.size)" in str(statement) else None
 
-    async def execute(self, _statement: object) -> None:
+    async def execute(self, statement: object) -> None:
         self.executed = True
+        self.statements.append(statement)
+
+    async def scalars(self, statement: object) -> list[RemoteMediaCache]:
+        if "FROM remote_media_cache" not in str(statement):
+            raise AssertionError("unexpected scalar collection query")
+        return self.cached_variants
+
+    async def delete(self, value: object) -> None:
+        self.deleted.append(value)
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -120,6 +142,7 @@ def media_settings(*, max_bytes: int = 2048, cache_bytes: int = 8192) -> SimpleN
         media_remote_cache_bytes=cache_bytes,
         media_remote_cache_bucket="remote-cache",
         media_remote_cache_ttl_days=30,
+        photodna_enabled=False,
     )
 
 
@@ -145,6 +168,53 @@ def test_group_dm_history_media_query_binds_scope_and_requester() -> None:
         "requester_id": "42",
         "requester_domain": "gamma.localhost",
     }
+
+
+async def test_known_remote_photodna_match_is_rejected_without_refetch() -> None:
+    session = CacheSession(None, photodna_report=900)
+    configured = media_settings()
+
+    with pytest.raises(HTTPException) as raised:
+        await media_api.cache_remote_media(
+            cast(Any, session),
+            cast(Any, configured),
+            origin_domain="beta.localhost",
+            attachment_id=7,
+            variant="thumbnail_128",
+        )
+
+    assert raised.value.status_code == 422
+    assert cast(dict[str, object], raised.value.detail)["code"] == "REMOTE_MEDIA_REJECTED"
+    assert session.commits == 0
+
+
+async def test_photodna_match_retires_every_previously_clean_cached_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thumbnail = SimpleNamespace(object_key="beta/7/thumbnail_128/hash", size=123)
+    poster = SimpleNamespace(object_key="beta/7/poster/hash", size=456)
+    session = CacheSession(
+        None,
+        photodna_report=900,
+        cached_variants=cast(list[RemoteMediaCache], [thumbnail, poster]),
+    )
+    enqueue = AsyncMock()
+    monkeypatch.setattr(media_api, "enqueue_best_effort", enqueue)
+
+    with pytest.raises(HTTPException) as raised:
+        await media_api.reject_known_photodna_match(
+            cast(Any, session),
+            origin_domain="beta.localhost",
+            attachment_id=7,
+        )
+
+    assert raised.value.status_code == 422
+    assert cast(dict[str, object], raised.value.detail)["code"] == "REMOTE_MEDIA_REJECTED"
+    assert session.deleted == [thumbnail, poster]
+    assert session.commits == 1
+    assert len(session.statements) == 2
+    assert all("remote_media_orphans" in str(statement) for statement in session.statements)
+    enqueue.assert_awaited_once_with(media_api.media_cache_gc)
 
 
 async def test_remote_media_is_spooled_scanned_and_uploaded_without_a_body_buffer(
@@ -237,6 +307,133 @@ async def test_remote_media_is_spooled_scanned_and_uploaded_without_a_body_buffe
         "message_id": "20",
         "message_domain": "beta.localhost",
     }
+
+
+async def test_remote_photodna_match_is_reported_and_never_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = b"\x89PNG\r\n\x1a\n" + (b"safe-test-payload" * 40)
+    response = httpx.Response(
+        200,
+        headers={"Content-Type": "image/png", "Content-Length": str(len(body))},
+        stream=ChunkStream([body]),
+        request=httpx.Request("GET", "https://beta.localhost/media"),
+    )
+    session = CacheSession(None)
+    redis = object()
+    install_direct_file_io(monkeypatch)
+
+    @asynccontextmanager
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[httpx.Response]:
+        try:
+            yield response
+        finally:
+            await response.aclose()
+
+    async def scan(data: bytes, _settings: object) -> PhotoDNAFinding:
+        assert data == body
+        return PhotoDNAFinding(
+            tracking_id="tracking",
+            flags=(PhotoDNAMatchFlag("Test", ("A1",), 12, "2600000"),),
+        )
+
+    class Snowflake:
+        async def mint(self) -> int:
+            return 900
+
+    class Storage:
+        def __init__(self, _settings: object) -> None:
+            raise AssertionError("a matched remote image must never reach object storage")
+
+    increment = AsyncMock()
+    monkeypatch.setattr(media_api, "signed_stream_request", stream)
+    monkeypatch.setattr(media_api, "clamav_scan_file", AsyncMock(return_value="clean"))
+    monkeypatch.setattr(media_api, "scan_image", scan)
+    monkeypatch.setattr(media_api, "S3Storage", Storage)
+    monkeypatch.setattr(media_api, "increment_metric", increment)
+
+    with pytest.raises(HTTPException) as raised:
+        await media_api.cache_remote_media(
+            cast(Any, session),
+            cast(Any, media_settings()),
+            redis=cast(Any, redis),
+            origin_domain="beta.localhost",
+            attachment_id=7,
+            variant="original",
+            snowflake=cast(Any, Snowflake()),
+            message_ref=(8, "beta.localhost"),
+        )
+
+    assert cast(dict[str, object], raised.value.detail)["code"] == "REMOTE_MEDIA_REJECTED"
+    assert session.commits == 1
+    assert len(session.statements) == 1
+    statement = session.statements[0]
+    assert "ON CONFLICT" in str(statement)
+    assert statement.compile().params["source"] == "photodna"  # type: ignore[attr-defined]
+    assert statement.compile().params["target_ref"] == "7@beta.localhost"  # type: ignore[attr-defined]
+    increment.assert_awaited_once_with(redis, "media_photodna_matches")
+
+
+async def test_positive_decision_racing_final_cache_admission_leaves_only_an_orphan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = b"\x89PNG\r\n\x1a\n" + (b"safe-test-payload" * 40)
+    response = httpx.Response(
+        200,
+        headers={"Content-Type": "image/png", "Content-Length": str(len(body))},
+        stream=ChunkStream([body]),
+        request=httpx.Request("GET", "https://beta.localhost/media"),
+    )
+    # The first lookup precedes the download. The second happens under the
+    # attachment-scoped advisory lock after object upload and observes the
+    # positive report committed by a concurrent variant scan.
+    session = CacheSession(None, photodna_reports=[None, 900])
+    install_direct_file_io(monkeypatch)
+    uploads: list[str] = []
+
+    @asynccontextmanager
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[httpx.Response]:
+        try:
+            yield response
+        finally:
+            await response.aclose()
+
+    class Storage:
+        def __init__(self, _settings: object) -> None:
+            pass
+
+        async def put_file(
+            self,
+            _bucket: str,
+            key: str,
+            _path: Path,
+            **_kwargs: object,
+        ) -> None:
+            uploads.append(key)
+
+    enqueue = AsyncMock()
+    monkeypatch.setattr(media_api, "signed_stream_request", stream)
+    monkeypatch.setattr(media_api, "clamav_scan_file", AsyncMock(return_value="clean"))
+    monkeypatch.setattr(media_api, "scan_image", AsyncMock(return_value=None))
+    monkeypatch.setattr(media_api, "S3Storage", Storage)
+    monkeypatch.setattr(media_api, "enqueue_best_effort", enqueue)
+
+    with pytest.raises(HTTPException) as raised:
+        await media_api.cache_remote_media(
+            cast(Any, session),
+            cast(Any, media_settings()),
+            origin_domain="beta.localhost",
+            attachment_id=7,
+            variant="thumbnail_128",
+        )
+
+    assert raised.value.status_code == 422
+    assert cast(dict[str, object], raised.value.detail)["code"] == "REMOTE_MEDIA_REJECTED"
+    assert len(uploads) == 1
+    assert len(session.added) == 1
+    assert isinstance(session.added[0], RemoteMediaOrphan)
+    assert session.statements == []
+    enqueue.assert_awaited_with(media_api.media_cache_gc)
 
 
 async def test_remote_media_cache_ceiling_emits_operator_metric(
@@ -483,7 +680,7 @@ async def test_failed_cache_swap_never_deletes_the_still_referenced_old_object(
 
     class SwapSession:
         def __init__(self) -> None:
-            self.scalar_values = iter([True, 128, 0, None, True])
+            self.scalar_values = iter([True, 128, 0, None, True, True])
             self.execute_count = 0
             self.commits = 0
             self.rollbacks = 0
@@ -498,6 +695,8 @@ async def test_failed_cache_swap_never_deletes_the_still_referenced_old_object(
             raise AssertionError("unexpected model lookup")
 
         async def scalar(self, _statement: object) -> object:
+            if "FROM abuse_reports" in str(_statement):
+                return None
             return next(self.scalar_values)
 
         async def execute(self, _statement: object) -> None:

@@ -859,6 +859,22 @@ async fn forget_account(state: &NativeState, account_key: &str) -> Result<(), Na
         })
 }
 
+fn submitted_password_kdf_version(body: &Value) -> Result<u8, NativeError> {
+    let Some(value) = body.get("password_kdf_version") else {
+        // Web bundles from before the versioned password protocol submit the
+        // literal password. Preserve that native-client behavior explicitly.
+        return Ok(0);
+    };
+    match value.as_u64() {
+        Some(0) => Ok(0),
+        Some(2) => Ok(2),
+        _ => Err(NativeError::local(
+            "INVALID_PASSWORD_PROTOCOL",
+            "This Kaede client submitted an unsupported password protection version. Update the app and try again.",
+        )),
+    }
+}
+
 async fn login_request(body: &Value, state: &NativeState) -> Result<Value, NativeError> {
     let identifier = body
         .get("identifier")
@@ -883,14 +899,32 @@ async fn login_request(body: &Value, state: &NativeState) -> Result<Value, Nativ
         .get("turnstile_token")
         .and_then(Value::as_str)
         .map(|value| SecretString::from(value.to_owned()));
+    let password_kdf_version = submitted_password_kdf_version(body)?;
+    let password_upgrade = body
+        .get("password_upgrade")
+        .filter(|value| !value.is_null());
     let mut outcome = session
-        .login(identifier, password, "Kaede Desktop", supplied.as_ref())
+        .login_with_password_protocol(
+            identifier,
+            password,
+            password_kdf_version,
+            password_upgrade,
+            "Kaede Desktop",
+            supplied.as_ref(),
+        )
         .await
         .map_err(NativeError::from)?;
     if matches!(outcome, LoginOutcome::ChallengeRequired) {
         let token = challenge_token(&session, "kaede-login-v1").await?;
         outcome = session
-            .login(identifier, password, "Kaede Desktop", token.as_ref())
+            .login_with_password_protocol(
+                identifier,
+                password,
+                password_kdf_version,
+                password_upgrade,
+                "Kaede Desktop",
+                token.as_ref(),
+            )
             .await
             .map_err(NativeError::from)?;
     }
@@ -980,9 +1014,16 @@ async fn register_request(body: &Value, state: &NativeState) -> Result<Value, Na
         .get("password")
         .and_then(Value::as_str)
         .ok_or_else(|| NativeError::local("INVALID_REGISTRATION", "Enter a password."))?;
+    let password_kdf = body.get("password_kdf").filter(|value| !value.is_null());
     let challenge = challenge_token(&session, "kaede-register-v1").await?;
     let result = session
-        .register(username, email, password, challenge.as_ref())
+        .register_with_password_protocol(
+            username,
+            email,
+            password,
+            password_kdf,
+            challenge.as_ref(),
+        )
         .await
         .map_err(NativeError::from)?;
     serde_json::to_value(result).map_err(|error| {
@@ -2253,7 +2294,10 @@ mod tests {
     use kaede_protocol::ApiError;
     use reqwest::StatusCode;
 
-    use super::{NativeError, is_autostart_launch, validate_attachment_media_path};
+    use super::{
+        NativeError, is_autostart_launch, submitted_password_kdf_version,
+        validate_attachment_media_path,
+    };
 
     #[test]
     fn autostart_argument_is_detected_without_hiding_regular_launches() {
@@ -2262,6 +2306,24 @@ mod tests {
             "--kaede-autostart".to_owned()
         ]));
         assert!(!is_autostart_launch(&["kaede-chat".to_owned()]));
+    }
+
+    #[test]
+    fn password_protocol_versions_preserve_old_webviews_and_reject_unknown_versions() {
+        assert_eq!(
+            submitted_password_kdf_version(&serde_json::json!({})).ok(),
+            Some(0)
+        );
+        assert_eq!(
+            submitted_password_kdf_version(&serde_json::json!({"password_kdf_version": 2})).ok(),
+            Some(2)
+        );
+        let Err(error) =
+            submitted_password_kdf_version(&serde_json::json!({"password_kdf_version": 1}))
+        else {
+            panic!("unknown password protocol should be rejected");
+        };
+        assert_eq!(error.code, "INVALID_PASSWORD_PROTOCOL");
     }
 
     #[test]

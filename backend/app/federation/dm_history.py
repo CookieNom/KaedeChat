@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
-from app.chat.e2ee import validate_e2ee_envelope
+from app.chat.e2ee import validate_e2ee_envelope, validate_e2ee_message_projection
 from app.core.settings import Settings
 from app.federation.network import FederationNetworkError, normalize_domain
 from app.federation.replication import (
@@ -470,6 +470,18 @@ def validate_dm_history_page(
         except (ValueError, OverflowError) as exc:
             raise FederationNetworkError("DM history creation timestamp is invalid") from exc
         edited_at = _optional_timestamp(raw.get("edited_at"), "edited timestamp")
+        if deleted_at is None:
+            try:
+                validate_e2ee_message_projection(
+                    e2ee,
+                    message_id=reference[0],
+                    message_domain=reference[1],
+                    edited=edited_at is not None,
+                )
+            except ValueError as exc:
+                raise FederationNetworkError(
+                    "DM history encrypted operation does not match its message"
+                ) from exc
         attachments = [
             _validated_attachment(
                 item,

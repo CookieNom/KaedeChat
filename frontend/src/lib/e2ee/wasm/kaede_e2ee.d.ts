@@ -16,6 +16,7 @@ export class KaedeMlsClient {
   exportState(): Uint8Array;
   generateKeyPackage(): Uint8Array;
   hasGroup(group_id: Uint8Array): boolean;
+  inspectKeyPackage(key_package: Uint8Array): KaedeMlsKeyPackageIdentity;
   joinGroup(welcome: Uint8Array): Uint8Array;
   memberRoster(group_id: Uint8Array): Uint8Array;
   mergePendingCommit(group_id: Uint8Array): void;
@@ -25,6 +26,14 @@ export class KaedeMlsClient {
   removeAccounts(group_id: Uint8Array, accounts: Array<any>): KaedeMlsPendingCommit;
   static restoreState(state: Uint8Array): KaedeMlsClient;
   signServerChallenge(challenge: Uint8Array): Uint8Array;
+}
+
+export class KaedeMlsKeyPackageIdentity {
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+  readonly credential: Uint8Array;
+  readonly signatureKey: Uint8Array;
 }
 
 export class KaedeMlsPendingCommit {
@@ -50,6 +59,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_kaedemlsclient_free: (a: number, b: number) => void;
+  readonly __wbg_kaedemlskeypackageidentity_free: (a: number, b: number) => void;
   readonly __wbg_kaedemlspendingcommit_free: (a: number, b: number) => void;
   readonly __wbg_kaedemlsprocessedmessage_free: (a: number, b: number) => void;
   readonly kaedemlsclient_addMembers: (
@@ -84,6 +94,7 @@ export interface InitOutput {
   readonly kaedemlsclient_exportState: (a: number, b: number) => void;
   readonly kaedemlsclient_generateKeyPackage: (a: number, b: number) => void;
   readonly kaedemlsclient_hasGroup: (a: number, b: number, c: number, d: number) => void;
+  readonly kaedemlsclient_inspectKeyPackage: (a: number, b: number, c: number, d: number) => void;
   readonly kaedemlsclient_joinGroup: (a: number, b: number, c: number, d: number) => void;
   readonly kaedemlsclient_memberRoster: (a: number, b: number, c: number, d: number) => void;
   readonly kaedemlsclient_mergePendingCommit: (a: number, b: number, c: number, d: number) => void;
@@ -106,6 +117,8 @@ export interface InitOutput {
   ) => void;
   readonly kaedemlsclient_restoreState: (a: number, b: number, c: number) => void;
   readonly kaedemlsclient_signServerChallenge: (a: number, b: number, c: number, d: number) => void;
+  readonly kaedemlskeypackageidentity_credential: (a: number, b: number) => void;
+  readonly kaedemlskeypackageidentity_signatureKey: (a: number, b: number) => void;
   readonly kaedemlspendingcommit_commit: (a: number, b: number) => void;
   readonly kaedemlspendingcommit_welcome: (a: number, b: number) => void;
   readonly kaedemlsprocessedmessage_aad: (a: number, b: number) => void;

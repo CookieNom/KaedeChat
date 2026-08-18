@@ -18,8 +18,18 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use kaede_e2ee::{MlsClient, PendingCommit, ProcessedMessage};
 use serde_json::{Value, json};
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
+fn zeroize_json(value: &mut Value) {
+    match value {
+        Value::String(string) => drop(Zeroizing::new(std::mem::take(string))),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_json),
+        Value::Object(values) => values.values_mut().for_each(zeroize_json),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
 
 #[repr(C)]
 pub struct KaedeE2eeBuffer {
@@ -29,7 +39,8 @@ pub struct KaedeE2eeBuffer {
 
 impl KaedeE2eeBuffer {
     fn from_json(value: &Value) -> Self {
-        let mut encoded = value.to_string().into_bytes().into_boxed_slice();
+        let serialized = Zeroizing::new(value.to_string());
+        let mut encoded = serialized.as_bytes().to_vec().into_boxed_slice();
         let result = Self {
             data: encoded.as_mut_ptr(),
             len: encoded.len(),
@@ -39,11 +50,17 @@ impl KaedeE2eeBuffer {
     }
 
     fn success(value: &Value) -> Self {
-        Self::from_json(&json!({"ok": true, "result": value}))
+        let mut wrapped = json!({"ok": true, "result": value});
+        let buffer = Self::from_json(&wrapped);
+        zeroize_json(&mut wrapped);
+        buffer
     }
 
     fn error(message: &str) -> Self {
-        Self::from_json(&json!({"ok": false, "error": message}))
+        let mut wrapped = json!({"ok": false, "error": message});
+        let buffer = Self::from_json(&wrapped);
+        zeroize_json(&mut wrapped);
+        buffer
     }
 }
 
@@ -63,7 +80,7 @@ unsafe fn input_bytes<'a>(data: *const u8, len: usize) -> Result<&'a [u8], Strin
     Ok(unsafe { slice::from_raw_parts(data, len) })
 }
 
-fn decode(value: &Value, field: &str, maximum: usize) -> Result<Vec<u8>, String> {
+fn decode(value: &Value, field: &str, maximum: usize) -> Result<Zeroizing<Vec<u8>>, String> {
     let encoded = value
         .get(field)
         .and_then(Value::as_str)
@@ -75,7 +92,7 @@ fn decode(value: &Value, field: &str, maximum: usize) -> Result<Vec<u8>, String>
     {
         return Err(format!("{field} is not canonical base64url"));
     }
-    Ok(decoded)
+    Ok(Zeroizing::new(decoded))
 }
 
 fn encode(value: &[u8]) -> String {
@@ -137,6 +154,18 @@ fn invoke(method: &str, handle: u64, value: &Value) -> Result<Value, String> {
             .generate_key_package()
             .map(|package| json!({"bytes": encode(&package)}))
             .map_err(|error| error.to_string()),
+        "inspect_key_package" => {
+            let package = decode(value, "key_package", 32_768)?;
+            client
+                .inspect_key_package(&package)
+                .map(|identity| {
+                    json!({
+                        "credential": encode(&identity.credential),
+                        "signature_key": encode(&identity.signature_key),
+                    })
+                })
+                .map_err(|error| error.to_string())
+        }
         "create_group" => {
             let group_id = decode(value, "group_id", 128)?;
             client
@@ -164,7 +193,7 @@ fn invoke(method: &str, handle: u64, value: &Value) -> Result<Value, String> {
                     {
                         return Err("key package is invalid".to_owned());
                     }
-                    Ok(package)
+                    Ok(Zeroizing::new(package))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             client
@@ -286,13 +315,19 @@ pub unsafe extern "C" fn kaede_e2ee_invoke(
     let result = (|| {
         let method = std::str::from_utf8(unsafe { input_bytes(method_data, method_len)? })
             .map_err(|_| "native E2EE method is invalid".to_owned())?;
-        let input = unsafe { input_bytes(input_data, input_len)? };
-        let value: Value =
-            serde_json::from_slice(input).map_err(|_| "native E2EE JSON is invalid".to_owned())?;
-        invoke(method, handle, &value)
+        let input = Zeroizing::new(unsafe { input_bytes(input_data, input_len)? }.to_vec());
+        let mut value: Value =
+            serde_json::from_slice(&input).map_err(|_| "native E2EE JSON is invalid".to_owned())?;
+        let result = invoke(method, handle, &value);
+        zeroize_json(&mut value);
+        result
     })();
     match result {
-        Ok(value) => KaedeE2eeBuffer::success(&value),
+        Ok(mut value) => {
+            let buffer = KaedeE2eeBuffer::success(&value);
+            zeroize_json(&mut value);
+            buffer
+        }
         Err(error) => KaedeE2eeBuffer::error(&error),
     }
 }
@@ -316,5 +351,26 @@ pub unsafe extern "C" fn kaede_e2ee_buffer_free(buffer: KaedeE2eeBuffer) {
     }
     // SAFETY: Ownership of this exact boxed slice was transferred from
     // `KaedeE2eeBuffer::from_json` and the ABI requires a single matching free.
-    drop(unsafe { Box::from_raw(ptr::slice_from_raw_parts_mut(buffer.data, buffer.len)) });
+    let mut allocation =
+        unsafe { Box::from_raw(ptr::slice_from_raw_parts_mut(buffer.data, buffer.len)) };
+    allocation.zeroize();
+    drop(allocation);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_json_strings_are_zeroized_before_drop() {
+        let mut value = json!({
+            "plaintext": "secret",
+            "nested": ["credential", {"state": "private"}],
+        });
+        zeroize_json(&mut value);
+        assert_eq!(
+            value,
+            json!({"plaintext": "", "nested": ["", {"state": ""}]})
+        );
+    }
 }

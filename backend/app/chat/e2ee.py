@@ -20,6 +20,19 @@ E2EE_ROOM_STATES = frozenset(
     {"plaintext", "legacy", "proposed", "activating", "active", "rekeying", "failed"}
 )
 MLS_DEVICE_ID_RE = re.compile(r"ked_[A-Za-z0-9_-]{43}")
+ACCOUNT_VAULT_LEASE_TTL_SECONDS = 120
+RELEASE_ACCOUNT_VAULT_LEASE = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+
+def account_vault_lease_key(user_id: int, user_domain: str) -> str:
+    """Return the single distributed-lease key for an account vault."""
+
+    return f"e2ee:account-vault-lease:{user_domain}:{user_id}"
 
 
 class MessageEncryptionPolicyError(ValueError):
@@ -195,6 +208,32 @@ def validate_e2ee_envelope(value: object) -> dict[str, Any] | None:
     if version == 2:
         _validate_mls_application_envelope(normalized)
     return normalized
+
+
+def validate_e2ee_message_projection(
+    envelope: dict[str, Any] | None,
+    *,
+    message_id: int,
+    message_domain: str,
+    edited: bool,
+) -> None:
+    """Bind an MLS application operation to its immutable message row.
+
+    MLS controls are rejected here. Welcome and Commit records are consumed
+    only from the separately authenticated durable control log, where the
+    room-operation metadata also binds their apply mode.
+    """
+
+    if envelope is None:
+        return
+    expected_ref = f"{message_id}@{message_domain}"
+    operation = envelope.get("operation")
+    if edited:
+        if operation != "edit" or envelope.get("target_message") != expected_ref:
+            raise ValueError("MLS edit does not target its projected message")
+        return
+    if operation != "create" or "target_message" in envelope:
+        raise ValueError("MLS create does not match its projected message")
 
 
 def _canonical_base64url(value: object, label: str, *, maximum: int) -> bytes:

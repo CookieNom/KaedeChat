@@ -47,6 +47,12 @@ asyncio.run(enroll())
 
 Keep `KAEDE_BOT_CONTROL_TOKEN` in your deployment secret store, and rotate it from the Developer Portal when needed. Your bot never uses a human session during normal operation.
 
+`application_home` is security-sensitive: the SDK accepts only a canonical
+HTTPS origin whose hostname exactly matches the domain in `application_ref`.
+Enrollment and command sync disable redirects and environment proxies before
+sending a control credential, so do not point these operations at a vanity,
+redirect, or proxy URL.
+
 ## Run the bot
 
 ```python
@@ -63,10 +69,19 @@ bot = kaede.Client(
 async def ping(interaction: kaede.Interaction) -> None:
     await interaction.respond("Pong!")
 
+@bot.event
+async def on_message(message: kaede.Message) -> None:
+    if message.content == "hello":
+        await message.reply("Hello from the correct instance!")
+
+@bot.event
+async def on_reaction_add(event: kaede.ReactionEvent) -> None:
+    print(event.user_ref, event.emoji)
+
 asyncio.run(bot.start("https://chat.example", "https://community.example"))
 ```
 
-When your command definitions change, call `sync_commands(application_home=..., control_token=...)` from a controlled deployment job. You don't need to run it on every process start.
+When your command definitions change, call `sync_commands(application_home=..., control_token=...)` from a controlled deployment job. The home must match the domain stored in `WorkerState.application_ref`. You don't need to run it on every process start.
 
 ## IDs and usernames
 
@@ -85,4 +100,100 @@ Always keep the full composite reference. Two instances may issue the same numer
 
 The SDK handles the connection plumbing for you. It reads `Retry-After`, obtains short-lived target tokens, and signs every request with the enrolled worker key. It also sends Gateway heartbeats and resumes from per-topic sequence cursors. Event delivery is at least once, so persistent bots should make their handlers idempotent.
 
-Kaede never forwards bot tokens between instances. To cut off a worker, revoke it in the Developer Portal; token issuance and Gateway sessions stop at every target once the short token lifetime runs out.
+Kaede never forwards bot tokens between instances. To cut off a worker, revoke
+it in the Developer Portal; new token issuance stops and connected Gateway
+sessions close promptly at every target.
+
+An already-connected Gateway also reloads the current application, worker,
+token, and exact installation grants. Suspension, revocation, or a grant
+revision closes that connection promptly and requires a fresh identify.
+
+## Resources and events
+
+The wrapper exposes typed fetch and action methods instead of requiring raw
+HTTP calls:
+
+```python
+guild = await bot.fetch_guild(kaede.EntityRef.parse("42@chat.example"), target="https://chat.example")
+channels = await guild.channels()
+members = await guild.members(limit=250)
+roles = await guild.roles()
+
+await channels[0].send("Deployment complete")
+await channels[0].trigger_typing()
+pins = await channels[0].pins()
+occupancy = await channels[0].voice_occupancy()
+```
+
+Management operations use narrow scopes rather than one administrator grant:
+
+```python
+# Requires channels.manage and the bot's live MANAGE_CHANNELS permission.
+created = await guild.create_channel("build-status", topic="Release automation")
+created = await created.edit(topic="Current release automation")
+
+# Requires roles.manage and the relevant live role permissions/hierarchy.
+release_role = await guild.create_role("release-manager", permissions=0)
+await members[0].add_role(release_role.ref)
+```
+
+Fetched guilds, channels, and roles retain their server `version`; their
+convenience `edit()` methods automatically send it as `If-Match`. A stale
+resource fails instead of overwriting another moderator's update.
+
+File uploads require `attachments.write` and an authoritative guild
+installation. Bytes are charged to that exact installation, never to a fake
+local-human account:
+
+```python
+upload = await channels[0].upload(
+    b"release notes",
+    filename="release.txt",
+    content_type="text/plain",
+)
+message = await channels[0].send("Artifacts", attachment_ids=[upload.ref.id])
+
+# attachments.read is independent from messages.content.
+body = await message.attachments[0].read(max_bytes=1_000_000)
+```
+
+The SDK uploads directly to the short-lived HTTPS storage URL without sending
+the bot token or DPoP headers to storage. Kaede accepts the attachment in a
+message only from the installation that reserved its quota. Plaintext media
+passes the normal scan/quarantine pipeline. E2EE uploads require an already
+encrypted `kaede-file-v1` payload and opaque metadata; the SDK never falls back
+to plaintext. Bot attachment uploads in DMs are not currently supported.
+
+Outbound DMs are explicitly bound to an active installation that granted both
+`dm.send` and `messages.send`. Use a fetched guild so the SDK carries its exact
+installation ID into both DM creation and later writes:
+
+```python
+dm = await guild.open_dm("alice@chat.example")
+await dm.send("Your scheduled export is ready")
+```
+
+The resulting `Channel` retains `bot_installation_id`; a revoked or
+scope-reduced installation cannot be replaced by some other installation of
+the same application.
+
+Supported listener aliases include `on_ready`, `on_message`,
+`on_message_edit`, `on_message_delete`, `on_reaction_add`,
+`on_reaction_remove`, `on_member_join`, `on_member_update`,
+`on_member_remove`, `on_guild_join`, `on_guild_update`, `on_guild_remove`,
+channel and role create/update/delete listeners, `on_presence`, `on_typing`,
+`on_voice_state`, and `on_interaction`. `Client.listen()` registers additional
+listeners and `Client.wait_for()` waits for a filtered event.
+
+Reaction events use the independent `message_reactions` intent. Typing events
+use `guild_typing`; they are disabled by default. Gateway cursors are persisted
+next to the owner-only worker key so a process restart resumes each guild topic
+instead of silently starting from the live edge.
+
+Moderation helpers (`edit_member`, `kick_member`, `ban_member`, `unban_member`,
+and `bans`) require both the `moderation.members` scope and the corresponding
+live guild permission. Deleting another author's message and bulk deletion use
+`moderation.messages`. Pin changes and removing another user's reaction use
+`messages.manage`. Voice mute/deafen, disconnect, and move operations require
+`voice.moderate`; each still enforces live permissions, hierarchy, audit logs,
+and the authoritative guild/federation target.

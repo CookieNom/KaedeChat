@@ -14,6 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  CARGO_INCREMENTAL: "0"
   NODE_VERSION: "22.23.1"
   PNPM_VERSION: "10.34.0"
   RUST_VERSION: "1.92.0"
@@ -64,20 +65,38 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Install pinned Rust toolchain
         run: rustup toolchain install "$RUST_VERSION" --profile minimal
-      - name: Cache Cargo artifacts
+      - name: Cache Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            desktop/target
-          key: client-release-linux-${{ hashFiles('desktop/Cargo.lock') }}
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: cargo-download-v1-rust-${{ env.RUST_VERSION }}-${{ hashFiles('desktop/Cargo.lock') }}
+          enableCrossOsArchive: true
       - name: Build embedded frontend
         run: |
           pnpm --dir frontend install --frozen-lockfile
           pnpm --dir frontend build
+      - name: Cache pinned Tauri CLI
+        id: tauri-cli-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: cargo-tauri-cli-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-tauri-${{ env.TAURI_CLI_VERSION }}
       - name: Install pinned Tauri CLI
+        if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
         run: cargo +"$RUST_VERSION" install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Verify pinned Tauri CLI
+        run: |
+          version_output="$(cargo +"$RUST_VERSION" tauri --version)"
+          printf '%s\n' "$version_output"
+          case "$version_output" in
+            *"$TAURI_CLI_VERSION"*) ;;
+            *) echo "unexpected Tauri CLI version" >&2; exit 1 ;;
+          esac
       - name: Build Linux packages
         working-directory: desktop/tauri
         env:
@@ -119,6 +138,9 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
           retention-days: 7
+      - name: Enforce desktop cache size budgets
+        if: always()
+        run: bash .github/scripts/enforce-cache-budgets.sh desktop-release
 
   desktop-windows:
     name: Windows desktop
@@ -140,14 +162,15 @@ jobs:
       - name: Install pinned Rust toolchain
         shell: bash
         run: rustup toolchain install "$RUST_VERSION" --profile minimal
-      - name: Cache Cargo artifacts
+      - name: Cache Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            desktop/target
-          key: client-release-windows-${{ hashFiles('desktop/Cargo.lock') }}
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: cargo-download-v1-rust-${{ env.RUST_VERSION }}-${{ hashFiles('desktop/Cargo.lock') }}
+          enableCrossOsArchive: true
       - name: Build embedded frontend
         shell: bash
         run: |
@@ -187,9 +210,27 @@ jobs:
             }
           } | ConvertTo-Json -Depth 4
           Set-Content desktop/tauri/src-tauri/tauri.windows.conf.json $config -Encoding utf8
+      - name: Cache pinned Tauri CLI
+        id: tauri-cli-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: cargo-tauri-cli-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-tauri-${{ env.TAURI_CLI_VERSION }}
       - name: Install pinned Tauri CLI
+        if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
         shell: bash
         run: cargo +"$RUST_VERSION" install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Verify pinned Tauri CLI
+        shell: bash
+        run: |
+          version_output="$(cargo +"$RUST_VERSION" tauri --version)"
+          printf '%s\n' "$version_output"
+          case "$version_output" in
+            *"$TAURI_CLI_VERSION"*) ;;
+            *) echo "unexpected Tauri CLI version" >&2; exit 1 ;;
+          esac
       - name: Build signed Windows installer
         shell: bash
         working-directory: desktop/tauri
@@ -226,6 +267,10 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
           retention-days: 7
+      - name: Enforce desktop cache size budgets
+        if: always()
+        shell: bash
+        run: bash .github/scripts/enforce-cache-budgets.sh desktop-release
 
   desktop-macos:
     name: macOS desktop (${{ matrix.arch }})
@@ -253,14 +298,15 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Install pinned Rust toolchain
         run: rustup toolchain install "$RUST_VERSION" --profile minimal
-      - name: Cache Cargo artifacts
+      - name: Cache Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            desktop/target
-          key: client-release-macos-${{ matrix.arch }}-${{ hashFiles('desktop/Cargo.lock') }}
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: cargo-download-v1-rust-${{ env.RUST_VERSION }}-${{ hashFiles('desktop/Cargo.lock') }}
+          enableCrossOsArchive: true
       - name: Build embedded frontend
         run: |
           pnpm --dir frontend install --frozen-lockfile
@@ -285,8 +331,25 @@ jobs:
           security list-keychains -d user -s "$keychain" login.keychain-db
           security set-key-partition-list -S apple-tool:,apple: \
             -k "$KEYCHAIN_PASSWORD" "$keychain"
+      - name: Cache pinned Tauri CLI
+        id: tauri-cli-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: cargo-tauri-cli-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-tauri-${{ env.TAURI_CLI_VERSION }}
       - name: Install pinned Tauri CLI
+        if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
         run: cargo +"$RUST_VERSION" install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Verify pinned Tauri CLI
+        run: |
+          version_output="$(cargo +"$RUST_VERSION" tauri --version)"
+          printf '%s\n' "$version_output"
+          case "$version_output" in
+            *"$TAURI_CLI_VERSION"*) ;;
+            *) echo "unexpected Tauri CLI version" >&2; exit 1 ;;
+          esac
       - name: Build, sign, and notarize macOS packages
         working-directory: desktop/tauri
         env:
@@ -338,6 +401,9 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
           retention-days: 7
+      - name: Enforce desktop cache size budgets
+        if: always()
+        run: bash .github/scripts/enforce-cache-budgets.sh desktop-release
 
   android:
     name: Android APK
@@ -353,6 +419,11 @@ jobs:
         run: |
           git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git flutter
           echo "${{ runner.temp }}/flutter/bin" >> "$GITHUB_PATH"
+      - name: Cache pinned Flutter runtime artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/flutter/bin/cache
+          key: flutter-android-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}
       - name: Install pinned Rust Android targets
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal
@@ -360,6 +431,30 @@ jobs:
             aarch64-linux-android \
             armv7-linux-androideabi \
             x86_64-linux-android
+      - name: Cache Cargo downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: cargo-download-v1-rust-${{ env.RUST_VERSION }}-${{ hashFiles('desktop/Cargo.lock') }}
+          enableCrossOsArchive: true
+      - name: Cache Dart packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.pub-cache/hosted
+            ~/.pub-cache/git
+          key: dart-pub-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('mobile/pubspec.lock') }}
+      - name: Cache Android dependency downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2/files-2.1
+            ~/.gradle/caches/modules-2/metadata-*
+            ~/.gradle/wrapper/dists
+          key: gradle-download-v1-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('mobile/pubspec.lock', 'mobile/android/**/*.gradle*', 'mobile/android/gradle/wrapper/gradle-wrapper.properties') }}
       - name: Configure Android release signing
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -423,6 +518,11 @@ jobs:
           path: mobile/release-assets/*
           if-no-files-found: error
           retention-days: 7
+      - name: Enforce mobile cache size budgets
+        if: always()
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: bash .github/scripts/enforce-cache-budgets.sh mobile
 
   publish:
     name: Publish GitHub Release

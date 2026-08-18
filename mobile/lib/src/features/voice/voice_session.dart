@@ -10,6 +10,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
+import 'package:kaede_mobile/src/features/voice/e2ee_policy.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart' as permissions;
@@ -171,17 +172,7 @@ final class VoiceSession extends ChangeNotifier {
       }
       E2EEOptions? e2eeOptions;
       if (encryptedGrant) {
-        if (target.encryptionState != 'active' ||
-            '${grant['channel_id']}@${grant['channel_domain']}' !=
-                target.ref.wire ||
-            '${grant['encryption_policy_generation']}' !=
-                '${target.encryptionPolicyGeneration}' ||
-            '${grant['encryption_epoch']}' != '${target.encryptionEpoch}' ||
-            grant['media_protocol'] != 'livekit-e2ee-v1' ||
-            grant['media_suite'] != 'AES-256-GCM' ||
-            !RegExp(r'^[A-Za-z0-9_-]{43}$')
-                .hasMatch('${grant['media_session_id']}') ||
-            '${grant['media_epoch']}' != '${grant['encryption_epoch']}') {
+        if (!voiceGrantMatchesChannelE2EEPolicy(grant, target)) {
           throw const KaedeException(
             code: 'VOICE_E2EE_POLICY_MISMATCH',
             message:

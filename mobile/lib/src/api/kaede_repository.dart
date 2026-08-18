@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
+import 'package:kaede_mobile/src/auth/password_kdf.dart';
+import 'package:kaede_mobile/src/auth/password_vault.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
@@ -12,6 +15,48 @@ import 'package:uuid/uuid.dart';
 
 List<String> messageAttachmentIds(Iterable<EntityRef> attachments) =>
     attachments.map((reference) => reference.id.value).toList(growable: false);
+
+Map<String, Object?> messageReportRequestData(
+  EntityRef message, {
+  required String category,
+  String? description,
+  String? disclosedContent,
+  bool disclosureAcknowledged = false,
+}) =>
+    <String, Object?>{
+      'target_type': 'message',
+      'target_ref': message.wire,
+      'message_ref': message.wire,
+      'category': category,
+      if (description?.trim().isNotEmpty == true)
+        'description': description!.trim(),
+      // Preserve exact empty text: it represents successful decryption of an
+      // attachment-only E2EE message. Null means decryption was unavailable.
+      if (disclosedContent != null) 'disclosed_content': disclosedContent,
+      if (disclosedContent != null)
+        'disclosure_acknowledged': disclosureAcknowledged,
+    };
+
+final RegExp _e2eeRecoveryAuthorizationPattern =
+    RegExp(r'^ker_[A-Za-z0-9_-]{43}$');
+
+String e2eeRecoveryAuthorizationFromReset(
+  Map<String, Object?> response,
+  String accountRef,
+) {
+  final authorization = response['recovery_authorization'];
+  if (response.length != 4 ||
+      response['status'] != 'encryption_reset' ||
+      response['account_ref'] != accountRef ||
+      authorization is! String ||
+      !_e2eeRecoveryAuthorizationPattern.hasMatch(authorization) ||
+      response['recovery_authorization_expires_in'] != 300) {
+    throw const FormatException(
+      'The server returned an invalid encryption-reset confirmation.',
+    );
+  }
+  return authorization;
+}
 
 final class ReactionUserPage {
   const ReactionUserPage({
@@ -73,13 +118,97 @@ void _throwForTerminalMediaStatus(String status) {
 }
 
 final class KaedeRepository {
-  const KaedeRepository(this.api);
+  KaedeRepository(
+    this.api, {
+    this.passwordVault = const MobilePasswordVault(),
+  });
 
   final KaedeApiClient api;
+  final MobilePasswordVault passwordVault;
+  SecretKeyData? _pendingVaultKey;
+  Domain? _pendingVaultInstance;
+  String? _pendingE2eeRecoveryAuthorization;
 
   Future<Map<String, Object?>> authConfig(Domain instance) async {
     api.selectInstance(instance);
     return api.getJson('/api/v1/auth/config');
+  }
+
+  Future<MobilePasswordKdfContext> _passwordKdfContext(
+    String identifier,
+  ) async {
+    final response = await api.sendJson(
+      'POST',
+      '/api/v1/auth/key-derivation',
+      data: <String, Object?>{'identifier': identifier},
+    );
+    return MobilePasswordKdfContext.fromJson(response);
+  }
+
+  void _replacePendingVaultKey(SecretKeyData key, Domain instance) {
+    _clearPendingVaultKey();
+    _pendingVaultKey = key;
+    _pendingVaultInstance = instance;
+  }
+
+  void _clearPendingVaultKey() {
+    _pendingVaultKey?.destroy();
+    _pendingVaultKey = null;
+    _pendingVaultInstance = null;
+  }
+
+  /// Drops password-derived material retained only while an MFA login is in
+  /// progress. Call when that flow is cancelled or this repository is disposed.
+  void discardPendingPasswordKey() => _clearPendingVaultKey();
+
+  void stageE2eeRecoveryAuthorization(String authorization) {
+    if (!_e2eeRecoveryAuthorizationPattern.hasMatch(authorization)) {
+      throw const FormatException(
+          'The E2EE recovery authorization is invalid.');
+    }
+    _pendingE2eeRecoveryAuthorization = authorization;
+  }
+
+  void discardPendingE2eeRecoveryAuthorization() {
+    _pendingE2eeRecoveryAuthorization = null;
+  }
+
+  void dispose() => _clearPendingVaultKey();
+
+  Future<void> _persistPendingVaultKey(KaedeUser user) async {
+    final key = _pendingVaultKey;
+    final instance = _pendingVaultInstance;
+    if (key == null || instance == null) return;
+    try {
+      if (user.ref.domain != instance) {
+        throw StateError(
+          'The password-derived encryption key belongs to another instance.',
+        );
+      }
+      await passwordVault.write(user.ref.wire, key);
+    } finally {
+      if (identical(_pendingVaultKey, key)) _clearPendingVaultKey();
+    }
+  }
+
+  Future<Map<String, Object?>> _currentPasswordPayload(
+    String password,
+  ) async {
+    final user = await me();
+    final prepared = await prepareMobilePassword(
+      password,
+      await _passwordKdfContext(user.username),
+      api.tokens?.instance ??
+          (throw StateError('No active instance is selected.')),
+    );
+    try {
+      return <String, Object?>{
+        'password': prepared.authenticationSecret,
+        'password_kdf_version': prepared.context.version,
+      };
+    } finally {
+      prepared.destroy();
+    }
   }
 
   Future<SessionTokens> login({
@@ -90,41 +219,62 @@ final class KaedeRepository {
     String? deviceName,
   }) async {
     api.selectInstance(instance);
-    final response = await api
-        .sendJson('POST', '/api/v1/auth/login', data: <String, Object?>{
-      'identifier': identifier,
-      'password': password,
-      'device_name': deviceName ?? '${Platform.operatingSystem} mobile',
-      if (turnstileToken != null) 'turnstile_token': turnstileToken,
-    });
-    if (response['mfa_required'] == true) {
-      throw MfaRequired(response['mfa_ticket']! as String);
-    }
-    final tokens = SessionTokens(
-      instance: instance,
-      accessToken: response['access_token']! as String,
-      refreshToken: response['refresh_token']! as String,
+    final prepared = await prepareMobilePassword(
+      password,
+      await _passwordKdfContext(identifier),
+      instance,
     );
-    await api.useTokens(tokens);
-    return tokens;
+    _replacePendingVaultKey(prepared.vaultKey, instance);
+    try {
+      final response = await api
+          .sendJson('POST', '/api/v1/auth/login', data: <String, Object?>{
+        'identifier': identifier,
+        'password': prepared.authenticationSecret,
+        'password_kdf_version': prepared.context.version,
+        if (prepared.passwordUpgrade case final upgrade?)
+          'password_upgrade': upgrade,
+        'device_name': deviceName ?? '${Platform.operatingSystem} mobile',
+        if (turnstileToken != null) 'turnstile_token': turnstileToken,
+      });
+      if (response['mfa_required'] == true) {
+        throw MfaRequired(response['mfa_ticket']! as String);
+      }
+      final tokens = SessionTokens(
+        instance: instance,
+        accessToken: response['access_token']! as String,
+        refreshToken: response['refresh_token']! as String,
+      );
+      await api.useTokens(tokens);
+      return tokens;
+    } on MfaRequired {
+      rethrow;
+    } on Object {
+      _clearPendingVaultKey();
+      rethrow;
+    }
   }
 
   Future<SessionTokens> finishMfa(
       Domain instance, String ticket, String code) async {
     api.selectInstance(instance);
-    final response =
-        await api.sendJson('POST', '/api/v1/auth/mfa', data: <String, Object?>{
-      'ticket': ticket,
-      'code': code,
-      'device_name': '${Platform.operatingSystem} mobile',
-    });
-    final tokens = SessionTokens(
-      instance: instance,
-      accessToken: response['access_token']! as String,
-      refreshToken: response['refresh_token']! as String,
-    );
-    await api.useTokens(tokens);
-    return tokens;
+    try {
+      final response = await api
+          .sendJson('POST', '/api/v1/auth/mfa', data: <String, Object?>{
+        'ticket': ticket,
+        'code': code,
+        'device_name': '${Platform.operatingSystem} mobile',
+      });
+      final tokens = SessionTokens(
+        instance: instance,
+        accessToken: response['access_token']! as String,
+        refreshToken: response['refresh_token']! as String,
+      );
+      await api.useTokens(tokens);
+      return tokens;
+    } on Object {
+      _clearPendingVaultKey();
+      rethrow;
+    }
   }
 
   Future<Map<String, Object?>> register({
@@ -135,13 +285,27 @@ final class KaedeRepository {
     String? turnstileToken,
   }) async {
     api.selectInstance(instance);
-    return api
-        .sendJson('POST', '/api/v1/auth/register', data: <String, Object?>{
-      'username': username,
-      'password': password,
-      if (email?.isNotEmpty == true) 'email': email,
-      if (turnstileToken != null) 'turnstile_token': turnstileToken,
-    });
+    final prepared = await prepareMobileRegistrationPassword(
+      password,
+      instance,
+    );
+    try {
+      final context = prepared.context;
+      if (context is! ModernMobilePasswordKdfContext) {
+        throw StateError(
+            'Registration did not create a modern password context.');
+      }
+      return api
+          .sendJson('POST', '/api/v1/auth/register', data: <String, Object?>{
+        'username': username,
+        'password': prepared.authenticationSecret,
+        'password_kdf': context.toJson(),
+        if (email?.isNotEmpty == true) 'email': email,
+        if (turnstileToken != null) 'turnstile_token': turnstileToken,
+      });
+    } finally {
+      prepared.destroy();
+    }
   }
 
   Future<void> verifyEmail(String token) => api.sendJson(
@@ -162,18 +326,45 @@ final class KaedeRepository {
         data: <String, Object?>{'email': email},
       );
 
-  Future<void> resetPassword(String token, String password) => api.sendJson(
-        'POST',
-        '/api/v1/auth/password/reset',
-        data: <String, Object?>{'token': token, 'password': password},
+  Future<String> resetPassword(
+    Domain instance,
+    String token,
+    String password,
+  ) async {
+    api.selectInstance(instance);
+    final prepared = await prepareMobileResetPassword(password, instance);
+    final response = await api.sendJson(
+      'POST',
+      '/api/v1/auth/password/reset',
+      data: <String, Object?>{
+        'token': token,
+        'password': prepared.authenticationSecret,
+        'password_kdf': prepared.passwordKdf,
+      },
+    );
+    final accountRef = response['account_ref'];
+    if (accountRef is! String) {
+      throw const FormatException(
+        'The server did not confirm which encrypted account was reset.',
       );
+    }
+    final parsed = EntityRef.parse(accountRef);
+    if (parsed.wire != accountRef || parsed.domain != instance) {
+      throw const FormatException(
+        'The server confirmed a different encrypted account reset.',
+      );
+    }
+    return accountRef;
+  }
 
-  Future<void> requestEmailChange(String email, String password) =>
-      api.sendJson(
-        'POST',
-        '/api/v1/auth/email/change',
-        data: <String, Object?>{'email': email, 'password': password},
-      );
+  Future<void> requestEmailChange(String email, String password) async {
+    final passwordPayload = await _currentPasswordPayload(password);
+    await api.sendJson(
+      'POST',
+      '/api/v1/auth/email/change',
+      data: <String, Object?>{'email': email, ...passwordPayload},
+    );
+  }
 
   Future<void> confirmEmailChange(String token) => api.sendJson(
         'POST',
@@ -181,15 +372,17 @@ final class KaedeRepository {
         data: <String, Object?>{'token': token},
       );
 
-  Future<Map<String, Object?>> setupMfa(String password, {String? code}) =>
-      api.sendJson(
-        'POST',
-        '/api/v1/auth/mfa/setup',
-        data: <String, Object?>{
-          'password': password,
-          if (code?.isNotEmpty == true) 'current_code': code,
-        },
-      );
+  Future<Map<String, Object?>> setupMfa(String password, {String? code}) async {
+    final passwordPayload = await _currentPasswordPayload(password);
+    return api.sendJson(
+      'POST',
+      '/api/v1/auth/mfa/setup',
+      data: <String, Object?>{
+        ...passwordPayload,
+        if (code?.isNotEmpty == true) 'current_code': code,
+      },
+    );
+  }
 
   Future<Map<String, Object?>> enableMfa(String code) => api.sendJson(
         'POST',
@@ -197,17 +390,21 @@ final class KaedeRepository {
         data: <String, Object?>{'code': code},
       );
 
-  Future<void> disableMfa(String code, String password) => api.sendJson(
-        'POST',
-        '/api/v1/auth/mfa/disable',
-        data: <String, Object?>{'code': code, 'password': password},
-      );
+  Future<void> disableMfa(String code, String password) async {
+    final passwordPayload = await _currentPasswordPayload(password);
+    await api.sendJson(
+      'POST',
+      '/api/v1/auth/mfa/disable',
+      data: <String, Object?>{'code': code, ...passwordPayload},
+    );
+  }
 
   Future<KaedeUser> me() async {
     final user = KaedeUser.fromJson(await api.getJson('/api/v1/users/@me'));
     if (api.tokens case final tokens?) {
       await api.useTokens(tokens.copyWith(userRef: user.ref));
     }
+    await _persistPendingVaultKey(user);
     return user;
   }
 
@@ -414,17 +611,17 @@ final class KaedeRepository {
     String? disclosedContent,
     bool disclosureAcknowledged = false,
   }) =>
-      api.sendJson('POST', '/api/v1/reports', data: {
-        'target_type': 'message',
-        'target_ref': message.wire,
-        'message_ref': message.wire,
-        'category': category,
-        if (description?.trim().isNotEmpty == true)
-          'description': description!.trim(),
-        if (disclosedContent != null) 'disclosed_content': disclosedContent,
-        if (disclosedContent != null)
-          'disclosure_acknowledged': disclosureAcknowledged,
-      });
+      api.sendJson(
+        'POST',
+        '/api/v1/reports',
+        data: messageReportRequestData(
+          message,
+          category: category,
+          description: description,
+          disclosedContent: disclosedContent,
+          disclosureAcknowledged: disclosureAcknowledged,
+        ),
+      );
   Future<void> react(EntityRef channel, EntityRef message, String emoji) =>
       api.sendJson(
         'POST',
@@ -924,8 +1121,12 @@ final class KaedeRepository {
     required String signature,
     required String deviceName,
     required String platform,
-  }) =>
-      api.sendJson('POST', '/api/v1/e2ee/devices', data: {
+  }) async {
+    final authorization = _pendingE2eeRecoveryAuthorization;
+    final registered = await api.sendJson(
+      'POST',
+      '/api/v1/e2ee/devices',
+      data: <String, Object?>{
         'challenge_id': challengeId,
         'identity_key': identityKey,
         'credential': credential,
@@ -933,13 +1134,86 @@ final class KaedeRepository {
         'device_name': deviceName,
         'platform': platform,
         'capabilities': const ['e2ee-mls/1', 'e2ee-media/1'],
-      });
+        if (authorization != null) 'recovery_authorization': authorization,
+      },
+    );
+    // A successful HTTP response means the backend committed registration and
+    // atomically consumed (or cancelled for a fresh identity) the reset fence.
+    _pendingE2eeRecoveryAuthorization = null;
+    return registered;
+  }
 
   Future<Map<String, Object?>> e2eeDevices() =>
       api.getJson('/api/v1/e2ee/devices');
+
+  Future<Map<String, Object?>> acquireE2eeVaultLease() => api.sendJson(
+        'POST',
+        '/api/v1/e2ee/vault/lease',
+        data: const <String, Object?>{},
+      );
+
+  Future<Map<String, Object?>> e2eeVault() => api.getJson('/api/v1/e2ee/vault');
+
+  Future<Map<String, Object?>> e2eeVaultDigests({
+    required String after,
+    int limit = 256,
+  }) =>
+      api.getJson(
+        '/api/v1/e2ee/vault/digests',
+        query: <String, Object?>{'after': after, 'limit': limit},
+      );
+
+  Future<Map<String, Object?>> e2eeControlLog(
+    EntityRef channel, {
+    String? after,
+  }) =>
+      api.getJson(
+        '/api/v1/e2ee/channels/${channel.wire}/control-log',
+        query: <String, Object?>{
+          'limit': 25,
+          if (after != null) 'after': after,
+        },
+      );
+
+  Future<Map<String, Object?>> updateE2eeVault({
+    required String leaseToken,
+    required String expectedRevision,
+    required Map<String, Object?> envelope,
+  }) =>
+      api.sendJson(
+        'PUT',
+        '/api/v1/e2ee/vault',
+        data: <String, Object?>{
+          'lease_token': leaseToken,
+          'expected_revision': expectedRevision,
+          'envelope': envelope,
+        },
+      );
+
+  Future<void> releaseE2eeVaultLease(String leaseToken) async {
+    try {
+      await api.sendJson(
+        'POST',
+        '/api/v1/e2ee/vault/lease/release',
+        data: <String, Object?>{'lease_token': leaseToken},
+      );
+    } on Object {
+      // The lease is short-lived and releases itself. Failure here must not
+      // replace the result of the MLS operation that already completed.
+    }
+  }
+
   Future<void> revokeE2eeDevice(String deviceId) => api.sendJson(
         'DELETE',
         '/api/v1/e2ee/devices/${Uri.encodeComponent(deviceId)}',
+      );
+
+  Future<Map<String, Object?>> resetE2eeIdentity() => api.sendJson(
+        'POST',
+        '/api/v1/e2ee/reset',
+        data: const <String, Object?>{
+          'confirmation': 'RESET ENCRYPTED HISTORY',
+        },
       );
 
   Future<void> uploadE2eeKeyPackages(
@@ -960,43 +1234,72 @@ final class KaedeRepository {
       );
 
   Future<Map<String, Object?>> proposeE2eeRoom(
-          EntityRef channel, String deviceId) =>
+    EntityRef channel,
+    String deviceId,
+    String operationId,
+  ) =>
       api.sendJson(
         'POST',
         '/api/v1/e2ee/channels/${channel.wire}/propose',
-        data: {'sender_device_id': deviceId},
+        data: {
+          'operation_id': operationId,
+          'sender_device_id': deviceId,
+        },
       );
 
   Future<Map<String, Object?>> proposeE2eeRekey(
-          EntityRef channel, String deviceId) =>
+    EntityRef channel,
+    String deviceId,
+    String operationId,
+  ) =>
       api.sendJson(
         'POST',
         '/api/v1/e2ee/channels/${channel.wire}/rekey/propose',
-        data: {'sender_device_id': deviceId},
+        data: {
+          'operation_id': operationId,
+          'sender_device_id': deviceId,
+        },
       );
 
-  Future<KaedeChannel> activateE2eeRoom(
+  Future<Map<String, Object?>> activateE2eeRoom(
     EntityRef channel, {
+    required String operationId,
     required String deviceId,
     required String generation,
+    required String groupId,
     required String commit,
     required String welcome,
-    String? proposalId,
-  }) async =>
-      KaedeChannel.fromJson(await api.sendJson(
+    required String preparedVaultRevision,
+    required String preparedVaultDigest,
+    required String vaultLeaseToken,
+    required bool rekey,
+  }) =>
+      api.sendJson(
         'POST',
-        proposalId == null
-            ? '/api/v1/e2ee/channels/${channel.wire}/activate'
-            : '/api/v1/e2ee/channels/${channel.wire}/rekey/activate',
+        rekey
+            ? '/api/v1/e2ee/channels/${channel.wire}/rekey/activate'
+            : '/api/v1/e2ee/channels/${channel.wire}/activate',
         data: {
-          if (proposalId != null) 'proposal_id': proposalId,
+          'operation_id': operationId,
           'sender_device_id': deviceId,
           'policy_generation': generation,
           'epoch': '1',
+          'group_id': groupId,
           'commit': commit,
           'welcome': welcome,
+          'prepared_vault_revision': preparedVaultRevision,
+          'prepared_vault_digest': preparedVaultDigest,
+          'vault_lease_token': vaultLeaseToken,
         },
-      ));
+      );
+
+  Future<Map<String, Object?>> e2eeRoomOperation(
+    EntityRef channel,
+    String operationId,
+  ) =>
+      api.getJson(
+        '/api/v1/e2ee/channels/${channel.wire}/operations/${Uri.encodeComponent(operationId)}',
+      );
 
   Future<EntityRef> uploadAttachment({
     required EntityRef channel,
@@ -1168,10 +1471,22 @@ final class KaedeRepository {
       );
 
   Future<void> logout() async {
+    final accountRef = api.tokens?.userRef?.wire;
     try {
-      await api.sendJson('POST', '/api/v1/auth/logout');
+      try {
+        await api.sendJson('POST', '/api/v1/auth/logout');
+      } on Object {
+        // Explicit logout is locally authoritative even if the instance is
+        // unreachable. The refresh token is still removed below.
+      }
     } finally {
-      await api.clearTokens();
+      _clearPendingVaultKey();
+      discardPendingE2eeRecoveryAuthorization();
+      try {
+        if (accountRef != null) await passwordVault.clear(accountRef);
+      } finally {
+        await api.clearTokens();
+      }
     }
   }
 }

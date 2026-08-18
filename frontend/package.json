@@ -8,6 +8,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "check:csp": "node scripts/verify-csp.mjs",
+    "check:e2ee-wasm": "node scripts/verify-e2ee-wasm.mjs",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",

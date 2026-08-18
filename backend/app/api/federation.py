@@ -27,7 +27,7 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from redis.asyncio import Redis
-from sqlalchemy import and_, delete, func, or_, select, tuple_
+from sqlalchemy import and_, delete, exists, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -36,14 +36,21 @@ from app.api.e2ee import (
     RoomActivationRequest,
     RoomProposalRequest,
     RoomRekeyActivationRequest,
-    activate_room_encryption,
-    activate_room_rekey,
+    activate_room_encryption_attested,
+    activate_room_rekey_attested,
+    apply_e2ee_control_metadata,
     claim_local_room_key_packages,
     propose_room_encryption,
     propose_room_rekey,
+    room_encryption_operation_status_for_actor,
 )
 from app.auth.tokens import AccessGrant
 from app.bootstrap import MAX_ADVERTISED_OLD_KEYS
+from app.bots.installations import (
+    cleanup_installation_roles,
+    publish_deleted_installation_roles,
+    revoke_installations_for_guild_member,
+)
 from app.chat.custom_emojis import validate_custom_emoji_use
 from app.chat.e2ee import (
     MessageEncryptionPolicyError,
@@ -107,6 +114,7 @@ from app.db.models import (
     ChannelOverwrite,
     DMConversation,
     DMParticipant,
+    E2EEControlRecord,
     Emoji,
     FederationEvent,
     FederationInbox,
@@ -205,6 +213,7 @@ from app.federation.schemas import (
     DMGroupMutationRequest,
     DMOpenFederationRequest,
     E2EEKeyPackageClaimRequest,
+    E2EERoomOperationStatusRequest,
     E2EERoomProxyRequest,
     EventEnvelope,
     GuildHistoryExportRequest,
@@ -781,7 +790,7 @@ async def _apply_authoritative_guild_leave(
     user_id: int,
     user_domain: str,
     missing_ok: bool,
-) -> bool:
+) -> tuple[bool, list[tuple[int, str]]]:
     """Apply an idempotent remote leave at the guild authority."""
 
     member = await session.get(
@@ -790,7 +799,7 @@ async def _apply_authoritative_guild_leave(
     )
     if member is None:
         if missing_ok:
-            return False
+            return False, []
         raise HTTPException(status_code=404, detail={"code": "NOT_A_GUILD_MEMBER"})
     if (guild.owner_id, guild.owner_domain) == (user_id, user_domain):
         raise HTTPException(
@@ -800,6 +809,20 @@ async def _apply_authoritative_guild_leave(
     owner = await session.get(User, (guild.owner_id, guild.owner_domain))
     if owner is None or not owner.is_local:
         raise RuntimeError("local guild owner is unavailable")
+    revoked_installations = await revoke_installations_for_guild_member(
+        session,
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        user_id=user_id,
+        user_domain=user_domain,
+    )
+    deleted_role_refs = await cleanup_installation_roles(
+        session,
+        settings,
+        guild,
+        owner,
+        revoked_installations,
+    )
     await session.delete(member)
     await queue_guild_access_revocation(
         session,
@@ -818,7 +841,7 @@ async def _apply_authoritative_guild_leave(
         {"user": {"id": str(user_id), "origin_domain": user_domain}},
         snapshot_required=True,
     )
-    return True
+    return True, deleted_role_refs
 
 
 async def remote_guild_snapshot_is_pending(
@@ -1074,6 +1097,7 @@ async def process_event(
     history_access_changed = False
     authoritative_leave_guild: Guild | None = None
     authoritative_leave_target: tuple[int, str] | None = None
+    authoritative_leave_role_refs: list[tuple[int, str]] = []
     replicated_group_call: dict[str, Any] | None = None
     e2ee_policy_channels: list[Channel] = []
     durably_committed = False
@@ -1506,6 +1530,22 @@ async def process_event(
                 event_timestamp_ms=envelope.ts,
                 event_origin=envelope.origin,
             )
+            if replicated_message is None:
+                replicated_message = await session.get(
+                    Message,
+                    (
+                        database_snowflake(raw_message.get("id"), "DM message id"),
+                        normalize_domain(str(raw_message.get("origin_domain", ""))),
+                    ),
+                )
+            if replicated_message is None:
+                raise RuntimeError("replicated DM message disappeared")
+            await apply_e2ee_control_metadata(
+                session,
+                replicated_message,
+                envelope.content.get("e2ee_control"),
+                expected_authority=envelope.origin,
+            )
             if envelope.type == "dm.group.message.proposed":
                 if message_conversation is None:
                     raise RuntimeError("validated group DM proposal lost its conversation")
@@ -1590,6 +1630,22 @@ async def process_event(
                 )
             except GuildSequenceGap as exc:
                 raise FederationResyncRetry from exc
+            if replicated_guild_message is None:
+                replicated_guild_message = await session.get(
+                    Message,
+                    (
+                        database_snowflake(raw_message.get("id"), "guild message id"),
+                        normalize_domain(str(raw_message.get("origin_domain", ""))),
+                    ),
+                )
+            if replicated_guild_message is None:
+                raise RuntimeError("replicated guild message disappeared")
+            await apply_e2ee_control_metadata(
+                session,
+                replicated_guild_message,
+                envelope.content.get("e2ee_control"),
+                expected_authority=envelope.origin,
+            )
         elif envelope.type == "guild.member.add":
             guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
             guild_domain = str(envelope.context.get("guild_domain"))
@@ -1638,16 +1694,18 @@ async def process_event(
             if home_leave_guild is None:
                 raise ValueError("guild leave request references an unknown guild")
             leave_user_id = database_snowflake(envelope.actor.id, "guild leave user id")
-            if await _apply_authoritative_guild_leave(
+            leave_applied, deleted_role_refs = await _apply_authoritative_guild_leave(
                 session,
                 settings,
                 home_leave_guild,
                 user_id=leave_user_id,
                 user_domain=envelope.actor.domain,
                 missing_ok=True,
-            ):
+            )
+            if leave_applied:
                 authoritative_leave_guild = home_leave_guild
                 authoritative_leave_target = (leave_user_id, envelope.actor.domain)
+                authoritative_leave_role_refs = deleted_role_refs
         elif envelope.type in GUILD_MUTATION_EVENT_TYPES | {"guild.event.redacted"}:
             guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
             guild_domain = normalize_domain(str(envelope.context.get("guild_domain", "")))
@@ -1819,7 +1877,9 @@ async def process_event(
             proxy_content = envelope.content.get("content")
             proxy_e2ee = validate_e2ee_envelope(envelope.content.get("e2ee"))
             if proxy_e2ee is not None and (
-                proxy_e2ee.get("version") != 2 or proxy_e2ee.get("operation") != "create"
+                proxy_e2ee.get("version") != 2
+                or proxy_e2ee.get("operation") != "create"
+                or "target_message" in proxy_e2ee
             ):
                 raise ValueError("proxy encrypted write operation is invalid")
             if proxy_content is not None and (
@@ -2292,6 +2352,11 @@ async def process_event(
             )
         if authoritative_leave_guild is not None and authoritative_leave_target is not None:
             await wake_queued_guild_federation(authoritative_leave_guild)
+            await publish_deleted_installation_roles(
+                redis,
+                authoritative_leave_guild,
+                authoritative_leave_role_refs,
+            )
             await publish_dispatch(
                 redis,
                 guild_topic(authoritative_leave_guild.origin_domain, authoritative_leave_guild.id),
@@ -2986,7 +3051,11 @@ async def federation_e2ee_key_packages_claim(
         capacity=1_000,
         refill_per_minute=1_000,
     )
-    if payload.channel_domain != principal.origin or payload.target_domain != settings.domain:
+    if (
+        payload.channel_domain != principal.origin
+        or payload.operation_domain != principal.origin
+        or payload.target_domain != settings.domain
+    ):
         raise HTTPException(status_code=403, detail={"code": "KAED_E2EE_AUTHORITY_MISMATCH"})
     channel = await session.get(
         Channel,
@@ -2998,15 +3067,22 @@ async def federation_e2ee_key_packages_claim(
     claimant_ref = (int(payload.claimant_id), payload.claimant_domain)
     target_ref = (target.id, target.origin_domain)
     if channel.guild_id is not None:
-        target_member = await session.get(
-            GuildMember,
-            (channel.guild_id, channel.guild_domain, target.id, target.origin_domain),
+        guild = await session.get(Guild, (channel.guild_id, channel.guild_domain))
+        claimant = await session.get(User, claimant_ref)
+        if guild is None or claimant is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "KAED_E2EE_TARGET_NOT_FOUND"},
+            )
+        await require_guild_key_package_claim_visibility(
+            session,
+            redis,
+            guild,
+            channel,
+            claimant,
+            target,
         )
-        claimant_member = await session.get(
-            GuildMember,
-            (channel.guild_id, channel.guild_domain, claimant_ref[0], claimant_ref[1]),
-        )
-        authorized = target_member is not None and claimant_member is not None
+        authorized = True
     else:
         target_participant = await session.get(
             DMParticipant,
@@ -3023,6 +3099,9 @@ async def federation_e2ee_key_packages_claim(
     packages = await claim_local_room_key_packages(
         session,
         [target],
+        operation_id=payload.operation_id,
+        operation_domain=payload.operation_domain,
+        channel_ref=(channel.id, channel.origin_domain),
         claimant_ref=claimant_ref,
         excluded_device_id=excluded,
         max_devices=payload.max_devices,
@@ -3031,8 +3110,45 @@ async def federation_e2ee_key_packages_claim(
     return {"key_packages": packages}
 
 
+async def require_guild_key_package_claim_visibility(
+    session: AsyncSession,
+    redis: Redis,
+    guild: Guild,
+    channel: Channel,
+    claimant: User,
+    target: User,
+) -> None:
+    """Require both sides of a guild package claim to see the exact channel."""
+
+    try:
+        await require_permissions(
+            session,
+            redis,
+            guild,
+            claimant,
+            Permission.VIEW_CHANNEL,
+            channel=channel,
+        )
+        await require_permissions(
+            session,
+            redis,
+            guild,
+            target,
+            Permission.VIEW_CHANNEL,
+            channel=channel,
+        )
+    except HTTPException:
+        # Package availability is sensitive membership and channel-visibility
+        # metadata. Keep every authorization miss indistinguishable from a
+        # missing target, including malformed synchronized-parent state.
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "KAED_E2EE_TARGET_NOT_FOUND"},
+        ) from None
+
+
 async def federated_e2ee_actor(
-    payload: E2EERoomProxyRequest,
+    payload: E2EERoomProxyRequest | E2EERoomOperationStatusRequest,
     principal: FederationPrincipal,
     session: AsyncSession,
     settings: Settings,
@@ -3071,7 +3187,10 @@ async def federation_e2ee_room_propose(
     auth = await federated_e2ee_actor(payload, principal, session, settings)
     return await propose_room_encryption(
         EntityRef(f"{payload.channel_id}@{payload.channel_domain}"),
-        RoomProposalRequest(sender_device_id=payload.sender_device_id),
+        RoomProposalRequest(
+            operation_id=payload.operation_id,
+            sender_device_id=payload.sender_device_id,
+        ),
         auth,
         session,
         redis,
@@ -3090,16 +3209,25 @@ async def federation_e2ee_room_activate(
 ) -> dict[str, object]:
     await enforce_e2ee_room_proxy_limit(redis, principal)
     auth = await federated_e2ee_actor(payload, principal, session, settings)
+    if payload.vault_attested is not True:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "E2EE_ACCOUNT_VAULT_ATTESTATION_REQUIRED"},
+        )
     activation = RoomActivationRequest.model_validate(
         {
+            "operation_id": payload.operation_id,
             "sender_device_id": payload.sender_device_id,
             "policy_generation": payload.policy_generation,
             "epoch": payload.epoch,
+            "group_id": payload.group_id,
             "commit": payload.commit,
             "welcome": payload.welcome,
+            "prepared_vault_revision": payload.prepared_vault_revision,
+            "prepared_vault_digest": payload.prepared_vault_digest,
         }
     )
-    return await activate_room_encryption(
+    return await activate_room_encryption_attested(
         EntityRef(f"{payload.channel_id}@{payload.channel_domain}"),
         activation,
         auth,
@@ -3122,7 +3250,10 @@ async def federation_e2ee_room_rekey_propose(
     auth = await federated_e2ee_actor(payload, principal, session, settings)
     return await propose_room_rekey(
         EntityRef(f"{payload.channel_id}@{payload.channel_domain}"),
-        RoomProposalRequest(sender_device_id=payload.sender_device_id),
+        RoomProposalRequest(
+            operation_id=payload.operation_id,
+            sender_device_id=payload.sender_device_id,
+        ),
         auth,
         session,
         redis,
@@ -3141,23 +3272,51 @@ async def federation_e2ee_room_rekey_activate(
 ) -> dict[str, object]:
     await enforce_e2ee_room_proxy_limit(redis, principal)
     auth = await federated_e2ee_actor(payload, principal, session, settings)
+    if payload.vault_attested is not True:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "E2EE_ACCOUNT_VAULT_ATTESTATION_REQUIRED"},
+        )
     activation = RoomRekeyActivationRequest.model_validate(
         {
-            "proposal_id": payload.proposal_id,
+            "operation_id": payload.operation_id,
             "sender_device_id": payload.sender_device_id,
             "policy_generation": payload.policy_generation,
             "epoch": payload.epoch,
+            "group_id": payload.group_id,
             "commit": payload.commit,
             "welcome": payload.welcome,
+            "prepared_vault_revision": payload.prepared_vault_revision,
+            "prepared_vault_digest": payload.prepared_vault_digest,
         }
     )
-    return await activate_room_rekey(
+    return await activate_room_rekey_attested(
         EntityRef(f"{payload.channel_id}@{payload.channel_domain}"),
         activation,
         auth,
         session,
         redis,
         snowflake,
+        settings,
+    )
+
+
+@router.post("/_kaede/v1/e2ee/rooms/operations/status")
+async def federation_e2ee_room_operation_status(
+    payload: E2EERoomOperationStatusRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    await enforce_e2ee_room_proxy_limit(redis, principal)
+    auth = await federated_e2ee_actor(payload, principal, session, settings)
+    return await room_encryption_operation_status_for_actor(
+        EntityRef(f"{payload.channel_id}@{payload.channel_domain}"),
+        payload.operation_id,
+        auth,
+        session,
+        redis,
         settings,
     )
 
@@ -3237,6 +3396,12 @@ async def federation_dm_history_page(
     conditions = [
         Message.channel_id == conversation.id,
         Message.channel_domain == conversation.origin_domain,
+        ~exists(
+            select(E2EEControlRecord.id).where(
+                E2EEControlRecord.id == Message.id,
+                E2EEControlRecord.origin_domain == Message.origin_domain,
+            )
+        ),
         # A peer may retrieve only bodies authored away from that peer. Its
         # locally-authored rows are durable source data on that home and are
         # merged from its own database; the authority is not trusted to echo
@@ -4078,7 +4243,7 @@ async def federation_guild_leave(
     if guild is None:
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
     user_id = database_snowflake(payload.user.id, "guild leave user id")
-    await _apply_authoritative_guild_leave(
+    _, deleted_role_refs = await _apply_authoritative_guild_leave(
         session,
         settings,
         guild,
@@ -4088,6 +4253,7 @@ async def federation_guild_leave(
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     await publish_dispatch(
         redis,
         guild_topic(guild.origin_domain, guild.id),

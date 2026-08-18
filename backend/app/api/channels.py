@@ -948,7 +948,9 @@ async def create_message(
     if channel.encryption_mode == "e2ee":
         await require_owned_e2ee_sender_device(session, auth.user, payload.e2ee)
     if channel.encryption_mode == "e2ee" and (
-        not isinstance(payload.e2ee, dict) or payload.e2ee.get("operation") != "create"
+        not isinstance(payload.e2ee, dict)
+        or payload.e2ee.get("operation") != "create"
+        or "target_message" in payload.e2ee
     ):
         raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_INVALID"})
     expected_attachment_mode = "e2ee" if channel.encryption_mode == "e2ee" else "plaintext"

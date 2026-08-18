@@ -109,13 +109,16 @@ class ReportCreate(BaseModel):
     ]
     description: str | None = Field(default=None, max_length=2000)
     message_ref: EntityRef | None = None
-    disclosed_content: str | None = Field(default=None, min_length=1, max_length=4000)
+    disclosed_content: str | None = Field(default=None, max_length=4000)
     disclosure_acknowledged: bool = False
 
     @field_validator("disclosed_content")
     @classmethod
     def _meaningful_disclosure(cls, value: str | None) -> str | None:
-        if value is not None and not value.strip():
+        # Exact empty text is valid evidence for an E2EE attachment-only
+        # message. It remains distinct from None (decryption unavailable).
+        # Non-empty whitespace is never meaningful reporter evidence.
+        if value is not None and value != "" and not value.strip():
             raise ValueError("disclosed content must contain a non-whitespace character")
         return value
 
@@ -192,6 +195,12 @@ def reporter_report_payload(report: AbuseReport) -> dict[str, object]:
 def report_payload(report: AbuseReport) -> dict[str, object]:
     return {
         "id": str(report.id),
+        "source": report.source,
+        "reporter_ref": (
+            f"{report.reporter_id}@{report.reporter_domain}"
+            if report.reporter_id is not None and report.reporter_domain is not None
+            else None
+        ),
         "target_type": report.target_type,
         "target_ref": report.target_ref,
         "category": report.category,

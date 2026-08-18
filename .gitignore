@@ -21,6 +21,7 @@ frontend/.pnpm-store/
 /.pnpm-store/
 frontend/.svelte-kit/
 frontend/build/
+frontend/build-prevalidation/
 frontend/coverage/
 deploy/data/
 deploy/compose.generated.yml
@@ -49,3 +50,8 @@ mobile/ios/Runner/GoogleService-Info.plist
 # locked Rust workspace.
 mobile/android/app/src/main/jniLibs/
 mobile/ios/KaedeE2EE.xcframework/
+tmp/
+
+# Microsoft PhotoDNA SDK is licensed operator material. Keep it local and
+# mount it read-only at runtime; never include it in source distributions.
+vendor/photodna-sdk/

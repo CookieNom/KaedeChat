@@ -11,6 +11,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.api.channels as channels_api
+import app.api.federation as federation_api
 import app.api.media as media_api
 from app.api.channels import (
     dm_delivery_statuses,
@@ -20,6 +21,7 @@ from app.api.channels import (
 from app.api.federation import (
     _dm_history_media_scope,
     _federation_media_attachment,
+    federation_dm_history_page,
 )
 from app.api.media import authorized_dm_history_media
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
@@ -33,6 +35,7 @@ from app.db.models import (
     Message,
     RemoteMediaCache,
     RemoteMediaTombstone,
+    User,
 )
 from app.federation.dm_history import (
     dm_history_page_is_complete,
@@ -175,6 +178,104 @@ def test_history_merge_preserves_local_body_and_attachments() -> None:
     merged = merge_dm_history_messages([remote], [local], limit=50)
 
     assert merged == [local]
+
+
+@pytest.mark.asyncio
+async def test_authority_dm_history_filters_controls_before_spanning_page_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = settings()
+    conversation = DMConversation(
+        id=100,
+        origin_domain=configured.domain,
+        authority_domain=configured.domain,
+        pair_key="a" * 64,
+        type="direct",
+    )
+    now = datetime.now(UTC)
+    messages = [
+        Message(
+            id=identifier,
+            origin_domain=configured.domain,
+            channel_id=conversation.id,
+            channel_domain=conversation.origin_domain,
+            author_id=200,
+            author_domain=configured.domain,
+            content=f"application-{identifier}",
+            created_at=now - timedelta(seconds=index),
+        )
+        # Durable control rows at 499 and 497 must not consume the page. The
+        # application page therefore spans those gaps and still returns 3
+        # rows for a requested limit of 2 (two selected plus has-more probe).
+        for index, identifier in enumerate((500, 498, 496))
+    ]
+    author = User(
+        id=200,
+        origin_domain=configured.domain,
+        is_local=True,
+        username="author",
+        display_name="Author",
+        profile_version=1,
+        e2ee_device_generation=0,
+        profile_resolved=True,
+        account_type="human",
+    )
+    captured: list[object] = []
+    scalar_batches: list[list[object]] = [messages, [author], []]
+
+    async def get(model: object, key: object) -> object | None:
+        if model is DMConversation and key == (100, configured.domain):
+            return conversation
+        return None
+
+    async def scalars(statement: object) -> list[object]:
+        captured.append(statement)
+        return scalar_batches.pop(0)
+
+    session = cast(
+        AsyncSession,
+        SimpleNamespace(
+            get=get,
+            scalar=AsyncMock(return_value=200),
+            scalars=scalars,
+        ),
+    )
+    monkeypatch.setattr(
+        federation_api,
+        "enforce_federation_route_rate_limit",
+        AsyncMock(),
+    )
+
+    result = await federation_dm_history_page(
+        conversation_id=cast(Any, 100),
+        before_id=None,
+        before_domain=None,
+        limit=2,
+        requester_id=None,
+        requester_domain=None,
+        principal=FederationPrincipal("requester.example", "ed25519:test"),
+        session=session,
+        redis=cast(Any, object()),
+        settings=configured,
+    )
+
+    sql = str(
+        captured[0].compile(  # type: ignore[union-attr]
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": False},
+        )
+    )
+    assert "e2ee_control_records" in sql
+    assert "NOT (EXISTS" in sql
+    assert [item["id"] for item in cast(list[dict[str, object]], result["messages"])] == [
+        "500",
+        "498",
+    ]
+    assert result["next_before"] == {
+        "id": "498",
+        "origin_domain": configured.domain,
+    }
+    assert result["complete"] is False
 
 
 def test_minimal_eviction_prefix_keeps_every_recent_row_that_fits() -> None:
@@ -552,7 +653,11 @@ async def test_expired_history_media_is_reauthorized_and_returns_fresh_scoped_pa
 
     session = cast(
         AsyncSession,
-        SimpleNamespace(get=get, commit=AsyncMock()),
+        SimpleNamespace(
+            get=get,
+            scalar=AsyncMock(return_value=None),
+            commit=AsyncMock(),
+        ),
     )
     authorization = AsyncMock(
         return_value=httpx.Response(

@@ -103,6 +103,7 @@
     initializeE2EE,
     type KaedeE2EEClient
   } from '$lib/e2ee/client';
+  import { confirmEncryptedRoomJoin } from '$lib/e2ee/disclosures';
   import { uploadEncryptedChannelFile } from '$lib/e2ee/media';
   import { uploadChannelFile, type PendingUpload } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
@@ -225,6 +226,7 @@
   let dispatchBuffer: Dispatch[] | null = null;
   let uploads = $state<PendingUpload[]>([]);
   let e2eeClient = $state<KaedeE2EEClient | null>(null);
+  let e2eeSafetyNumber = $state('');
   let fileInput = $state<HTMLInputElement | null>(null);
   let composerInput = $state<HTMLTextAreaElement | null>(null);
   let autocomplete = $state<{ handleKeydown(event: KeyboardEvent): boolean } | null>(null);
@@ -2549,13 +2551,25 @@
       }
       let orderedMessages = loadedMessages.reverse().sort(compareMessages);
       if (loadedChannel?.encryption_mode === 'e2ee') {
+        if (
+          !confirmEncryptedRoomJoin(
+            entityRef(loadedCurrentUser),
+            entityRef(loadedChannel),
+            loadedChannel.type === 2 ? 'media' : 'messages'
+          )
+        ) {
+          window.location.assign(resolve('/home'));
+          return;
+        }
         const client = await initializeE2EE(loadedCurrentUser);
         if (routeGeneration !== loadGeneration || targetChannel !== channelId) return;
         e2eeClient = client;
         orderedMessages = await decryptConversationMessages(client, loadedChannel, orderedMessages);
         pinnedMessages = await decryptConversationMessages(client, loadedChannel, loadedPins);
+        e2eeSafetyNumber = await client.safetyNumber(loadedChannel).catch(() => '');
       } else {
         e2eeClient = null;
+        e2eeSafetyNumber = '';
       }
       setMessages(
         preserveMessages
@@ -2589,6 +2603,22 @@
         error = 'Live updates resumed, but channel state could not be refreshed.';
       }
     }
+  }
+
+  async function showEncryptionInfo() {
+    if (!channel || channel.encryption_mode !== 'e2ee') return;
+    if (currentUser) {
+      try {
+        const client = e2eeClient ?? (await initializeE2EE(currentUser));
+        e2eeClient = client;
+        e2eeSafetyNumber = await client.safetyNumber(channel);
+      } catch {
+        // The cached number or an explicit unavailable state remains useful.
+      }
+    }
+    window.alert(
+      `End-to-end encryption is on, but participant identities remain unverified until this safety number is compared with the other members using a separate trusted channel. A match detects first-contact key substitution by an actively malicious instance. Compare it again after membership or identity changes:\n\n${e2eeSafetyNumber || 'Safety number unavailable on this device.'}`
+    );
   }
 
   async function loadEarlier() {
@@ -3802,6 +3832,18 @@
         </div>
       </div>
       <div class="channel-header-actions">
+        {#if channel?.encryption_mode === 'e2ee'}
+          <button
+            class="icon-button active e2ee-status-button"
+            type="button"
+            aria-label="End-to-end encryption is on; view safety number"
+            title="End-to-end encrypted · identities unverified until the safety number is compared"
+            onclick={showEncryptionInfo}
+          >
+            <Icon name="lock" size={18} />
+            <span>{channel.encryption_state === 'active' ? 'Encrypted' : 'Rekey needed'}</span>
+          </button>
+        {/if}
         <MessageSearch
           bind:open={messageSearchOpen}
           scope="guild"

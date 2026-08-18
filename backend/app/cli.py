@@ -26,6 +26,7 @@ from app.core.snowflake import SnowflakeGenerator, WorkerLease
 from app.db.bot_models import InstanceAdminGrant
 from app.db.models import User
 from app.db.session import create_engine_and_sessionmaker
+from app.media.photodna_sdk import PhotoDNASDKError, validate_sdk_installation
 
 cli = typer.Typer(no_args_is_help=True)
 
@@ -254,6 +255,13 @@ def preflight(
     settings = get_settings()
     try:
         validate_external_secrets(settings.environment, os.environ, include_voice=voice)
+        if settings.photodna_enabled:
+            if settings.photodna_sdk_root is None:
+                raise ValueError("the PhotoDNA SDK root is not configured")
+            try:
+                validate_sdk_installation(settings.photodna_sdk_root)
+            except PhotoDNASDKError as exc:
+                raise ValueError(str(exc)) from exc
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo("configuration preflight passed")

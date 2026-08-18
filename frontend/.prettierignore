@@ -1,5 +1,6 @@
 .svelte-kit/
 build/
+build-prevalidation/
 coverage/
 node_modules/
 pnpm-lock.yaml

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cryptography/cryptography.dart';
@@ -21,6 +22,136 @@ import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
 
 void main() {
+  group('E2EE reset recovery authorization', () {
+    const accountRef = '17@alpha.example';
+    final authorization = 'ker_${List<String>.filled(43, 'a').join()}';
+
+    test('accepts only the exact session-recovery response contract', () {
+      final response = <String, Object?>{
+        'status': 'encryption_reset',
+        'account_ref': accountRef,
+        'recovery_authorization': authorization,
+        'recovery_authorization_expires_in': 300,
+      };
+
+      expect(
+        e2eeRecoveryAuthorizationFromReset(response, accountRef),
+        authorization,
+      );
+      expect(
+        () => e2eeRecoveryAuthorizationFromReset(
+          <String, Object?>{...response, 'unexpected': true},
+          accountRef,
+        ),
+        throwsFormatException,
+      );
+      expect(
+        () => e2eeRecoveryAuthorizationFromReset(
+          <String, Object?>{
+            ...response,
+            'recovery_authorization': 'ker_short',
+          },
+          accountRef,
+        ),
+        throwsFormatException,
+      );
+      expect(
+        () => e2eeRecoveryAuthorizationFromReset(
+          <String, Object?>{
+            ...response,
+            'recovery_authorization_expires_in': 301,
+          },
+          accountRef,
+        ),
+        throwsFormatException,
+      );
+      expect(
+        () => e2eeRecoveryAuthorizationFromReset(response, '18@alpha.example'),
+        throwsFormatException,
+      );
+    });
+
+    test('runs destructive reset work only after the active client closes',
+        () async {
+      final events = <String>[];
+      final allowClose = Completer<void>();
+      final reset = runE2eeResetAfterQuiescence(
+        queueTeardown: ({afterClose}) async {
+          events.add('closing');
+          await allowClose.future;
+          events.add('closed');
+          await afterClose?.call();
+        },
+        resetAndReplace: () async {
+          events.add('reset');
+        },
+      );
+
+      await Future<void>.delayed(Duration.zero);
+      expect(events, <String>['closing']);
+      allowClose.complete();
+      await reset;
+      expect(events, <String>['closing', 'closed', 'reset']);
+    });
+  });
+
+  group('message report evidence', () {
+    KaedeMessage encryptedMessage(String? content) => KaedeMessage.fromJson(
+          <String, Object?>{
+            'id': '11',
+            'origin_domain': 'alpha.example',
+            'channel_id': '10',
+            'channel_domain': 'alpha.example',
+            'author_id': '2',
+            'author_domain': 'alpha.example',
+            'content': content,
+            'e2ee': <String, Object?>{'version': 2, 'ciphertext': 'opaque'},
+            'message_type': 0,
+            'created_at': '2026-08-18T12:00:00Z',
+          },
+        );
+
+    test('distinguishes decrypt-unavailable from decrypted empty text', () {
+      final unavailable = encryptedMessage(null);
+      final attachmentOnly = encryptedMessage('');
+
+      expect(encryptedReportEvidenceAvailable(unavailable), isFalse);
+      expect(encryptedReportEvidenceAvailable(attachmentOnly), isTrue);
+      expect(
+        canSubmitMessageReport(
+          attachmentOnly,
+          disclosureAcknowledged: false,
+        ),
+        isFalse,
+      );
+      expect(
+        canSubmitMessageReport(
+          attachmentOnly,
+          disclosureAcknowledged: true,
+        ),
+        isTrue,
+      );
+
+      final payload = messageReportRequestData(
+        attachmentOnly.ref,
+        category: 'illegal_content',
+        disclosedContent: attachmentOnly.content,
+        disclosureAcknowledged: true,
+      );
+      expect(payload, containsPair('disclosed_content', ''));
+      expect(payload, containsPair('disclosure_acknowledged', true));
+
+      final unavailablePayload = messageReportRequestData(
+        unavailable.ref,
+        category: 'illegal_content',
+        disclosedContent: unavailable.content,
+        disclosureAcknowledged: true,
+      );
+      expect(unavailablePayload, isNot(contains('disclosed_content')));
+      expect(unavailablePayload, isNot(contains('disclosure_acknowledged')));
+    });
+  });
+
   group('message reaction recents', () {
     test('ranks frequently used emoji and breaks ties by recency', () {
       expect(

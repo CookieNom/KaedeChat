@@ -126,6 +126,8 @@ class RemoteUserProfile(BaseModel):
 class E2EEKeyPackageClaimRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    operation_id: str = Field(pattern=r"^keo_[A-Za-z0-9_-]{43}$")
+    operation_domain: FederationDomain
     channel_id: SnowflakeString
     channel_domain: FederationDomain
     claimant_id: SnowflakeString
@@ -147,26 +149,55 @@ class E2EERoomProxyRequest(BaseModel):
     channel_id: SnowflakeString
     channel_domain: FederationDomain
     actor: RemoteUserProfile
+    operation_id: str = Field(pattern=r"^keo_[A-Za-z0-9_-]{43}$")
     sender_device_id: str = Field(pattern=r"^ked_[A-Za-z0-9_-]{43}$")
-    proposal_id: str | None = Field(
-        default=None,
-        min_length=32,
-        max_length=64,
-        pattern=r"^[A-Za-z0-9_-]+$",
-    )
     policy_generation: SnowflakeString | None = None
     epoch: SnowflakeString | None = None
+    group_id: str | None = Field(
+        default=None,
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
     commit: str | None = Field(default=None, min_length=2, max_length=87_384)
     welcome: str | None = Field(default=None, min_length=2, max_length=87_384)
+    prepared_vault_revision: SnowflakeString | None = None
+    prepared_vault_digest: str | None = Field(
+        default=None,
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
+    vault_attested: bool | None = None
 
     @model_validator(mode="after")
     def complete_activation(self) -> E2EERoomProxyRequest:
-        activation = (self.policy_generation, self.epoch, self.commit, self.welcome)
+        activation = (
+            self.policy_generation,
+            self.epoch,
+            self.group_id,
+            self.commit,
+            self.welcome,
+            self.prepared_vault_revision,
+            self.prepared_vault_digest,
+            self.vault_attested,
+        )
         if any(item is not None for item in activation) and any(
             item is None for item in activation
         ):
             raise ValueError("room activation context is incomplete")
+        if self.vault_attested is False:
+            raise ValueError("room activation vault attestation is invalid")
         return self
+
+
+class E2EERoomOperationStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel_id: SnowflakeString
+    channel_domain: FederationDomain
+    actor: RemoteUserProfile
+    operation_id: str = Field(pattern=r"^keo_[A-Za-z0-9_-]{43}$")
 
 
 class RelationshipEventContent(BaseModel):

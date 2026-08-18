@@ -198,6 +198,27 @@ export class KaedeMlsClient {
     }
   }
   /**
+   * @param {Uint8Array} key_package
+   * @returns {KaedeMlsKeyPackageIdentity}
+   */
+  inspectKeyPackage(key_package) {
+    try {
+      const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+      const ptr0 = passArray8ToWasm0(key_package, wasm.__wbindgen_export);
+      const len0 = WASM_VECTOR_LEN;
+      wasm.kaedemlsclient_inspectKeyPackage(retptr, this.__wbg_ptr, ptr0, len0);
+      var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+      var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+      var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+      if (r2) {
+        throw takeObject(r1);
+      }
+      return KaedeMlsKeyPackageIdentity.__wrap(r0);
+    } finally {
+      wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+  }
+  /**
    * @param {Uint8Array} welcome
    * @returns {Uint8Array}
    */
@@ -400,6 +421,59 @@ export class KaedeMlsClient {
   }
 }
 if (Symbol.dispose) KaedeMlsClient.prototype[Symbol.dispose] = KaedeMlsClient.prototype.free;
+
+export class KaedeMlsKeyPackageIdentity {
+  static __wrap(ptr) {
+    const obj = Object.create(KaedeMlsKeyPackageIdentity.prototype);
+    obj.__wbg_ptr = ptr;
+    KaedeMlsKeyPackageIdentityFinalization.register(obj, obj.__wbg_ptr, obj);
+    return obj;
+  }
+  __destroy_into_raw() {
+    const ptr = this.__wbg_ptr;
+    this.__wbg_ptr = 0;
+    KaedeMlsKeyPackageIdentityFinalization.unregister(this);
+    return ptr;
+  }
+  free() {
+    const ptr = this.__destroy_into_raw();
+    wasm.__wbg_kaedemlskeypackageidentity_free(ptr, 0);
+  }
+  /**
+   * @returns {Uint8Array}
+   */
+  get credential() {
+    try {
+      const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+      wasm.kaedemlskeypackageidentity_credential(retptr, this.__wbg_ptr);
+      var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+      var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+      var v1 = getArrayU8FromWasm0(r0, r1).slice();
+      wasm.__wbindgen_export4(r0, r1 * 1, 1);
+      return v1;
+    } finally {
+      wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+  }
+  /**
+   * @returns {Uint8Array}
+   */
+  get signatureKey() {
+    try {
+      const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+      wasm.kaedemlskeypackageidentity_signatureKey(retptr, this.__wbg_ptr);
+      var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+      var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+      var v1 = getArrayU8FromWasm0(r0, r1).slice();
+      wasm.__wbindgen_export4(r0, r1 * 1, 1);
+      return v1;
+    } finally {
+      wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+  }
+}
+if (Symbol.dispose)
+  KaedeMlsKeyPackageIdentity.prototype[Symbol.dispose] = KaedeMlsKeyPackageIdentity.prototype.free;
 
 export class KaedeMlsPendingCommit {
   static __wrap(ptr) {
@@ -704,6 +778,10 @@ const KaedeMlsClientFinalization =
   typeof FinalizationRegistry === 'undefined'
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry((ptr) => wasm.__wbg_kaedemlsclient_free(ptr, 1));
+const KaedeMlsKeyPackageIdentityFinalization =
+  typeof FinalizationRegistry === 'undefined'
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry((ptr) => wasm.__wbg_kaedemlskeypackageidentity_free(ptr, 1));
 const KaedeMlsPendingCommitFinalization =
   typeof FinalizationRegistry === 'undefined'
     ? { register: () => {}, unregister: () => {} }

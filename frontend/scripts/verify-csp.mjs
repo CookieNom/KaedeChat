@@ -11,6 +11,18 @@ if (!meta) throw new Error('static SPA fallback is missing its generated CSP met
 
 const policy = meta[1];
 if (!policy.includes('script-src')) throw new Error('generated CSP has no script-src directive');
+const normalizedPolicy = policy.replaceAll('&#39;', "'");
+const scriptPolicy = normalizedPolicy
+  .split(';')
+  .map((directive) => directive.trim())
+  .find((directive) => directive === 'script-src' || directive.startsWith('script-src '));
+const scriptTokens = new Set(scriptPolicy?.split(/\s+/).slice(1) ?? []);
+if (!scriptTokens.has("'wasm-unsafe-eval'")) {
+  throw new Error('generated script-src does not permit the OpenMLS WebAssembly runtime');
+}
+if (scriptTokens.has("'unsafe-eval'")) {
+  throw new Error('generated script-src broadly permits JavaScript unsafe-eval');
+}
 if (!policy.includes('base-uri &#39;none&#39;') && !policy.includes("base-uri 'none'")) {
   throw new Error('generated CSP does not disable base URI injection');
 }
@@ -90,6 +102,25 @@ if (!edgePolicy || !edgePolicy.includes("frame-ancestors 'none'")) {
 }
 if (/\b(?:default-src|script-src|style-src)\b/.test(edgePolicy)) {
   throw new Error('Caddy resource CSP would override SvelteKit build-specific hashes');
+}
+
+const tauriConfig = JSON.parse(
+  await readFile(new URL('../../desktop/tauri/src-tauri/tauri.conf.json', import.meta.url), 'utf8')
+);
+const tauriPolicy = tauriConfig?.app?.security?.csp;
+if (typeof tauriPolicy !== 'string') {
+  throw new Error('Tauri is missing its content security policy');
+}
+const tauriScriptPolicy = tauriPolicy
+  .split(';')
+  .map((directive) => directive.trim())
+  .find((directive) => directive === 'script-src' || directive.startsWith('script-src '));
+const tauriScriptTokens = new Set(tauriScriptPolicy?.split(/\s+/).slice(1) ?? []);
+if (!tauriScriptTokens.has("'wasm-unsafe-eval'")) {
+  throw new Error('Tauri script-src does not permit the OpenMLS WebAssembly runtime');
+}
+if (tauriScriptTokens.has("'unsafe-eval'")) {
+  throw new Error('Tauri script-src broadly permits JavaScript unsafe-eval');
 }
 
 process.stdout.write(`CSP verification passed (${inlineScripts.length} inline script hash)\n`);

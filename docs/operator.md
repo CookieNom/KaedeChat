@@ -166,13 +166,14 @@ custom-build requirements.
 
 ## End-to-end encryption activation
 
-New encrypted-room activation is fail-closed by default. Complete the release
-gates and client compatibility checks in [the E2EE protocol and rollout
-guide](e2ee.md), then set `KAEDE_E2EE_ACTIVATION_ENABLED=true` on every
-participating home. Mixed settings safely reject new proposals; they never
-downgrade an active encrypted room. Turning the flag off later hides new
-activation but leaves rekey, recovery, selective-disclosure reports, and active
-encrypted rooms operational.
+New encrypted-room activation is enabled by default and fails closed whenever
+the room, client, or participating home cannot satisfy the protocol. Before a
+public launch, complete the release gates and client compatibility checks in
+[the E2EE protocol and rollout guide](e2ee.md), or explicitly set
+`KAEDE_E2EE_ACTIVATION_ENABLED=false` on every participating home. Mixed
+settings safely reject new proposals; they never downgrade an active encrypted
+room. Turning the flag off later hides new activation but leaves rekey,
+recovery, selective-disclosure reports, and active encrypted rooms operational.
 
 Set the same `KAEDE_EDGE_SECRET` in `.env` and in the nginx
 `X-Kaede-Edge-Secret` header. It must differ from `KAEDE_PROXY_SECRET`. The
@@ -262,6 +263,69 @@ request bodies instead of buffering them on host disk. If you raise
 `KAEDE_MEDIA_MAX_ATTACHMENT_BYTES`, update and review the media-server
 `client_max_body_size` too; the application ticket and signed PUT length are
 still the authoritative per-object checks.
+
+## Microsoft PhotoDNA image matching
+
+PhotoDNA is optional because Microsoft distributes its Edge Hash generator
+under a separate confidential license. Do not add the SDK archive, native
+libraries, Python wrapper, WebAssembly build, or generated hashes to this
+repository, an image, an artifact, or a log. Extract the licensed SDK on each
+host into an operator-owned directory whose root contains `clientlibrary/python`
+and the platform native library. Keep other/world permissions closed and grant
+read/traverse access only to the operator's primary group (directories `0750`,
+files `0640`). Set:
+
+```env
+KAEDE_PHOTODNA_ENABLED=true
+KAEDE_PHOTODNA_SUBSCRIPTION_KEY=<Microsoft subscription key>
+PHOTODNA_EDGEHASHGENERATOR=/absolute/host/path/to/photodna-sdk
+```
+
+Compose mounts that directory read-only at `/opt/photodna` only in preflight,
+API, and worker containers. API and worker retain the image's dedicated
+unprivileged UID `10001`; Compose grants only the supplemental
+`OPERATOR_ENV_GID` (default `1000`) needed to read the SDK. Preflight runs as
+the operator UID/GID because it also validates the mode-`0600` operator env
+file. Set `OPERATOR_ENV_UID`/`OPERATOR_ENV_GID` to the account that owns the
+SDK directory, and ensure that group has only read/traverse permission. This
+avoids both world-readable confidential files and changing the long-running
+services away from their image identity.
+Preflight loads the native library and rejects an incomplete or incompatible
+installation before the API starts. The matcher URL is fixed in code to
+`https://api.microsoftmoderator.com/photodna/v1.0/MatchHash`; allow outbound
+TCP 443 to `api.microsoftmoderator.com` and never substitute HTTP.
+
+For plaintext local uploads the worker runs magic/type validation and ClamAV,
+creates an Edge Hash V2 in an isolated child process, and submits only that hash
+to Microsoft before any clean-key promotion. Plaintext images fetched from a
+federated home receive the same PhotoDNA decision before entering the local
+remote-media cache. A positive result is deleted from staging or the temporary
+remote spool, marked quarantined, and creates one automated `illegal_content`
+case in Administration → Reports. The report retains the provider tracking ID,
+source/violation/distance flags, attachment and optional uploader/message
+references, MIME type, and ordinary SHA-256 incident identifier. It retains no
+image bytes, thumbnail, object key, or PhotoDNA hash. Provider/generator failure
+is fail-closed: the object stays unavailable and normal task retries continue.
+The adapter rejects animations above 256 frames or 25 million decoded pixels
+in total. It also takes an advisory kernel lock on the mounted SDK directory,
+so the API's Uvicorn processes and the media worker run only one native image
+decode at a time even though they are separate processes and containers. Keep
+the SDK on a local filesystem (or one with working POSIX `flock` semantics).
+
+PhotoDNA cannot inspect an E2EE attachment because the server receives only
+ciphertext and does not have the room key. The existing E2EE activation warning
+therefore states that server-side file and malware scanning stops. A recipient
+can still submit a client-decrypted report, but Kaede must never silently upload
+E2EE plaintext to PhotoDNA.
+
+Kaede locally excludes plaintext images below `160x160` pixels. MatchHash
+receives a fixed-size Edge Hash rather than the source file, so Kaede does not
+create a source-byte-size bypass; Microsoft remains authoritative for the
+current upper eligibility window and status `3208` is treated as a terminal
+provider-ineligible result rather than leaving an upload stuck in retries.
+Other generator or provider errors remain fail-closed and retryable, while
+MIME validation, ClamAV, dimension limits, and normal image processing still
+apply.
 
 ## Validate and start
 

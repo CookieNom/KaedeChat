@@ -621,6 +621,27 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
             "rerun `make env-check`"
         )
 
+    photodna_enabled = values.get("KAEDE_PHOTODNA_ENABLED", "false").strip().lower()
+    if photodna_enabled not in {"true", "false"}:
+        raise DeploymentConfigurationError("KAEDE_PHOTODNA_ENABLED must be true or false")
+    if photodna_enabled == "true":
+        subscription_key = values.get("KAEDE_PHOTODNA_SUBSCRIPTION_KEY", "").strip()
+        if (
+            not 16 <= len(subscription_key) <= 256
+            or _is_placeholder(subscription_key)
+            or any(ord(character) < 33 or ord(character) > 126 for character in subscription_key)
+        ):
+            raise DeploymentConfigurationError(
+                "KAEDE_PHOTODNA_SUBSCRIPTION_KEY must contain the non-placeholder Microsoft "
+                "PhotoDNA subscription key when matching is enabled"
+            )
+        sdk_root = values.get("PHOTODNA_EDGEHASHGENERATOR", "").strip()
+        if not sdk_root or not Path(sdk_root).is_absolute() or "\x00" in sdk_root:
+            raise DeploymentConfigurationError(
+                "PHOTODNA_EDGEHASHGENERATOR must be an absolute host path to the separately "
+                "licensed PhotoDNA Edge Hash SDK root"
+            )
+
     if values.get("KAEDE_VOICE_ENABLED", "false").strip().lower() == "true":
         _validate_voice_ports(values)
 

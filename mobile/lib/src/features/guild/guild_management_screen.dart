@@ -11,6 +11,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
+import 'package:kaede_mobile/src/e2ee/disclosures.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -838,9 +839,13 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                             ? 'Voice, video, screen video, and screen audio will be encrypted on participant devices. The media relay still sees routing, timing, track, traffic, and participant metadata.'
                             : 'New messages and files will be encrypted on participant devices. Existing history remains plaintext.'),
                     const SizedBox(height: 12),
+                    const Text(
+                      'Until members compare the channel safety number through a separate trusted channel, content is encrypted but identities are unverified. Comparing it is what detects first-contact or active-instance key substitution.',
+                    ),
+                    const SizedBox(height: 12),
                     Text(media
                         ? 'Server recording, transcription, media moderation, and unsupported clients will be unavailable. A participant can still record on their own device. This change cannot be reversed.'
-                        : 'Search, link previews, bots, webhooks, server file previews, and malware scanning will be unavailable. Push wakes contain no message text, but participants, timing, and message-size metadata remain visible. Losing every enrolled device without a recovery backup permanently loses encrypted history. Removed members retain content already received. This change cannot be reversed.'),
+                        : 'Search, link previews, bots, webhooks, server file previews, and malware scanning will be unavailable. Push wakes contain no message text, but participants, timing, and message-size metadata remain visible. Losing the synchronized encrypted vault, every trusted client’s local state, and the recovery backup permanently loses encrypted history. Removed members retain content already received. This change cannot be reversed.'),
                     if (safetyNumber != null) ...[
                       const SizedBox(height: 14),
                       const Text('Channel safety number',
@@ -885,6 +890,16 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                             final updated = needsRekey
                                 ? await client.rekeyRoom(channel)
                                 : await client.enableRoom(channel);
+                            if (!needsRekey) {
+                              final accountRef =
+                                  widget.repository.api.tokens?.userRef?.wire;
+                              if (accountRef != null) {
+                                await acknowledgeEncryptedRoom(
+                                  accountRef,
+                                  updated.ref.wire,
+                                );
+                              }
+                            }
                             if (!dialogContext.mounted) return;
                             Navigator.pop(dialogContext);
                             await widget.changed(needsRekey

@@ -11,16 +11,17 @@ class Intents:
     guild_messages: bool = True
     message_content: bool = False
     message_reactions: bool = True
+    guild_typing: bool = False
     voice_states: bool = False
     interactions: bool = True
 
     @classmethod
-    def default(cls) -> "Intents":
+    def default(cls) -> Intents:
         return cls()
 
     @classmethod
-    def all(cls) -> "Intents":
-        return cls(True, True, True, True, True, True, True, True)
+    def all(cls) -> Intents:
+        return cls(True, True, True, True, True, True, True, True, True)
 
     def names(self) -> list[str]:
         return [name for name in self.__dataclass_fields__ if getattr(self, name)]

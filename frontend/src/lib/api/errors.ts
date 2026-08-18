@@ -16,6 +16,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   BOT_CONTROL_SCOPE_REQUIRED: 'That control credential does not allow this operation.',
   BOT_CONTROL_TOKEN_INVALID: 'That application control credential is invalid, expired, or revoked.',
   BOT_CREDENTIAL_NOT_FOUND: 'That application credential no longer exists.',
+  BOT_DM_ATTACHMENTS_UNAVAILABLE:
+    'Bot file uploads are currently available only through a guild installation.',
   BOT_E2EE_CONTENT_UNAVAILABLE:
     'This bot cannot read plaintext from an end-to-end encrypted channel.',
   BOT_E2EE_DISABLED: 'This bot is not enabled for encrypted interactions in this guild.',
@@ -51,6 +53,18 @@ const ERROR_MESSAGES: Record<string, string> = {
     'This encryption identity is already bound to different device credentials.',
   E2EE_DEVICE_LIMIT_REACHED: 'This account has reached its active encryption-device limit.',
   E2EE_DEVICE_NOT_FOUND: 'The encryption device was not found.',
+  E2EE_RECOVERY_AUTHORIZATION_REQUIRED:
+    'The one-time encryption-recovery authorization expired or was already used. Select the backup and confirm the restore again.',
+  E2EE_ACCOUNT_VAULT_BUSY:
+    'Your encrypted account vault is busy on another device. Wait a moment and try again.',
+  E2EE_ACCOUNT_VAULT_CONTEXT_MISMATCH:
+    'The encrypted-room update is not bound to the current account vault. Sign in again and retry.',
+  E2EE_ACCOUNT_VAULT_LEASE_EXPIRED:
+    'The encrypted account-vault lock expired before this update completed. Try again.',
+  E2EE_ACCOUNT_VAULT_REVISION_CONFLICT:
+    'Your encrypted account vault changed on another device. Refresh before trying again.',
+  E2EE_ACCOUNT_VAULT_ATTESTATION_REQUIRED:
+    'Your home server could not attest the encrypted account state for this room update.',
   E2EE_SENDER_DEVICE_INVALID:
     'This encrypted message was not created by one of your active encryption devices. Refresh device keys and try again.',
   E2EE_KEY_PACKAGE_EXPIRY_INVALID: 'The encryption key-package expiry is invalid.',
@@ -69,6 +83,15 @@ const ERROR_MESSAGES: Record<string, string> = {
   E2EE_AUTHORITY_REMOTE:
     "Encrypted-room settings must be completed by the conversation's home instance.",
   E2EE_OPERATION_INVALID: 'The encrypted message operation is not valid for this request.',
+  E2EE_OPERATION_CONFLICT:
+    'This encrypted-room update conflicts with an earlier request. Refresh and try again.',
+  E2EE_OPERATION_EXPIRED:
+    'This encrypted-room update expired. Review the member list and start it again.',
+  E2EE_OPERATION_IN_PROGRESS:
+    'Another encrypted-room update is already in progress. Wait for it to finish and retry.',
+  E2EE_OPERATION_NOT_FOUND: 'That encrypted-room update could not be found.',
+  E2EE_OPERATION_STALE:
+    'The room membership changed while encryption was being secured. Review the members and retry.',
   E2EE_ATTACHMENT_REQUIRED: 'Encrypted conversations accept only client-encrypted file uploads.',
   E2EE_REMOTE_DEVICE_DISCOVERY_REQUIRED:
     "The remote user's encryption devices could not be verified.",
@@ -85,7 +108,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   MESSAGE_ENCRYPTION_POLICY_INVALID:
     "This conversation's encryption policy is invalid, so the message was not sent.",
   E2EE_REPORT_DISCLOSURE_REQUIRED:
-    'Decrypt the message here and confirm that you want to share its text with Trust & Safety.',
+    'Decrypt the message here and confirm that you want to share its message evidence with Trust & Safety.',
   FEDERATED_COMMANDS_UNAVAILABLE:
     'Commands from that remote application are temporarily unavailable.',
   INTERACTION_ALREADY_RESPONDED: 'This interaction already has a response.',
@@ -113,6 +136,9 @@ const ERROR_MESSAGES: Record<string, string> = {
   NOT_A_GUILD_MEMBER: 'You are no longer a member of this guild.',
   BANNED_FROM_GUILD: 'You cannot join this guild because you are banned.',
   INSTANCE_BANNED_FROM_GUILD: 'Your home instance is blocked from this guild.',
+  BOT_USER_BANNED: 'This bot cannot be installed because its account is banned from this guild.',
+  BOT_INSTANCE_BANNED:
+    'This bot cannot be installed because its home instance is banned from this guild.',
   GUILD_NOT_FOUND: 'That guild no longer exists or you no longer have access to it.',
   CHANNEL_NOT_FOUND: 'That channel no longer exists or you no longer have access to it.',
   MESSAGE_NOT_FOUND: 'That message no longer exists or you no longer have access to it.',

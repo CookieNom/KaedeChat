@@ -8,12 +8,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.settings import Settings
+from app.db.bot_models import AbuseReport
 from app.db.models import (
     Attachment,
     RemoteMediaCache,
     RemoteMediaOrphan,
     RemoteMediaTombstone,
 )
+from app.media.photodna import PhotoDNAFinding, photodna_report, scan_image
 from app.media.processing import (
     IMAGE_PIPELINE_VERSION,
     IMAGE_TYPES,
@@ -36,6 +38,62 @@ from app.media.service import (
 from app.media.storage import S3Storage, StorageError
 
 log = structlog.get_logger()
+
+
+async def delete_quarantined_attachment_objects(
+    storage: S3Storage, settings: Settings, attachment: Attachment
+) -> bool:
+    """Best-effort deletion used immediately and by the durable staging sweep.
+
+    A positive decision is committed before this runs, so none of these keys
+    can be served even if object storage is temporarily unavailable.  Keeping
+    ``staging_object_key`` populated makes a failed deletion retryable by the
+    existing scheduled sweep.
+    """
+
+    objects: set[tuple[str, str]] = {(settings.media_attachments_bucket, attachment.object_key)}
+    if attachment.staging_object_key is not None:
+        objects.add((settings.media_attachments_bucket, attachment.staging_object_key))
+    for raw in attachment.variants.values():
+        if isinstance(raw, dict) and isinstance(raw.get("object_key"), str):
+            objects.add((settings.media_derived_bucket, raw["object_key"]))
+
+    complete = True
+    for bucket, key in objects:
+        try:
+            await storage.delete(bucket, key)
+        except StorageError:
+            complete = False
+            log.exception(
+                "photodna_quarantine_delete_failed",
+                attachment_id=str(attachment.id),
+                bucket=bucket,
+                object_key=key,
+            )
+    return complete
+
+
+def attachment_photodna_report(attachment: Attachment, finding: PhotoDNAFinding) -> AbuseReport:
+    """Create a retry-stable metadata-only report for a local upload."""
+
+    if attachment.detected_content_type is None or attachment.content_sha256 is None:
+        raise RuntimeError("PhotoDNA report requires finalized media metadata")
+    # Attachment IDs are minted by the same instance-wide snowflake lease as
+    # user-created report IDs. Reusing one is retry-stable and collision-free.
+    return photodna_report(
+        report_id=attachment.id,
+        attachment_ref=f"{attachment.id}@{attachment.origin_domain}",
+        finding=finding,
+        uploader_ref=f"{attachment.uploader_id}@{attachment.uploader_domain}",
+        message_ref=(
+            f"{attachment.message_id}@{attachment.message_domain}"
+            if attachment.message_id is not None and attachment.message_domain is not None
+            else None
+        ),
+        purpose=attachment.purpose,
+        detected_content_type=attachment.detected_content_type,
+        content_sha256=attachment.content_sha256,
+    )
 
 
 def image_derivatives_are_current(attachment: Attachment) -> bool:
@@ -129,6 +187,28 @@ async def process_attachment_record(
             await discard_attachment(session, settings, attachment)
             await session.commit()
             return "infected"
+        if detected in IMAGE_TYPES:
+            finding = await scan_image(data, settings)
+            if finding is not None:
+                attachment.scan_status = "quarantined"
+                # This nullable key doubles as the existing durable physical
+                # deletion queue. Reprocessing may discover a match after the
+                # original staging key has already been swept.
+                if attachment.staging_object_key is None:
+                    attachment.staging_object_key = attachment.object_key
+                await discard_attachment(session, settings, attachment)
+                if await session.get(AbuseReport, attachment.id) is None:
+                    session.add(attachment_photodna_report(attachment, finding))
+                # Commit the durable quarantine and metadata-only report before
+                # deleting storage. A failed object deletion cannot republish
+                # the staging key, and the normal staging sweep will retry it.
+                await session.commit()
+                # Keep the durable marker until the upload capability expires.
+                # A client may rewrite its staging key after this immediate
+                # deletion; the scheduled sweep performs the authoritative
+                # post-expiry delete and only then clears the marker.
+                await delete_quarantined_attachment_objects(storage, settings, attachment)
+                return "quarantined"
         derivatives: list[Derivative] = []
         if detected in IMAGE_TYPES:
             derivatives, attachment.blurhash, attachment.perceptual_hash, width, height = (
@@ -251,6 +331,13 @@ async def sweep_staging_objects(
     storage = S3Storage(settings)
     removed = 0
     for attachment in rows:
+        if attachment.scan_status == "quarantined":
+            if not await delete_quarantined_attachment_objects(storage, settings, attachment):
+                continue
+            attachment.staging_object_key = None
+            attachment.variants = {}
+            removed += 1
+            continue
         staging_key = attachment.staging_object_key
         if staging_key is None:
             continue

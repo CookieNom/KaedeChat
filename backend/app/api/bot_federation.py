@@ -41,6 +41,25 @@ from app.federation.security import (
 router = APIRouter(tags=["bot federation"])
 BOT_MANIFEST_CAPABILITY = "bot-direct-auth/1"
 BOT_MANIFEST_EVENT = "bot.application.manifest"
+LOCAL_APPLICATION_REFRESH_HOLDS = frozenset({"review_required", "suspended", "deleting", "deleted"})
+
+
+def activate_remote_application_if_permitted(
+    application: BotApplication,
+    *,
+    created: bool,
+) -> None:
+    """Apply remote liveness without overriding an instance administrator hold."""
+
+    if created or application.status not in LOCAL_APPLICATION_REFRESH_HOLDS:
+        application.status = "active"
+
+
+def restore_remote_worker_if_new(worker: BotWorker, *, created: bool) -> None:
+    """Never interpret remote refresh as revocation relief granted by this instance."""
+
+    if created:
+        worker.revoked_at = None
 
 
 class StrictModel(BaseModel):
@@ -122,6 +141,12 @@ class BotManifest(StrictModel):
     commands: list[ManifestCommand] = Field(max_length=100)
 
 
+def enabled_bot_identity(user: User) -> bool:
+    """Return whether a user may act as an exported bot identity."""
+
+    return user.account_type == "bot" and user.disabled_at is None
+
+
 async def local_manifest(
     session: AsyncSession,
     application_id: int,
@@ -147,12 +172,19 @@ async def local_manifest(
                 BotApplication.status == "active",
                 BotInstallTemplate.slug == template_slug,
                 BotInstallTemplate.active.is_(True),
+                User.account_type == "bot",
+                User.disabled_at.is_(None),
             )
         )
     ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "BOT_INVITE_NOT_FOUND"})
     application, template, bot = row
+    if not enabled_bot_identity(bot):
+        # Keep a runtime fence in addition to the SQL predicate.  This protects
+        # callers using an already-populated ORM identity and makes it
+        # impossible for a disabled home bot to export fresh worker material.
+        raise HTTPException(status_code=404, detail={"code": "BOT_INVITE_NOT_FOUND"})
     workers = list(
         await session.scalars(
             select(BotWorker)
@@ -306,12 +338,16 @@ async def federation_worker_authorization(
                 BotWorker.id == worker_id,
                 BotWorker.revoked_at.is_(None),
                 (BotWorker.expires_at.is_(None)) | (BotWorker.expires_at > datetime.now(UTC)),
+                User.account_type == "bot",
+                User.disabled_at.is_(None),
             )
         )
     ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "BOT_WORKER_NOT_FOUND"})
     application, worker, bot = row
+    if not enabled_bot_identity(bot):
+        raise HTTPException(status_code=404, detail={"code": "BOT_WORKER_NOT_FOUND"})
     rules = {
         rule.target_domain: rule.effect
         for rule in await session.scalars(
@@ -412,7 +448,10 @@ async def refresh_remote_worker_authorization(
                 public_key=public_key,
             )
             session.add(worker)
-        application.status = "active"
+            worker_created = True
+        else:
+            worker_created = False
+        activate_remote_application_if_permitted(application, created=False)
         application.manifest_generation = int(authorization.manifest_generation)
         application.revocation_generation = int(authorization.revocation_generation)
         worker.name = remote_worker.name
@@ -426,7 +465,7 @@ async def refresh_remote_worker_authorization(
             if remote_worker.expires_at is not None
             else None
         )
-        worker.revoked_at = None
+        restore_remote_worker_if_new(worker, created=worker_created)
         await session.flush()
     except (TypeError, ValueError) as exc:
         raise FederationNetworkError("remote worker authorization is invalid") from exc
@@ -501,6 +540,7 @@ async def materialize_remote_manifest(
         session.add(team)
         await session.flush()
     application = await session.get(BotApplication, (app_id, domain))
+    application_created = application is None
     if application is None:
         application = BotApplication(
             id=app_id,
@@ -517,7 +557,7 @@ async def materialize_remote_manifest(
     application.icon_hash = manifest.application.icon_hash
     application.support_url = manifest.application.support_url
     application.privacy_url = manifest.application.privacy_url
-    application.status = "active"
+    activate_remote_application_if_permitted(application, created=application_created)
     application.target_policy = manifest.application.target_policy
     application.default_scopes = manifest.application.default_scopes
     application.default_intents = manifest.application.default_intents
@@ -618,13 +658,16 @@ async def materialize_remote_manifest(
                 public_key=public_key,
             )
             session.add(existing_worker)
+            worker_created = True
+        else:
+            worker_created = False
         existing_worker.name = remote_worker.name
         existing_worker.public_key = public_key
         existing_worker.scopes = remote_worker.scopes
         existing_worker.intents = remote_worker.intents
         existing_worker.target_domains = remote_worker.target_domains
         existing_worker.generation = int(remote_worker.generation)
-        existing_worker.revoked_at = None
+        restore_remote_worker_if_new(existing_worker, created=worker_created)
     if worker_ids:
         for worker in await session.scalars(
             select(BotWorker)

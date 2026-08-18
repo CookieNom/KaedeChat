@@ -19,6 +19,12 @@ from app.api.dependencies import (
     require_user,
 )
 from app.api.guilds import local_guild
+from app.bots.installations import (
+    cleanup_installation_roles,
+    publish_deleted_installation_roles,
+    revoke_installations_for_guild_instance,
+    revoke_installations_for_guild_member,
+)
 from app.chat.audit import add_audit_entry
 from app.chat.e2ee_membership import pause_guild_e2ee_for_membership_change
 from app.chat.events import guild_topic, publish_dispatch, user_topic
@@ -416,6 +422,20 @@ async def kick_member(
     user_number, user_domain = user_id.resolve(settings.domain)
     await require_permissions(session, redis, guild, auth.user, required_permissions("member.kick"))
     member = await require_can_manage_member(session, guild, auth.user, user_number, user_domain)
+    revoked_installations = await revoke_installations_for_guild_member(
+        session,
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        user_id=user_number,
+        user_domain=user_domain,
+    )
+    deleted_role_refs = await cleanup_installation_roles(
+        session,
+        settings,
+        guild,
+        auth.user,
+        revoked_installations,
+    )
     await add_audit_entry(
         session,
         snowflake,
@@ -447,6 +467,7 @@ async def kick_member(
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     await publish_dispatch(
         redis,
         guild_topic(guild.origin_domain, guild.id),
@@ -502,6 +523,20 @@ async def ban_member(
         raise HTTPException(status_code=403, detail={"code": "OWNER_IMMUNE"})
     reason = audit_reason(header_reason or payload.reason)
     expires_at = future_expiry(payload.expires_at, code="BAN_EXPIRY")
+    revoked_installations = await revoke_installations_for_guild_member(
+        session,
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        user_id=user_number,
+        user_domain=user_domain,
+    )
+    deleted_role_refs = await cleanup_installation_roles(
+        session,
+        settings,
+        guild,
+        auth.user,
+        revoked_installations,
+    )
     await session.execute(
         pg_insert(Ban)
         .values(
@@ -597,6 +632,7 @@ async def ban_member(
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     if member is not None:
         await publish_dispatch(
             redis,
@@ -822,6 +858,19 @@ async def ban_instance(
             },
         )
     )
+    revoked_installations = await revoke_installations_for_guild_instance(
+        session,
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        instance_domain=domain,
+    )
+    deleted_role_refs = await cleanup_installation_roles(
+        session,
+        settings,
+        guild,
+        auth.user,
+        revoked_installations,
+    )
     removed_refs = list(
         await session.execute(
             delete(GuildMember)
@@ -863,10 +912,21 @@ async def ban_instance(
         changes=[
             {"key": "expires_at", "old_value": None, "new_value": str(expires_at)},
             {"key": "members_removed", "old_value": None, "new_value": len(removed_refs)},
+            {
+                "key": "bot_installations_revoked",
+                "old_value": None,
+                "new_value": len(revoked_installations),
+            },
+            {
+                "key": "bot_roles_deleted",
+                "old_value": None,
+                "new_value": len(deleted_role_refs),
+            },
         ],
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     for user_id, user_domain in removed_refs:
         await publish_dispatch(
             redis,

@@ -8,7 +8,12 @@
   import { entityKey } from '$lib/chat/refs';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
 
-  import { attachVideo, VoiceSession, type VoiceToken } from './session';
+  import {
+    attachVideo,
+    VoiceSession,
+    voiceGrantMatchesChannelPolicy,
+    type VoiceToken
+  } from './session';
 
   let {
     channelRef,
@@ -138,22 +143,11 @@
     const channel = entities.channels.values.find(
       (item) => entityKey(item) === `${grant.channel_id}@${grant.channel_domain}`
     );
-    if (!user || !channel || channel.encryption_mode !== 'e2ee')
-      throw new Error('Encrypted room state is unavailable on this device.');
-    if (
-      channel.encryption_policy_generation !== grant.encryption_policy_generation ||
-      channel.encryption_epoch !== grant.encryption_epoch
-    )
+    if (!user || !channel) throw new Error('Encrypted room state is unavailable on this device.');
+    if (!voiceGrantMatchesChannelPolicy(grant, channel))
       throw new Error('Encrypted call keys changed. Refresh the conversation and try again.');
     const client = await initializeE2EE(user);
     await client.syncRoomState(channel);
-    if (
-      grant.media_protocol !== 'livekit-e2ee-v1' ||
-      grant.media_suite !== 'AES-256-GCM' ||
-      !grant.media_session_id ||
-      grant.media_epoch !== grant.encryption_epoch
-    )
-      throw new Error('Encrypted call context is invalid. Nothing was connected.');
     return client.exportMediaKey(
       channel,
       [

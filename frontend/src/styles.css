@@ -367,6 +367,19 @@ p {
   background: var(--surface-hover);
 }
 
+.icon-button.e2ee-status-button {
+  width: auto;
+  padding-inline: 0.65rem;
+  color: var(--accent-text);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: var(--accent-soft);
+}
+
+.e2ee-status-button span {
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
 .danger-icon-button {
   color: var(--danger);
 }
@@ -7432,6 +7445,15 @@ body.media-viewer-open {
 }
 
 @media (max-width: 740px) {
+  .icon-button.e2ee-status-button {
+    width: 40px;
+    padding: 0;
+  }
+
+  .e2ee-status-button span {
+    display: none;
+  }
+
   .home-app,
   .chat-app {
     display: block;
