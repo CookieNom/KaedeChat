@@ -15,7 +15,7 @@ export interface VoiceToken {
   can_stream: boolean;
   can_use_vad: boolean;
   move_session_id?: string | null;
-  e2ee?: boolean;
+  e2ee: boolean;
   channel_id?: string | null;
   channel_domain?: string | null;
   encryption_policy_generation?: string | null;
@@ -24,6 +24,29 @@ export interface VoiceToken {
   media_suite?: 'AES-256-GCM' | null;
   media_session_id?: string | null;
   media_epoch?: string | null;
+}
+
+export type VoiceChannelPolicy = Pick<
+  Channel,
+  | 'id'
+  | 'origin_domain'
+  | 'encryption_mode'
+  | 'encryption_state'
+  | 'encryption_policy_generation'
+  | 'encryption_epoch'
+>;
+
+export interface ExpectedVoicePolicy {
+  e2ee: boolean;
+  room: string;
+  channel_id: string;
+  channel_domain: string;
+  encryption_policy_generation: string | null;
+  encryption_epoch: string | null;
+  media_protocol: 'livekit-e2ee-v1' | null;
+  media_suite: 'AES-256-GCM' | null;
+  media_session_id: string | null;
+  media_epoch: string | null;
 }
 
 export interface VoiceTile {
@@ -53,7 +76,26 @@ export interface VoiceParticipant {
   screen: boolean;
 }
 
+export type VoiceRoomFactory = (options: ConstructorParameters<typeof Room>[0]) => Room;
+
 const VOICE_CONNECT_TIMEOUT_MS = 15_000;
+
+export class VoiceConnectionFence {
+  #generation = 0;
+
+  begin(): number {
+    this.#generation += 1;
+    return this.#generation;
+  }
+
+  invalidate(): void {
+    this.#generation += 1;
+  }
+
+  isCurrent(generation: number): boolean {
+    return generation === this.#generation;
+  }
+}
 
 export async function withVoiceConnectTimeout<T>(
   operation: Promise<T>,
@@ -86,8 +128,13 @@ export function isUsableVoiceToken(value: VoiceToken, now = Date.now()): boolean
     (value.move_session_id == null ||
       (typeof value.move_session_id === 'string' &&
         /^[A-Za-z0-9_-]{32,64}$/.test(value.move_session_id))) &&
+    typeof value.e2ee === 'boolean' &&
     (!value.e2ee
-      ? value.media_protocol == null &&
+      ? Boolean(value.channel_id) &&
+        Boolean(value.channel_domain) &&
+        value.encryption_policy_generation == null &&
+        value.encryption_epoch == null &&
+        value.media_protocol == null &&
         value.media_suite == null &&
         value.media_session_id == null &&
         value.media_epoch == null
@@ -106,21 +153,24 @@ export function isUsableVoiceToken(value: VoiceToken, now = Date.now()): boolean
 
 export function voiceGrantMatchesChannelPolicy(
   grant: VoiceToken,
-  channel: Pick<
-    Channel,
-    | 'id'
-    | 'origin_domain'
-    | 'encryption_mode'
-    | 'encryption_state'
-    | 'encryption_policy_generation'
-    | 'encryption_epoch'
-  >
+  channel: VoiceChannelPolicy
 ): boolean {
+  if (channel.encryption_mode !== 'plaintext' && channel.encryption_mode !== 'e2ee') return false;
+  if (grant.e2ee !== (channel.encryption_mode === 'e2ee')) return false;
+  if (`${grant.channel_id}@${grant.channel_domain}` !== `${channel.id}@${channel.origin_domain}`)
+    return false;
+  if (!grant.e2ee) {
+    return (
+      grant.encryption_policy_generation == null &&
+      grant.encryption_epoch == null &&
+      grant.media_protocol == null &&
+      grant.media_suite == null &&
+      grant.media_session_id == null &&
+      grant.media_epoch == null
+    );
+  }
   return (
-    grant.e2ee === true &&
-    channel.encryption_mode === 'e2ee' &&
     channel.encryption_state === 'active' &&
-    `${grant.channel_id}@${grant.channel_domain}` === `${channel.id}@${channel.origin_domain}` &&
     grant.encryption_policy_generation === channel.encryption_policy_generation &&
     grant.encryption_epoch === channel.encryption_epoch &&
     grant.media_protocol === 'livekit-e2ee-v1' &&
@@ -130,11 +180,54 @@ export function voiceGrantMatchesChannelPolicy(
   );
 }
 
+export function expectedVoicePolicy(
+  grant: VoiceToken,
+  channel: VoiceChannelPolicy
+): ExpectedVoicePolicy {
+  if (!isUsableVoiceToken(grant) || !voiceGrantMatchesChannelPolicy(grant, channel)) {
+    throw new Error(
+      'The voice encryption grant did not match this conversation. Nothing connected.'
+    );
+  }
+  return {
+    e2ee: grant.e2ee,
+    room: grant.room,
+    channel_id: channel.id,
+    channel_domain: channel.origin_domain,
+    encryption_policy_generation: grant.encryption_policy_generation ?? null,
+    encryption_epoch: grant.encryption_epoch ?? null,
+    media_protocol: grant.media_protocol ?? null,
+    media_suite: grant.media_suite ?? null,
+    media_session_id: grant.media_session_id ?? null,
+    media_epoch: grant.media_epoch ?? null
+  };
+}
+
+export function voiceGrantMatchesExpectedPolicy(
+  grant: VoiceToken,
+  expected: ExpectedVoicePolicy
+): boolean {
+  return (
+    isUsableVoiceToken(grant) &&
+    grant.e2ee === expected.e2ee &&
+    grant.room === expected.room &&
+    grant.channel_id === expected.channel_id &&
+    grant.channel_domain === expected.channel_domain &&
+    (grant.encryption_policy_generation ?? null) === expected.encryption_policy_generation &&
+    (grant.encryption_epoch ?? null) === expected.encryption_epoch &&
+    (grant.media_protocol ?? null) === expected.media_protocol &&
+    (grant.media_suite ?? null) === expected.media_suite &&
+    (grant.media_session_id ?? null) === expected.media_session_id &&
+    (grant.media_epoch ?? null) === expected.media_epoch
+  );
+}
+
 export class VoiceSession extends EventTarget {
   room: Room;
 
   connected = false;
   connecting = false;
+  encrypted: boolean | null = null;
   microphone = false;
   camera = false;
   screen = false;
@@ -149,16 +242,20 @@ export class VoiceSession extends EventTarget {
   #nativeDeafened = false;
   #nativeSpeakingUntil = 0;
   #activeSpeakers = new Set<string>();
-  #e2eeConfigured = false;
+  #connectGeneration = 0;
+  #candidateRoom: Room | null = null;
+  #candidateWorker: Worker | null = null;
   #e2eeWorker: Worker | null = null;
+  readonly #roomFactory: VoiceRoomFactory;
 
-  constructor() {
+  constructor(roomFactory: VoiceRoomFactory = (options) => new Room(options)) {
     super();
+    this.#roomFactory = roomFactory;
     this.room = this.#createRoom();
   }
 
   #createRoom(e2ee?: { keyProvider: ExternalE2EEKeyProvider; worker: Worker }): Room {
-    const room = new Room({
+    const room = this.#roomFactory({
       adaptiveStream: true,
       dynacast: true,
       disconnectOnPageLeave: true,
@@ -173,11 +270,14 @@ export class VoiceSession extends EventTarget {
     room.on(RoomEvent.ParticipantConnected, changed);
     room.on(RoomEvent.ParticipantDisconnected, changed);
     room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+      if (this.room !== room) return;
       this.#activeSpeakers = new Set(speakers.map((speaker) => speaker.identity));
       changed();
     });
     room.on(RoomEvent.Disconnected, () => {
+      if (this.room !== room) return;
       this.connected = false;
+      this.encrypted = null;
       this.moveSessionId = null;
       this.microphone = false;
       this.camera = false;
@@ -188,73 +288,123 @@ export class VoiceSession extends EventTarget {
     return room;
   }
 
-  async #configureE2EE(key: ArrayBuffer): Promise<void> {
-    if (!globalThis.RTCRtpSender || !('transform' in RTCRtpSender.prototype)) {
-      throw new Error('This browser does not support encrypted voice and video.');
+  async connect(
+    grant: VoiceToken,
+    channel: VoiceChannelPolicy,
+    encryptionKey?: ArrayBuffer
+  ): Promise<void> {
+    const generation = ++this.#connectGeneration;
+    const expected = expectedVoicePolicy(grant, channel);
+    if (grant.e2ee && !encryptionKey) {
+      throw new Error('This encrypted call has no device media key.');
     }
-    await this.room.disconnect();
-    this.#e2eeWorker?.terminate();
-    const keyProvider = new ExternalE2EEKeyProvider({ ratchetSalt: 'kaede-livekit-v1' });
-    await keyProvider.setKey(key);
-    const worker = new Worker(new URL('livekit-client/e2ee-worker', import.meta.url), {
-      type: 'module'
-    });
-    this.#e2eeWorker = worker;
-    this.room = this.#createRoom({ keyProvider, worker });
-    this.#e2eeConfigured = true;
-  }
-
-  async #configurePlaintext(): Promise<void> {
-    if (!this.#e2eeConfigured) return;
-    await this.room.disconnect();
-    this.#e2eeWorker?.terminate();
-    this.#e2eeWorker = null;
-    this.room = this.#createRoom();
-    this.#e2eeConfigured = false;
-  }
-
-  async connect(grant: VoiceToken, encryptionKey?: ArrayBuffer): Promise<void> {
-    if (this.connected || this.connecting) return;
-    if (!isUsableVoiceToken(grant)) throw new TypeError('Invalid or expired voice grant');
-    if (grant.e2ee) {
-      if (!encryptionKey) throw new Error('This encrypted call has no device media key.');
-      await this.#configureE2EE(encryptionKey);
-    } else if (encryptionKey) {
+    if (!grant.e2ee && encryptionKey) {
       throw new Error('A plaintext voice grant cannot use an encrypted-room key.');
-    } else {
-      await this.#configurePlaintext();
     }
+
+    const previousRoom = this.room;
+    const previousCandidate = this.#candidateRoom;
+    const previousWorker = this.#e2eeWorker;
+    const previousCandidateWorker = this.#candidateWorker;
+    this.#candidateRoom = null;
+    this.#candidateWorker = null;
+    this.#e2eeWorker = null;
+    previousWorker?.terminate();
+    if (previousCandidateWorker !== previousWorker) previousCandidateWorker?.terminate();
+
     this.connecting = true;
+    this.connected = false;
+    this.encrypted = null;
+    this.moveSessionId = null;
+    this.microphone = false;
+    this.camera = false;
+    this.screen = false;
     this.error = '';
     this.canSpeak = grant.can_speak;
     this.canStream = grant.can_stream;
     this.#changed();
+
+    let candidate: Room | null = null;
+    let candidateWorker: Worker | null = null;
+    let promoted = false;
     try {
-      await withVoiceConnectTimeout(
-        this.room.connect(grant.url, grant.token, { autoSubscribe: true })
+      await Promise.allSettled(
+        [
+          ...new Set(
+            [previousRoom, previousCandidate].filter((room): room is Room => room !== null)
+          )
+        ].map((room) => room.disconnect(true))
       );
-      this.connected = true;
-      this.moveSessionId = grant.move_session_id ?? null;
-      if (grant.can_speak) {
-        await this.room.localParticipant.setMicrophoneEnabled(true);
-        this.microphone = true;
+      if (generation !== this.#connectGeneration) return;
+
+      if (grant.e2ee) {
+        if (!globalThis.RTCRtpSender || !('transform' in RTCRtpSender.prototype)) {
+          throw new Error('This browser does not support encrypted voice and video.');
+        }
+        const keyProvider = new ExternalE2EEKeyProvider({ ratchetSalt: 'kaede-livekit-v1' });
+        await keyProvider.setKey(encryptionKey as ArrayBuffer);
+        if (generation !== this.#connectGeneration) return;
+        candidateWorker = new Worker(new URL('livekit-client/e2ee-worker', import.meta.url), {
+          type: 'module'
+        });
+        candidate = this.#createRoom({ keyProvider, worker: candidateWorker });
+      } else {
+        candidate = this.#createRoom();
       }
+      this.#candidateRoom = candidate;
+      this.#candidateWorker = candidateWorker;
+
+      await withVoiceConnectTimeout(
+        candidate.connect(grant.url, grant.token, { autoSubscribe: true })
+      );
+      if (generation !== this.#connectGeneration) return;
+
+      if (grant.can_speak) {
+        if (generation !== this.#connectGeneration) return;
+        await candidate.localParticipant.setMicrophoneEnabled(true);
+        if (generation !== this.#connectGeneration) {
+          await candidate.localParticipant.setMicrophoneEnabled(false);
+          return;
+        }
+      }
+      if (generation !== this.#connectGeneration) return;
+
+      this.room = candidate;
+      this.#candidateRoom = null;
+      this.#candidateWorker = null;
+      this.#e2eeWorker = candidateWorker;
+      promoted = true;
+      this.connected = true;
+      this.encrypted = expected.e2ee;
+      this.moveSessionId = grant.move_session_id ?? null;
+      this.microphone = grant.can_speak;
     } catch (caught) {
-      await this.room.disconnect();
+      if (generation !== this.#connectGeneration) return;
       this.error = userErrorMessage(
         caught,
         'Could not join voice. Check your network and microphone permission, then try again.'
       );
       throw caught;
     } finally {
-      this.connecting = false;
-      this.#changed();
+      if (!promoted || generation !== this.#connectGeneration) {
+        if (this.#candidateRoom === candidate) this.#candidateRoom = null;
+        if (this.#candidateWorker === candidateWorker) this.#candidateWorker = null;
+        if (this.#e2eeWorker === candidateWorker) this.#e2eeWorker = null;
+        candidateWorker?.terminate();
+        await candidate?.disconnect(true);
+      }
+      if (generation === this.#connectGeneration) {
+        this.connecting = false;
+        this.#changed();
+      }
     }
   }
 
   async connectNative(
     reference: string,
     isCall: boolean,
+    grant: VoiceToken,
+    channel: VoiceChannelPolicy,
     encryptionKey?: ArrayBuffer,
     senderDeviceId?: string
   ): Promise<void> {
@@ -264,14 +414,18 @@ export class VoiceSession extends EventTarget {
     this.error = '';
     this.#changed();
     try {
+      const expectedPolicy = expectedVoicePolicy(grant, channel);
       await nativeInvoke('native_voice_join', {
         reference,
         isCall,
+        expectedPolicy,
         e2eeKey: encryptionKey ? base64url(new Uint8Array(encryptionKey)) : null,
         senderDeviceId: senderDeviceId ?? null
       });
       this.#startNativePolling();
       await this.#pollNativeStatus();
+      this.encrypted = expectedPolicy.e2ee;
+      this.moveSessionId = grant.move_session_id ?? null;
       this.#startNativeVideoPolling();
     } catch (caught) {
       this.error = userErrorMessage(
@@ -324,6 +478,8 @@ export class VoiceSession extends EventTarget {
           )
         : statusFallback;
       if (status.state === 'disconnected' || status.state === 'failed') {
+        this.encrypted = null;
+        this.moveSessionId = null;
         if (this.#nativePoll) clearInterval(this.#nativePoll);
         this.#nativePoll = null;
       }
@@ -413,16 +569,36 @@ export class VoiceSession extends EventTarget {
       this.#nativeSpeakingUntil = 0;
       await nativeInvoke('native_voice_leave');
       this.connected = false;
+      this.encrypted = null;
       this.moveSessionId = null;
       this.connecting = false;
       this.#changed();
       return;
     }
-    await this.room.disconnect(true);
-    this.#e2eeWorker?.terminate();
+    const generation = ++this.#connectGeneration;
+    const activeRoom = this.room;
+    const candidateRoom = this.#candidateRoom;
+    const activeWorker = this.#e2eeWorker;
+    const candidateWorker = this.#candidateWorker;
+    this.#candidateRoom = null;
+    this.#candidateWorker = null;
     this.#e2eeWorker = null;
+    activeWorker?.terminate();
+    if (candidateWorker !== activeWorker) candidateWorker?.terminate();
+    await Promise.allSettled(
+      [...new Set([activeRoom, candidateRoom].filter((room): room is Room => room !== null))].map(
+        (room) => room.disconnect(true)
+      )
+    );
+    if (generation !== this.#connectGeneration) return;
     this.connected = false;
+    this.encrypted = null;
     this.moveSessionId = null;
+    this.connecting = false;
+    this.microphone = false;
+    this.camera = false;
+    this.screen = false;
+    this.#activeSpeakers.clear();
     this.#changed();
   }
 

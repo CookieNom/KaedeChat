@@ -12,10 +12,29 @@ from app.api import auth as auth_api
 from app.auth.schemas import PasswordKdfLookupRequest, PasswordResetRequest
 from app.core.settings import Settings
 from app.db.models import User
+from scripts.verification import authentication_secret, password_kdf_metadata
 
 VALID_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
 AUTH_SALT = bytes(range(16))
 VAULT_SALT = bytes(reversed(range(16)))
+
+
+def test_verification_tooling_matches_the_cross_client_v2_vector() -> None:
+    assert (
+        authentication_secret(
+            "correct horse battery staple",
+            "kaede.example",
+            AUTH_SALT,
+        )
+        == "-Z__QIBecQeJPG4vVovIPtt-Oct4ZE8zUSWu3oyMG3s"
+    )
+    assert password_kdf_metadata(AUTH_SALT, vault_salt=bytes(range(16, 32))) == {
+        "version": 2,
+        "algorithm": "PBKDF2-SHA256",
+        "iterations": 600_000,
+        "auth_salt": "AAECAwQFBgcICQoLDA0ODw",
+        "vault_salt": "EBESExQVFhcYGRobHB0eHw",
+    }
 
 
 def settings() -> Settings:
@@ -121,6 +140,37 @@ async def test_kdf_lookup_local_handle_alias_has_the_same_observable_pattern(
 
     assert bare == composite
     assert redis.set.await_args_list[0].args[0] == redis.set.await_args_list[1].args[0]
+
+
+@pytest.mark.asyncio
+async def test_kdf_lookup_never_negotiates_legacy_or_discloses_its_vault_salt() -> None:
+    user = User(
+        id=7,
+        origin_domain="chat.example.com",
+        is_local=True,
+        username="maple",
+        account_type="human",
+        password_hash="legacy-hash",
+        e2ee_vault_salt=VAULT_SALT,
+    )
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=user)
+    session.commit = AsyncMock()
+    redis = MagicMock()
+    redis.set = AsyncMock(return_value=True)
+
+    result = await auth_api.password_key_derivation(
+        PasswordKdfLookupRequest(identifier="maple"),
+        request("/api/v1/auth/key-derivation"),
+        session,
+        redis,
+        settings(),
+    )
+
+    assert result["version"] == 2
+    assert result["algorithm"] == "PBKDF2-SHA256"
+    assert result["vault_salt"] != auth_api.encode_password_salt(VAULT_SALT)
+    session.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

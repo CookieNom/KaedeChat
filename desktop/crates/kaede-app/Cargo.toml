@@ -25,5 +25,8 @@ tracing.workspace = true
 uuid.workspace = true
 url.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true

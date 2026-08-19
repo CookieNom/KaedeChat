@@ -1,7 +1,9 @@
 import base64
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -23,11 +25,19 @@ from app.chat.e2ee import (
     validate_e2ee_envelope,
     validate_message_encryption_policy,
 )
+from app.chat.e2ee_controls import (
+    authority_attested_direct_dm_control,
+    authority_attested_room_policy_change,
+    room_policy_change_context,
+)
 from app.chat.schemas import MessageCreate, MessageEdit
 from app.core.federation import FEDERATION_CAPABILITIES, canonical_json
 from app.core.json_limits import MAX_SAFE_JSON_INTEGER, strict_json_loads
 from app.db.models import Message
-from app.federation.replication import replicated_message_create_fingerprint
+from app.federation.replication import (
+    authoritative_dm_control,
+    replicated_message_create_fingerprint,
+)
 from app.federation.schemas import EventEnvelope
 
 
@@ -38,6 +48,172 @@ def test_e2ee_envelope_is_opaque_versioned_and_bounded() -> None:
         validate_e2ee_envelope({"version": 0, "ciphertext": "opaque"})
     with pytest.raises(ValueError, match="too large"):
         validate_e2ee_envelope({"version": 1, "ciphertext": "x" * MAX_E2EE_ENVELOPE_BYTES})
+
+
+def test_dm_controls_require_the_signed_conversation_authority() -> None:
+    envelope = {"operation": "commit", "ciphertext": "opaque"}
+    assert authoritative_dm_control(
+        envelope,
+        message_type=7,
+        flags=4,
+        message_origin="authority.test",
+        event_origin="authority.test",
+        conversation_authority="authority.test",
+    ) == (True, True)
+    # A participant can legitimately mint and sign its own ordinary messages,
+    # but that is never sufficient authority for an MLS control.
+    assert authoritative_dm_control(
+        envelope,
+        message_type=7,
+        flags=4,
+        message_origin="participant.test",
+        event_origin="participant.test",
+        conversation_authority="authority.test",
+    ) == (True, False)
+    assert authoritative_dm_control(
+        envelope,
+        message_type=0,
+        flags=0,
+        message_origin="authority.test",
+        event_origin="authority.test",
+        conversation_authority="authority.test",
+    ) == (True, False)
+
+
+@pytest.mark.parametrize(("operation", "apply"), [("welcome", True), ("commit", False)])
+def test_remote_direct_dm_activation_and_rekey_controls_have_one_closed_shape(
+    operation: str,
+    apply: bool,
+) -> None:
+    content: dict[str, Any] = {
+        "message": {
+            "origin_domain": "authority.test",
+            "channel_id": "11",
+            "channel_domain": "authority.test",
+            "author_id": "7",
+            "author_domain": "participant.test",
+            "message_type": 7,
+            "flags": 4,
+            "e2ee": {
+                "operation": operation,
+                "ciphertext": "opaque",
+                "protocol": E2EE_PROTOCOL_MLS_10,
+                "suite": E2EE_SUITE_MLS_128,
+                "group_id": "g" * 43,
+                "policy_generation": "2",
+                "epoch": "1",
+            },
+        },
+        "author": {"id": "7", "origin_domain": "participant.test"},
+        "encryption_policy": {
+            "mode": "e2ee",
+            "state": "active",
+            "generation": "2",
+            "protocol": E2EE_PROTOCOL_MLS_10,
+            "suite": E2EE_SUITE_MLS_128,
+            "group_id": "g" * 43,
+            "epoch": "1",
+        },
+        "e2ee_control": {
+            "operation_id": "keo_" + "o" * 43,
+            "operation_domain": "authority.test",
+            "apply": apply,
+        },
+    }
+
+    assert authority_attested_direct_dm_control(
+        "dm.message.create",
+        content,
+        expected_authority="authority.test",
+        actor_id="7",
+        actor_domain="participant.test",
+    )
+
+    extra = deepcopy(content)
+    extra["unsigned_hint"] = True
+    assert not authority_attested_direct_dm_control(
+        "dm.message.create",
+        extra,
+        expected_authority="authority.test",
+        actor_id="7",
+        actor_domain="participant.test",
+    )
+
+    mismatched_policy = deepcopy(content)
+    mismatched_policy["encryption_policy"]["generation"] = "3"
+    assert not authority_attested_direct_dm_control(
+        "dm.message.create",
+        mismatched_policy,
+        expected_authority="authority.test",
+        actor_id="7",
+        actor_domain="participant.test",
+    )
+
+    # The exception must never turn the authority into a generic remote-user
+    # message signer, even when an ordinary message copies control-like fields.
+    content["message"]["message_type"] = 0
+    assert not authority_attested_direct_dm_control(
+        "dm.message.create",
+        content,
+        expected_authority="authority.test",
+        actor_id="7",
+        actor_domain="participant.test",
+    )
+
+
+def test_remote_room_policy_pause_binds_authority_actor_channel_and_scope() -> None:
+    actor = SimpleNamespace(id=7, origin_domain="participant.test")
+    channel = SimpleNamespace(
+        id=11,
+        origin_domain="authority.test",
+        guild_id=13,
+        guild_domain="authority.test",
+    )
+    content: dict[str, Any] = {
+        "channel_id": "11",
+        "channel_domain": "authority.test",
+        "encryption_policy": {
+            "mode": "e2ee",
+            "state": "rekeying",
+            "generation": "2",
+            "protocol": E2EE_PROTOCOL_MLS_10,
+            "suite": E2EE_SUITE_MLS_128,
+            "group_id": "g" * 43,
+            "epoch": "1",
+        },
+    }
+    context = room_policy_change_context(channel, actor)
+
+    assert authority_attested_room_policy_change(
+        "e2ee.room-policy.changed",
+        content,
+        context,
+        expected_authority="authority.test",
+        actor_id="7",
+        actor_domain="participant.test",
+    )
+
+    forged = deepcopy(context)
+    forged["actor"]["id"] = "8"
+    assert not authority_attested_room_policy_change(
+        "e2ee.room-policy.changed",
+        content,
+        forged,
+        expected_authority="authority.test",
+        actor_id="7",
+        actor_domain="participant.test",
+    )
+
+    downgraded = deepcopy(content)
+    downgraded["encryption_policy"]["state"] = "active"
+    assert not authority_attested_room_policy_change(
+        "e2ee.room-policy.changed",
+        downgraded,
+        context,
+        expected_authority="authority.test",
+        actor_id="7",
+        actor_domain="participant.test",
+    )
 
 
 def test_e2ee_envelope_has_iterative_shape_limits() -> None:

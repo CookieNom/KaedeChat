@@ -6,7 +6,6 @@ import time
 from contextlib import suppress
 from dataclasses import asdict
 from typing import Any, cast
-from urllib.parse import urlsplit
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -55,14 +54,12 @@ from app.voice.schemas import (
     VoiceTokenResponse,
 )
 from app.voice.service import (
-    MEDIA_E2EE_PROTOCOL,
-    MEDIA_E2EE_SUITE,
     VOICE_FLAG_MASK,
     VOICE_SERVER_DEAF,
     VOICE_SERVER_MUTE,
     authoritative_guild_token,
+    federated_voice_grant_matches,
     load_voice_channel,
-    media_session_id,
     parse_minted_metadata,
     require_e2ee_voice_device,
     require_voice_enabled,
@@ -92,25 +89,6 @@ from app.voice.state import (
 
 router = APIRouter(tags=["voice"])
 log = structlog.get_logger()
-
-
-def valid_federated_voice_url(value: str, authority_domain: str) -> bool:
-    """Accept only a TLS LiveKit endpoint on the authenticated authority."""
-
-    try:
-        parsed = urlsplit(value)
-        port = parsed.port
-    except ValueError:
-        return False
-    return bool(
-        parsed.scheme == "wss"
-        and parsed.hostname == authority_domain
-        and port in {None, 443}
-        and parsed.username is None
-        and parsed.password is None
-        and not parsed.query
-        and not parsed.fragment
-    )
 
 
 def voice_audit_reason(value: str | None) -> str | None:
@@ -206,26 +184,11 @@ async def channel_voice_token(
             raise HTTPException(
                 status_code=502, detail={"code": "VOICE_HOME_INVALID_RESPONSE"}
             ) from exc
-        if (
-            grant.move_session_id != move_session_id
-            or grant.room != expected_room
-            or not valid_federated_voice_url(grant.url, guild.origin_domain)
-            or grant.e2ee != (channel.encryption_mode == "e2ee")
-            or (
-                grant.e2ee
-                and (
-                    channel.encryption_state != "active"
-                    or grant.channel_id != str(channel.id)
-                    or grant.channel_domain != channel.origin_domain
-                    or grant.encryption_policy_generation
-                    != str(channel.encryption_policy_generation)
-                    or grant.encryption_epoch != str(channel.encryption_epoch)
-                    or grant.media_protocol != MEDIA_E2EE_PROTOCOL
-                    or grant.media_suite != MEDIA_E2EE_SUITE
-                    or grant.media_session_id != media_session_id(channel, expected_room)
-                    or grant.media_epoch != str(channel.encryption_epoch)
-                )
-            )
+        if grant.move_session_id != move_session_id or not federated_voice_grant_matches(
+            grant,
+            channel,
+            expected_room=expected_room,
+            authority_domain=guild.origin_domain,
         ):
             raise HTTPException(status_code=502, detail={"code": "VOICE_HOME_INVALID_RESPONSE"})
         if not await activate_federated_voice_home_session(
@@ -667,7 +630,12 @@ async def federation_voice_move(
     expected_room = f"g.{payload.guild_id}.{payload.channel_id}"
     if payload.grant.room != expected_room:
         raise HTTPException(status_code=400, detail={"code": "KAED_VOICE_INVALID_ROOM"})
-    if not valid_federated_voice_url(payload.grant.url, principal.origin):
+    if not federated_voice_grant_matches(
+        payload.grant,
+        channel,
+        expected_room=expected_room,
+        authority_domain=principal.origin,
+    ):
         raise HTTPException(status_code=400, detail={"code": "KAED_VOICE_INVALID_STATE"})
     try:
         source_kind, source_guild_id, _source_channel_id = parse_room_name(payload.source_room)

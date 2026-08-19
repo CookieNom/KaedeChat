@@ -31,12 +31,6 @@ sealed class MobilePasswordKdfContext {
         vaultSalt: vaultSalt,
       );
     }
-    if (version == 0 &&
-        json['algorithm'] == 'legacy' &&
-        json['iterations'] == 0 &&
-        json['auth_salt'] == null) {
-      return LegacyMobilePasswordKdfContext(vaultSalt: vaultSalt);
-    }
     throw const FormatException(
       'This server uses an unsupported password protection scheme.',
     );
@@ -72,25 +66,16 @@ final class ModernMobilePasswordKdfContext extends MobilePasswordKdfContext {
       };
 }
 
-final class LegacyMobilePasswordKdfContext extends MobilePasswordKdfContext {
-  const LegacyMobilePasswordKdfContext({required super.vaultSalt});
-
-  @override
-  int get version => 0;
-}
-
 final class PreparedMobilePassword {
   const PreparedMobilePassword({
     required this.authenticationSecret,
     required this.vaultKey,
     required this.context,
-    this.passwordUpgrade,
   });
 
   final String authenticationSecret;
   final SecretKeyData vaultKey;
   final MobilePasswordKdfContext context;
-  final Map<String, Object?>? passwordUpgrade;
 
   void destroy() => vaultKey.destroy();
 }
@@ -113,52 +98,30 @@ Future<PreparedMobilePassword> prepareMobilePassword(
   _validatePassword(password);
   final material = _passwordMaterial(password);
   try {
+    if (context is! ModernMobilePasswordKdfContext) {
+      throw const FormatException(
+        'This server uses an unsupported password protection scheme.',
+      );
+    }
     final vaultKey = await _deriveKey(
       material,
       context.vaultSalt,
       instance,
       purpose: 'vault',
     );
-    if (context case final ModernMobilePasswordKdfContext modern) {
-      try {
-        return PreparedMobilePassword(
-          authenticationSecret: await _authenticationSecret(
-            material,
-            modern.authSalt,
-            instance,
-          ),
-          vaultKey: vaultKey,
-          context: context,
-        );
-      } on Object {
-        vaultKey.destroy();
-        rethrow;
-      }
-    }
-    final upgradeSalt = _randomBytes(16);
     try {
-      final upgraded = ModernMobilePasswordKdfContext(
-        authSalt: _base64url(upgradeSalt),
-        vaultSalt: context.vaultSalt,
-      );
       return PreparedMobilePassword(
-        authenticationSecret: password,
+        authenticationSecret: await _authenticationSecret(
+          material,
+          context.authSalt,
+          instance,
+        ),
         vaultKey: vaultKey,
         context: context,
-        passwordUpgrade: <String, Object?>{
-          'password': await _authenticationSecret(
-            material,
-            upgraded.authSalt,
-            instance,
-          ),
-          'password_kdf': upgraded.toAuthenticationJson(),
-        },
       );
     } on Object {
       vaultKey.destroy();
       rethrow;
-    } finally {
-      upgradeSalt.fillRange(0, upgradeSalt.length, 0);
     }
   } finally {
     material.destroy();

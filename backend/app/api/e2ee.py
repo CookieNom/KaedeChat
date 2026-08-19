@@ -41,6 +41,7 @@ from app.chat.e2ee import (
     validate_channel_encryption_policy_transition,
     validate_e2ee_envelope,
 )
+from app.chat.e2ee_controls import apply_e2ee_control_metadata, room_policy_change_context
 from app.chat.e2ee_membership import (
     e2ee_policy_destinations,
     pause_local_e2ee_for_device_change,
@@ -718,6 +719,7 @@ async def queue_device_change_updates(
                 "channel_domain": channel.origin_domain,
                 "encryption_policy": channel_encryption_policy_payload(channel),
             },
+            context=room_policy_change_context(channel, user),
         )
         for destination in channel_destinations:
             await queue_event(session, settings, destination, envelope)
@@ -1535,10 +1537,23 @@ async def room_encryption_control_log(
             channel=access.channel,
         )
     channel = access.channel
+    if access.guild is not None:
+        authority_domain = access.guild.origin_domain
+    else:
+        conversation = await session.get(
+            DMConversation,
+            (channel.id, channel.origin_domain),
+        )
+        if conversation is None:
+            raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+        authority_domain = conversation.authority_domain
     conditions = [
         E2EEControlRecord.channel_id == channel.id,
         E2EEControlRecord.channel_domain == channel.origin_domain,
         E2EEControlRecord.id >= channel.created_floor_id,
+        E2EEControlRecord.origin_domain == authority_domain,
+        E2EEControlRecord.room_operation_id.is_not(None),
+        E2EEControlRecord.room_operation_domain == authority_domain,
     ]
     if after is not None:
         after_id, after_domain = after.resolve(settings.domain)
@@ -2443,79 +2458,6 @@ async def propose_room_rekey(
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     return await _route_room_proposal("rekey", channel_id, payload, auth, session, redis, settings)
-
-
-async def apply_e2ee_control_metadata(
-    session: AsyncSession,
-    message: Message,
-    value: object,
-    *,
-    expected_authority: str,
-) -> None:
-    """Persist signed control application metadata outside the MLS envelope."""
-
-    envelope = message.e2ee if isinstance(message.e2ee, dict) else None
-    operation = envelope.get("operation") if envelope is not None else None
-    if operation not in {"welcome", "commit"}:
-        if value is not None:
-            raise ValueError("non-control message contains E2EE control metadata")
-        return
-    if not isinstance(value, dict) or set(value) != {
-        "operation_id",
-        "operation_domain",
-        "apply",
-    }:
-        raise ValueError("E2EE control metadata is invalid")
-    operation_id = value.get("operation_id")
-    operation_domain = value.get("operation_domain")
-    apply = value.get("apply")
-    if (
-        not isinstance(operation_id, str)
-        or len(operation_id) != 47
-        or not operation_id.startswith("keo_")
-        or not all(character.isalnum() or character in "-_" for character in operation_id[4:])
-        or operation_domain != expected_authority
-        or not isinstance(apply, bool)
-        or (operation == "welcome" and not apply)
-    ):
-        raise ValueError("E2EE control metadata is invalid")
-    apply_mode = "join" if operation == "welcome" else "process" if apply else "audit"
-    record = await session.get(E2EEControlRecord, (message.id, message.origin_domain))
-    if record is None:
-        record = E2EEControlRecord(
-            id=message.id,
-            origin_domain=message.origin_domain,
-            channel_id=message.channel_id,
-            channel_domain=message.channel_domain,
-            author_id=message.author_id,
-            author_domain=message.author_domain,
-            policy_generation=message.encryption_policy_generation,
-            epoch=message.encryption_epoch or 0,
-            operation=str(operation),
-            apply_mode=apply_mode,
-            room_operation_id=operation_id,
-            room_operation_domain=str(operation_domain),
-            envelope=envelope,
-            created_at=message.created_at,
-        )
-        session.add(record)
-        return
-    if (
-        record.operation != operation
-        or record.envelope != envelope
-        or (
-            record.room_operation_id is not None
-            and (
-                record.room_operation_id != operation_id
-                or record.room_operation_domain != operation_domain
-                or record.apply_mode != apply_mode
-            )
-        )
-    ):
-        raise ValueError("E2EE control metadata conflicts with its durable record")
-    record.apply_mode = apply_mode
-    record.room_operation_id = operation_id
-    record.room_operation_domain = str(operation_domain)
 
 
 def _control_metadata(operation: E2EERoomOperation, *, apply: bool) -> dict[str, object]:

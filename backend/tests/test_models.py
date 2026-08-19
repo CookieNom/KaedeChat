@@ -44,6 +44,12 @@ def test_complete_v1_schema_is_registered() -> None:
         "guild_history_staged_messages",
         "federated_history_messages",
         "attachments",
+        "attachment_federation_recipients",
+        "media_tombstone_sources",
+        "media_tombstone_destinations",
+        "room_federation_recipients",
+        "terminal_room_deletions",
+        "guild_media_deletion_requests",
         "reactions",
         "pins",
         "dm_conversations",
@@ -340,7 +346,17 @@ def test_local_user_tables_have_database_constraints() -> None:
         "ck_users_e2ee_recovery_token_hash_length",
         "ck_users_e2ee_recovery_generation_positive",
         "ck_users_e2ee_recovery_authorization_complete",
+        "ck_users_password_kdf_fields_complete",
     } <= constraint_names("users")
+    assert any(
+        isinstance(constraint, CheckConstraint)
+        and constraint.name is not None
+        and constraint.name.endswith("password_kdf_fields_complete")
+        and "is_local AND account_type = 'human' AND password_kdf_version = 2"
+        in str(constraint.sqltext)
+        and "e2ee_vault_salt IS NOT NULL" in str(constraint.sqltext)
+        for constraint in users.constraints
+    )
     assert any(
         isinstance(constraint, CheckConstraint)
         and constraint.name is not None

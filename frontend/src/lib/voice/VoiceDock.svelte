@@ -6,12 +6,14 @@
   import { isNativeDesktop } from '$lib/platform/native';
   import { initializeE2EE } from '$lib/e2ee/client';
   import { entityKey } from '$lib/chat/refs';
+  import type { Channel } from '$lib/chat/types';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
 
   import {
     attachVideo,
+    VoiceConnectionFence,
     VoiceSession,
-    voiceGrantMatchesChannelPolicy,
+    expectedVoicePolicy,
     type VoiceToken
   } from './session';
 
@@ -26,7 +28,7 @@
   let audioHost = $state<HTMLElement | null>(null);
   let detachAudio: (() => void) | null = null;
   let mounted = false;
-  let connectionGeneration = 0;
+  const connectionFence = new VoiceConnectionFence();
   let joinController: AbortController | null = null;
   const permissionBits = $derived.by(() => {
     if (callRef || permissions === null) return null;
@@ -67,6 +69,7 @@
     return {
       connected: voice.connected,
       connecting: voice.connecting,
+      encrypted: voice.encrypted,
       microphone: voice.microphone,
       camera: voice.camera,
       screen: voice.screen,
@@ -82,17 +85,12 @@
     error = voice.error;
   };
 
-  function selectedChannel() {
-    if (!channelRef) return null;
-    return entities.channels.values.find((item) => entityKey(item) === channelRef) ?? null;
+  function selectedChannel(reference = channelRef) {
+    if (!reference) return null;
+    return entities.channels.values.find((item) => entityKey(item) === reference) ?? null;
   }
 
-  async function senderDeviceId(grant?: VoiceToken): Promise<string | null> {
-    const channel = grant?.channel_id
-      ? (entities.channels.values.find(
-          (item) => entityKey(item) === `${grant.channel_id}@${grant.channel_domain}`
-        ) ?? null)
-      : selectedChannel();
+  async function senderDeviceId(channel: Channel): Promise<string | null> {
     if (channel?.encryption_mode !== 'e2ee') return null;
     const user = entities.currentUser;
     if (!user) throw new Error('Sign in again before joining encrypted voice.');
@@ -100,30 +98,37 @@
   }
 
   const moved = (event: Event) => {
-    const grant = (event as CustomEvent<VoiceToken>).detail;
+    const { grant, channelRef: targetRef } = (
+      event as CustomEvent<{ grant: VoiceToken; channelRef: string }>
+    ).detail;
     if ((grant.move_session_id ?? null) !== voice.moveSessionId) return;
-    const generation = ++connectionGeneration;
+    const generation = connectionFence.begin();
     joinController?.abort();
     joinController = null;
     void (async () => {
       try {
+        const channel = selectedChannel(targetRef);
+        if (!channel) throw new Error('The destination voice channel is unavailable.');
+        const targetEncrypted = channel.encryption_mode === 'e2ee';
+        if (voice.encrypted !== targetEncrypted) {
+          await voice.disconnect();
+          throw new Error(
+            'The destination uses a different voice encryption policy. Review it and join manually.'
+          );
+        }
+        const key = await mediaKey(grant, channel);
+        const deviceId = await senderDeviceId(channel);
+        if (!mounted || !connectionFence.isCurrent(generation)) return;
         await voice.disconnect();
-        if (!mounted || generation !== connectionGeneration) return;
+        if (!mounted || !connectionFence.isCurrent(generation)) return;
         if (isNativeDesktop()) {
-          const reference = callRef ?? channelRef;
-          if (reference)
-            await voice.connectNative(
-              reference,
-              Boolean(callRef),
-              await mediaKey(grant),
-              (await senderDeviceId(grant)) ?? undefined
-            );
+          await voice.connectNative(targetRef, false, grant, channel, key, deviceId ?? undefined);
           return;
         }
-        await voice.connect(grant, await mediaKey(grant));
-        if (!mounted || generation !== connectionGeneration) await voice.disconnect();
+        await voice.connect(grant, channel, key);
+        if (!mounted || !connectionFence.isCurrent(generation)) await voice.disconnect();
       } catch (caught) {
-        if (mounted && generation === connectionGeneration) {
+        if (mounted && connectionFence.isCurrent(generation)) {
           error = userErrorMessage(caught, 'Could not move voice rooms. Try joining again.');
         }
       }
@@ -137,15 +142,11 @@
     if (audioHost) detachAudio = voice.attachAudio(audioHost);
   });
 
-  async function mediaKey(grant: VoiceToken): Promise<ArrayBuffer | undefined> {
+  async function mediaKey(grant: VoiceToken, channel: Channel): Promise<ArrayBuffer | undefined> {
+    expectedVoicePolicy(grant, channel);
     if (!grant.e2ee) return undefined;
     const user = entities.currentUser;
-    const channel = entities.channels.values.find(
-      (item) => entityKey(item) === `${grant.channel_id}@${grant.channel_domain}`
-    );
-    if (!user || !channel) throw new Error('Encrypted room state is unavailable on this device.');
-    if (!voiceGrantMatchesChannelPolicy(grant, channel))
-      throw new Error('Encrypted call keys changed. Refresh the conversation and try again.');
+    if (!user) throw new Error('Encrypted room state is unavailable on this device.');
     const client = await initializeE2EE(user);
     await client.syncRoomState(channel);
     return client.exportMediaKey(
@@ -163,7 +164,7 @@
 
   onDestroy(() => {
     mounted = false;
-    connectionGeneration += 1;
+    connectionFence.invalidate();
     joinController?.abort();
     joinController = null;
     voice.removeEventListener('change', changed);
@@ -172,19 +173,28 @@
     void voice.disconnect();
   });
 
+  async function leave() {
+    connectionFence.invalidate();
+    joinController?.abort();
+    joinController = null;
+    await voice.disconnect();
+  }
+
   async function join() {
     if (!mounted) return;
     if (!canConnect) {
       error = 'You do not have permission to join this voice channel.';
       return;
     }
-    const generation = ++connectionGeneration;
+    const generation = connectionFence.begin();
     joinController?.abort();
     const controller = new AbortController();
     joinController = controller;
     error = '';
     try {
-      const deviceId = await senderDeviceId();
+      const channel = selectedChannel();
+      if (!channel) throw new Error('Voice channel policy is unavailable. Refresh and try again.');
+      const deviceId = await senderDeviceId(channel);
       const path = callRef
         ? `/calls/${encodeURIComponent(callRef)}/voice/token`
         : `/channels/${encodeURIComponent(channelRef ?? '')}/voice/token`;
@@ -193,21 +203,28 @@
         body: JSON.stringify({ sender_device_id: deviceId }),
         signal: controller.signal
       });
-      if (!mounted || generation !== connectionGeneration || controller.signal.aborted) return;
+      if (!mounted || !connectionFence.isCurrent(generation) || controller.signal.aborted) return;
+      const key = await mediaKey(grant, channel);
+      if (!mounted || !connectionFence.isCurrent(generation) || controller.signal.aborted) return;
       if (isNativeDesktop()) {
         const reference = callRef ?? channelRef;
         if (!reference) throw new Error('Voice channel is unavailable.');
         await voice.connectNative(
           reference,
           Boolean(callRef),
-          await mediaKey(grant),
+          grant,
+          channel,
+          key,
           deviceId ?? undefined
         );
       } else {
-        await voice.connect(grant, await mediaKey(grant));
+        await voice.connect(grant, channel, key);
       }
-      if (!mounted || generation !== connectionGeneration || controller.signal.aborted) {
-        await voice.disconnect();
+      if (!mounted || !connectionFence.isCurrent(generation) || controller.signal.aborted) {
+        // Native joins have their own generation fence in Rust. A stale
+        // invocation may finish after a newer native join has started, so an
+        // unconditional leave here could tear down that newer call.
+        if (!isNativeDesktop()) await voice.disconnect();
         return;
       }
       if (audioHost) {
@@ -215,7 +232,7 @@
         detachAudio = voice.attachAudio(audioHost);
       }
     } catch (caught) {
-      if (mounted && generation === connectionGeneration && !controller.signal.aborted) {
+      if (mounted && connectionFence.isCurrent(generation) && !controller.signal.aborted) {
         error =
           caught instanceof ApiError
             ? caught.code === 'MISSING_PERMISSIONS'
@@ -250,7 +267,7 @@
         <strong>{view.connected ? 'Voice connected' : 'Voice channel'}</strong>
         <span>
           {view.connected
-            ? `${view.participants.length} ${view.participants.length === 1 ? 'participant' : 'participants'}`
+            ? `${view.participants.length} ${view.participants.length === 1 ? 'participant' : 'participants'} · ${view.encrypted ? 'End-to-end encrypted' : 'Not end-to-end encrypted'}`
             : voiceCapabilitySummary}
         </span>
       </div>
@@ -384,7 +401,7 @@
         class="control-button danger"
         aria-label="Leave voice"
         title="Leave voice"
-        onclick={() => safely(() => voice.disconnect())}
+        onclick={() => safely(leave)}
       >
         <Icon name="phone-off" size={21} />
       </button>

@@ -239,8 +239,10 @@ class User(Base, FederatedIdMixin, TimestampMixin):
             name="e2ee_vault_salt_length",
         ),
         CheckConstraint(
-            "(password_kdf_version IS NULL AND password_auth_salt IS NULL) OR "
-            "(password_kdf_version = 2 AND password_auth_salt IS NOT NULL)",
+            "(is_local AND account_type = 'human' AND password_kdf_version = 2 "
+            "AND password_auth_salt IS NOT NULL AND e2ee_vault_salt IS NOT NULL) OR "
+            "(NOT (is_local AND account_type = 'human') AND password_kdf_version IS NULL "
+            "AND password_auth_salt IS NULL AND e2ee_vault_salt IS NULL)",
             name="password_kdf_fields_complete",
         ),
         CheckConstraint(
@@ -1699,7 +1701,7 @@ class E2EEControlRecord(Base, FederatedIdMixin):
         CheckConstraint("epoch >= 0", name="nonnegative_epoch"),
         CheckConstraint("operation IN ('welcome','commit')", name="operation_value"),
         CheckConstraint(
-            "(operation = 'welcome' AND apply_mode = 'join') OR "
+            "(operation = 'welcome' AND apply_mode IN ('join','audit')) OR "
             "(operation = 'commit' AND apply_mode IN ('process','audit'))",
             name="apply_mode_value",
         ),
@@ -2045,7 +2047,8 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
             name="positive_dimensions",
         ),
         CheckConstraint(
-            "scan_status IN ('pending','clean','infected','failed','encrypted','quarantined')",
+            "scan_status IN "
+            "('pending','clean','infected','failed','encrypted','quarantined','rejected')",
             name="scan_status",
         ),
         CheckConstraint(
@@ -2073,7 +2076,7 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
         Index(
             "ix_attachments_pending_gc",
             "upload_expires_at",
-            postgresql_where=text("finalized_at IS NULL"),
+            postgresql_where=text("finalized_at IS NULL AND deleted_at IS NULL"),
         ),
         Index(
             "ix_attachments_staging_gc",
@@ -2093,6 +2096,15 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
             "ix_attachments_public_asset_hash",
             "content_sha256",
             postgresql_where=text("purpose <> 'attachment' AND scan_status = 'clean'"),
+        ),
+        Index(
+            "ix_attachments_content_digest",
+            "origin_domain",
+            "content_sha256",
+            # Status values are bound parameters in the hot capability and
+            # binding probes. Key only on non-null digests so PostgreSQL can
+            # use this index even after asyncpg selects a generic plan.
+            postgresql_where=text("content_sha256 IS NOT NULL"),
         ),
     )
 
@@ -2590,6 +2602,238 @@ class FederationInbox(Base):
         PrimaryKeyConstraint("origin_domain", "event_id"),
         ForeignKeyConstraint(["origin_domain"], ["instances.domain"]),
         CheckConstraint("status IN ('received','processed','rejected')", name="status_value"),
+    )
+
+
+class AttachmentFederationRecipient(Base):
+    """Durable record of an instance that received or fetched local media.
+
+    Access revocation may remove the membership/participant rows used for live
+    fanout. This ledger intentionally survives those removals so a later
+    terminal media verdict can still invalidate every prior replica/cache.
+    """
+
+    __tablename__ = "attachment_federation_recipients"
+    attachment_id: Mapped[int] = mapped_column(BigInteger)
+    attachment_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    destination_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "attachment_id",
+            "attachment_domain",
+            "destination_domain",
+        ),
+        ForeignKeyConstraint(
+            ["attachment_id", "attachment_domain"],
+            ["attachments.id", "attachments.origin_domain"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "destination_domain <> attachment_domain",
+            name="remote_destination",
+        ),
+        Index("ix_attachment_federation_recipients_destination", "destination_domain"),
+    )
+
+
+class MediaTombstoneSource(Base):
+    """Local signing state retained independently of attachment/message rows."""
+
+    __tablename__ = "media_tombstone_sources"
+    attachment_id: Mapped[int] = mapped_column(BigInteger)
+    attachment_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    signer_id: Mapped[int] = mapped_column(BigInteger)
+    signer_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    event_id: Mapped[str] = mapped_column(String(64))
+    key_id: Mapped[str] = mapped_column(String(64))
+    generation: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("attachment_id", "attachment_domain"),
+        CheckConstraint("attachment_id >= 0", name="nonnegative_attachment_id"),
+        CheckConstraint("signer_id >= 0", name="nonnegative_signer_id"),
+        # Generation zero is retained only for authenticated media.delete
+        # envelopes emitted before signed generations were introduced. Local
+        # rollover rewrites those proofs as generation one.
+        CheckConstraint("generation >= 0", name="nonnegative_generation"),
+        Index("ix_media_tombstone_sources_key", "key_id"),
+    )
+
+
+class MediaTombstoneDestination(Base):
+    """Replica route retained after attachment and membership rows disappear."""
+
+    __tablename__ = "media_tombstone_destinations"
+    attachment_id: Mapped[int] = mapped_column(BigInteger)
+    attachment_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    destination_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    room_kind: Mapped[str | None] = mapped_column(String(16))
+    room_id: Mapped[int | None] = mapped_column(BigInteger)
+    room_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "attachment_id",
+            "attachment_domain",
+            "destination_domain",
+        ),
+        ForeignKeyConstraint(["destination_domain"], ["instances.domain"]),
+        CheckConstraint("attachment_id >= 0", name="nonnegative_attachment_id"),
+        CheckConstraint(
+            "destination_domain <> attachment_domain",
+            name="remote_destination",
+        ),
+        CheckConstraint(
+            "(room_kind IS NULL AND room_id IS NULL AND room_domain IS NULL) OR "
+            "(room_kind IN ('guild','group_dm') AND room_id IS NOT NULL "
+            "AND room_id >= 0 AND room_domain IS NOT NULL)",
+            name="room_ref_complete",
+        ),
+        Index("ix_media_tombstone_destinations_destination", "destination_domain"),
+        Index(
+            "ix_media_tombstone_destinations_room",
+            "room_kind",
+            "room_id",
+            "room_domain",
+        ),
+    )
+
+
+class RoomFederationRecipient(Base):
+    """Historical instance access retained until authoritative room deletion."""
+
+    __tablename__ = "room_federation_recipients"
+    room_kind: Mapped[str] = mapped_column(String(16))
+    room_id: Mapped[int] = mapped_column(BigInteger)
+    room_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    destination_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "room_kind",
+            "room_id",
+            "room_domain",
+            "destination_domain",
+        ),
+        ForeignKeyConstraint(["destination_domain"], ["instances.domain"]),
+        CheckConstraint("room_kind IN ('guild','group_dm')", name="room_kind"),
+        CheckConstraint("room_id >= 0", name="nonnegative_room_id"),
+        CheckConstraint("destination_domain <> room_domain", name="remote_destination"),
+        Index("ix_room_federation_recipients_destination", "destination_domain"),
+    )
+
+
+class TerminalRoomDeletion(Base):
+    """One durable terminal-room proof and acknowledgement per destination."""
+
+    __tablename__ = "terminal_room_deletions"
+    room_kind: Mapped[str] = mapped_column(String(16))
+    room_id: Mapped[int] = mapped_column(BigInteger)
+    room_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    destination_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    actor_id: Mapped[int] = mapped_column(BigInteger)
+    actor_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    event_type: Mapped[str] = mapped_column(String(64))
+    content: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    event_id: Mapped[str] = mapped_column(String(64))
+    key_id: Mapped[str] = mapped_column(String(64))
+    generation: Mapped[int] = mapped_column(BigInteger)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "room_kind",
+            "room_id",
+            "room_domain",
+            "destination_domain",
+        ),
+        ForeignKeyConstraint(["destination_domain"], ["instances.domain"]),
+        CheckConstraint("room_kind IN ('guild','group_dm')", name="room_kind"),
+        CheckConstraint("room_id >= 0", name="nonnegative_room_id"),
+        CheckConstraint("actor_id >= 0", name="nonnegative_actor_id"),
+        CheckConstraint("generation > 0", name="positive_generation"),
+        CheckConstraint(
+            "(room_kind = 'guild' AND event_type = 'guild.instance_access.revoked') OR "
+            "(room_kind = 'group_dm' AND event_type = 'dm.group.state')",
+            name="event_matches_room_kind",
+        ),
+        Index(
+            "ix_terminal_room_deletions_pending_key",
+            "room_domain",
+            "key_id",
+            postgresql_where=text("acknowledged_at IS NULL"),
+        ),
+        Index("ix_terminal_room_deletions_event", "room_domain", "event_id"),
+    )
+
+
+class GuildMediaDeletionRequest(Base):
+    """Durable guild-authority request addressed to a remote media origin."""
+
+    __tablename__ = "guild_media_deletion_requests"
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    attachment_id: Mapped[int] = mapped_column(BigInteger)
+    attachment_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    message_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    actor_id: Mapped[int] = mapped_column(BigInteger)
+    actor_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_id: Mapped[str] = mapped_column(String(64))
+    key_id: Mapped[str] = mapped_column(String(64))
+    generation: Mapped[int] = mapped_column(BigInteger)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "guild_id",
+            "guild_domain",
+            "attachment_id",
+            "attachment_domain",
+        ),
+        ForeignKeyConstraint(["attachment_domain"], ["instances.domain"]),
+        CheckConstraint("guild_id >= 0", name="nonnegative_guild_id"),
+        CheckConstraint("attachment_id >= 0", name="nonnegative_attachment_id"),
+        CheckConstraint("message_id >= 0", name="nonnegative_message_id"),
+        CheckConstraint("actor_id >= 0", name="nonnegative_actor_id"),
+        CheckConstraint("generation > 0", name="positive_generation"),
+        CheckConstraint("guild_domain = message_domain", name="message_at_guild_home"),
+        CheckConstraint("attachment_domain <> guild_domain", name="remote_attachment_origin"),
+        Index(
+            "ix_guild_media_deletion_requests_pending_key",
+            "guild_domain",
+            "key_id",
+            postgresql_where=text("acknowledged_at IS NULL"),
+        ),
+        Index(
+            "ix_guild_media_deletion_requests_event",
+            "guild_domain",
+            "event_id",
+        ),
     )
 
 

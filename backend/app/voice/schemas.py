@@ -29,10 +29,10 @@ class VoiceTokenResponse(BaseModel):
     expires_at: str = Field(min_length=20, max_length=64)
     can_speak: bool
     can_stream: bool
-    # Defaults preserve compatibility with peers that predate the explicit
-    # grant. New home instances always send the authoritative value.
+    # This default preserves compatibility with peers that predate the
+    # explicit VAD grant. New home instances always send the authoritative value.
     can_use_vad: bool = True
-    e2ee: bool = False
+    e2ee: bool
     channel_id: SnowflakeString | None = None
     channel_domain: FederationDomain | None = None
     encryption_policy_generation: SnowflakeString | None = None
@@ -59,6 +59,8 @@ class VoiceTokenResponse(BaseModel):
             self.media_session_id,
             self.media_epoch,
         )
+        if self.channel_id is None or self.channel_domain is None:
+            raise ValueError("voice grant requires a channel reference")
         if self.e2ee and any(item is None for item in context):
             raise ValueError("encrypted voice grant requires complete room context")
         if self.e2ee and self.media_epoch != self.encryption_epoch:

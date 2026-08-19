@@ -8,6 +8,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime},
 };
 
 use bytes::Bytes;
@@ -18,6 +19,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::{Url, form_urlencoded};
+
+/// Maximum age of a public asset before its origin must be checked again.
+pub const PUBLIC_ASSET_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, Serialize)]
 struct TicketRequest<'a> {
@@ -278,8 +282,8 @@ impl MediaClient {
             return Err(MediaError::InvalidAssetReference);
         }
         tokio::fs::create_dir_all(directory).await?;
-        let path = directory.join(format!("{content_hash}-{variant}.asset"));
-        if tokio::fs::try_exists(&path).await? {
+        let path = public_asset_cache_path(directory, origin, content_hash, variant);
+        if public_asset_cache_is_fresh(&path).await? {
             return Ok(path);
         }
         let mut url = if origin == self.api.endpoint().domain() {
@@ -290,7 +294,7 @@ impl MediaClient {
         url.set_path(&format!("/media/assets/{content_hash}/{variant}"));
         url.set_query(Some("v=2"));
         let bytes = self.api.get_public_bytes(&url, 8 * 1024 * 1024).await?;
-        let temporary = directory.join(format!(".{content_hash}-{variant}.tmp"));
+        let temporary = path.with_extension("tmp");
         tokio::fs::write(&temporary, bytes).await?;
         #[cfg(unix)]
         {
@@ -320,6 +324,40 @@ impl MediaClient {
         };
         self.api.get(&path).await.map_err(Into::into)
     }
+}
+
+fn public_asset_cache_path(
+    directory: &Path,
+    origin: &kaede_protocol::Domain,
+    content_hash: &str,
+    variant: &str,
+) -> PathBuf {
+    let origin_scope = format!("{:x}", Sha256::digest(origin.as_str().as_bytes()));
+    directory.join(format!("{origin_scope}-{content_hash}-{variant}.asset"))
+}
+
+/// Reports whether a public asset path is a regular file inside the short
+/// revalidation window. Future mtimes are deliberately treated as stale.
+pub async fn public_asset_cache_is_fresh(path: &Path) -> Result<bool, std::io::Error> {
+    public_asset_cache_is_fresh_at(path, SystemTime::now()).await
+}
+
+async fn public_asset_cache_is_fresh_at(
+    path: &Path,
+    now: SystemTime,
+) -> Result<bool, std::io::Error> {
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    let modified = metadata.modified()?;
+    Ok(now
+        .duration_since(modified)
+        .is_ok_and(|age| age <= PUBLIC_ASSET_CACHE_TTL))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -405,16 +443,73 @@ pub enum MediaError {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
+    use std::{
+        error::Error,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+        },
+    };
 
     use kaede_api::InstanceEndpoint;
     use kaede_protocol::Domain;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+    };
 
     use super::*;
+
+    const CONTENT_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
     fn client() -> Result<MediaClient, Box<dyn Error>> {
         let endpoint = InstanceEndpoint::production(Domain::parse("home.example")?)?;
         Ok(MediaClient::new(ApiClient::new(endpoint)?))
+    }
+
+    fn development_client(origin: &Url) -> Result<MediaClient, Box<dyn Error>> {
+        let endpoint = InstanceEndpoint::development(Domain::parse("home.example")?, origin)?;
+        Ok(MediaClient::new(ApiClient::new(endpoint)?))
+    }
+
+    fn test_directory(label: &str) -> PathBuf {
+        let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "kaede-media-{label}-{}-{sequence}",
+            std::process::id()
+        ))
+    }
+
+    async fn public_asset_server(
+        body: &'static [u8],
+    ) -> Result<(Url, Arc<AtomicUsize>, JoinHandle<std::io::Result<String>>), Box<dyn Error>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let origin = Url::parse(&format!("http://{}/", listener.local_addr()?))?;
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let request_count_for_server = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            request_count_for_server.fetch_add(1, Ordering::SeqCst);
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1_024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).await?;
+            stream.write_all(body).await?;
+            Ok(String::from_utf8_lossy(&request).into_owned())
+        });
+        Ok((origin, request_count, server))
     }
 
     #[tokio::test]
@@ -433,6 +528,86 @@ mod tests {
             .await;
         assert!(matches!(result, Err(MediaError::InvalidAssetReference)));
         assert!(!tokio::fs::try_exists(directory).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fresh_public_asset_is_returned_without_network_recheck() -> Result<(), Box<dyn Error>>
+    {
+        let directory = test_directory("fresh");
+        tokio::fs::create_dir_all(&directory).await?;
+        let domain = Domain::parse("home.example")?;
+        let path = public_asset_cache_path(&directory, &domain, CONTENT_HASH, "thumbnail_128");
+        tokio::fs::write(&path, b"cached").await?;
+        let (origin, request_count, server) = public_asset_server(b"revalidated").await?;
+        let media = development_client(&origin)?;
+
+        let cached = media
+            .cache_public_asset(&domain, CONTENT_HASH, "thumbnail_128", &directory)
+            .await?;
+
+        assert_eq!(cached, path);
+        assert_eq!(tokio::fs::read(&cached).await?, b"cached");
+        assert_eq!(request_count.load(Ordering::SeqCst), 0);
+        server.abort();
+        tokio::fs::remove_dir_all(directory).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_hash_from_another_origin_cannot_bypass_revalidation() -> Result<(), Box<dyn Error>>
+    {
+        let directory = test_directory("origin-scope");
+        tokio::fs::create_dir_all(&directory).await?;
+        let domain = Domain::parse("home.example")?;
+        let foreign_domain = Domain::parse("remote.example")?;
+        let foreign_path =
+            public_asset_cache_path(&directory, &foreign_domain, CONTENT_HASH, "thumbnail_128");
+        tokio::fs::write(&foreign_path, b"foreign").await?;
+        let (origin, request_count, server) = public_asset_server(b"home").await?;
+        let media = development_client(&origin)?;
+
+        let cached = media
+            .cache_public_asset(&domain, CONTENT_HASH, "thumbnail_128", &directory)
+            .await?;
+        let request = server.await??;
+
+        assert_ne!(cached, foreign_path);
+        assert_eq!(tokio::fs::read(&cached).await?, b"home");
+        assert_eq!(tokio::fs::read(&foreign_path).await?, b"foreign");
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        assert!(request.starts_with(&format!(
+            "GET /media/assets/{CONTENT_HASH}/thumbnail_128?v=2 HTTP/1.1\r\n"
+        )));
+        tokio::fs::remove_dir_all(directory).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expired_public_asset_is_revalidated_before_it_is_returned()
+    -> Result<(), Box<dyn Error>> {
+        let directory = test_directory("expired");
+        tokio::fs::create_dir_all(&directory).await?;
+        let domain = Domain::parse("home.example")?;
+        let path = public_asset_cache_path(&directory, &domain, CONTENT_HASH, "thumbnail_128");
+        tokio::fs::write(&path, b"expired").await?;
+        let expired_at = SystemTime::now() - PUBLIC_ASSET_CACHE_TTL - Duration::from_secs(1);
+        std::fs::File::open(&path)?.set_modified(expired_at)?;
+        let (origin, request_count, server) = public_asset_server(b"revalidated").await?;
+        let media = development_client(&origin)?;
+
+        let cached = media
+            .cache_public_asset(&domain, CONTENT_HASH, "thumbnail_128", &directory)
+            .await?;
+        let request = server.await??;
+
+        assert_eq!(cached, path);
+        assert_eq!(tokio::fs::read(&cached).await?, b"revalidated");
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        assert!(request.starts_with(&format!(
+            "GET /media/assets/{CONTENT_HASH}/thumbnail_128?v=2 HTTP/1.1\r\n"
+        )));
+        tokio::fs::remove_dir_all(directory).await?;
         Ok(())
     }
 

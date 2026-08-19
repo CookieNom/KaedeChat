@@ -320,11 +320,11 @@ consent.
 
 Guild bots do not gain access to members' direct messages. `dm.send` covers only
 opening the documented outbound conversation and sending into it. Ambient and
-inbound direct-message access are outside this contract, there is no
-direct-message event intent, and bot attachment uploads require a guild
+inbound direct-message access are outside this contract, and there is no
+direct-message event intent. Bot attachment uploads require a guild
 installation. DM creation, sending, and typing bind to one caller-selected
-active installation; that exact installation must still grant `dm.send` and
-`messages.send` rather than relying on another guild's consent.
+active installation. That exact installation must still grant `dm.send` and
+`messages.send`; consent from another guild doesn't count.
 
 ## REST API
 
@@ -381,8 +381,8 @@ Supported resource operations include:
 - Guild update; channel and role create/update/reorder/delete; and member role
   assignment, removal, and atomic replacement.
 - Cursor-paginated message history when every required grant allows it.
-- Message send and edit/delete-own operations, plus explicitly scoped message
-  moderation.
+- Message send and edit/delete-own operations, plus message moderation behind
+  its own scope.
 - Reactions and independently scoped attachment metadata/downloads.
 - Installation-owned upload tickets with installation-level byte accounting.
 - Guild invite, webhook, and emoji management.
@@ -411,12 +411,12 @@ overwriting another moderator's work. Role reorders carry one version per role.
 
 `attachments.write` does not invent a local-human storage owner for a remote
 bot identity. Pending and finalized bytes belong to the exact installation
-that created the ticket and use the instance's configured upload and storage
-limits. A bot cannot bind that ticket in another installation. Conversely,
-`attachments.read` may download a human-authored attachment only after it is
-bound to a message in a channel where that same installation still has normal
-view/history permissions. Signed object-storage redirects never receive bot
-tokens or DPoP proof headers.
+that created the ticket, under the instance's configured upload and storage
+limits. A bot cannot bind that ticket in another installation. On the read
+side, `attachments.read` can download a human-authored attachment only once
+it's bound to a message in a channel where that same installation still has
+normal view/history permissions. Signed object-storage redirects never receive
+bot tokens or DPoP proof headers.
 
 ## Commands and interactions
 
@@ -497,13 +497,13 @@ backlog receives an explicit `GAP` event instead of silently missing data.
 
 Intent selection controls delivery. Scopes and current installation grants
 control fields and actions. Message content and attachments are filtered
-independently. Content requires the privileged intent plus `messages.content`;
-attachment projections require `attachments.read`. The event category itself
-also requires its read scope on both the worker and installation (for example
+independently: content needs the privileged intent plus `messages.content`,
+and attachment projections need `attachments.read`. The event category itself
+also needs its read scope on both the worker and installation (for example
 `messages.metadata`, `reactions.read`, `members.read`, or
 `voice.states.read`). Sparse presence and voice projections carry the
-canonical guild context from the authorized topic, so multi-instance workers
-do not have to infer an authority from a user or channel reference.
+canonical guild context from the authorized topic, so a multi-instance worker
+doesn't have to infer the authority from a user or channel reference.
 
 Sessions have hard limits. Gateway session counts are atomically limited per
 worker, token expiry is checked while the connection is open, and frames are
@@ -615,8 +615,9 @@ The package provides:
 - direct multi-target token exchange and DPoP signing
 - heartbeat, cursor resume, bounded reconnect, and `Retry-After` handling
 - `Client.event` and `Client.command` decorators
-- typed guild, channel, member, role, message, attachment, invite, webhook,
-  emoji, interaction, moderation, presence, and voice resources/events
+- typed resources and events: guilds, channels, members, roles, messages, and
+  attachments; invites, webhooks, and emojis; interactions, moderation,
+  presence, and voice
 - scoped CRUD and moderation helpers, safe presigned uploads/downloads,
   message history and reactions, and user lookup
 - `content_unavailable`, encrypted payload, and composite-reference handling

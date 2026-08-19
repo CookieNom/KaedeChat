@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import httpx
 from pydantic import ValidationError
@@ -17,12 +18,15 @@ from app.core.dm import dm_pair_key
 from app.core.federation import (
     POLICY_HELD_OUTBOX_PREFIX,
     canonical_json,
+    durable_guild_media_delete_request,
+    durable_terminal_room_event,
     federation_policy_holds_event,
     policy_held_retry_at,
 )
 from app.core.metrics import increment_metric
 from app.core.settings import Settings
 from app.db.models import (
+    Attachment,
     FederationEvent,
     FederationInbox,
     FederationOutbox,
@@ -100,6 +104,29 @@ def retry_delay(attempts: int) -> timedelta:
     return timedelta(seconds=base * _JITTER.uniform(0.85, 1.15))
 
 
+def without_event_id_collisions(
+    rows: Iterable[FederationOutbox],
+) -> list[FederationOutbox]:
+    """Return the ordered first row for each wire-level event ID.
+
+    Inbox results currently identify events only by ``event_id``, while relay
+    outboxes are keyed by ``(origin, event_id)``. A rare cross-origin collision
+    therefore cannot safely share one batch: defer the later row to the next
+    drain so each response remains unambiguous.
+    """
+
+    selected: list[FederationOutbox] = []
+    seen: set[str] = set()
+    for row in rows:
+        if row.event_id in seen:
+            # Preserve the destination's total ordering: the colliding row is
+            # a barrier, so no later event may overtake it in this drain.
+            break
+        seen.add(row.event_id)
+        selected.append(row)
+    return selected
+
+
 def group_state_rejection_is_upgrade_retryable(
     event: FederationEvent,
     row: FederationOutbox,
@@ -119,6 +146,29 @@ def group_state_rejection_is_upgrade_retryable(
         and code == "KAED_FED_EVENT_REJECTED"
         and now - row.created_at < timedelta(hours=24)
     )
+
+
+def retry_rejected_media_delete(
+    event: FederationEvent | None,
+    row: FederationOutbox,
+    code: str,
+    now: datetime,
+) -> bool:
+    """Keep authoritative media invalidation retryable across peer upgrades."""
+
+    if event is None or (
+        event.event_type != "media.delete"
+        and not durable_terminal_room_event(event.envelope)
+        and not durable_guild_media_delete_request(event.envelope)
+    ):
+        return False
+    row.attempts += 1
+    row.status = "circuit" if now - row.created_at >= timedelta(hours=24) else "retry"
+    row.next_retry_at = now + (
+        timedelta(hours=1) if row.status == "circuit" else retry_delay(row.attempts)
+    )
+    row.last_error = code
+    return True
 
 
 async def enforce_queue_limits(session: AsyncSession, destination: str) -> None:
@@ -328,6 +378,7 @@ async def drain_destination(
         )
         if not rows:
             return 0
+        rows = without_event_id_collisions(rows)
         event_refs = [(row.event_origin_domain, row.event_id) for row in rows]
         events = list(
             await session.scalars(
@@ -343,11 +394,22 @@ async def drain_destination(
                 row
                 for row in rows
                 if (
-                    block.level == "suspend"
-                    or (row.event_origin_domain, row.event_id) not in by_ref
-                    or federation_policy_holds_event(
-                        block.level,
-                        by_ref[(row.event_origin_domain, row.event_id)].event_type,
+                    (row.event_origin_domain, row.event_id) not in by_ref
+                    or (
+                        by_ref[(row.event_origin_domain, row.event_id)].event_type != "media.delete"
+                        and not durable_terminal_room_event(
+                            by_ref[(row.event_origin_domain, row.event_id)].envelope
+                        )
+                        and not durable_guild_media_delete_request(
+                            by_ref[(row.event_origin_domain, row.event_id)].envelope
+                        )
+                        and (
+                            block.level == "suspend"
+                            or federation_policy_holds_event(
+                                block.level,
+                                by_ref[(row.event_origin_domain, row.event_id)].event_type,
+                            )
+                        )
                     )
                 )
             ]
@@ -462,6 +524,8 @@ async def drain_destination(
             await session.commit()
             return 0
         delivered = 0
+        terminal_room_acks: list[tuple[str, dict[str, Any]]] = []
+        guild_media_delete_acks: list[tuple[str, dict[str, Any]]] = []
         delivery_updates: list[tuple[FederationEvent, str, str | None]] = []
         relationship_rejections: dict[tuple[int, str, int, str], tuple[User, User, str]] = {}
         for row in rows:
@@ -474,10 +538,24 @@ async def drain_destination(
                 event = by_ref.get((row.event_origin_domain, row.event_id))
                 if event is not None:
                     delivery_updates.append((event, "delivered", None))
+                    if durable_terminal_room_event(event.envelope):
+                        terminal_room_acks.append((row.destination, event.envelope))
+                    if durable_guild_media_delete_request(event.envelope):
+                        guild_media_delete_acks.append((row.destination, event.envelope))
             elif status == "rejected":
                 await increment_metric(redis, "federation_delivery_failures")
                 event = by_ref.get((row.event_origin_domain, row.event_id))
                 rejection_code = str((result or {}).get("code") or "peer rejected event")[:500]
+                if retry_rejected_media_delete(event, row, rejection_code, now):
+                    # A peer can reject this event while running an older
+                    # protocol build or while a recoverable tombstone quota is
+                    # full. Terminal invalidation must survive that rolling
+                    # upgrade/outage without relying on another disclosure to
+                    # wake a relay-only outbox.
+                    if event is None:
+                        raise RuntimeError("media tombstone retry lost its source event")
+                    delivery_updates.append((event, "retrying", rejection_code))
+                    continue
                 # Group federation support has evolved across rolling releases.
                 # An older peer reports only the generic rejection code for a
                 # newly introduced group event. Keep it retryable for one day so
@@ -522,6 +600,31 @@ async def drain_destination(
             update(Guild).where(Guild.origin_domain == destination).values(unavailable=False)
         )
         await session.commit()
+        # Generation rollover takes terminal-room state before outbox state.
+        # Mark the delivery in a second transaction after releasing outbox row
+        # locks so delivery cannot form an outbox -> room deadlock.
+        from app.federation.terminal_rooms import acknowledge_terminal_room_delivery
+
+        for ack_destination, ack_envelope in terminal_room_acks:
+            await acknowledge_terminal_room_delivery(
+                session,
+                destination=ack_destination,
+                envelope=ack_envelope,
+            )
+        if terminal_room_acks:
+            await session.commit()
+        from app.federation.guild_media_deletions import (
+            acknowledge_guild_media_delete_request,
+        )
+
+        for ack_destination, ack_envelope in guild_media_delete_acks:
+            await acknowledge_guild_media_delete_request(
+                session,
+                destination=ack_destination,
+                envelope=ack_envelope,
+            )
+        if guild_media_delete_acks:
+            await session.commit()
         if redis is not None:
             for event, delivery_status, code in delivery_updates:
                 await publish_dm_delivery_update(
@@ -549,17 +652,143 @@ async def drain_destination(
 
 
 async def due_destinations(session: AsyncSession) -> list[str]:
+    durable_invalidation = exists(
+        select(FederationEvent.event_id).where(
+            FederationEvent.origin_domain == FederationOutbox.event_origin_domain,
+            FederationEvent.event_id == FederationOutbox.event_id,
+            or_(
+                FederationEvent.event_type == "media.delete",
+                FederationEvent.event_type == "guild.media.delete.request",
+                (
+                    (FederationEvent.event_type == "guild.instance_access.revoked")
+                    & (FederationEvent.envelope["content"]["reason"].as_string() == "guild_deleted")
+                ),
+                (
+                    (FederationEvent.event_type == "dm.group.state")
+                    & (
+                        FederationEvent.envelope["content"]["conversation"]["deleted"]
+                        .as_boolean()
+                        .is_(True)
+                    )
+                ),
+            ),
+        )
+    )
     return list(
         await session.scalars(
             select(FederationOutbox.destination)
             .where(
                 FederationOutbox.status.in_(("pending", "retry", "circuit")),
                 FederationOutbox.next_retry_at <= datetime.now(UTC),
-                FederationOutbox.created_at >= datetime.now(UTC) - MAX_QUEUE_AGE,
+                or_(
+                    FederationOutbox.created_at >= datetime.now(UTC) - MAX_QUEUE_AGE,
+                    durable_invalidation,
+                ),
             )
             .distinct()
         )
     )
+
+
+async def rearm_failed_media_delete_outbox(
+    session: AsyncSession,
+    *,
+    limit: int = MAX_BATCH_EVENTS,
+) -> set[str]:
+    """Repair tombstone rows made terminal by an older delivery implementation."""
+
+    if not 1 <= limit <= 10_000:
+        raise ValueError("invalid media tombstone rearm limit")
+    candidate_destinations = list(
+        await session.scalars(
+            select(FederationOutbox.destination)
+            .join(
+                FederationEvent,
+                (FederationEvent.origin_domain == FederationOutbox.event_origin_domain)
+                & (FederationEvent.event_id == FederationOutbox.event_id),
+            )
+            .where(
+                or_(
+                    FederationEvent.event_type == "media.delete",
+                    FederationEvent.event_type == "guild.media.delete.request",
+                    (
+                        (FederationEvent.event_type == "guild.instance_access.revoked")
+                        & (
+                            FederationEvent.envelope["content"]["reason"].as_string()
+                            == "guild_deleted"
+                        )
+                    ),
+                    (
+                        (FederationEvent.event_type == "dm.group.state")
+                        & (
+                            FederationEvent.envelope["content"]["conversation"]["deleted"]
+                            .as_boolean()
+                            .is_(True)
+                        )
+                    ),
+                ),
+                FederationOutbox.status.in_(("failed", "expired")),
+                or_(
+                    FederationOutbox.last_error.is_(None),
+                    FederationOutbox.last_error != "KAED_FED_TOMBSTONE_SUPERSEDED",
+                ),
+            )
+            .distinct()
+            .order_by(FederationOutbox.destination)
+            .limit(limit)
+        )
+    )
+    await lock_outbox_destinations(session, candidate_destinations)
+    if not candidate_destinations:
+        return set()
+    rows = list(
+        await session.scalars(
+            select(FederationOutbox)
+            .join(
+                FederationEvent,
+                (FederationEvent.origin_domain == FederationOutbox.event_origin_domain)
+                & (FederationEvent.event_id == FederationOutbox.event_id),
+            )
+            .where(
+                or_(
+                    FederationEvent.event_type == "media.delete",
+                    FederationEvent.event_type == "guild.media.delete.request",
+                    (
+                        (FederationEvent.event_type == "guild.instance_access.revoked")
+                        & (
+                            FederationEvent.envelope["content"]["reason"].as_string()
+                            == "guild_deleted"
+                        )
+                    ),
+                    (
+                        (FederationEvent.event_type == "dm.group.state")
+                        & (
+                            FederationEvent.envelope["content"]["conversation"]["deleted"]
+                            .as_boolean()
+                            .is_(True)
+                        )
+                    ),
+                ),
+                FederationOutbox.destination.in_(candidate_destinations),
+                FederationOutbox.status.in_(("failed", "expired")),
+                or_(
+                    FederationOutbox.last_error.is_(None),
+                    FederationOutbox.last_error != "KAED_FED_TOMBSTONE_SUPERSEDED",
+                ),
+            )
+            .order_by(FederationOutbox.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    now = datetime.now(UTC)
+    for row in rows:
+        row.status = "pending"
+        row.attempts = 0
+        row.next_retry_at = now
+        row.last_error = None
+    await session.commit()
+    return {row.destination for row in rows}
 
 
 async def publish_dm_delivery_update(
@@ -609,12 +838,35 @@ async def expire_stale_outbox(
     redis: Redis | None = None,
 ) -> int:
     cutoff = datetime.now(UTC) - MAX_QUEUE_AGE
+    durable_invalidation = exists(
+        select(FederationEvent.event_id).where(
+            FederationEvent.origin_domain == FederationOutbox.event_origin_domain,
+            FederationEvent.event_id == FederationOutbox.event_id,
+            or_(
+                FederationEvent.event_type == "media.delete",
+                FederationEvent.event_type == "guild.media.delete.request",
+                (
+                    (FederationEvent.event_type == "guild.instance_access.revoked")
+                    & (FederationEvent.envelope["content"]["reason"].as_string() == "guild_deleted")
+                ),
+                (
+                    (FederationEvent.event_type == "dm.group.state")
+                    & (
+                        FederationEvent.envelope["content"]["conversation"]["deleted"]
+                        .as_boolean()
+                        .is_(True)
+                    )
+                ),
+            ),
+        )
+    )
     stale_destinations = list(
         await session.scalars(
             select(FederationOutbox.destination)
             .where(
                 FederationOutbox.status.in_(("pending", "retry", "circuit")),
                 FederationOutbox.created_at < cutoff,
+                ~durable_invalidation,
                 or_(
                     FederationOutbox.last_error.is_(None),
                     ~FederationOutbox.last_error.startswith(POLICY_HELD_OUTBOX_PREFIX),
@@ -635,6 +887,7 @@ async def expire_stale_outbox(
                 FederationOutbox.destination.in_(stale_destinations),
                 FederationOutbox.status.in_(("pending", "retry", "circuit")),
                 FederationOutbox.created_at < cutoff,
+                ~durable_invalidation,
                 or_(
                     FederationOutbox.last_error.is_(None),
                     ~FederationOutbox.last_error.startswith(POLICY_HELD_OUTBOX_PREFIX),
@@ -749,6 +1002,23 @@ async def cleanup_federation_retention(session: AsyncSession, settings: Settings
     await session.scalar(
         select(func.pg_advisory_xact_lock(func.hashtextextended("kaede-federation-retention", 0)))
     )
+    # Durable deletion proofs have their own carrier/ack predicates.  Compact
+    # them before taking the global quota rows so their canonical lock order
+    # remains room/cache -> media -> global, matching event admission.
+    from app.federation.terminal_rooms import cleanup_terminal_room_deletions
+    from app.media.tombstones import cleanup_media_tombstone_sources
+
+    now = datetime.now(UTC)
+    durable_cleaned = await cleanup_terminal_room_deletions(
+        session,
+        settings,
+        now=now,
+    )
+    durable_cleaned += await cleanup_media_tombstone_sources(
+        session,
+        settings,
+        now=now,
+    )
     # Admission takes the self/global ledger before an origin row. Keep that
     # order while retention rebuilds both counters so the sweep cannot deadlock
     # a concurrent accepted event or omit it from its database snapshot.
@@ -761,7 +1031,6 @@ async def cleanup_federation_retention(session: AsyncSession, settings: Settings
         .order_by(Instance.domain)
         .with_for_update()
     )
-    now = datetime.now(UTC)
     inbox_cutoff = now - timedelta(days=settings.federation_event_retention_days)
     events = await session.execute(delete(FederationEvent).where(FederationEvent.expires_at < now))
     inbox = await session.execute(
@@ -785,6 +1054,12 @@ async def cleanup_federation_retention(session: AsyncSession, settings: Settings
         delete(RemoteMediaTombstone).where(
             RemoteMediaTombstone.expires_at < now,
             ~exists(
+                select(Attachment.id).where(
+                    Attachment.origin_domain == RemoteMediaTombstone.origin_domain,
+                    Attachment.id == RemoteMediaTombstone.attachment_id,
+                )
+            ),
+            ~exists(
                 select(RemoteMediaCache.attachment_id).where(
                     RemoteMediaCache.origin_domain == RemoteMediaTombstone.origin_domain,
                     RemoteMediaCache.attachment_id == RemoteMediaTombstone.attachment_id,
@@ -795,7 +1070,8 @@ async def cleanup_federation_retention(session: AsyncSession, settings: Settings
     await reconcile_federation_storage_usage(session)
     await session.commit()
     return (
-        int(getattr(events, "rowcount", 0) or 0)
+        durable_cleaned
+        + int(getattr(events, "rowcount", 0) or 0)
         + int(getattr(inbox, "rowcount", 0) or 0)
         + int(getattr(keys, "rowcount", 0) or 0)
         + int(getattr(tombstones, "rowcount", 0) or 0)

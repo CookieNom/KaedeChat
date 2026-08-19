@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import secrets
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -18,6 +18,7 @@ from app.chat.e2ee import (
     validate_e2ee_message_projection,
     validate_message_encryption_policy,
 )
+from app.chat.e2ee_controls import apply_e2ee_control_metadata
 from app.chat.events import publish_dispatch, user_topic
 from app.chat.payloads import dm_channel_payload, render_message_payload
 from app.chat.privacy import require_can_direct_message
@@ -37,8 +38,11 @@ from app.db.models import (
     DMConversation,
     DMParticipant,
     Instance,
+    MediaTombstoneSource,
     Message,
     MessageProjection,
+    RemoteMediaTombstone,
+    TerminalRoomDeletion,
     User,
 )
 from app.federation.dm_storage import (
@@ -51,6 +55,7 @@ from app.federation.dm_storage import (
     opaque_dm_history_ref_allowed,
     register_federated_dm_conversation,
 )
+from app.federation.events import retained_media_delete_events
 from app.federation.identity_storage import admit_remote_user_identity
 from app.federation.network import ensure_remote_instance_record, normalize_domain
 from app.federation.schemas import MAX_DATABASE_SNOWFLAKE, RemoteUserProfile
@@ -110,6 +115,27 @@ def replicated_message_create_fingerprint(
         webhook_name,
         webhook_avatar_hash,
         created_at,
+    )
+
+
+def authoritative_dm_control(
+    e2ee: dict[str, Any] | None,
+    *,
+    message_type: int,
+    flags: int,
+    message_origin: str,
+    event_origin: str,
+    conversation_authority: str,
+) -> tuple[bool, bool]:
+    """Return whether a message is a control and satisfies every authority binding."""
+
+    is_control = e2ee is not None and e2ee.get("operation") in {"welcome", "commit"}
+    return is_control, bool(
+        is_control
+        and message_type == 7
+        and flags == 4
+        and message_origin == event_origin
+        and event_origin == conversation_authority
     )
 
 
@@ -559,6 +585,22 @@ async def replicate_message_attachments(
             max_bytes=settings.media_max_attachment_bytes,
         )
         existing = await session.get(Attachment, ref)
+        tombstone = await session.get(RemoteMediaTombstone, (origin, attachment_id))
+        durable_tombstone = await session.get(
+            MediaTombstoneSource,
+            (attachment_id, origin),
+        )
+        retained_tombstone = (
+            bool(await retained_media_delete_events(session, attachment_id, origin))
+            if tombstone is None and durable_tombstone is None
+            else True
+        )
+        if retained_tombstone:
+            # A signed authority tombstone can arrive before a delayed message
+            # create or history replay. Never recreate or render that media.
+            if existing is not None and existing.deleted_at is None:
+                existing.deleted_at = datetime.now(UTC)
+            continue
         if existing is None:
             existing = Attachment(
                 id=attachment_id,
@@ -623,6 +665,22 @@ async def replicate_conversation(
     conversation_type = str(conversation.get("type", "direct"))
     authority_domain = str(conversation["authority_domain"])
     participant_domains = {profile.origin_domain for profile in participant_profiles}
+    if conversation_type not in {"direct", "group"}:
+        raise ValueError("unsupported DM conversation type")
+    conversation_id = database_snowflake(conversation.get("id"), "conversation id")
+    if conversation_type == "group":
+        from app.federation.terminal_rooms import lock_terminal_room
+
+        await lock_terminal_room(session, "group_dm", conversation_id, origin)
+        if (
+            await session.get(
+                TerminalRoomDeletion,
+                ("group_dm", conversation_id, origin, settings.domain),
+                populate_existing=True,
+            )
+            is not None
+        ):
+            raise ValueError("a terminal group DM cannot be recreated")
     federated = await admit_federated_dm_conversation(
         session,
         settings,
@@ -635,15 +693,12 @@ async def replicate_conversation(
         if origin == settings.domain:
             raise RuntimeError("self instance is not bootstrapped")
         await ensure_remote_instance_record(session, settings, origin)
-    if conversation_type not in {"direct", "group"}:
-        raise ValueError("unsupported DM conversation type")
     participants = [
         await upsert_remote_user(session, settings, profile) for profile in participant_profiles
     ]
     participant_refs = {(participant.id, participant.origin_domain) for participant in participants}
     if len(participant_refs) != len(participants):
         raise ValueError("DM conversation participants must be unique")
-    conversation_id = database_snowflake(conversation.get("id"), "conversation id")
     raw_encryption_policy = conversation.get("encryption_policy")
     if raw_encryption_policy is None:
         raw_encryption_policy = {
@@ -1077,14 +1132,16 @@ async def replicate_dm_message(
     conversation = await session.get(DMConversation, (channel.id, channel.origin_domain))
     if conversation is None or conversation.type not in {"direct", "group"}:
         raise ValueError("DM conversation is not replicated")
-    authority_control = (
-        e2ee is not None
-        and e2ee.get("operation") in {"welcome", "commit"}
-        and message_type == 7
-        and flags == 4
-        and origin_domain == event_origin
-        and event_origin == conversation.authority_domain
+    is_control, authority_control = authoritative_dm_control(
+        e2ee,
+        message_type=message_type,
+        flags=flags,
+        message_origin=origin_domain,
+        event_origin=event_origin,
+        conversation_authority=conversation.authority_domain,
     )
+    if is_control and not authority_control:
+        raise ValueError("DM E2EE control did not originate at its conversation authority")
     if origin_domain != author.origin_domain and not authority_control:
         raise ValueError("DM message snowflake was not minted by its author instance")
     await lock_federated_dm_authority(session, conversation.authority_domain)
@@ -1268,12 +1325,24 @@ async def replicate_dm_message(
             created_at=created_at,
         ):
             raise ValueError("DM message snowflake conflicts with another message")
+        await apply_e2ee_control_metadata(
+            session,
+            existing,
+            content.get("e2ee_control"),
+            expected_authority=conversation.authority_domain,
+        )
         await replicate_message_attachments(session, settings, existing, author, raw_attachments)
         await advance_channel_cursor(session, channel, message_id, origin_domain)
         return None
     message = await session.get(Message, (message_id, origin_domain))
     if message is None:
         raise RuntimeError("replicated message disappeared")
+    await apply_e2ee_control_metadata(
+        session,
+        message,
+        content.get("e2ee_control"),
+        expected_authority=conversation.authority_domain,
+    )
     await replicate_message_attachments(session, settings, message, author, raw_attachments)
     session.add(
         MessageProjection(

@@ -120,8 +120,8 @@ type EncryptedMessageRecord = Pick<
 interface RoomControlRecord extends EncryptedMessageRecord {
   /** Server-authored control-log instruction; false retains an audit copy only. */
   apply: boolean;
-  room_operation_id: string | null;
-  room_operation_domain: string | null;
+  room_operation_id: string;
+  room_operation_domain: string;
 }
 
 interface RoomControlLogPage {
@@ -1756,7 +1756,22 @@ export class KaedeE2EEClient {
         throw new Error('The encrypted room control log is invalid.');
       }
       for (const control of page.controls) {
-        if (typeof control.apply !== 'boolean') {
+        const envelope = control.e2ee as MlsEnvelope | null | undefined;
+        if (
+          typeof control.apply !== 'boolean' ||
+          !isCanonicalSnowflake(control.id) ||
+          !isCanonicalFederationDomain(control.origin_domain) ||
+          control.origin_domain !== channel.origin_domain ||
+          !isCanonicalSnowflake(control.channel_id) ||
+          control.channel_id !== channel.id ||
+          control.channel_domain !== channel.origin_domain ||
+          typeof control.room_operation_id !== 'string' ||
+          !/^keo_[A-Za-z0-9_-]{43}$/u.test(control.room_operation_id) ||
+          control.room_operation_domain !== channel.origin_domain ||
+          !envelope ||
+          !['welcome', 'commit'].includes(envelope.operation) ||
+          (envelope.operation === 'welcome' && control.apply !== true)
+        ) {
           throw new Error('The encrypted room control instruction is invalid.');
         }
         const cursor = `${control.id}@${control.origin_domain}`;

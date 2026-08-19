@@ -17,6 +17,7 @@ from redis.asyncio import Redis
 from sqlalchemy import delete, exists, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.api.dependencies import (
     AuthenticatedUser,
@@ -41,21 +42,29 @@ from app.core.types import EntityRef, EntityReference, Snowflake
 from app.db.bot_models import AbuseReport
 from app.db.models import (
     Attachment,
+    Channel,
     DMConversation,
     DMParticipant,
     Emoji,
     Guild,
     GuildMember,
+    MediaTombstoneSource,
     Message,
     RemoteMediaCache,
     RemoteMediaOrphan,
     RemoteMediaTombstone,
+    TerminalRoomDeletion,
     User,
 )
 from app.federation.client import signed_request, signed_stream_request
 from app.federation.dm_history import history_media_capability_status, history_media_path
 from app.federation.network import FederationNetworkError, normalize_domain
 from app.federation.relationships import queue_friend_profile_updates
+from app.media.digest_revocation import (
+    TERMINAL_DIGEST_STATUSES,
+    lock_asset_digest,
+    valid_content_digest,
+)
 from app.media.photodna import PhotoDNAInputRejected, photodna_report_values, scan_image
 from app.media.processing import (
     IMAGE_TYPES,
@@ -86,6 +95,8 @@ REMOTE_MEDIA_UPLOAD_RESERVATION_SECONDS = 5 * 60
 REMOTE_MEDIA_FETCH_CONCURRENCY = 8
 REMOTE_MEDIA_FETCH_DEADLINE_SECONDS = 60
 PRIVATE_MEDIA_CAPABILITY_SECONDS = 60
+PUBLIC_MEDIA_CAPABILITY_SECONDS = 5 * 60
+PUBLIC_MEDIA_REDIRECT_CACHE_SECONDS = 60
 remote_media_fetch_limiter = CapacityLimiter(REMOTE_MEDIA_FETCH_CONCURRENCY)
 REMOTE_MEDIA_RESERVATION_TTL_MS = 300_000
 REMOTE_MEDIA_RESERVE_LUA = """
@@ -779,7 +790,9 @@ def redirect_to_object(
             "GET",
             bucket,
             key,
-            expires=604_800 if public else PRIVATE_MEDIA_CAPABILITY_SECONDS,
+            expires=(
+                PUBLIC_MEDIA_CAPABILITY_SECONDS if public else PRIVATE_MEDIA_CAPABILITY_SECONDS
+            ),
             download_name=(
                 filename
                 if not public and attachment.purpose == "attachment" and variant == "original"
@@ -790,7 +803,9 @@ def redirect_to_object(
         raise HTTPException(status_code=503, detail={"code": "MEDIA_STORAGE_UNAVAILABLE"}) from exc
     response = RedirectResponse(url, status_code=302)
     response.headers["Cache-Control"] = (
-        "public, max-age=518400, immutable" if public else "private, no-store"
+        f"public, max-age={PUBLIC_MEDIA_REDIRECT_CACHE_SECONDS}, must-revalidate"
+        if public
+        else "private, no-store"
     )
     if not public:
         response.headers["Vary"] = "Authorization, Cookie"
@@ -804,18 +819,48 @@ async def public_asset(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> RedirectResponse:
+    # Public capabilities are authorized by digest, so serialize the entire
+    # check-and-presign window with terminal verdicts, asset binding, and
+    # proof cleanup for that digest. This endpoint owns no Attachment yet and
+    # can therefore take the blocking fence in the global digest -> row order.
+    await lock_asset_digest(session, content_hash)
+    terminal_duplicate = aliased(Attachment)
     attachment = await session.scalar(
-        select(Attachment).where(
+        select(Attachment)
+        .where(
             Attachment.origin_domain == settings.domain,
             Attachment.content_sha256 == content_hash,
             Attachment.purpose != "attachment",
+            Attachment.asset_binding.is_not(None),
             Attachment.scan_status == "clean",
             Attachment.deleted_at.is_(None),
+            ~exists(
+                select(terminal_duplicate.id).where(
+                    terminal_duplicate.origin_domain == settings.domain,
+                    terminal_duplicate.content_sha256 == content_hash,
+                    terminal_duplicate.scan_status.in_(TERMINAL_DIGEST_STATUSES),
+                )
+            ),
         )
+        .with_for_update(read=True)
     )
     if attachment is None:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
-    return redirect_to_object(settings, attachment, variant, public=True)
+    if (
+        await session.get(
+            MediaTombstoneSource,
+            (attachment.id, attachment.origin_domain),
+        )
+        is not None
+    ):
+        raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    response = redirect_to_object(settings, attachment, variant, public=True)
+    # Keep the shared Attachment lock through capability construction. A
+    # reprocessing worker that discovers a terminal PhotoDNA verdict either
+    # commits before this read (and is observed above), or waits until the
+    # already-authorized capability has been minted.
+    await session.commit()
+    return response
 
 
 @router.get("/media/emojis/{emoji_id}/{variant}")
@@ -828,16 +873,56 @@ async def public_emoji(
     emoji = await session.get(Emoji, (int(emoji_id), settings.domain))
     if emoji is None:
         raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
+    digest = emoji.media_hash
+    if not valid_content_digest(digest):
+        raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
+    # Emoji IDs do not expose the digest in the URL. Read the immutable hash,
+    # take its fence before any Attachment lock, then revalidate the Emoji and
+    # exact binding under the fence before minting a capability.
+    await lock_asset_digest(session, digest)
+    emoji = await session.scalar(
+        select(Emoji)
+        .where(
+            Emoji.id == int(emoji_id),
+            Emoji.origin_domain == settings.domain,
+            Emoji.media_hash == digest,
+        )
+        .execution_options(populate_existing=True)
+    )
+    if emoji is None:
+        raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
+    terminal_duplicate = aliased(Attachment)
     attachment = await session.scalar(
-        select(Attachment).where(
+        select(Attachment)
+        .where(
             Attachment.asset_binding == f"emoji:{emoji.origin_domain}:{emoji.id}",
+            Attachment.origin_domain == settings.domain,
+            Attachment.content_sha256 == digest,
             Attachment.scan_status == "clean",
             Attachment.deleted_at.is_(None),
+            ~exists(
+                select(terminal_duplicate.id).where(
+                    terminal_duplicate.origin_domain == settings.domain,
+                    terminal_duplicate.content_sha256 == Attachment.content_sha256,
+                    terminal_duplicate.scan_status.in_(TERMINAL_DIGEST_STATUSES),
+                )
+            ),
         )
+        .with_for_update(read=True)
     )
     if attachment is None:
         raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
-    return redirect_to_object(settings, attachment, variant, public=True)
+    if (
+        await session.get(
+            MediaTombstoneSource,
+            (attachment.id, attachment.origin_domain),
+        )
+        is not None
+    ):
+        raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
+    response = redirect_to_object(settings, attachment, variant, public=True)
+    await session.commit()
+    return response
 
 
 def remote_media_federation_query(
@@ -910,6 +995,156 @@ async def acquire_remote_photodna_lock(
     )
 
 
+async def final_remote_cache_for_capability(
+    session: AsyncSession,
+    *,
+    origin_domain: str,
+    attachment_id: int,
+    variant: str,
+    local_domain: str,
+    message_ref: tuple[int, str] | None = None,
+    conversation_ref: tuple[int, str] | None = None,
+) -> RemoteMediaCache:
+    """Order capability minting against authoritative delete and PhotoDNA.
+
+    The remote-media budget lock is also the deletion/cache-row serialization
+    fence. Reloading both the tombstone and cache row only after acquiring it
+    prevents a stale identity-map value from minting a capability after a
+    concurrently committed ``media.delete``. Keep the lock through the caller's
+    presign and commit; that makes delete-before-capability ordering explicit.
+    """
+
+    await session.scalar(
+        select(
+            func.pg_advisory_xact_lock(func.hashtextextended("kaede-remote-media-cache-budget", 0))
+        )
+    )
+    if (
+        await session.get(
+            RemoteMediaTombstone,
+            (origin_domain, attachment_id),
+            populate_existing=True,
+        )
+        is not None
+    ):
+        raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    await require_remote_media_binding_live(
+        session,
+        origin_domain=origin_domain,
+        attachment_id=attachment_id,
+        message_ref=message_ref,
+        conversation_ref=conversation_ref,
+        local_domain=local_domain,
+    )
+    if (
+        await session.get(
+            MediaTombstoneSource,
+            (attachment_id, origin_domain),
+            populate_existing=True,
+        )
+        is not None
+    ):
+        raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    await acquire_remote_photodna_lock(session, origin_domain, attachment_id)
+    await reject_known_photodna_match(
+        session,
+        origin_domain=origin_domain,
+        attachment_id=attachment_id,
+    )
+    cached = await session.get(
+        RemoteMediaCache,
+        (origin_domain, attachment_id, variant),
+        populate_existing=True,
+        with_for_update=True,
+    )
+    checked_at = datetime.now(UTC)
+    if cached is None or cached.expires_at <= checked_at or cached.scan_status != "clean":
+        raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+    return cached
+
+
+async def require_remote_media_binding_live(
+    session: AsyncSession,
+    *,
+    origin_domain: str,
+    attachment_id: int,
+    message_ref: tuple[int, str] | None,
+    conversation_ref: tuple[int, str] | None,
+    local_domain: str,
+) -> None:
+    """Revalidate the carrier after the remote-cache deletion fence."""
+
+    attachment = await session.get(
+        Attachment,
+        (attachment_id, origin_domain),
+        populate_existing=True,
+    )
+    if attachment is not None:
+        if (
+            attachment.deleted_at is not None
+            or attachment.message_id is None
+            or attachment.message_domain is None
+            or (
+                message_ref is not None
+                and (attachment.message_id, attachment.message_domain) != message_ref
+            )
+        ):
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        message = await session.get(
+            Message,
+            (attachment.message_id, attachment.message_domain),
+            populate_existing=True,
+        )
+        if message is None or message.deleted_at is not None:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        channel = await session.get(
+            Channel,
+            (message.channel_id, message.channel_domain),
+            populate_existing=True,
+        )
+        if channel is None or channel.unavailable:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        room_ref = (
+            ("guild", channel.guild_id, channel.guild_domain)
+            if channel.guild_id is not None and channel.guild_domain is not None
+            else None
+        )
+        conversation_ref = conversation_ref or (
+            (channel.id, channel.origin_domain) if channel.guild_id is None else None
+        )
+    else:
+        room_ref = None
+        # Attachment-less access is supported only for an authenticated DM
+        # authority history capability. Ordinary live media always has a
+        # replicated Attachment carrier to revalidate.
+        if conversation_ref is None or message_ref is None:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+
+    if conversation_ref is not None:
+        conversation = await session.get(
+            DMConversation,
+            conversation_ref,
+            populate_existing=True,
+        )
+        conversation_channel = await session.get(
+            Channel,
+            conversation_ref,
+            populate_existing=True,
+        )
+        if conversation is None or conversation_channel is None or conversation_channel.unavailable:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        if conversation.type == "group":
+            room_ref = ("group_dm", conversation.id, conversation.origin_domain)
+
+    if room_ref is not None:
+        terminal = await session.get(
+            TerminalRoomDeletion,
+            (room_ref[0], room_ref[1], room_ref[2], local_domain),
+        )
+        if terminal is not None:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+
+
 async def retire_remote_media_variants(
     session: AsyncSession,
     *,
@@ -973,7 +1208,10 @@ async def cache_remote_media(
     message_ref: tuple[int, str] | None = None,
     uploader_ref: tuple[int, str] | None = None,
 ) -> RemoteMediaCache:
-    if await session.get(RemoteMediaTombstone, (origin_domain, attachment_id)) is not None:
+    if (
+        await session.get(RemoteMediaTombstone, (origin_domain, attachment_id)) is not None
+        or await session.get(MediaTombstoneSource, (attachment_id, origin_domain)) is not None
+    ):
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
     # A prior positive decision applies to every representation of the same
     # authoritative attachment, even if an origin later changes its declared
@@ -1253,6 +1491,23 @@ async def cache_remote_media(
                 is not None
             ):
                 raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+            if (
+                await session.get(
+                    MediaTombstoneSource,
+                    (attachment_id, origin_domain),
+                    populate_existing=True,
+                )
+                is not None
+            ):
+                raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+            await require_remote_media_binding_live(
+                session,
+                origin_domain=origin_domain,
+                attachment_id=attachment_id,
+                message_ref=message_ref,
+                conversation_ref=(dm_history_scope[0] if dm_history_scope is not None else None),
+                local_domain=settings.domain,
+            )
             await acquire_remote_photodna_lock(session, origin_domain, attachment_id)
             await reject_known_photodna_match(
                 session,
@@ -1380,10 +1635,76 @@ async def authorized_attachment(
         )
     attachment.updated_at = datetime.now(UTC)
     if origin_domain == settings.domain:
-        return redirect_to_object(settings, attachment, variant, public=False)
+        # Reprocessing holds Attachment FOR UPDATE while changing a formerly
+        # clean image to a terminal PhotoDNA decision. Message deletion also
+        # conflicts with the shared parent lock. Reload under both locks and
+        # repeat authorization before minting so stale ORM state cannot race a
+        # verdict or deletion commit.
+        locked_attachment = await session.scalar(
+            select(Attachment)
+            .where(
+                Attachment.id == int(attachment_id),
+                Attachment.origin_domain == settings.domain,
+            )
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        if (
+            locked_attachment is None
+            or locked_attachment.deleted_at is not None
+            or locked_attachment.message_id is None
+            or locked_attachment.message_domain is None
+        ):
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        if (
+            await session.get(
+                MediaTombstoneSource,
+                (int(attachment_id), settings.domain),
+                populate_existing=True,
+            )
+            is not None
+        ):
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        locked_message = await session.scalar(
+            select(Message)
+            .where(
+                Message.id == locked_attachment.message_id,
+                Message.origin_domain == locked_attachment.message_domain,
+            )
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        if locked_message is None or locked_message.deleted_at is not None:
+            raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
+        locked_access = await load_channel_access(
+            session,
+            settings,
+            auth.user,
+            EntityReference(locked_message.channel_id, locked_message.channel_domain),
+        )
+        if locked_access.guild is not None:
+            await require_permissions(
+                session,
+                redis,
+                locked_access.guild,
+                auth.user,
+                required_permissions("message.list"),
+                channel=locked_access.channel,
+            )
+        locked_attachment.updated_at = datetime.now(UTC)
+        response = redirect_to_object(settings, locked_attachment, variant, public=False)
+        await session.commit()
+        return response
 
     remote_attachment_id = int(attachment_id)
-    if await session.get(RemoteMediaTombstone, (origin_domain, remote_attachment_id)) is not None:
+    if (
+        await session.get(RemoteMediaTombstone, (origin_domain, remote_attachment_id)) is not None
+        or await session.get(
+            MediaTombstoneSource,
+            (remote_attachment_id, origin_domain),
+        )
+        is not None
+    ):
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
     if (
         await session.get(
@@ -1453,11 +1774,13 @@ async def authorized_attachment(
     # Holding the same transaction lock as the positive-decision writer makes
     # the order explicit: this capability either predates that decision, or
     # waits and observes it. It can never race past an in-flight report commit.
-    await acquire_remote_photodna_lock(session, origin_domain, remote_attachment_id)
-    await reject_known_photodna_match(
+    cached = await final_remote_cache_for_capability(
         session,
         origin_domain=origin_domain,
         attachment_id=remote_attachment_id,
+        variant=variant,
+        local_domain=settings.domain,
+        message_ref=(attachment.message_id, attachment.message_domain),
     )
     cached.last_accessed_at = datetime.now(UTC)
     try:
@@ -1529,6 +1852,8 @@ async def authorized_dm_history_media(
 
     origin_domain = attachment_key[1]
     attachment_id = attachment_key[0]
+    if await session.get(MediaTombstoneSource, (attachment_id, origin_domain)) is not None:
+        raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
     await reject_known_photodna_match(
         session,
         origin_domain=origin_domain,
@@ -1605,11 +1930,14 @@ async def authorized_dm_history_media(
                     )
     if cached is None:
         raise RuntimeError("remote history media cache write did not converge")
-    await acquire_remote_photodna_lock(session, origin_domain, attachment_id)
-    await reject_known_photodna_match(
+    cached = await final_remote_cache_for_capability(
         session,
         origin_domain=origin_domain,
         attachment_id=attachment_id,
+        variant=variant,
+        local_domain=settings.domain,
+        message_ref=message_key,
+        conversation_ref=conversation_key,
     )
     cached.last_accessed_at = datetime.now(UTC)
     try:

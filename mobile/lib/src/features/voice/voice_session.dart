@@ -160,9 +160,19 @@ final class VoiceSession extends ChangeNotifier {
         );
       }
 
-      final encryptedGrant = grant['e2ee'] == true;
+      final grantEncryptionMode = grant['e2ee'];
+      if (grantEncryptionMode is! bool) {
+        throw const KaedeException(
+          code: 'VOICE_E2EE_POLICY_MISMATCH',
+          message:
+              'The voice server omitted its encryption policy. Nothing was connected.',
+          status: 409,
+        );
+      }
+      final encryptedGrant = grantEncryptionMode;
       final encryptedChannel = target.encryptionMode == 'e2ee';
-      if (encryptedGrant != encryptedChannel) {
+      if (encryptedGrant != encryptedChannel ||
+          !voiceGrantMatchesChannelPolicy(grant, target)) {
         throw const KaedeException(
           code: 'VOICE_E2EE_POLICY_MISMATCH',
           message:
@@ -172,14 +182,6 @@ final class VoiceSession extends ChangeNotifier {
       }
       E2EEOptions? e2eeOptions;
       if (encryptedGrant) {
-        if (!voiceGrantMatchesChannelE2EEPolicy(grant, target)) {
-          throw const KaedeException(
-            code: 'VOICE_E2EE_POLICY_MISMATCH',
-            message:
-                'Voice encryption keys are being refreshed. Wait for the room to become ready and rejoin.',
-            status: 409,
-          );
-        }
         e2ee ??= await _e2eeClient();
         await e2ee.syncRoomState(target);
         final mediaKey = await e2ee.mediaKey(
@@ -204,6 +206,7 @@ final class VoiceSession extends ChangeNotifier {
           mediaKey.fillRange(0, mediaKey.length, 0);
         }
       }
+      if (generation != _generation) return;
 
       final room = candidate = Room(
         roomOptions: RoomOptions(
@@ -255,6 +258,11 @@ final class VoiceSession extends ChangeNotifier {
       _canStream = grant['can_stream'] == true &&
           (callRef != null || target.allows(Permission.stream));
       await selectAudioRoute(_audioRoute);
+      // Route selection may yield to a newer join/leave while this connected
+      // room is still only a local candidate. Never publish that stale room;
+      // the finally block below owns and disconnects it until this check has
+      // passed.
+      if (generation != _generation) return;
       _room = room;
       _events = events;
       candidate = null;
@@ -262,6 +270,7 @@ final class VoiceSession extends ChangeNotifier {
       room.addListener(_notifyRoomChanged);
       if (callRef == null) {
         await refreshOccupancy();
+        if (generation != _generation || _room != room) return;
         _occupancyTimer?.cancel();
         _occupancyTimer = Timer.periodic(
           const Duration(seconds: 10),
@@ -271,11 +280,15 @@ final class VoiceSession extends ChangeNotifier {
 
       if (_canSpeak) {
         final microphone = await permissions.Permission.microphone.request();
-        if (generation != _generation) return;
+        if (generation != _generation || _room != room) return;
         if (microphone.isGranted) {
           await room.localParticipant?.setMicrophoneEnabled(
             !_muted && (!_pushToTalk || _pushHeld),
           );
+          if (generation != _generation || _room != room) {
+            await room.localParticipant?.setMicrophoneEnabled(false);
+            return;
+          }
         } else {
           _muted = true;
           _error = 'Joined listen-only. Allow microphone access to speak.';

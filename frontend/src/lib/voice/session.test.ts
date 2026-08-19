@@ -1,12 +1,120 @@
-import { describe, expect, it } from 'vitest';
+import type { Room } from 'livekit-client';
+import { describe, expect, it, vi } from 'vitest';
 import type { Channel } from '$lib/chat/types';
 
 import {
+  expectedVoicePolicy,
   isUsableVoiceToken,
+  VoiceConnectionFence,
+  VoiceSession,
   voiceGrantMatchesChannelPolicy,
+  voiceGrantMatchesExpectedPolicy,
   withVoiceConnectTimeout,
+  type VoiceChannelPolicy,
   type VoiceToken
 } from './session';
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+class FakeVoiceRoom {
+  readonly connect;
+  readonly disconnect = vi.fn(async () => undefined);
+  readonly on = vi.fn(() => this);
+  readonly localParticipant = {
+    setMicrophoneEnabled: vi.fn(async () => undefined)
+  };
+
+  constructor(connect: () => Promise<void> = async () => undefined) {
+    this.connect = vi.fn(connect);
+  }
+}
+
+const plaintextChannel = {
+  id: '2',
+  origin_domain: 'chat.example',
+  encryption_mode: 'plaintext',
+  encryption_state: 'plaintext',
+  encryption_policy_generation: '0',
+  encryption_epoch: null
+} satisfies VoiceChannelPolicy;
+
+describe('voice connection generation fence', () => {
+  it('makes an in-flight move stale when the user leaves', () => {
+    const fence = new VoiceConnectionFence();
+    const moving = fence.begin();
+
+    fence.invalidate();
+
+    expect(fence.isCurrent(moving)).toBe(false);
+  });
+
+  it('allows only the newest competing join to publish', () => {
+    const fence = new VoiceConnectionFence();
+    const first = fence.begin();
+    const second = fence.begin();
+
+    expect(fence.isCurrent(first)).toBe(false);
+    expect(fence.isCurrent(second)).toBe(true);
+  });
+
+  it('disconnects an overlapping stale candidate before it can enable the microphone', async () => {
+    const firstConnect = deferred<void>();
+    const idle = new FakeVoiceRoom();
+    const first = new FakeVoiceRoom(() => firstConnect.promise);
+    const second = new FakeVoiceRoom();
+    const rooms = [idle, first, second];
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room);
+
+    const firstAttempt = voice.connect(
+      grant({ token: 'a'.repeat(64), expires_at: '2099-07-19T12:15:00Z' }),
+      plaintextChannel
+    );
+    await vi.waitFor(() => expect(first.connect).toHaveBeenCalledOnce());
+
+    const secondAttempt = voice.connect(
+      grant({ token: 'b'.repeat(64), expires_at: '2099-07-19T12:15:00Z' }),
+      plaintextChannel
+    );
+    await secondAttempt;
+    firstConnect.resolve();
+    await firstAttempt;
+
+    expect(first.disconnect).toHaveBeenCalled();
+    expect(first.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+    expect(second.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(true);
+    expect(voice.room).toBe(second);
+    expect(voice.connected).toBe(true);
+    expect(voice.connecting).toBe(false);
+  });
+
+  it('makes disconnect win over an in-flight connect without stale microphone activation', async () => {
+    const connectGate = deferred<void>();
+    const idle = new FakeVoiceRoom();
+    const candidate = new FakeVoiceRoom(() => connectGate.promise);
+    const rooms = [idle, candidate];
+    const voice = new VoiceSession(() => rooms.shift() as unknown as Room);
+
+    const attempt = voice.connect(grant({ expires_at: '2099-07-19T12:15:00Z' }), plaintextChannel);
+    await vi.waitFor(() => expect(candidate.connect).toHaveBeenCalledOnce());
+    await voice.disconnect();
+    connectGate.resolve();
+    await attempt;
+
+    expect(candidate.disconnect).toHaveBeenCalled();
+    expect(candidate.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+    expect(voice.connected).toBe(false);
+    expect(voice.connecting).toBe(false);
+    expect(voice.microphone).toBe(false);
+  });
+});
 
 function grant(overrides: Partial<VoiceToken> = {}): VoiceToken {
   return {
@@ -18,6 +126,9 @@ function grant(overrides: Partial<VoiceToken> = {}): VoiceToken {
     can_speak: true,
     can_stream: true,
     can_use_vad: true,
+    e2ee: false,
+    channel_id: '2',
+    channel_domain: 'chat.example',
     ...overrides
   };
 }
@@ -36,6 +147,10 @@ describe('voice grant validation', () => {
     expect(
       isUsableVoiceToken(grant({ move_session_id: ['a'.repeat(32)] as unknown as string }), 0)
     ).toBe(false);
+    expect(isUsableVoiceToken({ ...grant(), e2ee: undefined } as unknown as VoiceToken, 0)).toBe(
+      false
+    );
+    expect(isUsableVoiceToken(grant({ channel_id: null }), 0)).toBe(false);
   });
 
   it('requires a complete, internally consistent encrypted media context', () => {
@@ -127,5 +242,30 @@ describe('voice media key rotation', () => {
       voiceGrantMatchesChannelPolicy(encrypted, { ...channel, encryption_state: 'rekeying' })
     ).toBe(false);
     expect(voiceGrantMatchesChannelPolicy({ ...encrypted, channel_id: '3' }, channel)).toBe(false);
+  });
+
+  it('enforces the channel mode in both directions', () => {
+    const plaintextChannel = {
+      ...channel,
+      encryption_mode: 'plaintext',
+      encryption_state: 'plaintext',
+      encryption_policy_generation: '0',
+      encryption_epoch: null
+    } satisfies VoiceChannelPolicy;
+    const plaintext = grant();
+
+    expect(voiceGrantMatchesChannelPolicy(plaintext, plaintextChannel)).toBe(true);
+    expect(voiceGrantMatchesChannelPolicy(plaintext, channel)).toBe(false);
+    expect(voiceGrantMatchesChannelPolicy(encrypted, plaintextChannel)).toBe(false);
+  });
+
+  it('pins the full validated policy for a native grant refetch', () => {
+    const current = { ...encrypted, expires_at: '2099-07-19T12:15:00Z' };
+    const expected = expectedVoicePolicy(current, channel);
+    expect(voiceGrantMatchesExpectedPolicy(current, expected)).toBe(true);
+    expect(voiceGrantMatchesExpectedPolicy({ ...current, e2ee: false }, expected)).toBe(false);
+    expect(
+      voiceGrantMatchesExpectedPolicy({ ...current, media_session_id: 'b'.repeat(43) }, expected)
+    ).toBe(false);
   });
 });

@@ -677,8 +677,8 @@
             <!-- The authenticated decrypted manifest below supplies the real name, type, and key. -->
           {:else if attachment.scan_status === 'pending'}
             <span class="attachment-file">Scanning {attachment.filename}…</span>
-          {:else if attachment.scan_status === 'infected'}
-            <span class="attachment-file">Removed unsafe attachment</span>
+          {:else if attachment.scan_status === 'rejected' || attachment.scan_status === 'infected'}
+            <span class="attachment-file">Attachment rejected during server processing</span>
           {:else if attachment.scan_status === 'failed'}
             <span class="attachment-file">Attachment processing unavailable</span>
           {:else if attachment.content_type.startsWith('image/')}

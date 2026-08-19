@@ -27,8 +27,11 @@ async def test_known_pending_join_makes_pre_snapshot_events_retryable() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("inserted", "returns_message"), [(300, True), (None, False)])
 async def test_retried_join_window_message_backfills_behind_snapshot_cursor(
     monkeypatch: pytest.MonkeyPatch,
+    inserted: int | None,
+    returns_message: bool,
 ) -> None:
     guild = Guild(
         id=100,
@@ -64,6 +67,15 @@ async def test_retried_join_window_message_backfills_behind_snapshot_cursor(
         author_id=author.id,
         author_domain=author.origin_domain,
         content="arrived during join",
+        e2ee=None,
+        message_type=0,
+        flags=0,
+        client_nonce="join-window",
+        referenced_message_id=None,
+        referenced_message_domain=None,
+        mention_user_refs=[],
+        webhook_name=None,
+        webhook_avatar_hash=None,
         created_at=created_at,
     )
 
@@ -77,10 +89,11 @@ async def test_retried_join_window_message_backfills_behind_snapshot_cursor(
         return None
 
     session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[guild, message.id]),
+        scalar=AsyncMock(side_effect=[guild, inserted]),
         get=get_model,
         add=MagicMock(),
     )
+    reconcile_control = AsyncMock()
     monkeypatch.setattr(
         federation_guilds,
         "resolve_delegated_profile",
@@ -100,6 +113,11 @@ async def test_retried_join_window_message_backfills_behind_snapshot_cursor(
         federation_guilds,
         "advance_channel_cursor",
         AsyncMock(),
+    )
+    monkeypatch.setattr(
+        federation_guilds,
+        "apply_e2ee_control_metadata",
+        reconcile_control,
     )
     event = {
         "type": "guild.message.committed",
@@ -146,6 +164,12 @@ async def test_retried_join_window_message_backfills_behind_snapshot_cursor(
         event,
     )
 
-    assert applied is message
+    assert (applied is message) is returns_message
+    reconcile_control.assert_awaited_once_with(
+        session,
+        message,
+        None,
+        expected_authority="alpha.localhost",
+    )
     assert guild.last_event_seq == 10
     assert guild.next_event_seq == 11

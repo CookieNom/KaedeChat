@@ -3,7 +3,7 @@ import base64
 import pytest
 from pydantic import ValidationError
 
-from app.auth.schemas import MfaSetupRequest, RegisterRequest, SettingsPatch
+from app.auth.schemas import LoginRequest, MfaSetupRequest, RegisterRequest, SettingsPatch
 
 DERIVED_PASSWORD = "A" * 43
 AUTH_SALT = base64.urlsafe_b64encode(bytes(16)).decode().rstrip("=")
@@ -60,9 +60,44 @@ def test_settings_patch_validates_presence_preference() -> None:
 
 
 def test_mfa_setup_requires_password_and_bounds_the_current_factor() -> None:
-    payload = MfaSetupRequest(password="current password", current_code="123456")
+    payload = MfaSetupRequest(
+        password=DERIVED_PASSWORD,
+        password_kdf_version=2,
+        current_code="123456",
+    )
     assert payload.current_code == "123456"
     with pytest.raises(ValidationError):
         MfaSetupRequest()  # type: ignore[call-arg]
     with pytest.raises(ValidationError):
-        MfaSetupRequest(password="current password", current_code="1")
+        MfaSetupRequest(
+            password=DERIVED_PASSWORD,
+            password_kdf_version=2,
+            current_code="1",
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"identifier": "maple", "password": DERIVED_PASSWORD},
+        {
+            "identifier": "maple",
+            "password": DERIVED_PASSWORD,
+            "password_kdf_version": 0,
+        },
+        {
+            "identifier": "maple",
+            "password": "literal password",
+            "password_kdf_version": 2,
+        },
+        {
+            "identifier": "maple",
+            "password": DERIVED_PASSWORD,
+            "password_kdf_version": 2,
+            "password_upgrade": {"password": DERIVED_PASSWORD},
+        },
+    ],
+)
+def test_login_requires_exact_kdf_v2_without_upgrade_fields(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        LoginRequest.model_validate(payload)

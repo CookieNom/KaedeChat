@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -15,7 +16,17 @@ from app.db.models import (
     RemoteMediaOrphan,
     RemoteMediaTombstone,
 )
-from app.media.photodna import PhotoDNAFinding, photodna_report, scan_image
+from app.media.digest_revocation import (
+    TERMINAL_DIGEST_STATUSES,
+    try_lock_asset_digest,
+    valid_content_digest,
+)
+from app.media.photodna import (
+    PhotoDNAFinding,
+    PhotoDNAInputRejected,
+    photodna_report,
+    scan_image,
+)
 from app.media.processing import (
     IMAGE_PIPELINE_VERSION,
     IMAGE_TYPES,
@@ -34,21 +45,31 @@ from app.media.service import (
     derived_object_key,
     discard_attachment,
     expired_pending_attachments,
+    original_object_key,
 )
 from app.media.storage import S3Storage, StorageError
 
 log = structlog.get_logger()
 
+# Official clients bound one upload attempt to at most 15 minutes (web), five
+# minutes (desktop), or three minutes (mobile). Wait strictly longer than the
+# largest bound so a PUT accepted just before presign expiry cannot complete
+# after the staging marker is cleared at the timeout boundary.
+STAGING_UPLOAD_COMPLETION_GRACE_SECONDS = 16 * 60
 
-async def delete_quarantined_attachment_objects(
+
+class TerminalCommitPreparationError(Exception):
+    """Prevent a failed terminal outbox write from becoming a media retry state."""
+
+
+async def delete_terminal_attachment_objects(
     storage: S3Storage, settings: Settings, attachment: Attachment
 ) -> bool:
     """Best-effort deletion used immediately and by the durable staging sweep.
 
-    A positive decision is committed before this runs, so none of these keys
-    can be served even if object storage is temporarily unavailable.  Keeping
-    ``staging_object_key`` populated makes a failed deletion retryable by the
-    existing scheduled sweep.
+    The terminal decision is committed before this runs, so none of these keys
+    can be served even if object storage is temporarily unavailable. Keeping
+    ``staging_object_key`` populated makes a failed deletion retryable.
     """
 
     objects: set[tuple[str, str]] = {(settings.media_attachments_bucket, attachment.object_key)}
@@ -65,8 +86,9 @@ async def delete_quarantined_attachment_objects(
         except StorageError:
             complete = False
             log.exception(
-                "photodna_quarantine_delete_failed",
+                "media_terminal_object_delete_failed",
                 attachment_id=str(attachment.id),
+                scan_status=attachment.scan_status,
                 bucket=bucket,
                 object_key=key,
             )
@@ -106,15 +128,107 @@ def image_derivatives_are_current(attachment: Attachment) -> bool:
     return True
 
 
+def staging_upload_grace_elapsed(
+    upload_expires_at: datetime | None,
+    *,
+    now: datetime,
+) -> bool:
+    if upload_expires_at is None:
+        return True
+    return upload_expires_at + timedelta(seconds=STAGING_UPLOAD_COMPLETION_GRACE_SECONDS) < now
+
+
 async def process_attachment_record(
-    session: AsyncSession, settings: Settings, attachment_id: int, origin_domain: str
+    session: AsyncSession,
+    settings: Settings,
+    attachment_id: int,
+    origin_domain: str,
+    *,
+    before_terminal_commit: Callable[[Attachment], Awaitable[None]] | None = None,
 ) -> str:
+    async def prepare_terminal_commit(attachment: Attachment) -> None:
+        # Serialize the terminal transition with bind-time evidence checks and
+        # digest-proof cleanup. This is needed even when a caller has no
+        # projection callback: the terminal row itself is digest revocation
+        # evidence observed by future asset binds.
+        if valid_content_digest(attachment.content_sha256) and not await try_lock_asset_digest(
+            session,
+            attachment.content_sha256,
+        ):
+            # This path already owns the Attachment row. Never wait on a bind
+            # that owns digest and may be waiting to replace this same row.
+            raise TerminalCommitPreparationError("terminal digest fence is busy")
+        if before_terminal_commit is None:
+            return
+        try:
+            await before_terminal_commit(attachment)
+        except Exception as exc:
+            # The caller's outbox work belongs to the verdict transaction. Do
+            # not let the ordinary media RuntimeError handler commit a partial
+            # deleted/failed row when that preparation aborts.
+            raise TerminalCommitPreparationError from exc
+
+    async def reject_retained_terminal_digest(
+        attachment: Attachment,
+        storage: S3Storage,
+    ) -> bool:
+        """Fence a bind-capable clean transition against retained evidence."""
+
+        digest = attachment.content_sha256
+        if attachment.purpose == "attachment":
+            return False
+        if not valid_content_digest(digest):
+            raise TerminalCommitPreparationError("clean public asset has no valid digest")
+        # This lifecycle path already owns the Attachment row. A capability or
+        # repair owns digest before taking Attachment, so waiting would form
+        # the inverse cycle; rollback and let the media task retry instead.
+        if not await try_lock_asset_digest(session, digest):
+            raise TerminalCommitPreparationError("clean asset digest fence is busy")
+        terminal_evidence = await session.scalar(
+            select(Attachment.id)
+            .where(
+                Attachment.origin_domain == settings.domain,
+                Attachment.content_sha256 == digest,
+                Attachment.scan_status.in_(TERMINAL_DIGEST_STATUSES),
+            )
+            .limit(1)
+        )
+        if terminal_evidence is None:
+            return False
+        # The bytes passed their independent scan, so do not copy or disclose
+        # the original moderation category. A neutral terminal state is the
+        # durable propagation marker for the same local digest.
+        attachment.scan_status = "rejected"
+        if attachment.staging_object_key is None:
+            attachment.staging_object_key = attachment.object_key
+        await discard_attachment(session, settings, attachment)
+        await prepare_terminal_commit(attachment)
+        await session.commit()
+        await delete_terminal_attachment_objects(storage, settings, attachment)
+        return True
+
+    # All media lifecycle paths use the advisory ref fence before taking an
+    # Attachment row lock.  Metadata disclosure takes the same fence before
+    # its recipient writes, so a verdict can never deadlock as row -> media
+    # while disclosure is waiting media -> FK KEY SHARE.
+    from app.media.tombstones import lock_media_tombstone_ref
+
+    await lock_media_tombstone_ref(session, attachment_id, origin_domain)
     attachment = await session.scalar(
         select(Attachment)
         .where(Attachment.id == attachment_id, Attachment.origin_domain == origin_domain)
         .with_for_update()
     )
-    if attachment is None or attachment.deleted_at is not None:
+    if attachment is None:
+        return "missing"
+    if attachment.deleted_at is not None:
+        if (
+            attachment.scan_status in {"infected", "quarantined", "rejected"}
+            and before_terminal_commit is not None
+        ):
+            await prepare_terminal_commit(attachment)
+            await session.commit()
+            return attachment.scan_status
         return "missing"
     if attachment.finalized_at is None:
         return "pending_upload"
@@ -161,7 +275,10 @@ async def process_attachment_record(
     reprocessing = attachment.scan_status == "clean"
     if reprocessing and image_derivatives_are_current(attachment):
         return "clean"
-    if attachment.scan_status == "infected":
+    if attachment.scan_status in {"infected", "quarantined", "rejected"}:
+        if before_terminal_commit is not None:
+            await prepare_terminal_commit(attachment)
+            await session.commit()
         return attachment.scan_status
     storage = S3Storage(settings)
     try:
@@ -183,12 +300,30 @@ async def process_attachment_record(
         scan = "clean" if reprocessing else await clamav_scan(data, settings)
         if scan == "infected":
             attachment.scan_status = "infected"
-            await storage.delete(settings.media_attachments_bucket, staging_key)
+            if attachment.staging_object_key is None:
+                attachment.staging_object_key = attachment.object_key
             await discard_attachment(session, settings, attachment)
+            await prepare_terminal_commit(attachment)
             await session.commit()
+            await delete_terminal_attachment_objects(storage, settings, attachment)
             return "infected"
         if detected in IMAGE_TYPES:
-            finding = await scan_image(data, settings)
+            try:
+                finding = await scan_image(data, settings)
+            except PhotoDNAInputRejected:
+                # The configured PhotoDNA decoder cannot safely inspect this
+                # image. This is a terminal, fail-closed policy decision, not a
+                # malware verdict, a positive PhotoDNA match, or an outage to
+                # retry. The durable marker also prevents legacy reprocessing
+                # from selecting the same deterministic failure forever.
+                attachment.scan_status = "rejected"
+                if attachment.staging_object_key is None:
+                    attachment.staging_object_key = attachment.object_key
+                await discard_attachment(session, settings, attachment)
+                await prepare_terminal_commit(attachment)
+                await session.commit()
+                await delete_terminal_attachment_objects(storage, settings, attachment)
+                return "rejected"
             if finding is not None:
                 attachment.scan_status = "quarantined"
                 # This nullable key doubles as the existing durable physical
@@ -199,6 +334,7 @@ async def process_attachment_record(
                 await discard_attachment(session, settings, attachment)
                 if await session.get(AbuseReport, attachment.id) is None:
                     session.add(attachment_photodna_report(attachment, finding))
+                await prepare_terminal_commit(attachment)
                 # Commit the durable quarantine and metadata-only report before
                 # deleting storage. A failed object deletion cannot republish
                 # the staging key, and the normal staging sweep will retry it.
@@ -207,8 +343,14 @@ async def process_attachment_record(
                 # A client may rewrite its staging key after this immediate
                 # deletion; the scheduled sweep performs the authoritative
                 # post-expiry delete and only then clears the marker.
-                await delete_quarantined_attachment_objects(storage, settings, attachment)
+                await delete_terminal_attachment_objects(storage, settings, attachment)
                 return "quarantined"
+        # A bind-capable clean publication must be ordered against terminal
+        # proof cleanup before any derivative/final-object work. When no proof
+        # exists, retain the transaction-scoped digest fence through the clean
+        # commit so cleanup cannot remove the last proof between check/commit.
+        if await reject_retained_terminal_digest(attachment, storage):
+            return "rejected"
         derivatives: list[Derivative] = []
         if detected in IMAGE_TYPES:
             derivatives, attachment.blurhash, attachment.perceptual_hash, width, height = (
@@ -267,18 +409,18 @@ async def process_attachment_record(
             )
         return "clean"
     except MediaValidationError:
-        if reprocessing:
-            await session.rollback()
-            log.exception("media_reprocessing_failed", attachment_id=str(attachment_id))
-            raise
-        attachment.scan_status = "infected"
-        try:
-            await storage.delete(settings.media_attachments_bucket, attachment.object_key)
-        except StorageError:
-            log.exception("media_invalid_object_delete_failed", attachment_id=str(attachment_id))
+        # Size, type, decoder, and digest validation failures are not malware
+        # detections. Fail closed with the same neutral terminal policy used
+        # for unscannable PhotoDNA input; reserve ``infected`` exclusively for
+        # an affirmative ClamAV result.
+        attachment.scan_status = "rejected"
+        if attachment.staging_object_key is None:
+            attachment.staging_object_key = attachment.object_key
         await discard_attachment(session, settings, attachment)
+        await prepare_terminal_commit(attachment)
         await session.commit()
-        return "infected"
+        await delete_terminal_attachment_objects(storage, settings, attachment)
+        return "rejected"
     except (StorageError, RuntimeError):
         if reprocessing:
             await session.rollback()
@@ -298,11 +440,18 @@ async def sweep_orphan_uploads(
         return 0
     storage = S3Storage(settings)
     for attachment in rows:
+        if attachment.staging_object_key is None:
+            attachment.staging_object_key = original_object_key(
+                attachment.origin_domain,
+                attachment.id,
+            )
         try:
             await storage.delete(settings.media_attachments_bucket, attachment.object_key)
         except StorageError:
             log.exception("media_orphan_delete_failed", attachment_id=str(attachment.id))
-            continue
+            # Commit expired/deleted state and quota release even when storage
+            # is unavailable. The deterministic marker moves physical retry to
+            # the fair staging sweep instead of pinning the pending prefix.
         await discard_attachment(session, settings, attachment)
     await session.commit()
     return len(rows)
@@ -311,15 +460,20 @@ async def sweep_orphan_uploads(
 async def sweep_staging_objects(
     session: AsyncSession, settings: Settings, *, limit: int = 100
 ) -> int:
-    """Retry deletion of client-writable objects after immutable promotion."""
+    """Delete client-writable objects after expiry plus completion grace."""
 
     rows = list(
         await session.scalars(
             select(Attachment)
             .where(
                 Attachment.staging_object_key.is_not(None),
-                Attachment.upload_expires_at <= func.now(),
-                (Attachment.scan_status == "clean") | Attachment.deleted_at.is_not(None),
+                or_(
+                    Attachment.upload_expires_at.is_(None),
+                    Attachment.upload_expires_at
+                    < func.now() - timedelta(seconds=STAGING_UPLOAD_COMPLETION_GRACE_SECONDS),
+                ),
+                Attachment.scan_status.in_(("clean", "encrypted"))
+                | Attachment.deleted_at.is_not(None),
             )
             .order_by(Attachment.updated_at, Attachment.id)
             .limit(limit)
@@ -329,13 +483,27 @@ async def sweep_staging_objects(
     if not rows:
         return 0
     storage = S3Storage(settings)
+    swept_at = datetime.now(UTC)
     removed = 0
     for attachment in rows:
-        if attachment.scan_status == "quarantined":
-            if not await delete_quarantined_attachment_objects(storage, settings, attachment):
+        # Recheck the strict boundary after the row lock; a test fake or a
+        # concurrently repaired timestamp must not clear the marker at grace
+        # equality.
+        if not staging_upload_grace_elapsed(attachment.upload_expires_at, now=swept_at):
+            continue
+        if attachment.deleted_at is not None or attachment.scan_status in {
+            "infected",
+            "quarantined",
+            "rejected",
+        }:
+            if not await delete_terminal_attachment_objects(storage, settings, attachment):
+                attachment.updated_at = swept_at
                 continue
-            attachment.staging_object_key = None
             attachment.variants = {}
+            if attachment.finalized_at is None and attachment.deleted_at is not None:
+                await session.delete(attachment)
+            else:
+                attachment.staging_object_key = None
             removed += 1
             continue
         staging_key = attachment.staging_object_key
@@ -344,13 +512,20 @@ async def sweep_staging_objects(
         try:
             await storage.delete(settings.media_attachments_bucket, staging_key)
         except StorageError:
+            attachment.updated_at = swept_at
             log.exception(
                 "media_staging_gc_failed",
                 attachment_id=str(attachment.id),
                 staging_key=staging_key,
             )
             continue
-        attachment.staging_object_key = None
+        if attachment.finalized_at is None and attachment.deleted_at is not None:
+            # Expired tickets have no durable message/source lifecycle. Once
+            # their sole staging object is gone, remove the quota-released row
+            # instead of retaining an unreachable database tombstone forever.
+            await session.delete(attachment)
+        else:
+            attachment.staging_object_key = None
         removed += 1
     await session.commit()
     return removed
@@ -529,14 +704,30 @@ async def purge_local_attachment(
         )
         .with_for_update()
     )
-    if attachment is None or attachment.deleted_at is not None:
+    if attachment is None:
         return "missing"
+    already_deleted = attachment.deleted_at is not None
     storage = S3Storage(settings)
-    await storage.delete(settings.media_attachments_bucket, attachment.object_key)
+    now = datetime.now(UTC)
+    if attachment.staging_object_key is None and attachment.upload_expires_at is not None:
+        # Recover the deterministic key even for rows processed by an older
+        # release that cleared it after one deletion.
+        attachment.staging_object_key = original_object_key(origin_domain, attachment_id)
+    objects: set[tuple[str, str]] = {(settings.media_attachments_bucket, attachment.object_key)}
+    if attachment.staging_object_key is not None:
+        objects.add((settings.media_attachments_bucket, attachment.staging_object_key))
     for raw in attachment.variants.values():
         if isinstance(raw, dict) and isinstance(raw.get("object_key"), str):
-            await storage.delete(settings.media_derived_bucket, raw["object_key"])
-    await discard_attachment(session, settings, attachment)
+            objects.add((settings.media_derived_bucket, raw["object_key"]))
+    for bucket, key in sorted(objects):
+        await storage.delete(bucket, key)
+    if not already_deleted:
+        await discard_attachment(session, settings, attachment)
+    # Clear only strictly after the fixed post-expiry completion grace. At the
+    # equality boundary an official client's maximum-duration request can
+    # still be completing, so the scheduled staging sweep must retry later.
+    if staging_upload_grace_elapsed(attachment.upload_expires_at, now=now):
+        attachment.staging_object_key = None
     await session.commit()
     return "deleted"
 

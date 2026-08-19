@@ -16,6 +16,7 @@ from starlette.requests import Request
 
 from app.bots.auth import BotPrincipal, require_bot
 from app.bots.installations import installation_has_membership
+from app.chat.events import interaction_dispatch_audience
 from app.db.bot_models import BotApplication, BotInstallation, BotToken, BotWorker
 from app.db.models import Channel, Guild, User
 
@@ -248,6 +249,8 @@ def authentication_request(websocket: WebSocket, identify: dict[str, Any]) -> Re
 
 
 def event_intent(event_type: str) -> str:
+    if event_type == "ATTACHMENT_UPDATE":
+        return "guild_messages"
     if event_type.startswith("MESSAGE_REACTION"):
         return "message_reactions"
     if event_type.startswith("MESSAGE"):
@@ -268,6 +271,8 @@ def event_intent(event_type: str) -> str:
 def event_scope(event_type: str) -> str:
     """Return the data grant required to receive an event category."""
 
+    if event_type == "ATTACHMENT_UPDATE":
+        return "attachments.read"
     if event_type.startswith("MESSAGE_REACTION"):
         return "reactions.read"
     if event_type.startswith("MESSAGE"):
@@ -334,6 +339,10 @@ def filtered_event(
         return None
     event_type = normalized_bot_event_type(event_type, data)
     if event_type.startswith("INTERACTION"):
+        if event_type == "INTERACTION_CREATE" and interaction_dispatch_audience(event) != (
+            f"{principal.user.id}@{principal.user.origin_domain}"
+        ):
+            return None
         if data.get("application_ref") != (
             f"{principal.application.id}@{principal.application.origin_domain}"
         ):

@@ -623,6 +623,12 @@ async def test_expired_history_media_is_reauthorized_and_returns_fresh_scoped_pa
         pair_key="a" * 64,
         history_truncated=True,
     )
+    conversation_channel = Channel(
+        id=1,
+        origin_domain="authority.example",
+        type=1,
+        created_floor_id=1,
+    )
     participant = DMParticipant(
         conversation_id=1,
         conversation_domain="authority.example",
@@ -639,10 +645,14 @@ async def test_expired_history_media_is_reauthorized_and_returns_fresh_scoped_pa
         scan_status="clean",
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
+    get_calls: list[tuple[object, dict[str, object]]] = []
 
     async def get(model: object, key: object, **_kwargs: object) -> object | None:
+        get_calls.append((model, _kwargs))
         if model is DMConversation and key == (1, "authority.example"):
             return conversation
+        if model is Channel and key == (1, "authority.example"):
+            return conversation_channel
         if model is DMParticipant:
             return participant
         if model is RemoteMediaTombstone:
@@ -714,10 +724,18 @@ async def test_expired_history_media_is_reauthorized_and_returns_fresh_scoped_pa
         "requester_id": "9",
         "requester_domain": configured.domain,
     }
+    assert any(
+        model is RemoteMediaCache
+        and kwargs.get("populate_existing") is True
+        and kwargs.get("with_for_update") is True
+        for model, kwargs in get_calls
+    )
 
 
 @pytest.mark.asyncio
-async def test_history_media_origin_rejects_cross_conversation_or_message_scope() -> None:
+async def test_history_media_origin_rejects_cross_conversation_or_message_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     configured = settings()
     attachment = Attachment(
         id=7,
@@ -761,7 +779,18 @@ async def test_history_media_origin_rejects_cross_conversation_or_message_scope(
 
     session = cast(
         AsyncSession,
-        SimpleNamespace(get=get, scalar=AsyncMock(return_value=1)),
+        SimpleNamespace(
+            get=get,
+            scalar=AsyncMock(side_effect=[1, attachment, message_row, 1]),
+            execute=AsyncMock(),
+            commit=AsyncMock(),
+        ),
+    )
+    record_recipients = AsyncMock(return_value={(7, configured.domain)})
+    monkeypatch.setattr(
+        federation_api,
+        "record_attachment_recipients",
+        record_recipients,
     )
     principal = FederationPrincipal(origin="requester.example", key_id="ed25519:test")
     result = await _federation_media_attachment(
@@ -775,6 +804,8 @@ async def test_history_media_origin_rejects_cross_conversation_or_message_scope(
         expected_message=(20, configured.domain),
     )
     assert result is attachment
+    record_recipients.assert_awaited_once()
+    session.commit.assert_awaited_once()  # type: ignore[attr-defined]
 
     for conversation_ref, message_ref in (
         ((31, "authority.example"), (20, configured.domain)),
@@ -792,6 +823,84 @@ async def test_history_media_origin_rejects_cross_conversation_or_message_scope(
                 expected_message=message_ref,
             )
         assert raised.value.status_code == 404
+
+
+async def test_history_media_origin_rechecks_terminal_state_after_recipient_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = settings()
+    attachment = Attachment(
+        id=8,
+        origin_domain=configured.domain,
+        uploader_id=1,
+        uploader_domain=configured.domain,
+        filename="image.png",
+        content_type="image/png",
+        size=128,
+        purpose="attachment",
+        scan_status="clean",
+        message_id=21,
+        message_domain=configured.domain,
+    )
+    message_row = Message(
+        id=21,
+        origin_domain=configured.domain,
+        channel_id=31,
+        channel_domain="authority.example",
+        author_id=1,
+        author_domain=configured.domain,
+        content="image",
+    )
+    channel = Channel(
+        id=31,
+        origin_domain="authority.example",
+        type=1,
+        name=None,
+        guild_id=None,
+        guild_domain=None,
+    )
+
+    async def get(model: object, key: object, **_kwargs: object) -> object | None:
+        if model is Attachment and key == (8, configured.domain):
+            return attachment
+        if model is Message:
+            return message_row
+        if model is Channel:
+            return channel
+        return None
+
+    async def commit() -> None:
+        attachment.scan_status = "quarantined"
+        attachment.deleted_at = datetime.now(UTC)
+
+    session = cast(
+        AsyncSession,
+        SimpleNamespace(
+            get=get,
+            scalar=AsyncMock(side_effect=[1, attachment]),
+            execute=AsyncMock(),
+            commit=commit,
+        ),
+    )
+    monkeypatch.setattr(
+        federation_api,
+        "record_attachment_recipients",
+        AsyncMock(return_value={(8, configured.domain)}),
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        await _federation_media_attachment(
+            session,
+            cast(Any, object()),
+            configured,
+            FederationPrincipal(origin="requester.example", key_id="ed25519:test"),
+            8,
+            "original",
+            expected_conversation=(31, "authority.example"),
+            expected_message=(21, configured.domain),
+        )
+
+    assert raised.value.status_code == 404
 
 
 def test_history_media_scope_requires_all_composite_reference_parts() -> None:

@@ -19,25 +19,35 @@ is normative in [kaede-fed-v1.md](kaede-fed-v1.md).
   an owned, unexpired, single-use ticket whose object-store `HEAD` length
   matches.
 - Taskiq processing sniffs magic bytes, rejects executable and active content,
-  and scans through ClamAV INSTREAM. When the separately licensed Microsoft
-  PhotoDNA integration is enabled, plaintext images also receive an Edge Hash
-  V2 match decision before promotion. A positive result is quarantined and
-  creates a metadata-only automated report; the image and PhotoDNA hash are not
-  retained. Images below 160x160 pixels and provider status 3208 are terminally
-  ineligible; source files are not exempted merely for exceeding 4 MB because
-  MatchHash receives the fixed-size Edge Hash. Provider-ineligible images
-  continue through MIME, ClamAV, and ordinary image validation without a
-  permanent retry. An original is never exposed until it is clean. Browser `PUT`
-  credentials address staging-only keys; after validation, the worker writes
-  the exact in-memory bytes that passed scanning to a
+  and scans through ClamAV INSTREAM. An original is never exposed until it is
+  clean. Browser `PUT` credentials address staging-only keys; after validation,
+  the worker writes the exact in-memory bytes that passed scanning to a
   content-addressed clean key that has never been disclosed to the browser,
   then atomically switches the database reference to that key.
+- When the separately licensed Microsoft PhotoDNA integration is enabled,
+  plaintext images also receive an Edge Hash V2 match decision before
+  promotion. A positive result is quarantined internally and creates a
+  metadata-only automated report; the image and PhotoDNA hash are not retained.
+  Non-admin APIs expose only the same generic `rejected` status used for other
+  terminal safety-policy decisions.
+- Images below 160x160 pixels and provider statuses 3206/3208 are terminally
+  ineligible: they get the same neutral `rejected` state, are deleted, and are
+  never published as clean. A source file over 4 MB is not exempt, because
+  MatchHash receives the fixed-size Edge Hash rather than the file; the
+  provider's 4 MB source-image limit applies to its deprecated direct-image
+  representation, not the preferred fixed-size `PreHashV2` request used here.
+  Kaede enforces its own upload and decoded-image safety limits before hash
+  generation: images above the local 256-frame or 25-million-decoded-pixel
+  budget are terminally policy-rejected without a provider request, report, or
+  retry, and legacy derivative repair persists that outcome instead of
+  repeatedly enqueueing a deterministic failure.
 - pyvips emits animated-preserving WebP variants at 128, 512, and 1024 pixels
   plus blurhash and perceptual hash metadata. FFmpeg produces bounded WebP
   posters for supported videos.
 - Avatar, banner, guild icon/banner, and emoji ticket/commit paths use the same
-  scan gate. Public assets are content-addressed and return a cacheable
-  redirect whose lifetime is shorter than its immutable seven-day S3 target.
+  scan gate. Public assets are content-addressed, but remain revocable after a
+  late terminal verdict: the object capability lasts five minutes and its
+  redirect is cached for only 60 seconds with revalidation required.
 - A guild may own between one and 1,000 custom emoji according to the
   operator's configured limit (100 by default). Names are unique within a
   guild, and emoji images have an independent 512 KiB default upload limit.
@@ -84,11 +94,14 @@ are never trusted.
 
 A still-valid upload credential can rewrite only its abandoned staging key,
 never the clean object served by Kaede. The cleanup sweep retains the
-staging-key reference until the presigned `PUT` has expired and then retries
-deletion, covering a client that rewrites staging after the worker's
-best-effort immediate deletion.
+staging-key reference until strictly more than 16 minutes after the presigned
+`PUT` expires, then retries deletion. That exceeds the official clients'
+15-minute maximum request duration and covers an upload that starts just before
+expiry. Operators exposing upload credentials to third-party clients must also
+bound their request duration to no more than 15 minutes; S3-compatible
+providers do not expose a portable completion bound on their own.
 
-E2EE attachments deliberately bypass content scanners: only ciphertext is
+E2EE attachments bypass content scanning entirely: only ciphertext is
 available to the server. Clients warn about that loss before irreversible E2EE
 activation. Kaede never sends user-decrypted E2EE attachment bytes to ClamAV or
 PhotoDNA behind the user's back.

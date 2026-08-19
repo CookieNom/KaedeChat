@@ -7,11 +7,17 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from sqlalchemy import select, text
+from sqlalchemy import exists, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.settings import Settings
-from app.db.models import Instance, PeerKey
+from app.db.models import (
+    GuildMediaDeletionRequest,
+    Instance,
+    MediaTombstoneSource,
+    PeerKey,
+    TerminalRoomDeletion,
+)
 from app.db.partitions import ensure_message_partitions
 
 
@@ -66,6 +72,37 @@ def new_signing_key_id(now: datetime | None = None) -> str:
 
     generated_at = signing_key_operation_time(now)
     return f"ed25519:{generated_at.strftime('%Y%m%d')}-{secrets.token_hex(16)}"
+
+
+async def signing_key_has_pending_deletion_proofs(
+    session: AsyncSession,
+    settings: Settings,
+    key_id: str,
+) -> bool:
+    """Keep verification keys advertised while durable deletion still uses them."""
+
+    return bool(
+        await session.scalar(
+            select(
+                or_(
+                    exists().where(
+                        MediaTombstoneSource.attachment_domain == settings.domain,
+                        MediaTombstoneSource.key_id == key_id,
+                    ),
+                    exists().where(
+                        TerminalRoomDeletion.room_domain == settings.domain,
+                        TerminalRoomDeletion.key_id == key_id,
+                        TerminalRoomDeletion.acknowledged_at.is_(None),
+                    ),
+                    exists().where(
+                        GuildMediaDeletionRequest.guild_domain == settings.domain,
+                        GuildMediaDeletionRequest.key_id == key_id,
+                        GuildMediaDeletionRequest.acknowledged_at.is_(None),
+                    ),
+                )
+            )
+        )
+    )
 
 
 async def verify_stored_identity(
@@ -197,7 +234,13 @@ async def rotate_instance_signing_key(
                 # conservative overlap window on their first managed rotation.
                 key.retire_after = rotated_at + overlap
             elif key.retire_after <= rotated_at:
-                key.expired_at = rotated_at
+                pending_deletion_proof = await signing_key_has_pending_deletion_proofs(
+                    session,
+                    settings,
+                    key.key_id,
+                )
+                if not pending_deletion_proof:
+                    key.expired_at = rotated_at
         retained_old_keys = [
             key
             for key in active_keys
@@ -284,6 +327,14 @@ async def retire_instance_signing_key(
             raise KeyRetirementTooEarly(key.key_id, key.retire_after)
         if not force_compromised and key.retire_after is not None and retired_at < key.retire_after:
             raise KeyRetirementTooEarly(key.key_id, key.retire_after)
+        if not force_compromised and await signing_key_has_pending_deletion_proofs(
+            session,
+            settings,
+            key.key_id,
+        ):
+            raise IdentityKeyError(
+                f"signing key {key.key_id!r} still authenticates pending deletion proofs"
+            )
         if key.retire_after is None:
             key.retire_after = retired_at
         key.expired_at = retired_at

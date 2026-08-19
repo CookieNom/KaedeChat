@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -8,6 +9,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 import app.api.moderation as moderation_api
+import app.gateway as gateway
 from app.admin.auth import ROLE_CAPABILITIES, AdminPrincipal
 from app.api.applications import (
     SUPPORTED_SCOPES,
@@ -45,6 +47,7 @@ from app.api.bot_gateway import (
     gateway_authorization_fingerprint,
     guild_context_from_topic,
     normalized_bot_event_type,
+    replay_topic,
 )
 from app.api.bots import exact_installation_by_id
 from app.api.interactions import (
@@ -932,6 +935,7 @@ async def test_generic_kick_atomically_revokes_bot_installation(
     patch_moderation_side_effects(monkeypatch, guild, member)
     settings = SimpleNamespace(domain="guild.example")
     session = SimpleNamespace(
+        scalar=AsyncMock(return_value=None),
         scalars=AsyncMock(return_value=[installed]),
         delete=AsyncMock(),
         commit=AsyncMock(),
@@ -970,7 +974,7 @@ async def test_generic_ban_revokes_bot_and_unban_never_reactivates_it(
     patch_moderation_side_effects(monkeypatch, guild, member)
     settings = SimpleNamespace(domain="guild.example")
     session = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[target, member]),
+        scalar=AsyncMock(side_effect=[None, target, member]),
         scalars=AsyncMock(return_value=[installed]),
         execute=AsyncMock(),
         delete=AsyncMock(),
@@ -1886,6 +1890,7 @@ def test_message_gateway_requires_intent_and_both_content_scopes() -> None:
 def test_gateway_intent_mapping_orders_reactions_before_messages() -> None:
     assert event_intent("MESSAGE_REACTION_ADD") == "message_reactions"
     assert event_intent("MESSAGE_CREATE") == "guild_messages"
+    assert event_intent("ATTACHMENT_UPDATE") == "guild_messages"
     assert event_intent("INTERACTION_CREATE") == "interactions"
     assert event_intent("TYPING_START") == "guild_typing"
 
@@ -1893,10 +1898,60 @@ def test_gateway_intent_mapping_orders_reactions_before_messages() -> None:
 def test_gateway_scope_mapping_is_event_specific() -> None:
     assert event_scope("MESSAGE_REACTION_ADD") == "reactions.read"
     assert event_scope("MESSAGE_CREATE") == "messages.metadata"
+    assert event_scope("ATTACHMENT_UPDATE") == "attachments.read"
     assert event_scope("PRESENCE_UPDATE") == "members.read"
     assert event_scope("VOICE_STATE_UPDATE") == "voice.states.read"
     assert event_scope("GUILD_ROLE_UPDATE") == "roles.read"
     assert event_scope("CHANNEL_UPDATE") == "channels.read"
+
+
+def test_attachment_updates_require_message_intent_and_attachment_scope() -> None:
+    event = {
+        "t": "ATTACHMENT_UPDATE",
+        "topic_seq": 8,
+        "d": {
+            "channel_id": "9",
+            "channel_domain": "guild.example",
+            "message_id": "10",
+            "message_domain": "guild.example",
+            "attachment": {
+                "id": "11",
+                "filename": "private.png",
+                "scan_status": "rejected",
+            },
+        },
+    }
+    allowed = principal(scopes={"attachments.read"}, intents={"guild_messages"})
+    assert (
+        filtered_event(
+            allowed,
+            event,
+            {"guild_messages"},
+            {"attachments.read"},
+            topic="guild:guild.example:1",
+        )
+        is not None
+    )
+    assert (
+        filtered_event(
+            allowed,
+            event,
+            {"guilds"},
+            {"attachments.read"},
+            topic="guild:guild.example:1",
+        )
+        is None
+    )
+    assert (
+        filtered_event(
+            allowed,
+            event,
+            {"guild_messages"},
+            {"guilds.read"},
+            topic="guild:guild.example:1",
+        )
+        is None
+    )
 
 
 def test_interactions_are_isolated_to_the_exact_application_and_installation() -> None:
@@ -1904,10 +1959,12 @@ def test_interactions_are_isolated_to_the_exact_application_and_installation() -
     shared = {
         "t": "INTERACTION_CREATE",
         "topic_seq": 9,
+        "audience_user_refs": ["10@apps.example"],
         "d": {
             "id": "100",
             "application_ref": "20@apps.example",
             "installation_id": "60",
+            "bot_user_ref": "10@apps.example",
         },
     }
     assert (
@@ -1920,6 +1977,17 @@ def test_interactions_are_isolated_to_the_exact_application_and_installation() -
             installation_id=60,
         )
         is not None
+    )
+    assert (
+        filtered_event(
+            bot,
+            {**shared, "audience_user_refs": ["10@apps.example", "7@people.example"]},
+            {"interactions"},
+            {"applications.commands"},
+            topic="guild:guild.example:70",
+            installation_id=60,
+        )
+        is None
     )
     other_application = {
         **shared,
@@ -1955,6 +2023,77 @@ def test_interactions_are_isolated_to_the_exact_application_and_installation() -
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_interaction_replay_delivers_only_to_the_explicit_bot_audience(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = principal(scopes={"applications.commands"}, intents={"interactions"})
+    monkeypatch.setattr(gateway, "current_acl_fence", AsyncMock(return_value=(1, 1)))
+
+    def interaction(sequence: int, audience: object = None) -> dict[str, object]:
+        event: dict[str, object] = {
+            "t": "INTERACTION_CREATE",
+            "topic_seq": sequence,
+            "d": {
+                "application_ref": "20@apps.example",
+                "installation_id": "60",
+                "bot_user_ref": "10@apps.example",
+                "channel_id": "7",
+                "channel_domain": "guild.example",
+                "options": {"secret": str(sequence)},
+            },
+        }
+        if audience is not None:
+            event["audience_user_refs"] = audience
+        return event
+
+    events = [
+        interaction(1),
+        interaction(2, ["11@apps.example"]),
+        interaction(3, ["10@apps.example"]),
+        interaction(4, ["10@apps.example", "7@people.example"]),
+    ]
+
+    class Redis:
+        async def xrange(self, *_args: object, **_kwargs: object) -> list[object]:
+            return [
+                (f"{index}-0", {"event": json.dumps(event)})
+                for index, event in enumerate(events, start=1)
+            ]
+
+    class Socket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, object]] = []
+
+        async def send_json(self, value: dict[str, object]) -> None:
+            self.sent.append(value)
+
+    socket = Socket()
+    current = AsyncMock(return_value=True)
+    replayed = await replay_topic(
+        socket,  # type: ignore[arg-type]
+        Redis(),  # type: ignore[arg-type]
+        bot,
+        "guild:guild.example:70",
+        0,
+        {"interactions"},
+        {"applications.commands"},
+        60,
+        object(),
+        gateway.VisibilitySummary(
+            {(70, "guild.example")},
+            {(70, "guild.example"): {(7, "guild.example")}},
+            {(70, "guild.example"): (1, 1)},
+        ),
+        set(),
+        SimpleNamespace(current=current),  # type: ignore[arg-type]
+    )
+
+    assert replayed
+    assert len(socket.sent) == 1
+    assert socket.sent[0]["d"]["options"] == {"secret": "3"}  # type: ignore[index]
 
 
 def pending_interaction(installed: BotInstallation) -> BotInteraction:

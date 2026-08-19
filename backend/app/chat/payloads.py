@@ -18,6 +18,7 @@ from app.db.models import (
     Role,
     User,
 )
+from app.media.payloads import attachment_payload as media_attachment_payload
 
 
 def resource_version(value: object) -> str | None:
@@ -242,20 +243,7 @@ def dm_channel_payload(
 
 
 def attachment_payload(attachment: Attachment) -> dict[str, object]:
-    return {
-        "id": str(attachment.id),
-        "origin_domain": attachment.origin_domain,
-        "filename": attachment.filename,
-        "content_type": attachment.detected_content_type or attachment.content_type,
-        "size": attachment.size,
-        "width": attachment.width,
-        "height": attachment.height,
-        "blurhash": attachment.blurhash,
-        "scan_status": attachment.scan_status,
-        "encryption_mode": attachment.encryption_mode,
-        "encryption_protocol": attachment.encryption_protocol,
-        "variants": attachment.variants,
-    }
+    return media_attachment_payload(attachment, include_lifecycle=False)
 
 
 def message_payload(

@@ -74,7 +74,6 @@
             identifier,
             password: prepared.authenticationSecret,
             password_kdf_version: prepared.context.version,
-            ...(prepared.passwordUpgrade ? { password_upgrade: prepared.passwordUpgrade } : {}),
             ...(turnstileRequired ? { turnstile_token: turnstileToken } : {})
           })
         });

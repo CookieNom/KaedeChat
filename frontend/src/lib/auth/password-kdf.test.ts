@@ -3,9 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { fromBase64url, utf8 } from '$lib/e2ee/encoding';
 
-import { preparePassword, type ModernPasswordKdfContext } from './password-kdf';
+import { preparePassword, type PasswordKdfContext } from './password-kdf';
 
-const CONTEXT: ModernPasswordKdfContext = {
+const CONTEXT: PasswordKdfContext = {
   version: 2,
   algorithm: 'PBKDF2-SHA256',
   iterations: 600_000,
@@ -50,5 +50,25 @@ describe('password KDF v2', () => {
     const second = await preparePassword('correct horse battery staple', CONTEXT);
 
     expect(first.authenticationSecret).not.toBe(second.authenticationSecret);
+  });
+
+  it('fails closed on a legacy or missing password protocol version', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    vi.stubGlobal('window', { location: { hostname: 'kaede.example' } });
+    const legacy = {
+      version: 0,
+      algorithm: 'legacy',
+      iterations: 0,
+      auth_salt: null,
+      vault_salt: CONTEXT.vault_salt
+    } as unknown as PasswordKdfContext;
+    const missing = { ...CONTEXT, version: undefined } as unknown as PasswordKdfContext;
+
+    await expect(preparePassword('never send this password', legacy)).rejects.toThrow(
+      'unsupported password protection scheme'
+    );
+    await expect(preparePassword('never send this password', missing)).rejects.toThrow(
+      'unsupported password protection scheme'
+    );
   });
 });

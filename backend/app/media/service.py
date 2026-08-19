@@ -12,6 +12,12 @@ from app.core.settings import Settings
 from app.core.snowflake import SnowflakeGenerator
 from app.db.bot_models import BotInstallation
 from app.db.models import Attachment, User, UserStorageUsage
+from app.media.digest_revocation import (
+    TERMINAL_DIGEST_STATUSES,
+    try_lock_asset_digest,
+    valid_content_digest,
+)
+from app.media.payloads import attachment_payload as render_attachment_payload
 from app.media.processing import normalize_declared_type, sanitize_filename
 from app.media.storage import S3Storage, StorageError
 
@@ -33,24 +39,7 @@ def derived_object_key(domain: str, attachment_id: int, variant: str) -> str:
 
 
 def attachment_payload(attachment: Attachment) -> dict[str, object]:
-    return {
-        "id": str(attachment.id),
-        "origin_domain": attachment.origin_domain,
-        "filename": attachment.filename,
-        "content_type": attachment.detected_content_type or attachment.content_type,
-        "size": attachment.size,
-        "width": attachment.width,
-        "height": attachment.height,
-        "blurhash": attachment.blurhash,
-        "scan_status": attachment.scan_status,
-        "encryption_mode": attachment.encryption_mode,
-        "encryption_protocol": attachment.encryption_protocol,
-        "purpose": attachment.purpose,
-        "variants": attachment.variants,
-        "finalized_at": (
-            attachment.finalized_at.isoformat() if attachment.finalized_at is not None else None
-        ),
-    }
+    return render_attachment_payload(attachment)
 
 
 async def locked_usage(session: AsyncSession, settings: Settings, user: User) -> UserStorageUsage:
@@ -274,6 +263,36 @@ async def finalize_attachment(
 async def bind_asset(
     session: AsyncSession, attachment: Attachment, binding: str
 ) -> Attachment | None:
+    digest = attachment.content_sha256
+    if (
+        attachment.scan_status != "clean"
+        or attachment.deleted_at is not None
+        or not valid_content_digest(digest)
+    ):
+        raise HTTPException(status_code=409, detail={"code": "MEDIA_NOT_AVAILABLE"})
+    # Callers already own the destination User/Guild and this Attachment row.
+    # A public capability takes digest -> Attachment, so never wait here while
+    # holding the inverse row lock. The short, neutral 503 makes the client
+    # retry after the capability/verdict transaction releases the fence.
+    if not await try_lock_asset_digest(session, digest):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "MEDIA_NOT_AVAILABLE"},
+            headers={"Retry-After": "1"},
+        )
+    terminal_evidence = await session.scalar(
+        select(Attachment.id)
+        .where(
+            Attachment.origin_domain == attachment.origin_domain,
+            Attachment.content_sha256 == digest,
+            Attachment.scan_status.in_(TERMINAL_DIGEST_STATUSES),
+        )
+        .limit(1)
+    )
+    if terminal_evidence is not None:
+        # Do not disclose whether the retained digest evidence was malware,
+        # PhotoDNA, or a neutral fail-closed validation rejection.
+        raise HTTPException(status_code=409, detail={"code": "MEDIA_NOT_AVAILABLE"})
     if attachment.asset_binding not in {None, binding}:
         raise HTTPException(status_code=409, detail={"code": "ASSET_ALREADY_USED"})
     previous = await session.scalar(

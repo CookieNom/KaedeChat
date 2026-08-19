@@ -167,13 +167,13 @@ custom-build requirements.
 ## End-to-end encryption activation
 
 New encrypted-room activation is enabled by default and fails closed whenever
-the room, client, or participating home cannot satisfy the protocol. Before a
-public launch, complete the release gates and client compatibility checks in
-[the E2EE protocol and rollout guide](e2ee.md), or explicitly set
+the room, client, or a participating home can't satisfy the protocol. Before a
+public launch, work through the release gates and client compatibility checks
+in [the E2EE protocol and rollout guide](e2ee.md), or set
 `KAEDE_E2EE_ACTIVATION_ENABLED=false` on every participating home. Mixed
-settings safely reject new proposals; they never downgrade an active encrypted
-room. Turning the flag off later hides new activation but leaves rekey,
-recovery, selective-disclosure reports, and active encrypted rooms operational.
+settings reject new proposals; they never downgrade an active encrypted room.
+Turning the flag off later hides new activation. Rekey, recovery,
+selective-disclosure reports, and active encrypted rooms keep working.
 
 Set the same `KAEDE_EDGE_SECRET` in `.env` and in the nginx
 `X-Kaede-Edge-Secret` header. It must differ from `KAEDE_PROXY_SECRET`. The
@@ -252,9 +252,12 @@ synchronization, and only then change the backend configuration.
 Browser `PUT` URLs can write only staging keys. The worker copies the exact
 bytes that passed type validation and malware scanning to a server-only,
 content-addressed clean key, then switches the database reference atomically.
-It keeps the staging-key reference until the presign lifetime has elapsed. So
-a client that rewrites staging after an early deletion still can't affect
-served bytes, and the cleanup sweep deletes the rewrite.
+It keeps the staging-key reference until strictly more than 16 minutes after
+the presigned `PUT` expires. That exceeds the official clients' 15-minute
+request bound, so a rewrite begun just before expiry still can't affect served
+bytes and the cleanup sweep deletes it. Third-party upload clients must enforce
+the same 15-minute request bound, or the object store must enforce equivalent
+staging-prefix lifecycle cleanup.
 
 The nginx example gives only the media virtual host a 101 MiB body allowance,
 bounded concurrent connections, request rate, and five-minute proxy timeouts.
@@ -267,7 +270,7 @@ still the authoritative per-object checks.
 ## Microsoft PhotoDNA image matching
 
 PhotoDNA is optional because Microsoft distributes its Edge Hash generator
-under a separate confidential license. Do not add the SDK archive, native
+under a separate confidential license. Don't add the SDK archive, native
 libraries, Python wrapper, WebAssembly build, or generated hashes to this
 repository, an image, an artifact, or a log. Extract the licensed SDK on each
 host into an operator-owned directory whose root contains `clientlibrary/python`
@@ -287,45 +290,57 @@ unprivileged UID `10001`; Compose grants only the supplemental
 `OPERATOR_ENV_GID` (default `1000`) needed to read the SDK. Preflight runs as
 the operator UID/GID because it also validates the mode-`0600` operator env
 file. Set `OPERATOR_ENV_UID`/`OPERATOR_ENV_GID` to the account that owns the
-SDK directory, and ensure that group has only read/traverse permission. This
-avoids both world-readable confidential files and changing the long-running
-services away from their image identity.
+SDK directory, and give that group read/traverse permission only. That way the
+confidential files never become world-readable, and the long-running services
+keep their image identity.
+
 Preflight loads the native library and rejects an incomplete or incompatible
 installation before the API starts. The matcher URL is fixed in code to
 `https://api.microsoftmoderator.com/photodna/v1.0/MatchHash`; allow outbound
 TCP 443 to `api.microsoftmoderator.com` and never substitute HTTP.
 
 For plaintext local uploads the worker runs magic/type validation and ClamAV,
-creates an Edge Hash V2 in an isolated child process, and submits only that hash
-to Microsoft before any clean-key promotion. Plaintext images fetched from a
-federated home receive the same PhotoDNA decision before entering the local
-remote-media cache. A positive result is deleted from staging or the temporary
-remote spool, marked quarantined, and creates one automated `illegal_content`
-case in Administration → Reports. The report retains the provider tracking ID,
+creates an Edge Hash V2 in an isolated child process, and submits only that
+hash to Microsoft before any clean-key promotion. Plaintext images fetched
+from a federated home get the same PhotoDNA decision before they enter the
+local remote-media cache.
+
+On a match, the worker deletes the image from staging or the temporary remote
+spool, marks it quarantined internally, and opens one automated
+`illegal_content` case in Administration → Reports. The report retains the provider tracking ID, the
 source/violation/distance flags, attachment and optional uploader/message
-references, MIME type, and ordinary SHA-256 incident identifier. It retains no
-image bytes, thumbnail, object key, or PhotoDNA hash. Provider/generator failure
-is fail-closed: the object stays unavailable and normal task retries continue.
-The adapter rejects animations above 256 frames or 25 million decoded pixels
-in total. It also takes an advisory kernel lock on the mounted SDK directory,
+references, the MIME type, and the ordinary SHA-256 incident identifier. It
+retains no image bytes, thumbnail, object key, or PhotoDNA hash. Non-admin
+media APIs expose the same generic `rejected` state used for other terminal
+safety-policy decisions; they never reveal the internal quarantine state.
+Provider or generator failure is fail-closed: the object stays unavailable and
+normal task retries continue.
+
+The adapter terminally rejects images above 256 frames or 25 million decoded
+pixels in total without calling the provider or opening a report. This is a
+fail-closed policy rejection, not an infection or positive-match verdict, and
+is not retried. It also takes an advisory kernel lock on the mounted SDK directory,
 so the API's Uvicorn processes and the media worker run only one native image
 decode at a time even though they are separate processes and containers. Keep
 the SDK on a local filesystem (or one with working POSIX `flock` semantics).
 
-PhotoDNA cannot inspect an E2EE attachment because the server receives only
-ciphertext and does not have the room key. The existing E2EE activation warning
-therefore states that server-side file and malware scanning stops. A recipient
-can still submit a client-decrypted report, but Kaede must never silently upload
-E2EE plaintext to PhotoDNA.
+PhotoDNA can't inspect an E2EE attachment: the server receives only
+ciphertext and has no room key. That's why the E2EE activation warning states
+that server-side file and malware scanning stops. A recipient can still
+submit a client-decrypted report, but Kaede never silently uploads E2EE
+plaintext to PhotoDNA.
 
-Kaede locally excludes plaintext images below `160x160` pixels. MatchHash
-receives a fixed-size Edge Hash rather than the source file, so Kaede does not
-create a source-byte-size bypass; Microsoft remains authoritative for the
-current upper eligibility window and status `3208` is treated as a terminal
-provider-ineligible result rather than leaving an upload stuck in retries.
-Other generator or provider errors remain fail-closed and retryable, while
-MIME validation, ClamAV, dimension limits, and normal image processing still
-apply.
+Kaede excludes plaintext images below `160x160` pixels locally. MatchHash
+receives a fixed-size Edge Hash rather than the source file, so there is no
+source-byte-size bypass. The supplied SDK's preferred `PreHashV2` sample posts
+only the fixed-size hash; the provider's 4 MB source-image rule belongs to the
+deprecated direct-image input, which Kaede does not use. Microsoft remains
+authoritative for the current upper eligibility window. Statuses `3206` and
+`3208` are treated as terminal provider-ineligible results rather than leaving
+an upload stuck in retries: those files receive the neutral `rejected` state,
+are deleted, and are never published as clean. Other generator or provider
+errors remain fail-closed and retryable. MIME validation, ClamAV, dimension
+limits, and normal image processing still apply.
 
 ## Validate and start
 
@@ -605,6 +620,29 @@ docker compose --env-file .env -f deploy/compose.yml \
 docker compose --env-file .env -f deploy/compose.yml \
   up -d --no-build --wait --wait-timeout 180
 ```
+
+The password-KDF-v2 cutover migration refuses to run while any local human
+account still lacks version-2 authentication and vault salts. Before deploying this
+release, check the old database while the old release is still available:
+
+```sql
+SELECT id, username
+FROM users
+WHERE is_local
+  AND account_type = 'human'
+  AND (
+    password_kdf_version IS DISTINCT FROM 2
+    OR password_auth_salt IS NULL
+    OR e2ee_vault_salt IS NULL
+  );
+```
+
+Every returned account must complete the normal password-recovery flow on the
+old release before this migration runs. Do not use a same-password login
+upgrade or manufacture salts in SQL: neither can safely convert the
+password-encrypted account vault. Accounts without a working recovery address
+need an explicit account-replacement/recovery decision before rollout. Re-run
+the query and proceed only when it returns no rows.
 
 For the migration that introduces server-only clean media keys, wait at least
 `KAEDE_MEDIA_UPLOAD_TTL_SECONDS` after quiescing the old deployment before

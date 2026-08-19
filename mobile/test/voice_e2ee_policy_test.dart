@@ -29,7 +29,7 @@ void main() {
   };
 
   test('rejects an old media grant after a channel epoch rotation', () {
-    expect(voiceGrantMatchesChannelE2EEPolicy(grant, channel), isTrue);
+    expect(voiceGrantMatchesChannelPolicy(grant, channel), isTrue);
     final rotated = KaedeChannel(
       ref: channel.ref,
       type: channel.type,
@@ -41,9 +41,9 @@ void main() {
       encryptionEpoch: 8,
     );
 
-    expect(voiceGrantMatchesChannelE2EEPolicy(grant, rotated), isFalse);
+    expect(voiceGrantMatchesChannelPolicy(grant, rotated), isFalse);
     expect(
-      voiceGrantMatchesChannelE2EEPolicy(
+      voiceGrantMatchesChannelPolicy(
         <String, Object?>{
           ...grant,
           'encryption_policy_generation': '5',
@@ -68,20 +68,77 @@ void main() {
       encryptionPolicyGeneration: 4,
       encryptionEpoch: 7,
     );
-    expect(voiceGrantMatchesChannelE2EEPolicy(grant, rekeying), isFalse);
+    expect(voiceGrantMatchesChannelPolicy(grant, rekeying), isFalse);
     expect(
-      voiceGrantMatchesChannelE2EEPolicy(
+      voiceGrantMatchesChannelPolicy(
         <String, Object?>{...grant, 'channel_id': '3'},
         channel,
       ),
       isFalse,
     );
     expect(
-      voiceGrantMatchesChannelE2EEPolicy(
+      voiceGrantMatchesChannelPolicy(
         <String, Object?>{...grant, 'media_session_id': 'short'},
         channel,
       ),
       isFalse,
     );
+    expect(
+      voiceGrantMatchesChannelPolicy(
+        <String, Object?>{
+          ...grant,
+          'media_session_id': BigInt.parse(
+            '1111111111111111111111111111111111111111111',
+          ),
+        },
+        channel,
+      ),
+      isFalse,
+    );
+  });
+
+  test('binds plaintext grants and forbids encrypted context fields', () {
+    final plaintext = KaedeChannel(
+      ref: channel.ref,
+      type: channel.type,
+      position: channel.position,
+      permissions: channel.permissions,
+      encryptionMode: 'plaintext',
+      encryptionState: 'plaintext',
+      encryptionPolicyGeneration: 0,
+    );
+    final plaintextGrant = <String, Object?>{
+      'e2ee': false,
+      'channel_id': '2',
+      'channel_domain': 'chat.example',
+    };
+
+    expect(voiceGrantMatchesChannelPolicy(plaintextGrant, plaintext), isTrue);
+    expect(
+      voiceGrantMatchesChannelPolicy(
+        <String, Object?>{...plaintextGrant, 'channel_id': '3'},
+        plaintext,
+      ),
+      isFalse,
+    );
+    expect(
+      voiceGrantMatchesChannelPolicy(
+        <String, Object?>{
+          ...plaintextGrant,
+          'media_protocol': 'livekit-e2ee-v1',
+        },
+        plaintext,
+      ),
+      isFalse,
+    );
+    expect(
+      voiceGrantMatchesChannelPolicy(
+        <String, Object?>{...plaintextGrant, 'e2ee': true},
+        plaintext,
+      ),
+      isFalse,
+    );
+    final missingMode = <String, Object?>{...plaintextGrant}..remove('e2ee');
+    expect(voiceGrantMatchesChannelPolicy(missingMode, plaintext), isFalse);
   });
 }

@@ -46,20 +46,20 @@ void main() {
       }
     });
 
-    test('parses only exact modern and legacy server contexts', () {
+    test('parses only the exact version 2 server context', () {
       expect(
         MobilePasswordKdfContext.fromJson(context.toJson()),
         isA<ModernMobilePasswordKdfContext>(),
       );
       expect(
-        MobilePasswordKdfContext.fromJson(<String, Object?>{
+        () => MobilePasswordKdfContext.fromJson(<String, Object?>{
           'version': 0,
           'algorithm': 'legacy',
           'iterations': 0,
           'auth_salt': null,
           'vault_salt': context.vaultSalt,
         }),
-        isA<LegacyMobilePasswordKdfContext>(),
+        throwsFormatException,
       );
       expect(
         () => MobilePasswordKdfContext.fromJson(<String, Object?>{
@@ -75,29 +75,6 @@ void main() {
         }),
         throwsFormatException,
       );
-    });
-
-    test('preserves the raw legacy password while preparing an upgrade',
-        () async {
-      final prepared = await prepareMobilePassword(
-        ' leading and trailing ',
-        const LegacyMobilePasswordKdfContext(
-          vaultSalt: 'EBESExQVFhcYGRobHB0eHw',
-        ),
-        instance,
-      );
-      try {
-        expect(prepared.authenticationSecret, ' leading and trailing ');
-        expect(prepared.context.version, 0);
-        expect(prepared.passwordUpgrade?['password'],
-            matches(RegExp(r'^[A-Za-z0-9_-]{43}$')));
-        expect(
-          prepared.passwordUpgrade?['password_kdf'],
-          containsPair('version', mobilePasswordKdfVersion),
-        );
-      } finally {
-        prepared.destroy();
-      }
     });
 
     test('enforces the original password policy before deriving', () async {

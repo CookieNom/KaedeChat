@@ -65,11 +65,17 @@ async def verify() -> None:
             await session.execute(
                 text(
                     "INSERT INTO users "
-                    "(id, origin_domain, is_local, username, password_hash, email) "
-                    "VALUES (:id, :domain, true, 'schema_test', 'not-a-real-hash', "
-                    "'schema-test@example.invalid')"
+                    "(id, origin_domain, is_local, username, password_hash, email, "
+                    "password_kdf_version, password_auth_salt, e2ee_vault_salt) "
+                    "VALUES (:id, :domain, true, 'schema_test', 'not-a-real-derived-hash', "
+                    "'schema-test@example.invalid', 2, :auth_salt, :vault_salt)"
                 ),
-                {"id": base_id, "domain": settings.domain},
+                {
+                    "id": base_id,
+                    "domain": settings.domain,
+                    "auth_salt": bytes(range(16)),
+                    "vault_salt": bytes(reversed(range(16))),
+                },
             )
             try:
                 async with session.begin_nested():
@@ -183,11 +189,17 @@ async def verify() -> None:
             await session.execute(
                 text(
                     "INSERT INTO users "
-                    "(id, origin_domain, is_local, username, password_hash, email) "
-                    "VALUES (:id, :domain, true, 'schema_member', 'not-a-real-hash', "
-                    "'schema-member@example.invalid')"
+                    "(id, origin_domain, is_local, username, password_hash, email, "
+                    "password_kdf_version, password_auth_salt, e2ee_vault_salt) "
+                    "VALUES (:id, :domain, true, 'schema_member', 'not-a-real-derived-hash', "
+                    "'schema-member@example.invalid', 2, :auth_salt, :vault_salt)"
                 ),
-                {"id": member_id, "domain": settings.domain},
+                {
+                    "id": member_id,
+                    "domain": settings.domain,
+                    "auth_salt": bytes(range(16)),
+                    "vault_salt": bytes(reversed(range(16))),
+                },
             )
             await session.execute(
                 text(

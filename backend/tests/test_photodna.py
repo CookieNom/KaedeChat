@@ -8,6 +8,7 @@ import warnings
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -35,6 +36,7 @@ from app.media.photodna import (
     scan_image,
     sdk_hash_generation_lock,
 )
+from app.media.processing import content_digest
 
 
 def settings(**overrides: object) -> Settings:
@@ -152,7 +154,75 @@ def test_documented_cloud_size_ineligibility_is_terminal() -> None:
         "MatchResults": [{"Status": {"Code": 3208}}],
     }
 
-    assert parse_match_response(payload, 1) == [None]
+    with pytest.raises(PhotoDNAInputRejected, match="could not verify"):
+        parse_match_response(payload, 1)
+
+
+def test_documented_non_image_result_is_terminal_rejection() -> None:
+    payload = {
+        "TrackingId": "track",
+        "MatchResults": [{"Status": {"Code": 3206}}],
+    }
+
+    with pytest.raises(PhotoDNAInputRejected, match="could not verify"):
+        parse_match_response(payload, 1)
+
+
+def test_positive_match_wins_over_non_image_result_in_same_batch() -> None:
+    payload = {
+        "TrackingId": "request-track",
+        "MatchResults": [
+            {"Status": {"Code": 3206}},
+            {
+                "Status": {"Code": 3000},
+                "IsMatch": True,
+                "TrackingId": "matched-frame",
+                "MatchDetails": {
+                    "MatchFlags": [
+                        {
+                            "Source": "Test",
+                            "Violations": ["A1"],
+                            "MatchDistance": 1,
+                        }
+                    ]
+                },
+            },
+        ],
+    }
+
+    findings = parse_match_response(payload, 2)
+
+    assert findings[0] is None
+    assert findings[1] is not None
+    assert findings[1].tracking_id == "matched-frame"
+
+
+def test_positive_match_wins_over_size_rejection_in_same_batch() -> None:
+    payload = {
+        "TrackingId": "request-track",
+        "MatchResults": [
+            {"Status": {"Code": 3208}},
+            {
+                "Status": {"Code": 3000},
+                "IsMatch": True,
+                "TrackingId": "matched-frame",
+                "MatchDetails": {
+                    "MatchFlags": [
+                        {
+                            "Source": "Test",
+                            "Violations": ["A1"],
+                            "MatchDistance": 1,
+                        }
+                    ]
+                },
+            },
+        ],
+    }
+
+    findings = parse_match_response(payload, 2)
+
+    assert findings[0] is None
+    assert findings[1] is not None
 
 
 async def test_match_client_pins_endpoint_headers_and_request_shape(
@@ -461,6 +531,39 @@ async def test_scan_image_matches_all_frames_in_bounded_batches(
     assert batch_sizes == [5, 2]
 
 
+async def test_later_batch_match_wins_over_earlier_non_image_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hashes = [edge_hash() for _ in range(7)]
+    finding = PhotoDNAFinding(
+        tracking_id="matched-later-frame",
+        flags=(PhotoDNAMatchFlag("Test", ("A1",), 0, "match"),),
+    )
+    batch_sizes: list[int] = []
+
+    async def generate(_data: bytes, _settings: Settings) -> list[PhotoDNAHash]:
+        return hashes
+
+    async def match(batch: list[PhotoDNAHash], _settings: Settings) -> list[PhotoDNAFinding | None]:
+        batch_sizes.append(len(batch))
+        if len(batch_sizes) == 1:
+            raise PhotoDNAInputRejected("one frame was not verifiable")
+        return [finding, None]
+
+    monkeypatch.setattr(photodna_module, "generate_edge_hashes", generate)
+    monkeypatch.setattr(photodna_module, "match_hashes", match)
+    rendered = io.BytesIO()
+    Image.new("RGB", (160, 160), "teal").save(rendered, format="PNG")
+    configured = settings(
+        photodna_enabled=True,
+        photodna_subscription_key="p" * 32,
+        photodna_sdk_root="/opt/photodna",
+    )
+
+    assert await scan_image(rendered.getvalue(), configured) == finding
+    assert batch_sizes == [5, 2]
+
+
 def test_automated_report_never_retains_image_or_photodna_hash() -> None:
     finding = PhotoDNAFinding(
         tracking_id="tracking",
@@ -521,7 +624,9 @@ async def test_local_match_is_durably_quarantined_before_staging_delete(
 
         async def scalar(self, _statement: object) -> object | None:
             self.scalar_calls += 1
-            return attachment if self.scalar_calls == 1 else None
+            # The lifecycle now acquires the per-media advisory fence before
+            # selecting the Attachment row.
+            return attachment if self.scalar_calls == 2 else None
 
         async def get(self, model: object, _key: object) -> object | None:
             assert model is AbuseReport
@@ -562,6 +667,7 @@ async def test_local_match_is_durably_quarantined_before_staging_delete(
 
     monkeypatch.setattr(media_jobs, "clamav_scan", clean_scan)
     monkeypatch.setattr(media_jobs, "scan_image", match)
+    monkeypatch.setattr(media_jobs, "try_lock_asset_digest", AsyncMock(return_value=True))
 
     result = await media_jobs.process_attachment_record(
         cast(Any, session), settings(), attachment.id, attachment.origin_domain
@@ -576,3 +682,250 @@ async def test_local_match_is_durably_quarantined_before_staging_delete(
     report = cast(AbuseReport, session.added[0])
     assert report.source == "photodna"
     assert report.evidence["bytes_retained"] is False
+
+
+async def test_photodna_input_rejection_is_terminal_without_match_report_or_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = io.BytesIO()
+    Image.new("RGB", (160, 160), "teal").save(image, format="PNG")
+    body = image.getvalue()
+    attachment = Attachment(
+        id=78,
+        origin_domain="alpha.localhost",
+        uploader_id=3,
+        uploader_domain="alpha.localhost",
+        filename="oversized.png",
+        content_type="image/png",
+        size=len(body),
+        object_key="alpha.localhost/78/staging/original",
+        staging_object_key="alpha.localhost/78/staging/original",
+        scan_status="pending",
+        encryption_mode="plaintext",
+        purpose="attachment",
+        upload_expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        finalized_at=datetime.now(UTC),
+        variants={},
+    )
+    events: list[str] = []
+
+    class Session:
+        def __init__(self) -> None:
+            self.scalar_calls = 0
+
+        async def scalar(self, _statement: object) -> object | None:
+            self.scalar_calls += 1
+            return attachment if self.scalar_calls == 2 else None
+
+        async def commit(self) -> None:
+            events.append("commit")
+
+        async def rollback(self) -> None:
+            raise AssertionError("terminal policy rejection must not roll back for retry")
+
+        async def get(self, *_args: object) -> object | None:
+            raise AssertionError("policy rejection must not query or create a PhotoDNA report")
+
+        def add(self, _value: object) -> None:
+            raise AssertionError("policy rejection must not create a PhotoDNA report")
+
+    class Storage:
+        def __init__(self, _settings: object) -> None:
+            pass
+
+        async def get(self, *_args: object, **_kwargs: object) -> bytes:
+            return body
+
+        async def delete(self, _bucket: str, key: str) -> None:
+            assert key == attachment.object_key
+            events.append("delete")
+
+        async def put(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("policy-rejected bytes must never be promoted")
+
+    async def clean_scan(*_args: object) -> str:
+        return "clean"
+
+    async def reject(*_args: object) -> None:
+        raise PhotoDNAInputRejected("image is too large to scan safely")
+
+    monkeypatch.setattr(media_jobs, "S3Storage", Storage)
+    monkeypatch.setattr(media_jobs, "clamav_scan", clean_scan)
+    monkeypatch.setattr(media_jobs, "scan_image", reject)
+    monkeypatch.setattr(media_jobs, "try_lock_asset_digest", AsyncMock(return_value=True))
+
+    result = await media_jobs.process_attachment_record(
+        cast(Any, Session()), settings(), attachment.id, attachment.origin_domain
+    )
+
+    assert result == "rejected"
+    assert attachment.scan_status == "rejected"
+    assert attachment.deleted_at is not None
+    assert events == ["commit", "delete"]
+
+
+async def test_clean_public_asset_transition_propagates_retained_terminal_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = io.BytesIO()
+    Image.new("RGB", (160, 160), "teal").save(image, format="PNG")
+    body = image.getvalue()
+    attachment = Attachment(
+        id=80,
+        origin_domain="alpha.localhost",
+        uploader_id=3,
+        uploader_domain="alpha.localhost",
+        filename="avatar.png",
+        content_type="image/png",
+        size=len(body),
+        object_key="alpha.localhost/80/staging/original",
+        staging_object_key="alpha.localhost/80/staging/original",
+        scan_status="pending",
+        encryption_mode="plaintext",
+        purpose="avatar",
+        upload_expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        finalized_at=datetime.now(UTC),
+        variants={},
+    )
+    scalar_values = iter((None, attachment, 77))
+    commits: list[str] = []
+
+    class Session:
+        async def scalar(self, _statement: object) -> object | None:
+            return next(scalar_values)
+
+        async def commit(self) -> None:
+            commits.append("commit")
+
+    put = AsyncMock()
+
+    class Storage:
+        def __init__(self, _settings: object) -> None:
+            pass
+
+        async def get(self, *_args: object, **_kwargs: object) -> bytes:
+            return body
+
+        async def put(self, *args: object, **kwargs: object) -> None:
+            await put(*args, **kwargs)
+
+    async def discard(_session: object, _settings: object, item: Attachment) -> None:
+        item.deleted_at = datetime.now(UTC)
+
+    digest_try_lock = AsyncMock(return_value=True)
+    before_terminal = AsyncMock()
+    delete_objects = AsyncMock(return_value=True)
+    monkeypatch.setattr(media_jobs, "S3Storage", Storage)
+    monkeypatch.setattr(media_jobs, "clamav_scan", AsyncMock(return_value="clean"))
+    monkeypatch.setattr(media_jobs, "scan_image", AsyncMock(return_value=None))
+    monkeypatch.setattr(media_jobs, "discard_attachment", discard)
+    monkeypatch.setattr(media_jobs, "try_lock_asset_digest", digest_try_lock)
+    monkeypatch.setattr(media_jobs, "delete_terminal_attachment_objects", delete_objects)
+
+    result = await media_jobs.process_attachment_record(
+        cast(Any, Session()),
+        settings(),
+        attachment.id,
+        attachment.origin_domain,
+        before_terminal_commit=before_terminal,
+    )
+
+    assert result == "rejected"
+    assert attachment.scan_status == "rejected"
+    assert attachment.deleted_at is not None
+    assert commits == ["commit"]
+    # One acquisition gates clean publication; the reentrant acquisition is
+    # the ordinary terminal-commit preparation before its signed source work.
+    assert digest_try_lock.await_count == 2
+    before_terminal.assert_awaited_once_with(attachment)
+    put.assert_not_awaited()
+    delete_objects.assert_awaited_once()
+
+
+async def test_legacy_reprocessing_persists_photodna_policy_rejection_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = io.BytesIO()
+    Image.new("RGB", (160, 160), "teal").save(image, format="GIF")
+    body = image.getvalue()
+    variant_keys = {
+        name: {"object_key": f"alpha.localhost/79/{name}.webp"}
+        for name in ("thumbnail_128", "thumbnail_512", "thumbnail_1024")
+    }
+    attachment = Attachment(
+        id=79,
+        origin_domain="alpha.localhost",
+        uploader_id=3,
+        uploader_domain="alpha.localhost",
+        filename="legacy.gif",
+        content_type="image/gif",
+        detected_content_type="image/gif",
+        content_sha256=content_digest(body),
+        size=len(body),
+        object_key="alpha.localhost/79/clean/original",
+        staging_object_key=None,
+        scan_status="clean",
+        encryption_mode="plaintext",
+        purpose="attachment",
+        upload_expires_at=datetime.now(UTC) - timedelta(days=1),
+        finalized_at=datetime.now(UTC) - timedelta(days=1),
+        variants=variant_keys,
+    )
+    deleted: set[tuple[str, str]] = set()
+
+    class Session:
+        def __init__(self) -> None:
+            self.scalar_calls = 0
+            self.commits = 0
+
+        async def scalar(self, _statement: object) -> object | None:
+            self.scalar_calls += 1
+            return attachment if self.scalar_calls == 2 else None
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+        async def rollback(self) -> None:
+            raise AssertionError("deterministic policy rejection must not be retried")
+
+        async def get(self, *_args: object) -> object | None:
+            raise AssertionError("policy rejection must not create a PhotoDNA report")
+
+        def add(self, _value: object) -> None:
+            raise AssertionError("policy rejection must not create a PhotoDNA report")
+
+    session = Session()
+
+    class Storage:
+        def __init__(self, _settings: object) -> None:
+            pass
+
+        async def get(self, *_args: object, **_kwargs: object) -> bytes:
+            return body
+
+        async def delete(self, bucket: str, key: str) -> None:
+            deleted.add((bucket, key))
+
+        async def put(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("policy-rejected legacy bytes must never be promoted")
+
+    async def reject(*_args: object) -> None:
+        raise PhotoDNAInputRejected("animated image has too many frames to scan safely")
+
+    monkeypatch.setattr(media_jobs, "S3Storage", Storage)
+    monkeypatch.setattr(media_jobs, "scan_image", reject)
+    monkeypatch.setattr(media_jobs, "try_lock_asset_digest", AsyncMock(return_value=True))
+
+    result = await media_jobs.process_attachment_record(
+        cast(Any, session), settings(), attachment.id, attachment.origin_domain
+    )
+
+    assert result == "rejected"
+    assert attachment.scan_status == "rejected"
+    assert attachment.deleted_at is not None
+    assert attachment.staging_object_key == attachment.object_key
+    assert session.commits == 1
+    assert deleted == {
+        ("kaede-attachments", attachment.object_key),
+        *(("kaede-derived", item["object_key"]) for item in variant_keys.values()),
+    }

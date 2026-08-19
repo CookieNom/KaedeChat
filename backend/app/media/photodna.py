@@ -144,6 +144,7 @@ def parse_match_response(payload: object, expected_results: int) -> list[PhotoDN
     if not isinstance(raw_results, list) or len(raw_results) != expected_results:
         raise PhotoDNAError("PhotoDNA returned the wrong number of match results")
     findings: list[PhotoDNAFinding | None] = []
+    input_rejected = False
     for raw in raw_results:
         if not isinstance(raw, dict):
             raise PhotoDNAError("PhotoDNA returned an invalid match result")
@@ -153,10 +154,12 @@ def parse_match_response(payload: object, expected_results: int) -> list[PhotoDN
         code = status.get("Code")
         if isinstance(code, bool) or not isinstance(code, int):
             raise PhotoDNAError("PhotoDNA returned an invalid status code")
-        if code == 3208:
-            # Microsoft documents this as the terminal image-size eligibility
-            # result. It must not strand an otherwise safe upload in the
-            # retry queue forever.
+        if code in {3206, 3208}:
+            # Microsoft documents this as a deterministic input result rather
+            # than a transient provider failure. A multi-frame image may still
+            # contain a positive match in another result, however, so retain
+            # the rejection until every result in this batch has been checked.
+            input_rejected = True
             findings.append(None)
             continue
         if code != 3000:
@@ -177,6 +180,8 @@ def parse_match_response(payload: object, expected_results: int) -> list[PhotoDN
             if is_match
             else None
         )
+    if input_rejected and not any(finding is not None for finding in findings):
+        raise PhotoDNAInputRejected("PhotoDNA could not verify the submitted file as an image")
     return findings
 
 
@@ -443,13 +448,24 @@ async def scan_image(data: bytes, settings: Settings) -> PhotoDNAFinding | None:
     if not settings.photodna_enabled:
         return None
     if image_ineligibility_reason(data) is not None:
-        # ClamAV/type validation and the ordinary image pipeline still run.
-        # This is a terminal provider-ineligible result, not an outage retry.
-        return None
+        # PhotoDNA cannot verify this image. Publishing it as clean would turn
+        # an eligibility boundary into a moderation bypass, so use the same
+        # neutral terminal rejection as provider statuses 3206/3208.
+        raise PhotoDNAInputRejected("PhotoDNA cannot verify this image size")
     generated = await generate_edge_hashes(data, settings)
+    input_rejected = False
     for offset in range(0, len(generated), MAX_BATCH_SIZE):
-        findings = await match_hashes(generated[offset : offset + MAX_BATCH_SIZE], settings)
+        try:
+            findings = await match_hashes(generated[offset : offset + MAX_BATCH_SIZE], settings)
+        except PhotoDNAInputRejected:
+            # Do not let one unverified animation frame suppress a known-CSAM
+            # match in a later batch. Positive matches always take precedence;
+            # reject only after every submitted frame has been checked.
+            input_rejected = True
+            continue
         finding = next((item for item in findings if item is not None), None)
         if finding is not None:
             return finding
+    if input_rejected:
+        raise PhotoDNAInputRejected("PhotoDNA could not verify the submitted file as an image")
     return None

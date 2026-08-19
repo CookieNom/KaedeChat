@@ -69,6 +69,10 @@ def install_direct_file_io(monkeypatch: pytest.MonkeyPatch) -> None:
     # facade keeps the test deterministic while exercising the chunked code.
     monkeypatch.setattr(media_api.anyio, "open_file", direct_open_file)
     monkeypatch.setattr(media_api.anyio, "Path", DirectAsyncPath)
+    # These cache-pipeline tests use narrow session doubles and exercise the
+    # spool/scan/reservation/swap phases. Capability revalidation has focused
+    # coverage above, so keep that independent database walk out of the doubles.
+    monkeypatch.setattr(media_api, "require_remote_media_binding_live", AsyncMock())
 
 
 class CacheSession:
@@ -97,6 +101,8 @@ class CacheSession:
 
     async def get(self, model: object, _key: object, **_kwargs: object) -> object | None:
         if model is media_api.RemoteMediaTombstone:
+            return None
+        if model is media_api.MediaTombstoneSource:
             return None
         if model is media_api.RemoteMediaCache:
             self.cache_gets += 1
@@ -138,6 +144,7 @@ class CacheSession:
 
 def media_settings(*, max_bytes: int = 2048, cache_bytes: int = 8192) -> SimpleNamespace:
     return SimpleNamespace(
+        domain="alpha.localhost",
         media_max_attachment_bytes=max_bytes,
         media_remote_cache_bytes=cache_bytes,
         media_remote_cache_bucket="remote-cache",
@@ -168,6 +175,43 @@ def test_group_dm_history_media_query_binds_scope_and_requester() -> None:
         "requester_id": "42",
         "requester_domain": "gamma.localhost",
     }
+
+
+@pytest.mark.asyncio
+async def test_final_remote_capability_recheck_observes_concurrent_tombstone() -> None:
+    tombstone = SimpleNamespace(event_id="kcfe_delete")
+
+    class TombstonedSession:
+        def __init__(self) -> None:
+            self.cache_lookup = AsyncMock()
+            self.scalar = AsyncMock(return_value=None)
+
+        async def get(self, model: object, _key: object, **_kwargs: object) -> object | None:
+            if model is media_api.RemoteMediaTombstone:
+                assert _kwargs.get("populate_existing") is True
+                return tombstone
+            if model is media_api.MediaTombstoneSource:
+                return None
+            if model is media_api.RemoteMediaCache:
+                await self.cache_lookup()
+                return None
+            raise AssertionError("unexpected model lookup")
+
+    session = TombstonedSession()
+
+    with pytest.raises(HTTPException) as raised:
+        await media_api.final_remote_cache_for_capability(
+            cast(Any, session),
+            origin_domain="beta.localhost",
+            attachment_id=8,
+            variant="original",
+            local_domain="alpha.localhost",
+        )
+
+    assert raised.value.status_code == 404
+    assert cast(dict[str, object], raised.value.detail)["code"] == "MEDIA_NOT_FOUND"
+    session.scalar.assert_awaited_once()
+    session.cache_lookup.assert_not_awaited()
 
 
 async def test_known_remote_photodna_match_is_rejected_without_refetch() -> None:
@@ -586,6 +630,8 @@ async def test_refresh_reloads_cache_after_gc_budget_lock_before_reusing_object(
         async def get(self, model: object, _key: object, **_kwargs: object) -> object | None:
             if model is media_api.RemoteMediaTombstone:
                 return None
+            if model is media_api.MediaTombstoneSource:
+                return None
             if model is media_api.RemoteMediaCache:
                 self.cache_gets += 1
                 if self.cache_gets == 1:
@@ -687,6 +733,8 @@ async def test_failed_cache_swap_never_deletes_the_still_referenced_old_object(
 
         async def get(self, model: object, _key: object, **_kwargs: object) -> object | None:
             if model is media_api.RemoteMediaTombstone:
+                return None
+            if model is media_api.MediaTombstoneSource:
                 return None
             if model is media_api.RemoteMediaCache:
                 return existing

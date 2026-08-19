@@ -12,11 +12,13 @@ from app.core.settings import Settings
 from app.db.models import Channel, Guild
 from app.federation import delivery as federation_delivery
 from app.federation import guilds as federation_guilds
+from app.federation import terminal_rooms
 from app.federation.delivery import cleanup_federation_retention
 from app.federation.guilds import (
     purge_orphaned_replicated_guilds,
     replicated_guild_sync_candidates,
 )
+from app.media import tombstones as media_tombstones
 
 LOCAL_DOMAIN = "alpha.localhost"
 REMOTE_DOMAIN = "beta.localhost"
@@ -25,7 +27,11 @@ REMOTE_DOMAIN = "beta.localhost"
 def config() -> Settings:
     return cast(
         Settings,
-        SimpleNamespace(domain=LOCAL_DOMAIN, federation_event_retention_days=30),
+        SimpleNamespace(
+            domain=LOCAL_DOMAIN,
+            federation_event_retention_days=30,
+            federation_clock_skew_seconds=300,
+        ),
     )
 
 
@@ -139,7 +145,7 @@ async def test_orphaned_replica_purge_evicts_channels_before_the_guild(
     candidate_sql = str(candidate_statement.compile(dialect=postgresql.dialect()))
     assert "NOT (EXISTS" in candidate_sql
     assert "FOR UPDATE SKIP LOCKED" in candidate_sql
-    purge_channel.assert_awaited_once_with(session, channel, reconcile=False)
+    purge_channel.assert_awaited_once_with(session, config(), channel, reconcile=False)
     session.delete.assert_awaited_once_with(guild)  # type: ignore[attr-defined]
 
 
@@ -226,6 +232,16 @@ async def test_retention_removes_expired_peer_keys_after_event_window(
         federation_delivery,
         "reconcile_federation_storage_usage",
         reconcile,
+    )
+    monkeypatch.setattr(
+        terminal_rooms,
+        "cleanup_terminal_room_deletions",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        media_tombstones,
+        "cleanup_media_tombstone_sources",
+        AsyncMock(return_value=0),
     )
 
     assert await cleanup_federation_retention(session, config()) == 17

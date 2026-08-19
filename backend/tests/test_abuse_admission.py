@@ -211,6 +211,18 @@ async def test_remote_media_cache_hit_skips_fetch_admission(
         channel_domain="beta.localhost",
         deleted_at=None,
     )
+    channel = SimpleNamespace(
+        id=7,
+        origin_domain="beta.localhost",
+        unavailable=False,
+        guild_id=None,
+        guild_domain=None,
+    )
+    conversation = SimpleNamespace(
+        id=7,
+        origin_domain="beta.localhost",
+        type="direct",
+    )
     cached = SimpleNamespace(
         expires_at=datetime.now(UTC) + timedelta(hours=1),
         scan_status="clean",
@@ -221,13 +233,22 @@ async def test_remote_media_cache_hit_skips_fetch_admission(
     class CacheHitSession:
         def __init__(self) -> None:
             self.commits = 0
+            self.get_calls: list[tuple[object, dict[str, object]]] = []
 
         async def get(self, model: object, _key: object, **_kwargs: object) -> object | None:
+            self.get_calls.append((model, _kwargs))
             if model is media_api.Attachment:
                 return attachment
             if model is media_api.Message:
                 return message
-            if model is media_api.RemoteMediaTombstone:
+            if model is media_api.Channel:
+                return channel
+            if model is media_api.DMConversation:
+                return conversation
+            if model in {
+                media_api.MediaTombstoneSource,
+                media_api.RemoteMediaTombstone,
+            }:
                 return None
             if model is media_api.RemoteMediaCache:
                 return cached
@@ -284,3 +305,9 @@ async def test_remote_media_cache_hit_skips_fetch_admission(
     assert response.headers["cache-control"] == "private, no-store"
     assert session.commits == 1
     assert cached.last_accessed_at is not None
+    assert any(
+        model is media_api.RemoteMediaCache
+        and kwargs.get("populate_existing") is True
+        and kwargs.get("with_for_update") is True
+        for model, kwargs in session.get_calls
+    )

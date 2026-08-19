@@ -324,7 +324,7 @@ async def test_failed_login_requires_turnstile_on_the_next_attempt(
     session = MagicMock()
     session.scalar = AsyncMock(return_value=None)
     monkeypatch.setattr(auth_api, "verify_submitted_password", AsyncMock(return_value=False))
-    payload = LoginRequest(identifier="missing", password="A" * 43)
+    payload = LoginRequest(identifier="missing", password="A" * 43, password_kdf_version=2)
 
     with pytest.raises(HTTPException) as first_error:
         await auth_api.login(
@@ -371,6 +371,7 @@ async def test_invalid_password_rearms_challenge_after_valid_turnstile(
             LoginRequest(
                 identifier="missing",
                 password="A" * 43,
+                password_kdf_version=2,
                 turnstile_token="single-use-token",
             ),
             source_request(),
@@ -385,7 +386,7 @@ async def test_invalid_password_rearms_challenge_after_valid_turnstile(
 
 
 @pytest.mark.asyncio
-async def test_legacy_password_upgrade_is_committed_before_issuing_mfa_ticket(
+async def test_legacy_password_account_fails_closed_without_verifying_submitted_material(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = User(
@@ -394,49 +395,29 @@ async def test_legacy_password_upgrade_is_committed_before_issuing_mfa_ticket(
         is_local=True,
         username="maple",
         password_hash="legacy-password-hash",
-        totp_secret_encrypted=b"encrypted-factor",
     )
     session = MagicMock()
-    session.scalar = AsyncMock(side_effect=[user, user])
+    session.scalar = AsyncMock(return_value=user)
     session.commit = AsyncMock()
-    monkeypatch.setattr(auth_api, "verify_submitted_password", AsyncMock(return_value=True))
-    monkeypatch.setattr(
-        auth_api,
-        "hash_submitted_password",
-        AsyncMock(return_value="upgraded-password-hash"),
-    )
+    verify = AsyncMock(return_value=False)
+    monkeypatch.setattr(auth_api, "verify_submitted_password", verify)
 
-    async def issue_after_commit(_redis: object, upgraded: User) -> str:
-        session.commit.assert_awaited_once()
-        assert upgraded.password_hash == "upgraded-password-hash"
-        assert upgraded.password_kdf_version == 2
-        return "mfa-ticket"
+    with pytest.raises(HTTPException) as caught:
+        await auth_api.login(
+            LoginRequest(
+                identifier="maple",
+                password="A" * 43,
+                password_kdf_version=2,
+            ),
+            client_request("web"),
+            session,  # type: ignore[arg-type]
+            FakeRedis(),  # type: ignore[arg-type]
+            auth_settings(),
+        )
 
-    monkeypatch.setattr(auth_api, "issue_mfa_ticket", issue_after_commit)
-    response = await auth_api.login(
-        LoginRequest(
-            identifier="maple",
-            password="legacy password",
-            password_kdf_version=0,
-            password_upgrade={
-                "password": "A" * 43,
-                "password_kdf": {
-                    "version": 2,
-                    "algorithm": "PBKDF2-SHA256",
-                    "iterations": 600_000,
-                    "auth_salt": "AAAAAAAAAAAAAAAAAAAAAA",
-                },
-            },
-        ),
-        client_request("web"),
-        session,  # type: ignore[arg-type]
-        FakeRedis(),  # type: ignore[arg-type]
-        auth_settings(),
-    )
-
-    assert response.status_code == 200
-    assert b'"mfa_required":true' in response.body
-    assert b'"mfa_ticket":"mfa-ticket"' in response.body
+    assert caught.value.status_code == 401
+    verify.assert_awaited_once_with("invalid-password-protocol", "legacy-password-hash")
+    session.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

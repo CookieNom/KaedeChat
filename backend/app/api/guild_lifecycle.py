@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from redis.asyncio import Redis
-from sqlalchemy import delete, or_, select, tuple_, update
+from sqlalchemy import delete, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
@@ -25,7 +25,6 @@ from app.chat.audit import add_audit_entry
 from app.chat.e2ee_membership import pause_guild_e2ee_for_membership_change
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import (
-    queue_guild_access_revocation,
     queue_guild_mutation,
     wake_queued_guild_federation,
 )
@@ -40,13 +39,21 @@ from app.db.models import (
     Channel,
     Guild,
     GuildMember,
+    MediaTombstoneDestination,
     Message,
     ReadState,
     RemoteMediaCache,
+    RoomFederationRecipient,
     User,
 )
 from app.federation.events import build_envelope, queue_event
 from app.federation.guilds import apply_guild_access_revocation, mark_remote_guild_departed
+from app.federation.terminal_rooms import lock_terminal_room, queue_terminal_room_deletion
+from app.media.tombstones import (
+    historical_attachment_destinations,
+    lock_media_tombstone_ref,
+    queue_terminal_attachment_tombstone,
+)
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["guild-lifecycle"])
 log = structlog.get_logger()
@@ -281,7 +288,13 @@ async def transfer_guild_ownership(
 
 async def _prepare_guild_content_deletion(
     session: AsyncSession, settings: Settings, guild: Guild
-) -> list[tuple[int, str]]:
+) -> tuple[list[tuple[int, str]], set[str], set[str]]:
+    await lock_terminal_room(session, "guild", guild.id, guild.origin_domain)
+    await session.scalar(
+        select(
+            func.pg_advisory_xact_lock(func.hashtextextended("kaede-remote-media-cache-budget", 0))
+        )
+    )
     channel_refs = select(Channel.id, Channel.origin_domain).where(
         Channel.guild_id == guild.id,
         Channel.guild_domain == guild.origin_domain,
@@ -290,26 +303,80 @@ async def _prepare_guild_content_deletion(
         tuple_(Message.channel_id, Message.channel_domain).in_(channel_refs)
     )
     asset_prefix = f"emoji:{guild.origin_domain}:"
-    attachments = list(
-        await session.scalars(
-            select(Attachment).where(
-                or_(
-                    tuple_(Attachment.message_id, Attachment.message_domain).in_(message_refs),
-                    Attachment.asset_binding.in_(
-                        (
-                            f"guild:{guild.origin_domain}:{guild.id}:icon",
-                            f"guild:{guild.origin_domain}:{guild.id}:banner",
-                        )
-                    ),
-                    Attachment.asset_binding.startswith(asset_prefix),
+    routed_refs = select(
+        MediaTombstoneDestination.attachment_id,
+        MediaTombstoneDestination.attachment_domain,
+    ).where(
+        MediaTombstoneDestination.room_kind == "guild",
+        MediaTombstoneDestination.room_id == guild.id,
+        MediaTombstoneDestination.room_domain == guild.origin_domain,
+    )
+    attachment_refs = list(
+        (
+            await session.execute(
+                select(Attachment.id, Attachment.origin_domain).where(
+                    or_(
+                        tuple_(Attachment.message_id, Attachment.message_domain).in_(message_refs),
+                        tuple_(Attachment.id, Attachment.origin_domain).in_(routed_refs),
+                        Attachment.asset_binding.in_(
+                            (
+                                f"guild:{guild.origin_domain}:{guild.id}:icon",
+                                f"guild:{guild.origin_domain}:{guild.id}:banner",
+                            )
+                        ),
+                        Attachment.asset_binding.startswith(asset_prefix),
+                    )
                 )
             )
+        ).tuples()
+    )
+    for attachment_id, attachment_domain in sorted(
+        attachment_refs, key=lambda ref: (ref[1], ref[0])
+    ):
+        await lock_media_tombstone_ref(session, attachment_id, attachment_domain)
+    attachments = list(
+        await session.scalars(
+            select(Attachment)
+            .where(tuple_(Attachment.id, Attachment.origin_domain).in_(attachment_refs))
+            .order_by(Attachment.origin_domain, Attachment.id)
+            .with_for_update()
         )
     )
     local_purge: list[tuple[int, str]] = []
+    delivery_wakes: set[str] = set()
+    room_destinations: set[str] = set()
+    for route in list(
+        await session.scalars(
+            select(MediaTombstoneDestination).where(
+                MediaTombstoneDestination.room_kind == "guild",
+                MediaTombstoneDestination.room_id == guild.id,
+                MediaTombstoneDestination.room_domain == guild.origin_domain,
+            )
+        )
+    ):
+        room_destinations.update({route.attachment_domain, route.destination_domain})
+    room_destinations.update(
+        await session.scalars(
+            select(RoomFederationRecipient.destination_domain).where(
+                RoomFederationRecipient.room_kind == "guild",
+                RoomFederationRecipient.room_id == guild.id,
+                RoomFederationRecipient.room_domain == guild.origin_domain,
+            )
+        )
+    )
     remote_refs: list[tuple[int, str]] = []
     for attachment in attachments:
+        room_destinations.add(attachment.origin_domain)
+        room_destinations.update(await historical_attachment_destinations(session, attachment))
         if attachment.origin_domain == settings.domain:
+            delivery_wakes.update(
+                await queue_terminal_attachment_tombstone(
+                    session,
+                    settings,
+                    attachment,
+                    force_authoritative=True,
+                )
+            )
             attachment.message_id = None
             attachment.message_domain = None
             attachment.asset_binding = None
@@ -348,7 +415,8 @@ async def _prepare_guild_content_deletion(
     await session.execute(
         delete(Message).where(tuple_(Message.channel_id, Message.channel_domain).in_(channel_refs))
     )
-    return local_purge
+    room_destinations.discard(settings.domain)
+    return local_purge, delivery_wakes, room_destinations
 
 
 @router.delete("/{guild_id}", status_code=204)
@@ -380,20 +448,33 @@ async def delete_guild(
             )
         )
     )
-    for member in members:
-        if member.origin_domain != settings.domain:
-            await queue_guild_access_revocation(
-                session,
-                settings,
-                guild,
-                user_id=member.id,
-                user_domain=member.origin_domain,
-                reason="guild_deleted",
-            )
-    attachment_purges = await _prepare_guild_content_deletion(session, settings, guild)
+    (
+        attachment_purges,
+        media_destinations,
+        historical_room_destinations,
+    ) = await _prepare_guild_content_deletion(session, settings, guild)
+    terminal_room_destinations = historical_room_destinations | {
+        member.origin_domain for member in members if member.origin_domain != settings.domain
+    }
+    terminal_room_wakes = await queue_terminal_room_deletion(
+        session,
+        settings,
+        room_kind="guild",
+        room_id=guild.id,
+        room_domain=guild.origin_domain,
+        actor=auth.user,
+        event_type="guild.instance_access.revoked",
+        content={"reason": "guild_deleted"},
+        context={"guild_id": str(guild.id), "guild_domain": guild.origin_domain},
+        destinations=terminal_room_destinations,
+    )
     await session.delete(guild)
     await session.commit()
     await wake_queued_guild_federation(guild)
+    from app.tasks import federation_deliver
+
+    for destination in sorted(media_destinations | terminal_room_wakes):
+        await enqueue_best_effort(federation_deliver, destination)
 
     for member in members:
         if member.origin_domain == settings.domain:

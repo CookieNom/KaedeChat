@@ -22,6 +22,7 @@ from app.core.federation import (
     SigningInput,
     canonical_request_target,
     content_sha256,
+    terminal_room_event_ref,
     verify_envelope,
     verify_request,
 )
@@ -110,6 +111,30 @@ def federation_request_nonce(headers: Mapping[str, str]) -> str | None:
     return raw_nonce
 
 
+def _deletion_control_inbox_request(request: Request) -> bool:
+    """Allow a suspended peer to submit only removal-only inbox controls.
+
+    Request authentication, replay protection, rate limits, event signatures,
+    and semantic validation still run normally. This narrow transport bypass
+    prevents an intermediary block from stranding already-disclosed media.
+    """
+
+    if request.url.path != "/_kaede/v1/inbox":
+        return False
+    payload = getattr(request.state, "federation_json", None)
+    raw_events = payload.get("events") if isinstance(payload, dict) else None
+    if not isinstance(raw_events, list) or not raw_events:
+        return False
+    return all(
+        isinstance(item, dict)
+        and (
+            item.get("type") == "media.delete"
+            or terminal_room_event_ref(cast(dict[str, Any], item)) is not None
+        )
+        for item in raw_events
+    )
+
+
 def require_pinned_request_nonce(instance: Instance | None, nonce: str | None) -> None:
     if instance is not None and "request-nonce/1" in instance.capabilities and nonce is None:
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_NONCE_REQUIRED"})
@@ -154,10 +179,20 @@ def require_guild_federation_access(principal: FederationPrincipal) -> None:
 
 
 async def federation_event_policy_code(
-    session: AsyncSession, origin: str, event_type: str
+    session: AsyncSession,
+    origin: str,
+    event_type: str,
+    *,
+    deletion_control: bool = False,
 ) -> str | None:
     """Recheck policy for one inbox event after prior events may commit."""
 
+    # Authenticated, strictly validated removal-only controls must converge
+    # even while ordinary federation with an instance is suspended. Holding a
+    # multi-hop media/room deletion at an intermediary would strand bytes on
+    # downstream replicas that the origin cannot address directly.
+    if deletion_control:
+        return None
     await lock_block_policy_shared(session)
     current_block = await matching_block(session, origin)
     if current_block is None:
@@ -175,14 +210,13 @@ def event_timestamp_allowed(
     now_ms: int,
     future_skew_seconds: int,
     retention_days: int,
+    allow_past: bool = False,
 ) -> bool:
     """Bound durable-envelope replay without rejecting legitimate queue delay."""
 
     return (
-        now_ms - retention_days * 86_400_000
-        <= event_timestamp_ms
-        <= now_ms + future_skew_seconds * 1000
-    )
+        allow_past or now_ms - retention_days * 86_400_000 <= event_timestamp_ms
+    ) and event_timestamp_ms <= now_ms + future_skew_seconds * 1000
 
 
 async def self_instance(session: AsyncSession, settings: Settings) -> Instance:
@@ -564,9 +598,6 @@ async def authenticate_federation(
     source_ip = federation_client_ip(request, settings)
     await enforce_federation_source_rate_limit(redis, source_ip)
     await lock_block_policy_shared(session)
-    block = await matching_block(session, origin)
-    if block is not None and block.level == "suspend":
-        raise HTTPException(status_code=403, detail={"code": "KAED_FED_INSTANCE_SUSPENDED"})
     instance = await session.get(Instance, origin)
     if settings.federation_mode == "allowlist" and (
         instance is None or instance.federation_mode != "allowlist"
@@ -654,7 +685,11 @@ async def authenticate_federation(
     # cannot race inbox, lookup, join, DM, or guild work after this recheck.
     await lock_block_policy_shared(session)
     current_block = await matching_block(session, origin)
-    if current_block is not None and current_block.level == "suspend":
+    if (
+        current_block is not None
+        and current_block.level == "suspend"
+        and not _deletion_control_inbox_request(request)
+    ):
         raise HTTPException(status_code=403, detail={"code": "KAED_FED_INSTANCE_SUSPENDED"})
     return FederationPrincipal(
         origin=origin,
@@ -691,9 +726,6 @@ async def authenticate_federation_websocket(
     source_ip = federation_websocket_client_ip(websocket, settings)
     await enforce_federation_source_rate_limit(redis, source_ip)
     await lock_block_policy_shared(session)
-    block = await matching_block(session, origin)
-    if block is not None and block.level == "suspend":
-        raise HTTPException(status_code=403, detail={"code": "KAED_FED_INSTANCE_SUSPENDED"})
     instance = await session.get(Instance, origin)
     if settings.federation_mode == "allowlist" and (
         instance is None or instance.federation_mode != "allowlist"
@@ -759,8 +791,9 @@ async def authenticate_federation_websocket(
     await session.commit()
     await lock_block_policy_shared(session)
     current_block = await matching_block(session, origin)
-    if current_block is not None and current_block.level == "suspend":
-        raise HTTPException(status_code=403, detail={"code": "KAED_FED_INSTANCE_SUSPENDED"})
+    # A suspended link is restricted by the per-event policy check to exact
+    # deletion controls; permitting the authenticated transport itself is
+    # necessary for offline durable invalidation to converge.
     return FederationPrincipal(
         origin=origin,
         key_id=key_id,

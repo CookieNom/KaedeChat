@@ -23,6 +23,7 @@ from app.chat.e2ee import (
     validate_e2ee_message_projection,
     validate_message_encryption_policy,
 )
+from app.chat.e2ee_controls import apply_e2ee_control_metadata
 from app.chat.e2ee_membership import (
     GUILD_E2EE_ACCESS_MUTATION_EVENTS,
     pause_guild_e2ee_for_membership_change,
@@ -49,9 +50,11 @@ from app.db.models import (
     RemoteGuildMembershipIntent,
     RemoteMediaCache,
     Role,
+    TerminalRoomDeletion,
     User,
 )
 from app.federation.client import signed_request
+from app.federation.events import message_attachment_refs
 from app.federation.identity_storage import FederationIdentityQuotaExceeded
 from app.federation.network import (
     FederationInstanceQuotaExceeded,
@@ -76,6 +79,8 @@ from app.federation.replication import (
 )
 from app.federation.schemas import RemoteUserProfile
 from app.federation.security import validated_event_envelope
+from app.federation.terminal_rooms import lock_terminal_room
+from app.media.tombstones import lock_media_tombstone_ref
 
 
 class GuildSequenceGap(RuntimeError):
@@ -905,12 +910,24 @@ async def apply_guild_message_event(
             created_at=created_at,
         ):
             raise ValueError("guild message snowflake conflicts with another message")
+        await apply_e2ee_control_metadata(
+            session,
+            existing,
+            event["content"].get("e2ee_control"),
+            expected_authority=guild.origin_domain,
+        )
         await replicate_message_attachments(session, settings, existing, author, raw_attachments)
         await advance_channel_cursor(session, channel, message_id, message_origin)
         return None
     message = await session.get(Message, (message_id, message_origin))
     if message is None:
         raise RuntimeError("replicated guild message disappeared")
+    await apply_e2ee_control_metadata(
+        session,
+        message,
+        event["content"].get("e2ee_control"),
+        expected_authority=guild.origin_domain,
+    )
     await replicate_message_attachments(session, settings, message, author, raw_attachments)
     session.add(
         MessageProjection(
@@ -1323,7 +1340,7 @@ async def apply_guild_mutation_event(
         if channel is not None:
             if (channel.guild_id, channel.guild_domain) != (locked.id, locked.origin_domain):
                 raise ValueError("channel deletion references the wrong guild")
-            await purge_replicated_channel_cache(session, channel)
+            await purge_replicated_channel_cache(session, settings, channel)
         dispatch_type = "CHANNEL_DELETE"
         dispatch = {
             **dispatch,
@@ -2265,6 +2282,26 @@ async def synchronize_guild(
             return await quarantine_and_recover()
         if response.status_code != 200:
             raise RuntimeError("guild gap fill failed")
+        # A remote response is not itself a serialization point. Re-enter the
+        # retained terminal-room fence after every network page and hold it
+        # through the caller's commit so a stale gap response cannot recreate a
+        # guild after its exact authority deletion was applied locally.
+        await lock_terminal_room(session, "guild", guild_id, guild_origin)
+        terminal_receipt = await session.get(
+            TerminalRoomDeletion,
+            ("guild", guild_id, guild_origin, settings.domain),
+        )
+        live_guild = await session.get(
+            Guild,
+            (guild_id, guild_origin),
+            populate_existing=True,
+        )
+        # ``unavailable`` is also used while an otherwise valid replica is
+        # stale/quota-paused. A successful gap fill is precisely what clears
+        # that state; only the retained terminal receipt is a deletion fence.
+        if terminal_receipt is not None or live_guild is None:
+            return []
+        guild = live_guild
         requires_snapshot = False
         try:
             payload = decode_federation_response_json(response)
@@ -2280,11 +2317,20 @@ async def synchronize_guild(
             if latest_seq < advertised_latest or latest_seq < page_start_seq:
                 raise ValueError("guild gap fill latest sequence regressed")
             advertised_latest = latest_seq
+            validated_events: list[dict[str, Any]] = []
+            page_attachment_refs: set[tuple[int, str]] = set()
             for raw_event in events:
                 envelope = await validated_event_envelope(
                     session, settings, guild_origin, raw_event
                 )
                 event = envelope.model_dump(mode="json")
+                validated_events.append(event)
+                page_attachment_refs.update(message_attachment_refs(event))
+            for attachment_id, attachment_domain in sorted(
+                page_attachment_refs, key=lambda ref: (ref[1], ref[0])
+            ):
+                await lock_media_tombstone_ref(session, attachment_id, attachment_domain)
+            for event in validated_events:
                 if event.get("type") in {"guild.message.create", "guild.message.committed"}:
                     message = await apply_guild_message_event(session, settings, guild, event)
                     if message is not None:
@@ -2603,6 +2649,7 @@ def tombstone_omitted_replicated_channel(channel: Channel) -> None:
 
 async def purge_replicated_channel_cache(
     session: AsyncSession,
+    settings: Settings,
     channel: Channel,
     *,
     reconcile: bool = True,
@@ -2610,7 +2657,10 @@ async def purge_replicated_channel_cache(
     """Logically and physically evict inaccessible replicated channel data.
 
     Access is revoked immediately by tombstoning the channel and deleting its
-    message rows. Cached remote object bytes are marked expired in the same
+    replaceable message rows. A non-visible message shadow is retained when it
+    anchors media hosted by this instance: deleting that row would cascade the
+    authoritative attachment before its scan/report/tombstone lifecycle has
+    completed. Cached remote object bytes are marked expired in the same
     transaction; the storage GC performs retryable physical deletion.
     """
 
@@ -2663,6 +2713,13 @@ async def purge_replicated_channel_cache(
         delete(Message).where(
             Message.channel_id == channel.id,
             Message.channel_domain == channel.origin_domain,
+            ~exists(
+                select(Attachment.id).where(
+                    Attachment.message_id == Message.id,
+                    Attachment.message_domain == Message.origin_domain,
+                    Attachment.origin_domain == settings.domain,
+                )
+            ),
         )
     )
     tombstone_omitted_replicated_channel(channel)
@@ -2689,12 +2746,30 @@ async def purge_orphaned_replicated_guilds(
     reconciliation transaction. The caller owns the transaction and commit.
     """
 
+    local_attachment_anchor = exists(
+        select(Attachment.id)
+        .join(
+            Message,
+            (Message.id == Attachment.message_id)
+            & (Message.origin_domain == Attachment.message_domain),
+        )
+        .join(
+            Channel,
+            (Channel.id == Message.channel_id) & (Channel.origin_domain == Message.channel_domain),
+        )
+        .where(
+            Attachment.origin_domain == settings.domain,
+            Channel.guild_id == Guild.id,
+            Channel.guild_domain == Guild.origin_domain,
+        )
+    )
     candidates = list(
         await session.scalars(
             select(Guild)
             .where(
                 Guild.origin_domain != settings.domain,
                 ~local_guild_membership_exists(settings.domain),
+                ~local_attachment_anchor,
             )
             .order_by(Guild.origin_domain, Guild.id)
             .limit(limit)
@@ -2714,6 +2789,32 @@ async def purge_orphaned_replicated_guilds(
         )
         if bool(has_local_member):
             continue
+        has_local_attachment = await session.scalar(
+            select(
+                exists(
+                    select(Attachment.id)
+                    .join(
+                        Message,
+                        (Message.id == Attachment.message_id)
+                        & (Message.origin_domain == Attachment.message_domain),
+                    )
+                    .join(
+                        Channel,
+                        (Channel.id == Message.channel_id)
+                        & (Channel.origin_domain == Message.channel_domain),
+                    )
+                    .where(
+                        Attachment.origin_domain == settings.domain,
+                        Channel.guild_id == guild.id,
+                        Channel.guild_domain == guild.origin_domain,
+                    )
+                )
+            )
+        )
+        if bool(has_local_attachment):
+            guild.unavailable = True
+            guild.sync_status = "stale"
+            continue
         channels = list(
             await session.scalars(
                 select(Channel).where(
@@ -2723,7 +2824,7 @@ async def purge_orphaned_replicated_guilds(
             )
         )
         for channel in channels:
-            await purge_replicated_channel_cache(session, channel, reconcile=False)
+            await purge_replicated_channel_cache(session, settings, channel, reconcile=False)
         await session.delete(guild)
         removed += 1
     return removed
@@ -2777,7 +2878,7 @@ async def apply_guild_access_revocation(
             )
         )
         for channel in channels:
-            await purge_replicated_channel_cache(session, channel, reconcile=False)
+            await purge_replicated_channel_cache(session, settings, channel, reconcile=False)
         await session.execute(
             delete(ChannelOverwrite).where(
                 ChannelOverwrite.channel_id.in_([channel.id for channel in channels]),
@@ -2831,7 +2932,7 @@ async def apply_guild_instance_access_revocation(
         )
     )
     for channel in channels:
-        await purge_replicated_channel_cache(session, channel, reconcile=False)
+        await purge_replicated_channel_cache(session, settings, channel, reconcile=False)
     if channels:
         await session.execute(
             delete(ChannelOverwrite).where(
@@ -3010,6 +3111,18 @@ async def apply_guild_snapshot(
     if origin == settings.domain:
         raise HTTPException(status_code=409, detail={"code": "GUILD_IS_LOCAL"})
     guild_id = int(raw_guild["id"])
+    from app.federation.terminal_rooms import lock_terminal_room
+
+    await lock_terminal_room(session, "guild", guild_id, origin)
+    if (
+        await session.get(
+            TerminalRoomDeletion,
+            ("guild", guild_id, origin, settings.domain),
+            populate_existing=True,
+        )
+        is not None
+    ):
+        raise HTTPException(status_code=410, detail={"code": "GUILD_DELETED"})
     guild = await session.get(Guild, (guild_id, origin))
     if guild is None:
         guild = Guild(
@@ -3115,7 +3228,7 @@ async def apply_guild_snapshot(
     for channel in existing_channels:
         if (channel.id, channel.origin_domain) not in channel_refs:
             omitted_channel_ids.append(channel.id)
-            await purge_replicated_channel_cache(session, channel, reconcile=False)
+            await purge_replicated_channel_cache(session, settings, channel, reconcile=False)
     if omitted_channel_ids:
         await session.execute(
             delete(ChannelOverwrite).where(

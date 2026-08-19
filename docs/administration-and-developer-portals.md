@@ -104,11 +104,11 @@ review record. The reporter cannot read the evidence snapshot, assignee, or
 internal resolution.
 
 An E2EE message can be reported only after the reporter's client decrypts that
-specific message and the reporter explicitly confirms selective disclosure.
-The case stores the disclosed text, a fingerprint of the original ciphertext,
-and `server_verified=false`; moderators see that the evidence is
-reporter-supplied. Room keys, other messages, and surrounding history are never
-included automatically.
+specific message and the reporter confirms the selective disclosure. The case
+stores the disclosed text, a fingerprint of the original ciphertext, and
+`server_verified=false`; moderators see that the evidence is reporter-supplied.
+Room keys, other messages, and surrounding history are never included
+automatically.
 
 The Trust & Safety queue is instance-level; guild moderators do not receive it.
 Authorized staff can triage, review, request more information, record action or

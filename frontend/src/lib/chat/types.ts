@@ -188,7 +188,7 @@ export interface Attachment {
   width: number | null;
   height: number | null;
   blurhash: string | null;
-  scan_status: 'pending' | 'clean' | 'infected' | 'failed' | 'encrypted';
+  scan_status: 'pending' | 'clean' | 'rejected' | 'infected' | 'failed' | 'encrypted';
   encryption_mode?: 'plaintext' | 'e2ee';
   encryption_protocol?: 'kaede-file-v1' | null;
   variants: Record<string, { width?: number; height?: number; content_type?: string }>;

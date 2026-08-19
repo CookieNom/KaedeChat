@@ -557,7 +557,11 @@
           notice = `${kind === 'avatar' ? 'Avatar' : 'Banner'} updated.`;
           return;
         }
-        if (attachment.scan_status === 'infected' || attachment.scan_status === 'failed') {
+        if (
+          attachment.scan_status === 'rejected' ||
+          attachment.scan_status === 'infected' ||
+          attachment.scan_status === 'failed'
+        ) {
           throw new Error('The image did not pass media processing.');
         }
         await cancelableDelay(1000, controller.signal);

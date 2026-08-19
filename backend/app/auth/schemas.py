@@ -34,13 +34,6 @@ class PasswordKdfRegistration(PasswordKdfBase):
     vault_salt: str = Field(pattern=r"^[A-Za-z0-9_-]{22}$")
 
 
-class PasswordUpgrade(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    password: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
-    password_kdf: PasswordKdfBase
-
-
 class PasswordKdfLookupRequest(BaseModel):
     identifier: str = Field(min_length=2, max_length=320)
 
@@ -68,20 +61,13 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     identifier: str = Field(min_length=2, max_length=320)
-    password: str = Field(min_length=1, max_length=256)
-    password_kdf_version: Literal[0, 2] = 2
-    password_upgrade: PasswordUpgrade | None = None
+    password: str = Field(min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]{43}$")
+    password_kdf_version: Literal[2]
     device_name: str | None = Field(default=None, max_length=100)
     turnstile_token: str | None = Field(default=None, min_length=1, max_length=2048)
-
-    @model_validator(mode="after")
-    def validate_password_protocol(self) -> LoginRequest:
-        if self.password_kdf_version == 2 and PASSWORD_SECRET_RE.fullmatch(self.password) is None:
-            raise ValueError("password must be a version 2 derived authentication secret")
-        if self.password_kdf_version == 2 and self.password_upgrade is not None:
-            raise ValueError("password upgrade is only valid for legacy credentials")
-        return self
 
 
 class TokenResponse(BaseModel):
@@ -132,20 +118,26 @@ class MfaCodeRequest(BaseModel):
 
 
 class MfaSetupRequest(BaseModel):
-    password: str = Field(min_length=1, max_length=256)
-    password_kdf_version: Literal[0, 2] = 2
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]{43}$")
+    password_kdf_version: Literal[2]
     current_code: str | None = Field(default=None, min_length=6, max_length=32)
 
 
 class MfaDisableRequest(MfaCodeRequest):
-    password: str = Field(min_length=1, max_length=256)
-    password_kdf_version: Literal[0, 2] = 2
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]{43}$")
+    password_kdf_version: Literal[2]
 
 
 class EmailChangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     email: EmailStr
-    password: str = Field(min_length=1, max_length=256)
-    password_kdf_version: Literal[0, 2] = 2
+    password: str = Field(min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]{43}$")
+    password_kdf_version: Literal[2]
 
 
 class SessionSummary(BaseModel):

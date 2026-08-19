@@ -13,12 +13,18 @@ from sqlalchemy import and_, case, delete, exists, func, or_, select, tuple_, up
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from taskiq import SimpleRetryMiddleware
 from taskiq_redis import RedisStreamBroker
 
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
-from app.chat.payloads import dm_channel_payload, guild_payload, render_message_payload
+from app.chat.payloads import (
+    dm_channel_payload,
+    guild_payload,
+    render_message_payload,
+    user_payload,
+)
 from app.chat.permissions import get_permissions
 from app.core.cache_warmup import warm_identify_cache
 from app.core.logging import configure_logging
@@ -35,12 +41,15 @@ from app.db.models import (
     DMConversation,
     DMParticipant,
     FederatedHistoryMessage,
+    FederationEvent,
     Guild,
     GuildEvent,
     GuildHistoryImport,
     GuildInstanceBan,
     GuildMember,
     GuildNotificationSetting,
+    Instance,
+    MediaTombstoneSource,
     Message,
     MessageProjection,
     OneTimeToken,
@@ -61,11 +70,16 @@ from app.federation.delivery import (
     drain_destination,
     due_destinations,
     expire_stale_outbox,
+    rearm_failed_media_delete_outbox,
 )
 from app.federation.dm_storage import (
     dm_authority_history_available,
     dm_history_metadata,
     sweep_federated_dm_replica_cache,
+)
+from app.federation.guild_media_deletions import (
+    repair_guild_media_delete_request_acks,
+    rotate_guild_media_delete_requests,
 )
 from app.federation.guilds import (
     purge_orphaned_replicated_guilds,
@@ -85,6 +99,10 @@ from app.federation.replica_storage import (
     purge_orphaned_remote_instances,
     purge_orphaned_remote_users,
 )
+from app.federation.terminal_rooms import (
+    repair_terminal_room_delivery_acks,
+    rotate_terminal_room_deletions,
+)
 from app.federation.users import (
     discover_profile_by_ref_capability,
     refresh_remote_user,
@@ -92,6 +110,12 @@ from app.federation.users import (
     unresolved_profile_peer_candidates,
     unresolved_profile_refresh_candidates,
 )
+from app.media.asset_invalidation import (
+    TerminalAssetInvalidation,
+    invalidate_terminal_asset_binding,
+    invalidate_terminal_digest_binding_batch,
+)
+from app.media.digest_revocation import try_lock_asset_digest, valid_content_digest
 from app.media.jobs import (
     enforce_remote_cache_limit,
     process_attachment_record,
@@ -101,8 +125,15 @@ from app.media.jobs import (
     sweep_orphan_uploads,
     sweep_staging_objects,
 )
+from app.media.payloads import attachment_update_payload
 from app.media.processing import IMAGE_PIPELINE_VERSION
-from app.media.service import attachment_payload
+from app.media.tombstones import (
+    TERMINAL_ATTACHMENT_STATUSES,
+    lock_media_tombstone_ref,
+    queue_media_delete_tombstone,
+    queue_terminal_attachment_tombstone,
+    terminal_attachment_refs_for_messages,
+)
 from app.push.client import send_relay_wake
 from app.push.relay import (
     PUSH_WAKE_TTL_SECONDS,
@@ -1126,9 +1157,18 @@ async def federation_history_sync(guild_id: int, guild_domain: str, user_id: int
                     "status": "syncing",
                 },
             )
+            history_tombstone_wakes: set[str] = set()
             try:
-                imported = await request_and_import_history(session, settings, guild, user)
+                imported = await request_and_import_history(
+                    session,
+                    settings,
+                    guild,
+                    user,
+                    tombstone_delivery_wakes=history_tombstone_wakes,
+                )
             except Exception as caught:
+                for destination in sorted(history_tombstone_wakes):
+                    await enqueue_best_effort(federation_deliver, destination)
                 exc = user_facing_history_error(caught)
                 await session.refresh(guild)
                 if (guild.sync_status, guild.sync_error_code) != previous_sync_state:
@@ -1174,6 +1214,8 @@ async def federation_history_sync(guild_id: int, guild_domain: str, user_id: int
                         },
                     )
                 return 0
+            for destination in sorted(history_tombstone_wakes):
+                await enqueue_best_effort(federation_deliver, destination)
             await session.refresh(guild)
             if (guild.sync_status, guild.sync_error_code) != previous_sync_state:
                 # Replica admission may clear a previous quota pause. Publish
@@ -1413,6 +1455,183 @@ async def federation_history_revocation_sweep() -> int:
         await engine.dispose()
 
 
+async def _publish_terminal_asset_invalidation(
+    session: AsyncSession,
+    redis: Redis,
+    invalidation: TerminalAssetInvalidation,
+) -> None:
+    """Publish and wake one asset projection only after its verdict commits."""
+
+    if invalidation.user is not None:
+        user = invalidation.user
+        await session.refresh(user)
+        await publish_dispatch(
+            redis,
+            user_topic(user.origin_domain, user.id),
+            "USER_UPDATE",
+            user_payload(user),
+        )
+        for destination in sorted(invalidation.friend_destinations):
+            await enqueue_best_effort(federation_deliver, destination)
+    if invalidation.guild is not None:
+        guild = invalidation.guild
+        await session.refresh(guild)
+        await wake_queued_guild_federation(guild)
+        if invalidation.dispatch_type is None:
+            raise RuntimeError("guild asset invalidation has no dispatch type")
+        dispatch_payload = (
+            guild_payload(guild)
+            if invalidation.dispatch_payload is None
+            else invalidation.dispatch_payload
+        )
+        await publish_dispatch(
+            redis,
+            guild_topic(guild.origin_domain, guild.id),
+            invalidation.dispatch_type,
+            dispatch_payload,
+        )
+
+
+@broker.task(
+    task_name="media.terminal_asset_duplicate_purge",
+    retry_on_error=True,
+    max_retries=5,
+)
+@observed_job("media.terminal_asset_duplicate_purge")
+async def media_terminal_asset_duplicate_purge(
+    attachment_id: int,
+    origin_domain: str,
+    digest: str,
+) -> str:
+    """Durably stage one clean same-digest public upload for local purge.
+
+    The bounded projection worker cannot safely create a media tombstone while
+    it owns digest -> Attachment. This task starts a fresh transaction in the
+    canonical media-ref -> Attachment -> try-digest order, revalidates the
+    retained terminal evidence, and commits the signed deletion source before
+    either federation delivery or physical object purge is woken.
+    """
+
+    settings = get_settings()
+    if (
+        origin_domain != settings.domain
+        or not 0 <= attachment_id <= (1 << 63) - 1
+        or not valid_content_digest(digest)
+    ):
+        raise ValueError("invalid terminal duplicate attachment")
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    delivery_wakes: set[str] = set()
+    try:
+        async with sessionmaker() as session:
+            await lock_media_tombstone_ref(session, attachment_id, origin_domain)
+            attachment = await session.scalar(
+                select(Attachment)
+                .where(
+                    Attachment.id == attachment_id,
+                    Attachment.origin_domain == origin_domain,
+                )
+                .with_for_update()
+            )
+            if attachment is None:
+                return "missing"
+            if (
+                attachment.content_sha256 != digest
+                or attachment.purpose == "attachment"
+                or attachment.scan_status not in TERMINAL_ATTACHMENT_STATUSES
+                or attachment.deleted_at is not None
+            ):
+                return "ineligible"
+            if attachment.asset_binding is not None:
+                # The bounded projection repair must clear the public metadata
+                # and binding first. Its durable hourly discovery will retry.
+                return "bound"
+            if not await try_lock_asset_digest(session, digest):
+                # This transaction already owns the media ref and Attachment;
+                # waiting behind a digest owner that may need either can
+                # deadlock. Taskiq rolls the transaction back and retries.
+                raise RuntimeError("terminal duplicate digest fence is busy")
+            terminal_evidence = await session.scalar(
+                select(Attachment.id)
+                .where(
+                    Attachment.origin_domain == settings.domain,
+                    Attachment.content_sha256 == digest,
+                    Attachment.scan_status.in_(TERMINAL_ATTACHMENT_STATUSES),
+                )
+                .limit(1)
+            )
+            if terminal_evidence is None:
+                return "no_terminal_evidence"
+            delivery_wakes.update(
+                await queue_terminal_attachment_tombstone(
+                    session,
+                    settings,
+                    attachment,
+                    force_authoritative=True,
+                )
+            )
+            await session.commit()
+        for destination in sorted(delivery_wakes):
+            await enqueue_best_effort(federation_deliver, destination)
+        await enqueue_best_effort(media_local_purge, attachment_id, origin_domain)
+        return "queued"
+    finally:
+        await engine.dispose()
+
+
+@broker.task(
+    task_name="media.terminal_asset_digest_repair",
+    retry_on_error=True,
+    max_retries=5,
+)
+@observed_job("media.terminal_asset_digest_repair")
+async def media_terminal_asset_digest_repair(digest: str) -> int:
+    """Boundedly remove projections that share a retained terminal digest."""
+
+    if not valid_content_digest(digest):
+        raise ValueError("invalid terminal asset digest")
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis: Redis | None = None
+    try:
+        async with sessionmaker() as session:
+            (
+                invalidations,
+                duplicate_purge_refs,
+                processed,
+                more,
+            ) = await invalidate_terminal_digest_binding_batch(
+                session,
+                settings,
+                digest,
+            )
+            await session.commit()
+            for attachment_id, origin_domain in duplicate_purge_refs:
+                await enqueue_best_effort(
+                    media_terminal_asset_duplicate_purge,
+                    attachment_id,
+                    origin_domain,
+                    digest,
+                )
+            if more and processed:
+                await enqueue_best_effort(media_terminal_asset_digest_repair, digest)
+            if invalidations:
+                redis = Redis.from_url(settings.dragonfly_url.get_secret_value())
+                for invalidation in invalidations:
+                    await _publish_terminal_asset_invalidation(
+                        session,
+                        redis,
+                        invalidation,
+                    )
+        # Each transaction processes at most 25 bindings. The retained
+        # terminal row makes an omitted/lost wake discoverable by the hourly
+        # tombstone sweep, so a fully locked page must not busy-loop here.
+        return processed
+    finally:
+        if redis is not None:
+            await redis.aclose()
+        await engine.dispose()
+
+
 @broker.task(task_name="media.process", retry_on_error=True, max_retries=3)
 @observed_job("media.process")
 async def media_process(attachment_id: int, origin_domain: str) -> str:
@@ -1423,10 +1642,61 @@ async def media_process(attachment_id: int, origin_domain: str) -> str:
     redis = Redis.from_url(settings.dragonfly_url.get_secret_value())
     try:
         async with sessionmaker() as session:
+            tombstone_destinations: set[str] = set()
+            asset_invalidations: list[TerminalAssetInvalidation] = []
+
+            async def queue_tombstone_before_terminal_commit(
+                attachment: Attachment,
+            ) -> None:
+                # Projection invalidation and its signed federation outbox
+                # belong to the same transaction as the terminal verdict.
+                # Do this before tombstone signer lookup: asset mutations lock
+                # User/Guild before Attachment, and the invalidation helper's
+                # NOWAIT lock turns an inverse-order collision into a task
+                # retry instead of a deadlock.
+                asset_invalidation = await invalidate_terminal_asset_binding(
+                    session,
+                    settings,
+                    attachment,
+                )
+                if asset_invalidation is not None:
+                    asset_invalidations.append(asset_invalidation)
+                tombstone_destinations.update(
+                    await queue_terminal_attachment_tombstone(
+                        session,
+                        settings,
+                        attachment,
+                    )
+                )
+
             result = await process_attachment_record(
-                session, settings, attachment_id, origin_domain
+                session,
+                settings,
+                attachment_id,
+                origin_domain,
+                before_terminal_commit=queue_tombstone_before_terminal_commit,
             )
             attachment = await session.get(Attachment, (attachment_id, origin_domain))
+            # Terminal verdict state, public projection invalidation, and all
+            # signed outbox rows were committed atomically by
+            # process_attachment_record before these external notifications.
+            for destination in sorted(tombstone_destinations):
+                await enqueue_best_effort(federation_deliver, destination)
+            if (
+                result in TERMINAL_ATTACHMENT_STATUSES
+                and attachment is not None
+                and valid_content_digest(attachment.content_sha256)
+            ):
+                await enqueue_best_effort(
+                    media_terminal_asset_digest_repair,
+                    attachment.content_sha256,
+                )
+            for asset_invalidation in asset_invalidations:
+                await _publish_terminal_asset_invalidation(
+                    session,
+                    redis,
+                    asset_invalidation,
+                )
             message = (
                 await session.get(
                     Message,
@@ -1443,11 +1713,13 @@ async def media_process(attachment_id: int, origin_domain: str) -> str:
                 else None
             )
             if attachment is not None and message is not None and channel is not None:
-                payload = {
-                    "message_id": str(message.id),
-                    "message_domain": message.origin_domain,
-                    "attachment": attachment_payload(attachment),
-                }
+                payload = attachment_update_payload(
+                    attachment,
+                    message_id=message.id,
+                    message_domain=message.origin_domain,
+                    channel_id=channel.id,
+                    channel_domain=channel.origin_domain,
+                )
                 if channel.guild_id is not None and channel.guild_domain is not None:
                     await publish_dispatch(
                         redis,
@@ -1511,6 +1783,277 @@ async def media_processing_sweep() -> int:
             await enqueue_best_effort(media_process, attachment_id, origin_domain)
         return len(refs)
     finally:
+        await engine.dispose()
+
+
+@broker.task(
+    task_name="media.terminal_tombstone_sweep",
+    schedule=[{"cron": "23 * * * *"}],
+    retry_on_error=True,
+    max_retries=3,
+)
+@observed_job("media.terminal_tombstone_sweep")
+async def media_terminal_tombstone_sweep(after_attachment_id: int = 0) -> int:
+    """Repair durable media invalidation state missed by an interrupted worker.
+
+    The normal verdict path queues the signed tombstone in the verdict
+    transaction. This bounded traversal also covers rows created before that
+    invariant, ordinary message deletions awaiting object purge, attachments
+    whose message binding appeared later, and proxy uploads disclosed before a
+    binding ever returned. Persistent source events make repeated hourly passes
+    idempotent while allowing newly discovered replica destinations and fresh
+    signing-key generations to be added.
+    """
+
+    if not 0 <= after_attachment_id <= (1 << 63) - 1:
+        raise ValueError("invalid terminal attachment repair cursor")
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    processed = 0
+    cursor = after_attachment_id
+    redis: Redis | None = None
+    try:
+        async with sessionmaker() as session:
+            current_key_id = await session.scalar(
+                select(Instance.current_key_id).where(Instance.is_self.is_(True))
+            )
+        if not isinstance(current_key_id, str) or not current_key_id:
+            raise RuntimeError("local federation signing identity is unavailable")
+        # First repair authoritative deletions whose transaction predates (or
+        # was interrupted before) creation of the independent source row. A
+        # terminal public asset may already have a source row backfilled by
+        # the f8 migration, so independently select every still-bound terminal
+        # asset and repair its public projection in the same transaction.
+        missing_source = ~exists(
+            select(MediaTombstoneSource.attachment_id).where(
+                MediaTombstoneSource.attachment_id == Attachment.id,
+                MediaTombstoneSource.attachment_domain == Attachment.origin_domain,
+            )
+        )
+        authoritative_deletion = or_(
+            Attachment.deleted_at.is_not(None),
+            exists(
+                select(Message.id).where(
+                    Message.id == Attachment.message_id,
+                    Message.origin_domain == Attachment.message_domain,
+                    Message.deleted_at.is_not(None),
+                )
+            ),
+        )
+        bound_duplicate = aliased(Attachment)
+        duplicate_missing_source = ~exists(
+            select(MediaTombstoneSource.attachment_id).where(
+                MediaTombstoneSource.attachment_id == bound_duplicate.id,
+                MediaTombstoneSource.attachment_domain == bound_duplicate.origin_domain,
+            )
+        )
+        terminal_digest_binding = and_(
+            Attachment.content_sha256.is_not(None),
+            Attachment.scan_status.in_(TERMINAL_ATTACHMENT_STATUSES),
+            exists(
+                select(bound_duplicate.id).where(
+                    bound_duplicate.origin_domain == settings.domain,
+                    bound_duplicate.content_sha256 == Attachment.content_sha256,
+                    or_(
+                        bound_duplicate.asset_binding.is_not(None),
+                        and_(
+                            bound_duplicate.purpose != "attachment",
+                            bound_duplicate.scan_status == "clean",
+                            bound_duplicate.deleted_at.is_(None),
+                            duplicate_missing_source,
+                        ),
+                    ),
+                )
+            ),
+        )
+        repair_candidate = or_(
+            and_(missing_source, authoritative_deletion),
+            and_(
+                missing_source,
+                Attachment.purpose != "attachment",
+                Attachment.scan_status.in_(TERMINAL_ATTACHMENT_STATUSES),
+            ),
+            terminal_digest_binding,
+        )
+        while True:
+            async with sessionmaker() as session:
+                candidates = list(
+                    await session.scalars(
+                        select(Attachment)
+                        .where(
+                            Attachment.origin_domain == settings.domain,
+                            Attachment.id > cursor,
+                            repair_candidate,
+                        )
+                        .order_by(Attachment.id)
+                        .limit(100)
+                    )
+                )
+                if not candidates:
+                    break
+                delivery_wakes: set[str] = set()
+                asset_invalidations: list[TerminalAssetInvalidation] = []
+                digest_repair_wakes: set[str] = set()
+                repaired = 0
+                for candidate in candidates:
+                    # Match the normal media lifecycle ordering: advisory ref
+                    # fence first, then the Attachment row. Re-evaluate the
+                    # candidate under FOR UPDATE so an asset replaced while
+                    # this page was being scanned is never cleared by stale
+                    # rollout-repair state.
+                    await lock_media_tombstone_ref(
+                        session,
+                        candidate.id,
+                        candidate.origin_domain,
+                    )
+                    attachment = await session.scalar(
+                        select(Attachment)
+                        .where(
+                            Attachment.id == candidate.id,
+                            Attachment.origin_domain == candidate.origin_domain,
+                            Attachment.origin_domain == settings.domain,
+                            repair_candidate,
+                        )
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                    if attachment is None:
+                        continue
+                    if (
+                        attachment.scan_status in TERMINAL_ATTACHMENT_STATUSES
+                        and valid_content_digest(attachment.content_sha256)
+                    ):
+                        # This traversal already owns Attachment, so it must
+                        # never wait behind a bind that may be replacing this
+                        # same row under the digest fence.
+                        if not await try_lock_asset_digest(
+                            session,
+                            attachment.content_sha256,
+                        ):
+                            continue
+                        digest_repair_wakes.add(attachment.content_sha256)
+                        if attachment.asset_binding is not None:
+                            invalidation = await invalidate_terminal_asset_binding(
+                                session,
+                                settings,
+                                attachment,
+                            )
+                            if invalidation is not None:
+                                asset_invalidations.append(invalidation)
+                    delivery_wakes.update(
+                        await queue_terminal_attachment_tombstone(
+                            session,
+                            settings,
+                            attachment,
+                            force_authoritative=(
+                                attachment.scan_status in TERMINAL_ATTACHMENT_STATUSES
+                            ),
+                        )
+                    )
+                    repaired += 1
+                await session.commit()
+                for destination in sorted(delivery_wakes):
+                    await enqueue_best_effort(federation_deliver, destination)
+                for digest in sorted(digest_repair_wakes):
+                    await enqueue_best_effort(media_terminal_asset_digest_repair, digest)
+                if asset_invalidations:
+                    if redis is None:
+                        redis = Redis.from_url(settings.dragonfly_url.get_secret_value())
+                    for invalidation in asset_invalidations:
+                        await _publish_terminal_asset_invalidation(
+                            session,
+                            redis,
+                            invalidation,
+                        )
+            processed += repaired
+            cursor = candidates[-1].id
+            if len(candidates) < 100:
+                break
+
+        # Key rollover is driven by the bounded source table, not Attachment.
+        # It therefore survives hard message/channel/guild cascades and queues
+        # exactly one fresh generation to every durable destination.
+        cursor = after_attachment_id
+        while True:
+            async with sessionmaker() as session:
+                sources = list(
+                    await session.scalars(
+                        select(MediaTombstoneSource)
+                        .where(
+                            MediaTombstoneSource.attachment_domain == settings.domain,
+                            MediaTombstoneSource.attachment_id > cursor,
+                            or_(
+                                MediaTombstoneSource.generation == 0,
+                                MediaTombstoneSource.key_id != current_key_id,
+                                ~exists(
+                                    select(FederationEvent.event_id).where(
+                                        FederationEvent.origin_domain
+                                        == MediaTombstoneSource.attachment_domain,
+                                        FederationEvent.event_id == MediaTombstoneSource.event_id,
+                                    )
+                                ),
+                            ),
+                        )
+                        .order_by(MediaTombstoneSource.attachment_id)
+                        .limit(100)
+                    )
+                )
+                if not sources:
+                    break
+                rotation_wakes: set[str] = set()
+                for source in sources:
+                    rotation_wakes.update(
+                        await queue_media_delete_tombstone(
+                            session,
+                            settings,
+                            attachment_id=source.attachment_id,
+                            attachment_domain=source.attachment_domain,
+                            destinations=set(),
+                        )
+                    )
+                await session.commit()
+            for destination in sorted(rotation_wakes):
+                await enqueue_best_effort(federation_deliver, destination)
+            processed += len(sources)
+            cursor = sources[-1].attachment_id
+            if len(sources) < 100:
+                break
+
+        # The source row is also a durable local-object deletion intent. This
+        # repairs a lost best-effort purge wake after ordinary message or hard
+        # guild deletion without rescanning already terminal Attachment rows.
+        cursor = after_attachment_id
+        while True:
+            async with sessionmaker() as session:
+                purge_refs = (
+                    await session.execute(
+                        select(Attachment.id, Attachment.origin_domain)
+                        .join(
+                            MediaTombstoneSource,
+                            (MediaTombstoneSource.attachment_id == Attachment.id)
+                            & (MediaTombstoneSource.attachment_domain == Attachment.origin_domain),
+                        )
+                        .where(
+                            Attachment.origin_domain == settings.domain,
+                            Attachment.id > cursor,
+                            Attachment.deleted_at.is_(None),
+                        )
+                        .order_by(Attachment.id)
+                        .limit(100)
+                    )
+                ).all()
+            if not purge_refs:
+                break
+            for attachment_id, origin_domain in purge_refs:
+                await enqueue_best_effort(media_local_purge, attachment_id, origin_domain)
+            processed += len(purge_refs)
+            cursor = purge_refs[-1][0]
+            if len(purge_refs) < 100:
+                break
+        return processed
+    finally:
+        if redis is not None:
+            await redis.aclose()
         await engine.dispose()
 
 
@@ -1798,7 +2341,25 @@ async def federation_guild_sync(origin: str, guild_id: int) -> int:
                 return 0
             async with asyncio.timeout(30):
                 messages = await synchronize_guild(session, settings, guild)
+            tombstone_destinations: set[str] = set()
+            terminal_attachment_refs = await terminal_attachment_refs_for_messages(
+                session,
+                settings,
+                {(message.id, message.origin_domain) for message in messages},
+            )
+            for attachment_ref in terminal_attachment_refs:
+                terminal_attachment = await session.get(Attachment, attachment_ref)
+                if terminal_attachment is not None:
+                    tombstone_destinations.update(
+                        await queue_terminal_attachment_tombstone(
+                            session,
+                            settings,
+                            terminal_attachment,
+                        )
+                    )
             await session.commit()
+            for destination in sorted(tombstone_destinations):
+                await enqueue_best_effort(federation_deliver, destination)
             channel_ids = list(
                 await session.scalars(
                     select(Channel.id).where(
@@ -1840,8 +2401,25 @@ async def federation_outbox_sweep() -> int:
     redis = Redis.from_url(settings.dragonfly_url.get_secret_value())
     try:
         async with sessionmaker() as session:
+            await repair_terminal_room_delivery_acks(session)
+            await repair_guild_media_delete_request_acks(session)
+            terminal_room_wakes = await rotate_terminal_room_deletions(
+                session,
+                settings,
+            )
+            guild_media_delete_wakes = await rotate_guild_media_delete_requests(
+                session,
+                settings,
+            )
             await expire_stale_outbox(session, settings, redis)
-            destinations = await due_destinations(session)
+            rearmed = await rearm_failed_media_delete_outbox(session)
+            await session.commit()
+            destinations = sorted(
+                terminal_room_wakes
+                | guild_media_delete_wakes
+                | rearmed
+                | set(await due_destinations(session))
+            )
         for destination in destinations:
             await enqueue_best_effort(federation_deliver, destination)
         return len(destinations)

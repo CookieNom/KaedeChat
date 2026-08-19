@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import secrets
 import time
 
 from fastapi import HTTPException, Response
 from redis.asyncio import Redis
 from sqlalchemy import func, select
 
+from app.auth.security import hash_password
 from app.chat.events import publish_dispatch
 from app.core.cache_warmup import WARMUP_READY_KEY, warm_identify_cache, warmup_manifest
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
@@ -22,6 +22,9 @@ from scripts.verification import VerificationFailure, failure_message, require
 SUBSCRIBERS = 20
 EVENTS = 200
 DESTINATIONS = 20
+RELEASE_PASSWORD_SECRET = "A" * 43
+RELEASE_AUTH_SALT = bytes(range(16))
+RELEASE_VAULT_SALT = bytes(reversed(range(16)))
 
 
 async def verify_rate_limit(redis: Redis) -> None:
@@ -133,7 +136,10 @@ async def verify_federation_amplification() -> None:
                     is_local=True,
                     username="releaseprobe",
                     display_name="Release Probe",
-                    password_hash=secrets.token_urlsafe(32),
+                    password_hash=hash_password(RELEASE_PASSWORD_SECRET),
+                    password_kdf_version=2,
+                    password_auth_salt=RELEASE_AUTH_SALT,
+                    e2ee_vault_salt=RELEASE_VAULT_SALT,
                     email="release-probe@example.invalid",
                 )
                 session.add(actor)

@@ -145,11 +145,11 @@ the same batches with correlated results. It reconnects for periodic
 reauthentication and falls back to the signed HTTP inbox on connection or
 protocol failure.
 
-The lower participant domain mints a two-party DM conversation. Group DMs are
-minted by the creator's home, which remains authoritative for their name,
-owner, membership, and monotonic state version. Every invitee's home confirms
-an accepted friendship before the authority adds that person. Signed full-state
-updates let every participating home deliver messages and calls directly while
+The lower participant domain mints a two-party DM conversation. The creator's
+home mints a group DM and stays authoritative for its name, owner, membership,
+and monotonic state version. Every invitee's home confirms an accepted
+friendship before the authority adds that person. Signed full-state updates
+let every participating home deliver messages and calls directly while
 rejecting stale or conflicting membership changes. A direct-message recipient
 authorizes its privacy policy and rechecks it on message ingestion.
 Guild homes mint message snowflakes and assign transactional event sequences
@@ -266,19 +266,19 @@ presented as MLS encryption. Instances advertise storage and relay support as
 separately.
 
 Each device has a proof-of-possession identity and one-use MLS KeyPackages. MLS
-authenticated data canonically binds the composite channel reference, group,
-policy generation, epoch, sender device, operation, edit target, and encrypted
-attachment manifest digest. The MLS credential binds the author account.
-Federation's instance-level Ed25519 signatures authenticate transport between
-servers; clients still verify MLS credentials and authenticated data.
+authenticated data canonically binds: the composite channel reference and
+group, the policy generation and epoch, the sender device, the operation and
+edit target, and the encrypted attachment manifest digest. The MLS credential
+binds the author account. Federation's instance-level Ed25519 signatures
+authenticate transport between servers; clients still verify MLS credentials
+and authenticated data.
 
 Enabling encryption creates a monotonic room-policy generation, and membership
 and device changes pause writes until a fresh group excludes removed devices.
-Clients reject
-plaintext or stale epochs after the policy is enabled, and authorities and
-replicas must reject writes that do not match the current policy. Optional
-encryption must never be negotiated from an unauthenticated boolean or from the
-presence of an opaque envelope alone.
+Clients reject plaintext or stale epochs after the policy is enabled, and
+authorities and replicas must reject writes that do not match the current
+policy. Optional encryption must never be negotiated from an unauthenticated
+boolean or from the presence of an opaque envelope alone.
 
 Encrypted rooms trade away server-side content search, link previews, content
 moderation, and plaintext mention extraction, unless clients provide a
@@ -287,7 +287,7 @@ features is a prerequisite for accepting an opaque envelope, so the present
 architecture does not force future encrypted rooms to reveal content.
 Notification text, mention recipients, link metadata, thumbnails, filenames,
 and attachment dimensions are projections too. Encrypted-room clients omit or
-encrypt them unless the user explicitly discloses selected content. Servers
+encrypt them unless the user chooses to disclose selected content. Servers
 still learn routing metadata: the participating instances, composite room and
 sender references, timestamps, ciphertext sizes, and delivery activity. Padding
 and traffic analysis resistance are outside the current transport capability.
@@ -315,7 +315,7 @@ The production scope covers identity and authentication, single-instance chat,
 federation, media and webhooks, voice/video/screen sharing, Android and iOS
 clients, message search, group DMs, and the associated operational controls.
 Threads and compressed gateway encoding are not currently implemented. MLS 1.0
-messaging, encrypted attachments, recovery, and LiveKit frame encryption are
-implemented behind the operator activation gate documented in `docs/e2ee.md`.
+messaging, encrypted attachments, recovery, and LiveKit frame encryption ship
+behind the operator activation gate documented in `docs/e2ee.md`.
 The mobile clients use the same home-instance API and gateway boundary as the
 web and desktop clients; they never call peer federation endpoints directly.

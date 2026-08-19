@@ -15,7 +15,20 @@ from app.email.outbox import drain_email_outbox
 from app.main import app
 from app.tasks import purge_unverified_accounts_in_session
 from scripts.email_tokens import token_from_email
-from scripts.verification import VerificationFailure, failure_message, require
+from scripts.verification import (
+    PASSWORD_KDF_VERSION,
+    VerificationFailure,
+    authentication_secret,
+    failure_message,
+    password_kdf_metadata,
+    require,
+)
+
+PASSWORD = "correct horse battery staple"  # noqa: S105 - disposable validation credential
+NEW_PASSWORD = "a new correct horse password"  # noqa: S105 - disposable validation credential
+AUTH_SALT = bytes(range(16))
+VAULT_SALT = bytes(reversed(range(16)))
+RESET_AUTH_SALT = bytes(range(16, 32))
 
 
 async def verify() -> None:
@@ -33,6 +46,12 @@ async def verify() -> None:
     transport = httpx.ASGITransport(app=app)
     async with app.router.lifespan_context(app):  # noqa: SIM117
         settings = get_settings()
+        password_secret = authentication_secret(PASSWORD, settings.domain, AUTH_SALT)
+        new_password_secret = authentication_secret(
+            NEW_PASSWORD,
+            settings.domain,
+            RESET_AUTH_SALT,
+        )
 
         async def drain_mail() -> dict[str, int]:
             return await drain_email_outbox(
@@ -47,7 +66,11 @@ async def verify() -> None:
                 json={
                     "username": "maple",
                     "email": "maple@example.com",
-                    "password": "correct horse battery staple",
+                    "password": password_secret,
+                    "password_kdf": password_kdf_metadata(
+                        AUTH_SALT,
+                        vault_salt=VAULT_SALT,
+                    ),
                 },
             )
             require(register.status_code == 201, f"registration failed: {register.text}")
@@ -119,7 +142,8 @@ async def verify() -> None:
                 headers={"X-Kaede-Client": "mobile"},
                 json={
                     "identifier": "maple",
-                    "password": "correct horse battery staple",
+                    "password": password_secret,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
                     "device_name": "integration test",
                 },
             )
@@ -152,7 +176,8 @@ async def verify() -> None:
                 headers={"X-Kaede-Client": "web"},
                 json={
                     "identifier": "maple@schema.localhost",
-                    "password": "correct horse battery staple",
+                    "password": password_secret,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
                     "device_name": "browser integration test",
                 },
             )
@@ -188,7 +213,10 @@ async def verify() -> None:
             setup = await client.post(
                 "/api/v1/auth/mfa/setup",
                 headers=bearer,
-                json={"password": "correct horse battery staple"},
+                json={
+                    "password": password_secret,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
+                },
             )
             require(setup.status_code == 200, f"MFA setup failed: {setup.text}")
             secret = setup.json()["secret"]
@@ -212,7 +240,10 @@ async def verify() -> None:
             replacement_without_factor = await client.post(
                 "/api/v1/auth/mfa/setup",
                 headers=bearer,
-                json={"password": "correct horse battery staple"},
+                json={
+                    "password": password_secret,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
+                },
             )
             require(
                 replacement_without_factor.status_code == 401,
@@ -222,7 +253,8 @@ async def verify() -> None:
                 "/api/v1/auth/mfa/setup",
                 headers=bearer,
                 json={
-                    "password": "correct horse battery staple",
+                    "password": password_secret,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
                     "current_code": pyotp.TOTP(secret).now(),
                 },
             )
@@ -236,7 +268,8 @@ async def verify() -> None:
                 headers={"X-Kaede-Client": "mobile"},
                 json={
                     "identifier": "maple@example.com",
-                    "password": "correct horse battery staple",
+                    "password": password_secret,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
                 },
             )
             require(mfa_login.json()["mfa_required"], "MFA was not required")
@@ -275,7 +308,8 @@ async def verify() -> None:
                 headers=bearer,
                 json={
                     "email": "maple-new@example.com",
-                    "password": "correct horse battery staple",
+                    "password": password_secret,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
                 },
             )
             await drain_mail()
@@ -297,7 +331,11 @@ async def verify() -> None:
             reset_token = token_from_email(emails.pop()[2])
             reset = await client.post(
                 "/api/v1/auth/password/reset",
-                json={"token": reset_token, "password": "a new correct horse password"},
+                json={
+                    "token": reset_token,
+                    "password": new_password_secret,
+                    "password_kdf": password_kdf_metadata(RESET_AUTH_SALT),
+                },
             )
             require(reset.status_code == 200, f"password reset failed: {reset.text}")
             stale_email_change = await client.post(
@@ -310,12 +348,20 @@ async def verify() -> None:
             )
             old_login = await client.post(
                 "/api/v1/auth/login",
-                json={"identifier": "maple", "password": "correct horse battery staple"},
+                json={
+                    "identifier": "maple",
+                    "password": password_secret,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
+                },
             )
             require(old_login.status_code == 401, "old password remained valid")
             new_login = await client.post(
                 "/api/v1/auth/login",
-                json={"identifier": "maple", "password": "a new correct horse password"},
+                json={
+                    "identifier": "maple",
+                    "password": new_password_secret,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
+                },
             )
             require(new_login.status_code == 200, f"new password login failed: {new_login.text}")
             require(new_login.json()["mfa_required"], "MFA state was lost after reset")

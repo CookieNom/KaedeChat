@@ -52,6 +52,7 @@ from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef, Snowflake
 from app.db.models import (
+    Attachment,
     AuditLogEntry,
     Ban,
     Channel,
@@ -65,12 +66,16 @@ from app.db.models import (
     User,
 )
 from app.federation.client import signed_request
+from app.federation.guild_media_deletions import queue_guild_media_delete_request
 from app.federation.network import (
     FederationNetworkError,
     decode_federation_response_json,
     normalize_domain,
 )
 from app.federation.schemas import GuildSelfModerationStatus
+from app.federation.terminal_rooms import lock_terminal_room
+from app.media.service import attachments_for_messages
+from app.media.tombstones import lock_media_tombstone_ref, queue_terminal_attachment_tombstone
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["moderation"])
 
@@ -418,6 +423,10 @@ async def kick_member(
     settings: Settings = Depends(get_settings),
     reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> Response:
+    guild_number, guild_domain = guild_id.resolve(settings.domain)
+    if guild_domain != settings.domain:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    await lock_terminal_room(session, "guild", guild_number, guild_domain)
     guild = await local_guild(session, settings, guild_id, for_update=True)
     user_number, user_domain = user_id.resolve(settings.domain)
     await require_permissions(session, redis, guild, auth.user, required_permissions("member.kick"))
@@ -501,6 +510,10 @@ async def ban_member(
     settings: Settings = Depends(get_settings),
     header_reason: str | None = Header(default=None, alias="X-Audit-Log-Reason"),
 ) -> Response:
+    guild_number, guild_domain = guild_id.resolve(settings.domain)
+    if guild_domain != settings.domain:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    await lock_terminal_room(session, "guild", guild_number, guild_domain)
     guild = await local_guild(session, settings, guild_id, for_update=True)
     user_number, user_domain = user_id.resolve(settings.domain)
     await require_permissions(session, redis, guild, auth.user, required_permissions("member.ban"))
@@ -537,6 +550,8 @@ async def ban_member(
         auth.user,
         revoked_installations,
     )
+    purged_local_attachments: list[Attachment] = []
+    media_delivery_wakes: set[str] = set()
     await session.execute(
         pg_insert(Ban)
         .values(
@@ -576,6 +591,69 @@ async def ban_member(
         channel_ids = select(Channel.id).where(
             Channel.guild_id == guild.id, Channel.guild_domain == guild.origin_domain
         )
+        affected_message_statement = select(Message).where(
+            Message.channel_id.in_(channel_ids),
+            Message.channel_domain == guild.origin_domain,
+            Message.author_id == user_number,
+            Message.author_domain == user_domain,
+            Message.created_at >= cutoff,
+            Message.deleted_at.is_(None),
+        )
+        affected_refs = set(
+            (
+                await session.execute(
+                    select(Message.id, Message.origin_domain).where(
+                        Message.channel_id.in_(channel_ids),
+                        Message.channel_domain == guild.origin_domain,
+                        Message.author_id == user_number,
+                        Message.author_domain == user_domain,
+                        Message.created_at >= cutoff,
+                        Message.deleted_at.is_(None),
+                    )
+                )
+            ).tuples()
+        )
+        affected_attachments = await attachments_for_messages(session, affected_refs)
+        for attachment in sorted(
+            (item for rows in affected_attachments.values() for item in rows),
+            key=lambda item: (item.origin_domain, item.id),
+        ):
+            await lock_media_tombstone_ref(session, attachment.id, attachment.origin_domain)
+        affected_messages = list(
+            await session.scalars(affected_message_statement.with_for_update())
+        )
+        affected_by_ref = {
+            (message.id, message.origin_domain): message for message in affected_messages
+        }
+        for message in affected_messages:
+            message.content = None
+            message.e2ee = None
+            message.deleted_at = deleted_at
+        for message_ref, attachments in affected_attachments.items():
+            affected_message = affected_by_ref.get(message_ref)
+            if affected_message is None:
+                continue
+            for attachment in attachments:
+                if attachment.origin_domain == settings.domain:
+                    purged_local_attachments.append(attachment)
+                    media_delivery_wakes.update(
+                        await queue_terminal_attachment_tombstone(
+                            session,
+                            settings,
+                            attachment,
+                        )
+                    )
+                else:
+                    destination = await queue_guild_media_delete_request(
+                        session,
+                        settings,
+                        guild=guild,
+                        message=affected_message,
+                        attachment=attachment,
+                        deleted_at=deleted_at,
+                    )
+                    if destination is not None:
+                        media_delivery_wakes.add(destination)
         await session.execute(
             update(Message)
             .where(
@@ -632,6 +710,17 @@ async def ban_member(
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    if purged_local_attachments or media_delivery_wakes:
+        from app.tasks import federation_deliver, media_local_purge
+
+        for attachment in purged_local_attachments:
+            await enqueue_best_effort(
+                media_local_purge,
+                attachment.id,
+                attachment.origin_domain,
+            )
+        for destination in sorted(media_delivery_wakes):
+            await enqueue_best_effort(federation_deliver, destination)
     await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     if member is not None:
         await publish_dispatch(

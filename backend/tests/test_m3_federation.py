@@ -4,6 +4,7 @@ import hashlib
 import json
 import socket
 import time
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -25,6 +26,7 @@ from app.api.federation import (
     visible_guild_channels_for_origin,
     well_known,
 )
+from app.chat.e2ee import E2EE_PROTOCOL_MLS_10, E2EE_SUITE_MLS_128
 from app.core.federation import (
     SECURITY_CRITICAL_GUILD_EVENTS,
     SigningInput,
@@ -53,7 +55,10 @@ from app.federation.delivery import (
     group_state_rejection_is_upgrade_retryable,
     lock_outbox_destinations,
     publish_dm_delivery_update,
+    rearm_failed_media_delete_outbox,
     retry_delay,
+    retry_rejected_media_delete,
+    without_event_id_collisions,
 )
 from app.federation.events import build_envelope, ensure_queue_destination
 from app.federation.guilds import (
@@ -195,6 +200,147 @@ async def test_envelope_builder_only_allows_authority_attested_remote_group_acto
     assert envelope["origin"] == "alpha.localhost"
     assert envelope["actor"] == {"id": "42", "domain": "beta.localhost"}
     assert envelope["signatures"] == {"alpha.localhost": {"ed25519:test": "signature"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("operation", "apply"), [("welcome", True), ("commit", False)])
+async def test_envelope_builder_allows_only_exact_remote_direct_dm_controls(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    apply: bool,
+) -> None:
+    configured = settings()
+    remote_actor = User(
+        id=42,
+        origin_domain="beta.localhost",
+        username="remote",
+        is_local=False,
+    )
+    monkeypatch.setattr(
+        "app.federation.events.self_private_key",
+        AsyncMock(return_value=("ed25519:test", object())),
+    )
+    monkeypatch.setattr("app.federation.events.sign_envelope", lambda *_args: "signature")
+    content: dict[str, Any] = {
+        "message": {
+            "origin_domain": "alpha.localhost",
+            "channel_id": "11",
+            "channel_domain": "alpha.localhost",
+            "author_id": "42",
+            "author_domain": "beta.localhost",
+            "message_type": 7,
+            "flags": 4,
+            "e2ee": {
+                "operation": operation,
+                "ciphertext": "opaque",
+                "protocol": E2EE_PROTOCOL_MLS_10,
+                "suite": E2EE_SUITE_MLS_128,
+                "group_id": "g" * 43,
+                "policy_generation": "2",
+                "epoch": "1",
+            },
+        },
+        "author": {"id": "42", "origin_domain": "beta.localhost"},
+        "encryption_policy": {
+            "mode": "e2ee",
+            "state": "active",
+            "generation": "2",
+            "protocol": E2EE_PROTOCOL_MLS_10,
+            "suite": E2EE_SUITE_MLS_128,
+            "group_id": "g" * 43,
+            "epoch": "1",
+        },
+        "e2ee_control": {
+            "operation_id": "keo_" + "o" * 43,
+            "operation_domain": "alpha.localhost",
+            "apply": apply,
+        },
+    }
+
+    envelope = await build_envelope(
+        cast(Any, SimpleNamespace()),
+        configured,
+        "dm.message.create",
+        remote_actor,
+        content,
+        authority_attested_actor=True,
+    )
+    assert envelope["origin"] == "alpha.localhost"
+    assert envelope["actor"] == {"id": "42", "domain": "beta.localhost"}
+
+    forged = deepcopy(content)
+    forged["message"]["message_type"] = 0
+    with pytest.raises(ValueError, match="only sign events for its own users"):
+        await build_envelope(
+            cast(Any, SimpleNamespace()),
+            configured,
+            "dm.message.create",
+            remote_actor,
+            forged,
+            authority_attested_actor=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_envelope_builder_binds_remote_room_policy_actor_and_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = settings()
+    remote_actor = User(
+        id=42,
+        origin_domain="beta.localhost",
+        username="remote",
+        is_local=False,
+    )
+    monkeypatch.setattr(
+        "app.federation.events.self_private_key",
+        AsyncMock(return_value=("ed25519:test", object())),
+    )
+    monkeypatch.setattr("app.federation.events.sign_envelope", lambda *_args: "signature")
+    content: dict[str, Any] = {
+        "channel_id": "11",
+        "channel_domain": "alpha.localhost",
+        "encryption_policy": {
+            "mode": "e2ee",
+            "state": "rekeying",
+            "generation": "2",
+            "protocol": E2EE_PROTOCOL_MLS_10,
+            "suite": E2EE_SUITE_MLS_128,
+            "group_id": "g" * 43,
+            "epoch": "1",
+        },
+    }
+    context: dict[str, Any] = {
+        "reason": "e2ee.device-list.changed",
+        "actor": {"id": "42", "domain": "beta.localhost"},
+        "channel": {"id": "11", "domain": "alpha.localhost"},
+        "scope": {"type": "guild", "id": "13", "domain": "alpha.localhost"},
+    }
+
+    envelope = await build_envelope(
+        cast(Any, SimpleNamespace()),
+        configured,
+        "e2ee.room-policy.changed",
+        remote_actor,
+        content,
+        context=context,
+        authority_attested_actor=True,
+    )
+    assert envelope["actor"] == {"id": "42", "domain": "beta.localhost"}
+    assert envelope["context"] == context
+
+    forged = deepcopy(context)
+    forged["actor"]["id"] = "43"
+    with pytest.raises(ValueError, match="only sign events for its own users"):
+        await build_envelope(
+            cast(Any, SimpleNamespace()),
+            configured,
+            "e2ee.room-policy.changed",
+            remote_actor,
+            content,
+            context=forged,
+            authority_attested_actor=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -427,6 +573,101 @@ async def test_duplicate_destination_drain_returns_without_querying_rows() -> No
     )
     assert session.scalar_calls == 2
     session.scalars.assert_not_awaited()
+
+
+def test_delivery_batch_stops_at_cross_origin_event_id_collision() -> None:
+    rows = [
+        FederationOutbox(
+            id=1,
+            destination="delta.localhost",
+            event_origin_domain="alpha.localhost",
+            event_id="kcfe_same",
+        ),
+        FederationOutbox(
+            id=2,
+            destination="delta.localhost",
+            event_origin_domain="beta.localhost",
+            event_id="kcfe_same",
+        ),
+        FederationOutbox(
+            id=3,
+            destination="delta.localhost",
+            event_origin_domain="gamma.localhost",
+            event_id="kcfe_later",
+        ),
+    ]
+
+    selected = without_event_id_collisions(rows)
+
+    assert [(row.event_origin_domain, row.event_id) for row in selected] == [
+        ("alpha.localhost", "kcfe_same")
+    ]
+    # The next ordered drain starts at B/x and can then carry C/y. No response
+    # keyed only by x can be applied to both origins, and y never overtakes B/x.
+    assert [
+        (row.event_origin_domain, row.event_id) for row in without_event_id_collisions(rows[1:])
+    ] == [
+        ("beta.localhost", "kcfe_same"),
+        ("gamma.localhost", "kcfe_later"),
+    ]
+
+
+def test_rejected_media_delete_remains_retryable_after_upgrade_window() -> None:
+    now = datetime.now(UTC)
+    event = FederationEvent(
+        event_id="kcfe_delete",
+        origin_domain="alpha.localhost",
+        event_type="media.delete",
+        envelope={},
+    )
+    row = FederationOutbox(
+        destination="beta.localhost",
+        event_origin_domain=event.origin_domain,
+        event_id=event.event_id,
+        status="pending",
+        attempts=3,
+        created_at=now - timedelta(days=30),
+        next_retry_at=now,
+    )
+
+    assert retry_rejected_media_delete(
+        event,
+        row,
+        "KAED_FED_EVENT_REJECTED",
+        now,
+    )
+    assert row.status == "circuit"
+    assert row.attempts == 4
+    assert row.next_retry_at == now + timedelta(hours=1)
+    assert row.last_error == "KAED_FED_EVENT_REJECTED"
+
+
+@pytest.mark.asyncio
+async def test_preexisting_failed_media_delete_is_rearmed_for_periodic_delivery() -> None:
+    now = datetime.now(UTC)
+    row = FederationOutbox(
+        id=7,
+        destination="beta.localhost",
+        event_origin_domain="alpha.localhost",
+        event_id="kcfe_delete",
+        status="failed",
+        attempts=9,
+        next_retry_at=now,
+        last_error="KAED_FED_EVENT_REJECTED",
+    )
+    session = SimpleNamespace(
+        scalars=AsyncMock(side_effect=[[row.destination], [row]]),
+        scalar=AsyncMock(return_value=None),
+        commit=AsyncMock(),
+    )
+
+    destinations = await rearm_failed_media_delete_outbox(cast(Any, session))
+
+    assert destinations == {"beta.localhost"}
+    assert row.status == "pending"
+    assert row.attempts == 0
+    assert row.last_error is None
+    session.commit.assert_awaited_once()
 
 
 def test_group_state_generic_rejection_retries_only_during_upgrade_window() -> None:
@@ -1362,10 +1603,12 @@ def test_block_policy_holds_durable_traffic_and_protects_reconciliation() -> Non
         "guild.access.revoked",
         "guild.instance_access.revoked",
         "guild.leave.request",
+        "guild.media.delete.request",
         "guild.resync.required",
         "relationship.remove",
         "e2ee.device-list.changed",
         "e2ee.room-policy.changed",
+        "media.delete",
     } == SECURITY_CRITICAL_GUILD_EVENTS
 
 
@@ -2468,8 +2711,14 @@ async def test_successful_gap_fill_restores_a_policy_staled_replica(
         "app.federation.guilds.admit_replica_storage",
         AsyncMock(),
     )
+    monkeypatch.setattr("app.federation.guilds.lock_terminal_room", AsyncMock())
 
-    assert await synchronize_guild(cast(Any, object()), settings(), cast(Any, guild)) == []
+    async def get_model(model: object, _key: object, **_kwargs: object) -> object | None:
+        return None if getattr(model, "__name__", "") == "TerminalRoomDeletion" else guild
+
+    session = SimpleNamespace(get=get_model, commit=AsyncMock())
+
+    assert await synchronize_guild(cast(Any, session), settings(), cast(Any, guild)) == []
     assert guild.sync_status == "ready"
     assert not guild.unavailable
 
@@ -2487,11 +2736,11 @@ async def test_semantic_poison_gap_page_is_quarantined_and_snapshot_recovered(
         sync_error=None,
         unavailable=False,
     )
-    session = SimpleNamespace(
-        rollback=AsyncMock(),
-        get=AsyncMock(return_value=guild),
-        commit=AsyncMock(),
-    )
+
+    async def get_model(model: object, _key: object, **_kwargs: object) -> object | None:
+        return None if getattr(model, "__name__", "") == "TerminalRoomDeletion" else guild
+
+    session = SimpleNamespace(rollback=AsyncMock(), get=get_model, commit=AsyncMock())
     response = httpx.Response(
         200,
         json={"events": [{}] * 1_001, "latest_seq": "1006"},
@@ -2504,6 +2753,7 @@ async def test_semantic_poison_gap_page_is_quarantined_and_snapshot_recovered(
     )
     monkeypatch.setattr("app.federation.guilds.fetch_guild_snapshot", fetch_snapshot)
     monkeypatch.setattr("app.federation.guilds.apply_guild_snapshot", apply_snapshot)
+    monkeypatch.setattr("app.federation.guilds.lock_terminal_room", AsyncMock())
 
     assert await synchronize_guild(cast(Any, session), settings(), cast(Any, guild)) == []
 

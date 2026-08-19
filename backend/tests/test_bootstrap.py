@@ -251,3 +251,29 @@ async def test_key_retirement_requires_deadline_unless_compromise_is_explicit() 
     assert compromised_key.expired_at == retired_at
     forced_session.commit.assert_awaited_once()
     forced_session.rollback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_key_retirement_refuses_pending_durable_deletion_proofs() -> None:
+    config = settings()
+    retired_at = datetime(2026, 8, 18, 12, 30, tzinfo=UTC)
+    instance, historical_key = stored_identity(config)
+    instance.current_key_id = "ed25519:current"
+    historical_key.retire_after = retired_at - timedelta(seconds=1)
+    session = MagicMock()
+    session.execute = AsyncMock()
+    session.scalar = AsyncMock(side_effect=[instance, historical_key, True])
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    with pytest.raises(IdentityKeyError, match="pending deletion proofs"):
+        await retire_instance_signing_key(
+            session,
+            config,
+            historical_key.key_id,
+            now=retired_at,
+        )
+
+    assert historical_key.expired_at is None
+    session.commit.assert_not_awaited()
+    session.rollback.assert_awaited_once()

@@ -311,7 +311,12 @@ async def test_device_change_queues_durable_updates_for_every_affected_home(
         event_type: str,
         _actor: object,
         content: dict[str, object],
+        *,
+        context: dict[str, object] | None = None,
     ) -> dict[str, object]:
+        if event_type == "e2ee.room-policy.changed":
+            assert context is not None
+            assert context["reason"] == "e2ee.device-list.changed"
         return {
             "event_id": f"event-{event_type}-{content.get('channel_id', 'account')}",
             "type": event_type,

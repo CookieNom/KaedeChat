@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import httpx
 import jwt
 import pytest
 from fastapi import HTTPException, Request
@@ -19,7 +20,6 @@ from app.api.voice import (
     federation_voice_move,
     livekit_webhook,
     move_member_voice,
-    valid_federated_voice_url,
 )
 from app.core.permissions import Permission
 from app.core.settings import Settings
@@ -45,9 +45,11 @@ from app.voice.schemas import (
 from app.voice.service import (
     MEDIA_E2EE_PROTOCOL,
     MEDIA_E2EE_SUITE,
+    federated_voice_grant_matches,
     media_session_id,
     parse_minted_metadata,
     require_e2ee_voice_device,
+    valid_federated_voice_url,
     voice_metadata_matches_policy,
 )
 from app.voice.state import (
@@ -389,6 +391,12 @@ def test_encrypted_voice_context_is_complete_and_policy_bound() -> None:
         "media_epoch": "7",
     }
     assert VoiceTokenResponse.model_validate(complete).media_session_id == first
+    with pytest.raises(ValidationError):
+        VoiceTokenResponse.model_validate(
+            {key: value for key, value in complete.items() if key != "e2ee"}
+        )
+    with pytest.raises(ValidationError, match="channel reference"):
+        VoiceTokenResponse.model_validate({**complete, "channel_id": None})
     with pytest.raises(ValidationError, match="complete room context"):
         VoiceTokenResponse.model_validate({**complete, "media_session_id": None})
     with pytest.raises(ValidationError, match="media epoch"):
@@ -515,6 +523,9 @@ def test_voice_and_call_federation_schemas_forbid_malleable_fields() -> None:
         expires_at="2026-08-11T12:00:00+00:00",
         can_speak=True,
         can_stream=True,
+        e2ee=False,
+        channel_id="35",
+        channel_domain="alpha.localhost",
         move_session_id=move_session_id,
     )
     VoiceMoveFederationRequest(
@@ -549,7 +560,11 @@ def test_voice_and_call_federation_schemas_forbid_malleable_fields() -> None:
         "wss://user@beta.localhost/livekit",
         "wss://beta.localhost:8443/livekit",
         "wss://beta.localhost/livekit?token=peer-controlled",
+        "wss://beta.localhost/livekit?",
         "wss://beta.localhost/livekit#fragment",
+        "wss://beta.localhost/livekit#",
+        "wss://beta.localhost/not-livekit",
+        "wss://beta.localhost//livekit",
         "wss://other.localhost/livekit",
     ],
 )
@@ -559,10 +574,157 @@ def test_federated_voice_urls_reject_downgrades_and_ambiguous_authorities(url: s
 
 @pytest.mark.parametrize(
     "url",
-    ["wss://beta.localhost/livekit", "wss://beta.localhost:443/livekit"],
+    [
+        "wss://beta.localhost",
+        "wss://beta.localhost/",
+        "wss://beta.localhost/livekit",
+        "wss://beta.localhost:443/livekit",
+    ],
 )
 def test_federated_voice_urls_accept_only_secure_authority_endpoints(url: str) -> None:
     assert valid_federated_voice_url(url, "beta.localhost")
+
+
+def test_plaintext_federated_voice_grant_is_bound_to_room_channel_and_authority() -> None:
+    channel = SimpleNamespace(
+        id=34,
+        origin_domain="beta.localhost",
+        encryption_mode="plaintext",
+    )
+    grant = VoiceTokenResponse(
+        token="x" * 32,
+        url="wss://beta.localhost/livekit",
+        room="d.34.56",
+        generation=1,
+        expires_at="2026-08-18T12:00:00+00:00",
+        can_speak=True,
+        can_stream=True,
+        e2ee=False,
+        channel_id="34",
+        channel_domain="beta.localhost",
+    )
+    assert federated_voice_grant_matches(
+        grant,
+        channel,  # type: ignore[arg-type]
+        expected_room="d.34.56",
+        authority_domain="beta.localhost",
+    )
+    for substituted in (
+        grant.model_copy(update={"room": "d.34.57"}),
+        grant.model_copy(update={"url": "wss://media.attacker.example/livekit"}),
+        grant.model_copy(update={"channel_id": "35"}),
+        grant.model_copy(update={"channel_domain": "gamma.localhost"}),
+    ):
+        assert not federated_voice_grant_matches(
+            substituted,
+            channel,  # type: ignore[arg-type]
+            expected_room="d.34.56",
+            authority_domain="beta.localhost",
+        )
+
+
+def test_encrypted_federated_voice_grant_is_bound_to_room_channel_and_authority() -> None:
+    channel = SimpleNamespace(
+        id=34,
+        origin_domain="beta.localhost",
+        encryption_mode="e2ee",
+        encryption_state="active",
+        encryption_group_id="group-a",
+        encryption_policy_generation=5,
+        encryption_epoch=7,
+    )
+    room = "d.34.56"
+    grant = VoiceTokenResponse(
+        token="x" * 32,
+        url="wss://beta.localhost/livekit",
+        room=room,
+        generation=1,
+        expires_at="2026-08-18T12:00:00+00:00",
+        can_speak=True,
+        can_stream=True,
+        e2ee=True,
+        channel_id="34",
+        channel_domain="beta.localhost",
+        encryption_policy_generation="5",
+        encryption_epoch="7",
+        media_protocol=MEDIA_E2EE_PROTOCOL,
+        media_suite=MEDIA_E2EE_SUITE,
+        media_session_id=media_session_id(channel, room),
+        media_epoch="7",
+    )
+    assert federated_voice_grant_matches(
+        grant,
+        channel,  # type: ignore[arg-type]
+        expected_room=room,
+        authority_domain="beta.localhost",
+    )
+    for substituted in (
+        grant.model_copy(update={"room": "d.34.57"}),
+        grant.model_copy(update={"url": "wss://beta.localhost/not-livekit"}),
+        grant.model_copy(update={"channel_id": "35"}),
+        grant.model_copy(update={"channel_domain": "gamma.localhost"}),
+    ):
+        assert not federated_voice_grant_matches(
+            substituted,
+            channel,  # type: ignore[arg-type]
+            expected_room=room,
+            authority_domain="beta.localhost",
+        )
+
+
+@pytest.mark.asyncio
+async def test_remote_dm_voice_grant_rejects_a_substituted_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = SimpleNamespace(id=78, origin_domain="alpha.localhost")
+    record = {
+        "id": "56",
+        "authority_domain": "beta.localhost",
+        "channel_id": "34",
+        "channel_domain": "beta.localhost",
+        "room": "d.34.56",
+    }
+    channel = SimpleNamespace(
+        id=34,
+        origin_domain="beta.localhost",
+        encryption_mode="plaintext",
+    )
+    grant = VoiceTokenResponse(
+        token="x" * 32,
+        url="wss://beta.localhost/livekit",
+        room="d.34.57",
+        generation=1,
+        expires_at="2026-08-18T12:00:00+00:00",
+        can_speak=True,
+        can_stream=True,
+        e2ee=False,
+        channel_id="34",
+        channel_domain="beta.localhost",
+    )
+    session = AsyncMock()
+    session.get.return_value = channel
+    monkeypatch.setattr("app.api.calls.get_call", AsyncMock(return_value=record))
+    monkeypatch.setattr("app.api.calls.require_call_policy", AsyncMock())
+    monkeypatch.setattr("app.api.calls.require_e2ee_voice_device", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.calls.signed_request",
+        AsyncMock(return_value=httpx.Response(200, json=grant.model_dump(mode="json"))),
+    )
+    discard = AsyncMock()
+    monkeypatch.setattr("app.api.calls.discard_all_federated_voice_home_sessions", discard)
+
+    with pytest.raises(HTTPException) as caught:
+        await call_voice_token(
+            EntityRef("56@beta.localhost"),
+            SimpleNamespace(user=actor),  # type: ignore[arg-type]
+            session,
+            AsyncMock(),
+            settings(),
+        )
+
+    assert caught.value.status_code == 502
+    assert caught.value.detail == {"code": "VOICE_HOME_INVALID_RESPONSE"}
+    discard.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -578,6 +740,9 @@ async def test_successful_local_voice_replacement_revokes_federated_move_session
         expires_at="2026-08-11T12:00:00+00:00",
         can_speak=True,
         can_stream=True,
+        e2ee=False,
+        channel_id="34",
+        channel_domain="alpha.localhost",
     )
     monkeypatch.setattr(
         "app.api.voice.load_voice_channel",
@@ -621,6 +786,9 @@ async def test_successful_dm_voice_replacement_revokes_federated_move_session(
         expires_at="2026-08-11T12:00:00+00:00",
         can_speak=True,
         can_stream=True,
+        e2ee=False,
+        channel_id="34",
+        channel_domain="alpha.localhost",
     )
     monkeypatch.setattr("app.api.calls.get_call", AsyncMock(return_value=record))
     monkeypatch.setattr("app.api.calls.mint_dm_call_token", AsyncMock(return_value=grant))
@@ -881,6 +1049,9 @@ async def test_federation_move_endpoint_rejects_unsolicited_before_dispatch(
             expires_at="2026-08-11T12:00:00+00:00",
             can_speak=True,
             can_stream=True,
+            e2ee=False,
+            channel_id="35",
+            channel_domain="beta.localhost",
             move_session_id=move_session_id,
         ),
     )
@@ -891,7 +1062,11 @@ async def test_federation_move_endpoint_rejects_unsolicited_before_dispatch(
         "app.api.voice.load_voice_channel",
         AsyncMock(
             return_value=(
-                SimpleNamespace(id=35),
+                SimpleNamespace(
+                    id=35,
+                    origin_domain="beta.localhost",
+                    encryption_mode="plaintext",
+                ),
                 SimpleNamespace(id=12, origin_domain="beta.localhost"),
             )
         ),
@@ -957,6 +1132,9 @@ async def test_remote_move_rejection_preserves_the_source_voice_session(
         expires_at="2026-08-11T12:00:00+00:00",
         can_speak=True,
         can_stream=True,
+        e2ee=False,
+        channel_id="35",
+        channel_domain="alpha.localhost",
         move_session_id=move_session_id,
     )
     session = AsyncMock()

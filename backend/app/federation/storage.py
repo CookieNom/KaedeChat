@@ -22,14 +22,20 @@ def federation_storage_quota_exceeded(
     usage: FederationStorageUsage,
     *,
     incoming_bytes: int,
+    replacing_event: bool = False,
+    replacing_bytes: int = 0,
 ) -> bool:
-    """Return whether one new retained event would exceed a configured budget."""
+    """Return whether retaining an event (optionally replacing one) exceeds budget."""
 
+    origin_events = max(0, usage.origin_events - int(replacing_event))
+    origin_bytes = max(0, usage.origin_bytes - replacing_bytes)
+    total_events = max(0, usage.total_events - int(replacing_event))
+    total_bytes = max(0, usage.total_bytes - replacing_bytes)
     return (
-        usage.origin_events + 1 > settings.federation_inbox_max_events_per_origin
-        or usage.origin_bytes + incoming_bytes > settings.federation_inbox_max_bytes_per_origin
-        or usage.total_events + 1 > settings.federation_inbox_max_events_total
-        or usage.total_bytes + incoming_bytes > settings.federation_inbox_max_bytes_total
+        origin_events + 1 > settings.federation_inbox_max_events_per_origin
+        or origin_bytes + incoming_bytes > settings.federation_inbox_max_bytes_per_origin
+        or total_events + 1 > settings.federation_inbox_max_events_total
+        or total_bytes + incoming_bytes > settings.federation_inbox_max_bytes_total
     )
 
 

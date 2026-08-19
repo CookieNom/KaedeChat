@@ -21,7 +21,13 @@ from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth.tokens import AccessGrant, AccessTokenStore
-from app.chat.events import guild_topic, publish_ephemeral, publish_presence, user_topic
+from app.chat.events import (
+    guild_topic,
+    interaction_dispatch_audience,
+    publish_ephemeral,
+    publish_presence,
+    user_topic,
+)
 from app.chat.payloads import (
     channel_payload,
     dm_channel_payload,
@@ -1208,6 +1214,23 @@ def parse_guild_topic(topic: str) -> EntityReference | None:
         return None
 
 
+def dispatch_audience_allows(user: User, event: dict[str, Any]) -> bool:
+    """Enforce explicit event targeting before either live or replay delivery."""
+
+    if event.get("t") == "INTERACTION_CREATE":
+        return interaction_dispatch_audience(event) == f"{user.id}@{user.origin_domain}"
+    if "audience_user_refs" not in event:
+        return True
+    audience = event.get("audience_user_refs")
+    if (
+        not isinstance(audience, list)
+        or not audience
+        or not all(isinstance(item, str) and item for item in audience)
+    ):
+        return False
+    return f"{user.id}@{user.origin_domain}" in audience
+
+
 @dataclass(slots=True)
 class VisibilitySummary:
     """Per-connection membership and channel visibility snapshot."""
@@ -1352,7 +1375,7 @@ async def event_visibility(
     """Return visibility after fencing the snapshot against durable SQL state."""
     guild_ref = parse_guild_topic(topic)
     if guild_ref is None:
-        return True, True
+        return dispatch_audience_allows(user, event), True
     guild_id, guild_domain = guild_ref.resolve(settings.domain)
     guild_key = (guild_id, guild_domain)
     fence = await current_acl_fence(sessionmaker, user, guild_id, guild_domain)
@@ -1376,11 +1399,19 @@ async def event_visibility(
     member = guild_key in summary.guilds
     if not member:
         return False, False
+    if not dispatch_audience_allows(user, event):
+        return False, True
     data = event.get("d")
     if not isinstance(data, dict):
         return False, True
     channel_id = data.get("channel_id")
     channel_domain = data.get("channel_domain")
+    # Attachment state can disclose both a private-channel filename and its
+    # moderation outcome.  Unlike older guild-wide events, it is never safe to
+    # infer a channel when a retained or malformed event omits either half of
+    # the canonical reference.
+    if event.get("t") == "ATTACHMENT_UPDATE" and (channel_id is None or channel_domain is None):
+        return False, True
     if channel_id is None and event.get("t") in {"CHANNEL_CREATE", "CHANNEL_UPDATE"}:
         channel_id = data.get("id")
         channel_domain = data.get("origin_domain")

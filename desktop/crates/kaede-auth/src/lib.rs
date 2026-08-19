@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use kaede_api::{ApiClient, ApiClientError};
 use kaede_platform::{
     CredentialVault, PlatformError, StoredSession, TurnstileBroker, TurnstileChallenge,
@@ -17,6 +18,54 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
+
+const PASSWORD_KDF_VERSION: u64 = 2;
+const PASSWORD_KDF_ALGORITHM: &str = "PBKDF2-SHA256";
+const PASSWORD_KDF_ITERATIONS: u64 = 600_000;
+
+fn canonical_base64url_material(value: &str, decoded_length: usize) -> bool {
+    let Ok(mut decoded) = URL_SAFE_NO_PAD.decode(value) else {
+        return false;
+    };
+    let valid = decoded.len() == decoded_length && URL_SAFE_NO_PAD.encode(&decoded) == value;
+    decoded.fill(0);
+    valid
+}
+
+fn validate_authentication_secret(value: &str) -> Result<(), AuthError> {
+    if value.len() == 43 && canonical_base64url_material(value, 32) {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidPasswordProtocol)
+    }
+}
+
+fn validate_password_kdf(value: &Value, require_vault_salt: bool) -> Result<(), AuthError> {
+    let Some(kdf) = value.as_object() else {
+        return Err(AuthError::InvalidPasswordProtocol);
+    };
+    let expected_fields = if require_vault_salt { 5 } else { 4 };
+    let auth_salt_valid = kdf
+        .get("auth_salt")
+        .and_then(Value::as_str)
+        .is_some_and(|salt| salt.len() == 22 && canonical_base64url_material(salt, 16));
+    let vault_salt_valid = !require_vault_salt
+        || kdf
+            .get("vault_salt")
+            .and_then(Value::as_str)
+            .is_some_and(|salt| salt.len() == 22 && canonical_base64url_material(salt, 16));
+    if kdf.len() == expected_fields
+        && kdf.get("version").and_then(Value::as_u64) == Some(PASSWORD_KDF_VERSION)
+        && kdf.get("algorithm").and_then(Value::as_str) == Some(PASSWORD_KDF_ALGORITHM)
+        && kdf.get("iterations").and_then(Value::as_u64) == Some(PASSWORD_KDF_ITERATIONS)
+        && auth_salt_valid
+        && vault_salt_valid
+    {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidPasswordProtocol)
+    }
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct SessionSummary {
@@ -49,8 +98,6 @@ struct LoginRequest<'a> {
     identifier: &'a str,
     password: &'a str,
     password_kdf_version: u8,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    password_upgrade: Option<&'a Value>,
     device_name: &'a str,
     turnstile_token: Option<&'a str>,
 }
@@ -65,8 +112,7 @@ struct RegisterRequest<'a> {
     username: &'a str,
     email: Option<&'a str>,
     password: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    password_kdf: Option<&'a Value>,
+    password_kdf: &'a Value,
     turnstile_token: Option<&'a str>,
 }
 
@@ -161,6 +207,9 @@ where
         self.api.get("auth/config").await.map_err(Into::into)
     }
 
+    // Preserve the published async API while making the unsafe unprepared
+    // password path fail before it can perform network I/O.
+    #[allow(clippy::unused_async)]
     pub async fn register(
         &self,
         username: &str,
@@ -168,22 +217,22 @@ where
         password: &str,
         challenge_token: Option<&SecretString>,
     ) -> Result<RegistrationResult, AuthError> {
-        self.register_with_password_protocol(username, email, password, None, challenge_token)
-            .await
+        let _ = (username, email, password, challenge_token);
+        Err(AuthError::PasswordProtocolRequired)
     }
 
     /// Register using password material and KDF metadata prepared by a trusted
-    /// frontend. The original `register` entry point remains source-compatible
-    /// for native callers that have not adopted versioned metadata yet; server
-    /// policy still decides whether an unversioned registration is accepted.
+    /// frontend.
     pub async fn register_with_password_protocol(
         &self,
         username: &str,
         email: Option<&str>,
         password: &str,
-        password_kdf: Option<&Value>,
+        password_kdf: &Value,
         challenge_token: Option<&SecretString>,
     ) -> Result<RegistrationResult, AuthError> {
+        validate_authentication_secret(password)?;
+        validate_password_kdf(password_kdf, true)?;
         self.api
             .post(
                 "auth/register",
@@ -226,29 +275,68 @@ where
             .map_err(Into::into)
     }
 
+    // Preserve the published async API while this legacy-shaped entry point
+    // deliberately fails closed without awaiting network I/O.
+    #[allow(clippy::unused_async)]
     pub async fn reset_password(
         &self,
         token: &SecretString,
         password: &str,
     ) -> Result<StatusResult, AuthError> {
+        let _ = (token, password);
+        Err(AuthError::PasswordProtocolRequired)
+    }
+
+    /// Replace a password using a client-derived authentication secret and
+    /// exact KDF-v2 authentication metadata. The server chooses a fresh vault
+    /// salt after the reset, so this request intentionally has no vault salt.
+    pub async fn reset_password_with_password_protocol(
+        &self,
+        token: &SecretString,
+        password: &str,
+        password_kdf: &Value,
+    ) -> Result<StatusResult, AuthError> {
+        validate_authentication_secret(password)?;
+        validate_password_kdf(password_kdf, false)?;
         self.api
             .post(
                 "auth/password/reset",
-                &serde_json::json!({"token": token.expose_secret(), "password": password}),
+                &serde_json::json!({
+                    "token": token.expose_secret(),
+                    "password": password,
+                    "password_kdf": password_kdf,
+                }),
             )
             .await
             .map_err(Into::into)
     }
 
+    // Preserve the published async API while this legacy-shaped entry point
+    // deliberately fails closed without awaiting network I/O.
+    #[allow(clippy::unused_async)]
     pub async fn request_email_change(
         &self,
         email: &str,
         password: &str,
     ) -> Result<StatusResult, AuthError> {
+        let _ = (email, password);
+        Err(AuthError::PasswordProtocolRequired)
+    }
+
+    pub async fn request_email_change_with_password_protocol(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<StatusResult, AuthError> {
+        validate_authentication_secret(password)?;
         self.api
             .post(
                 "auth/email/change",
-                &serde_json::json!({"email": email, "password": password}),
+                &serde_json::json!({
+                    "email": email,
+                    "password": password,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
+                }),
             )
             .await
             .map_err(Into::into)
@@ -267,15 +355,32 @@ where
             .map_err(Into::into)
     }
 
+    // Preserve the published async API while this legacy-shaped entry point
+    // deliberately fails closed without awaiting network I/O.
+    #[allow(clippy::unused_async)]
     pub async fn setup_mfa(
         &self,
         password: &str,
         current_code: Option<&str>,
     ) -> Result<MfaSetupResult, AuthError> {
+        let _ = (password, current_code);
+        Err(AuthError::PasswordProtocolRequired)
+    }
+
+    pub async fn setup_mfa_with_password_protocol(
+        &self,
+        password: &str,
+        current_code: Option<&str>,
+    ) -> Result<MfaSetupResult, AuthError> {
+        validate_authentication_secret(password)?;
         self.api
             .post(
                 "auth/mfa/setup",
-                &serde_json::json!({"password": password, "current_code": current_code}),
+                &serde_json::json!({
+                    "password": password,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
+                    "current_code": current_code,
+                }),
             )
             .await
             .map_err(Into::into)
@@ -288,11 +393,28 @@ where
             .map_err(Into::into)
     }
 
+    // Preserve the published async API while this legacy-shaped entry point
+    // deliberately fails closed without awaiting network I/O.
+    #[allow(clippy::unused_async)]
     pub async fn disable_mfa(&self, password: &str, code: &str) -> Result<StatusResult, AuthError> {
+        let _ = (password, code);
+        Err(AuthError::PasswordProtocolRequired)
+    }
+
+    pub async fn disable_mfa_with_password_protocol(
+        &self,
+        password: &str,
+        code: &str,
+    ) -> Result<StatusResult, AuthError> {
+        validate_authentication_secret(password)?;
         self.api
             .post(
                 "auth/mfa/disable",
-                &serde_json::json!({"password": password, "code": code}),
+                &serde_json::json!({
+                    "password": password,
+                    "password_kdf_version": PASSWORD_KDF_VERSION,
+                    "code": code,
+                }),
             )
             .await
             .map_err(Into::into)
@@ -309,6 +431,9 @@ where
             .map_err(Into::into)
     }
 
+    // Preserve the published async API while making the unsafe unprepared
+    // password path fail before it can perform network I/O.
+    #[allow(clippy::unused_async)]
     pub async fn login(
         &self,
         identifier: &str,
@@ -316,29 +441,19 @@ where
         device_name: &str,
         challenge_token: Option<&SecretString>,
     ) -> Result<LoginOutcome, AuthError> {
-        self.login_with_password_protocol(
-            identifier,
-            password,
-            0,
-            None,
-            device_name,
-            challenge_token,
-        )
-        .await
+        let _ = (identifier, password, device_name, challenge_token);
+        Err(AuthError::PasswordProtocolRequired)
     }
 
-    /// Authenticate with password material prepared by the frontend. Keeping
-    /// this separate from `login` preserves the legacy native API while the
-    /// Tauri webview forwards the versioned password protocol explicitly.
+    /// Authenticate with KDF-v2 password material prepared by the frontend.
     pub async fn login_with_password_protocol(
         &self,
         identifier: &str,
         password: &str,
-        password_kdf_version: u8,
-        password_upgrade: Option<&Value>,
         device_name: &str,
         challenge_token: Option<&SecretString>,
     ) -> Result<LoginOutcome, AuthError> {
+        validate_authentication_secret(password)?;
         let response = self
             .api
             .post::<_, TokenResponse>(
@@ -346,8 +461,7 @@ where
                 &LoginRequest {
                     identifier,
                     password,
-                    password_kdf_version,
-                    password_upgrade,
+                    password_kdf_version: 2,
                     device_name,
                     turnstile_token: challenge_token.map(ExposeSecret::expose_secret),
                 },
@@ -360,6 +474,27 @@ where
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Authenticate with material prepared against an exact KDF-v2 context.
+    /// This stronger boundary is intended for native consumers that perform
+    /// the public KDF lookup themselves.
+    pub async fn login_with_prepared_password(
+        &self,
+        identifier: &str,
+        password: &SecretString,
+        password_kdf: &Value,
+        device_name: &str,
+        challenge_token: Option<&SecretString>,
+    ) -> Result<LoginOutcome, AuthError> {
+        validate_password_kdf(password_kdf, true)?;
+        self.login_with_password_protocol(
+            identifier,
+            password.expose_secret(),
+            device_name,
+            challenge_token,
+        )
+        .await
     }
 
     pub async fn solve_turnstile(
@@ -486,56 +621,98 @@ pub enum AuthError {
     NotAuthenticated,
     #[error("the server returned an unexpected authentication state")]
     UnexpectedAuthState,
+    #[error("password KDF v2 material must be prepared by a trusted client")]
+    PasswordProtocolRequired,
+    #[error("prepared password material is not canonical KDF v2 data")]
+    InvalidPasswordProtocol,
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{LoginRequest, RegisterRequest};
+    use super::{
+        AuthError, LoginRequest, RegisterRequest, validate_authentication_secret,
+        validate_password_kdf,
+    };
+
+    fn password_kdf(include_vault_salt: bool) -> serde_json::Value {
+        let mut value = json!({
+            "version": 2,
+            "algorithm": "PBKDF2-SHA256",
+            "iterations": 600_000,
+            "auth_salt": "A".repeat(22),
+        });
+        if include_vault_salt {
+            value["vault_salt"] = json!("A".repeat(22));
+        }
+        value
+    }
 
     #[test]
-    fn password_protocol_fields_are_serialized_without_weakening_legacy_callers() {
-        let upgrade = json!({
-            "password": "new-secret",
-            "password_kdf": {"version": 2}
-        });
+    fn password_protocol_fields_are_always_version_two() {
         let Ok(login) = serde_json::to_value(LoginRequest {
             identifier: "turtle",
             password: "authentication-secret",
             password_kdf_version: 2,
-            password_upgrade: Some(&upgrade),
             device_name: "Kaede Desktop",
             turnstile_token: None,
         }) else {
             panic!("login request should serialize");
         };
         assert_eq!(login["password_kdf_version"], 2);
-        assert_eq!(login["password_upgrade"], upgrade);
-
-        let Ok(legacy_login) = serde_json::to_value(LoginRequest {
-            identifier: "turtle",
-            password: "literal-password",
-            password_kdf_version: 0,
-            password_upgrade: None,
-            device_name: "Kaede Desktop",
-            turnstile_token: None,
-        }) else {
-            panic!("legacy login request should serialize");
-        };
-        assert_eq!(legacy_login["password_kdf_version"], 0);
-        assert!(legacy_login.get("password_upgrade").is_none());
+        assert!(login.get("password_upgrade").is_none());
 
         let kdf = json!({"version": 2, "algorithm": "PBKDF2-SHA256"});
         let Ok(registration) = serde_json::to_value(RegisterRequest {
             username: "turtle",
             email: None,
             password: "authentication-secret",
-            password_kdf: Some(&kdf),
+            password_kdf: &kdf,
             turnstile_token: None,
         }) else {
             panic!("registration request should serialize");
         };
         assert_eq!(registration["password_kdf"], kdf);
+    }
+
+    #[test]
+    fn prepared_password_boundary_accepts_only_canonical_v2_material() {
+        assert!(validate_authentication_secret(&"A".repeat(43)).is_ok());
+        assert!(validate_password_kdf(&password_kdf(true), true).is_ok());
+        assert!(validate_password_kdf(&password_kdf(false), false).is_ok());
+
+        assert!(matches!(
+            validate_authentication_secret("literal-password"),
+            Err(AuthError::InvalidPasswordProtocol)
+        ));
+        for invalid in [
+            json!({
+                "version": 0,
+                "algorithm": "legacy",
+                "iterations": 0,
+                "auth_salt": null,
+                "vault_salt": "A".repeat(22),
+            }),
+            {
+                let mut value = password_kdf(true);
+                value["iterations"] = json!(1);
+                value
+            },
+            {
+                let mut value = password_kdf(true);
+                value["unexpected"] = json!(true);
+                value
+            },
+        ] {
+            assert!(matches!(
+                validate_password_kdf(&invalid, true),
+                Err(AuthError::InvalidPasswordProtocol)
+            ));
+        }
+        assert!(matches!(
+            validate_password_kdf(&password_kdf(false), true),
+            Err(AuthError::InvalidPasswordProtocol)
+        ));
     }
 }

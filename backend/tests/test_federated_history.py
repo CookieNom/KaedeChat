@@ -64,14 +64,19 @@ async def test_history_cleanup_reports_expired_and_abandoned_rows_without_commit
     session = AsyncMock()
     session.execute.side_effect = [
         SimpleNamespace(rowcount=3),
+        SimpleNamespace(rowcount=4),
         SimpleNamespace(rowcount=2),
     ]
 
     assert await cleanup_history_transfers(
         session,
         now=datetime(2026, 8, 5, tzinfo=UTC),
-    ) == {"history_exports": 3, "history_imports": 2}
-    assert session.execute.await_count == 2
+    ) == {
+        "history_exports": 3,
+        "history_imports": 2,
+        "history_staged_messages": 4,
+    }
+    assert session.execute.await_count == 3
     session.commit.assert_not_awaited()
 
 
@@ -614,6 +619,11 @@ async def test_history_delta_rejects_nonadvancing_cursor_and_budget_overflow(
         )
     )
     monkeypatch.setattr(history_module, "signed_request", request)
+    monkeypatch.setattr(
+        history_module,
+        "_lock_live_history_import",
+        AsyncMock(side_effect=lambda _session, _settings, guild, item: (guild, item)),
+    )
     session = AsyncMock()
     session.scalar.return_value = 0
     history_import = SimpleNamespace(
@@ -730,17 +740,25 @@ def test_history_response_error_classifies_transient_and_terminal_responses() ->
 
 
 @pytest.mark.asyncio
-async def test_history_merge_batch_fences_live_events_after_delta() -> None:
+async def test_history_merge_batch_fences_live_events_after_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     session = AsyncMock()
     session.scalar.return_value = SimpleNamespace(last_event_seq=12)
+    monkeypatch.setattr(
+        history_module,
+        "_lock_live_history_import",
+        AsyncMock(side_effect=lambda _session, _settings, guild, item: (guild, item)),
+    )
 
     with pytest.raises(HistoryDeltaAdvanced) as raised:
         await _merge_history_import_batch(
             session,
             history_settings(),  # type: ignore[arg-type]
             SimpleNamespace(id=1, origin_domain="home.example"),  # type: ignore[arg-type]
-            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(export_id=7, export_domain="home.example"),  # type: ignore[arg-type]
             reconciled_seq=11,
+            tombstone_delivery_wakes=set(),
         )
 
     assert raised.value.required_seq == 12

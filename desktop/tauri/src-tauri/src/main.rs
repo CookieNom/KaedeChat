@@ -27,7 +27,8 @@ use kaede_platform::{
 use kaede_protocol::{Domain, EntityRef};
 use kaede_turnstile::EmbeddedTurnstile;
 use kaede_voice::{
-    VoiceCommand, VoiceError, VoiceHandle, VoiceStatus, camera_devices, screen_sources,
+    ExpectedVoicePolicy, VoiceCommand, VoiceError, VoiceHandle, VoiceStatus, camera_devices,
+    screen_sources,
 };
 use parking_lot::Mutex as SyncMutex;
 use reqwest::Method;
@@ -83,12 +84,60 @@ struct NativeState {
     voice: Mutex<Option<VoiceHandle>>,
     voice_target: RwLock<Option<VoiceTarget>>,
     voice_video: Mutex<Option<mpsc::Receiver<kaede_voice::RemoteVideoFrame>>>,
-    voice_generation: AtomicU64,
+    voice_install: VoiceInstallFence,
     voice_ui: RwLock<VoiceUiState>,
     push_to_talk_sender: Arc<SyncMutex<Option<mpsc::Sender<VoiceCommand>>>>,
     hotkey: SyncMutex<HotkeyRegistration>,
     preferences: RwLock<DesktopPreferences>,
     paths: PlatformPaths,
+}
+
+/// Serializes the small voice publication boundary without holding a lock
+/// across token fetches, media setup, or `LiveKit` connection work. A newer
+/// join/leave can invalidate an in-flight operation, while a completed handle
+/// can only be published after checking that generation under the same lock.
+struct VoiceInstallFence {
+    generation: AtomicU64,
+    install: Mutex<()>,
+}
+
+impl VoiceInstallFence {
+    fn new() -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            install: Mutex::new(()),
+        }
+    }
+
+    async fn begin(&self) -> u64 {
+        let _guard = self.install.lock().await;
+        self.generation.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    async fn lock_if_current(&self, expected: u64) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        let guard = self.install.lock().await;
+        if self.generation.load(Ordering::Acquire) == expected {
+            Some(guard)
+        } else {
+            None
+        }
+    }
+
+    async fn invalidate(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        let guard = self.install.lock().await;
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        guard
+    }
+
+    async fn reserve_restart(
+        &self,
+        target: &RwLock<Option<VoiceTarget>>,
+    ) -> Option<(u64, VoiceTarget)> {
+        let _guard = self.install.lock().await;
+        let target = target.read().await.clone()?;
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        Some((generation, target))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -101,6 +150,7 @@ struct VoiceUiState {
 struct VoiceTarget {
     reference: String,
     is_call: bool,
+    expected_policy: ExpectedVoicePolicy,
     e2ee_key: Option<SecretString>,
     sender_device_id: Option<String>,
 }
@@ -197,6 +247,14 @@ impl From<AuthError> for NativeError {
                 "INVALID_AUTHENTICATION_RESPONSE",
                 "Your instance returned an unexpected sign-in response. Update Kaede and try again; if it continues, contact your instance administrator.",
                 "the server returned an unexpected authentication state",
+            ),
+            AuthError::PasswordProtocolRequired => Self::local(
+                "INVALID_PASSWORD_PROTOCOL",
+                "This desktop flow cannot safely prepare password protection. Update Kaede and try again.",
+            ),
+            AuthError::InvalidPasswordProtocol => Self::local(
+                "INVALID_PASSWORD_PROTOCOL",
+                "This desktop flow prepared invalid password protection data. Update Kaede and try again.",
             ),
             AuthError::NotAuthenticated => Self::local(
                 "NOT_AUTHENTICATED",
@@ -861,18 +919,108 @@ async fn forget_account(state: &NativeState, account_key: &str) -> Result<(), Na
 
 fn submitted_password_kdf_version(body: &Value) -> Result<u8, NativeError> {
     let Some(value) = body.get("password_kdf_version") else {
-        // Web bundles from before the versioned password protocol submit the
-        // literal password. Preserve that native-client behavior explicitly.
-        return Ok(0);
+        return Err(NativeError::local(
+            "INVALID_PASSWORD_PROTOCOL",
+            "This Kaede client did not submit password protection metadata. Update the app and try again.",
+        ));
     };
     match value.as_u64() {
-        Some(0) => Ok(0),
         Some(2) => Ok(2),
         _ => Err(NativeError::local(
             "INVALID_PASSWORD_PROTOCOL",
             "This Kaede client submitted an unsupported password protection version. Update the app and try again.",
         )),
     }
+}
+
+fn canonical_base64url_material(value: &str, decoded_length: usize) -> bool {
+    let Ok(mut decoded) = URL_SAFE_NO_PAD.decode(value) else {
+        return false;
+    };
+    let valid = decoded.len() == decoded_length && URL_SAFE_NO_PAD.encode(&decoded) == value;
+    decoded.fill(0);
+    valid
+}
+
+fn submitted_derived_password(body: &Value) -> Result<&str, NativeError> {
+    let password = body
+        .get("password")
+        .and_then(Value::as_str)
+        .filter(|value| value.len() == 43 && canonical_base64url_material(value, 32));
+    password.ok_or_else(|| {
+        NativeError::local(
+            "INVALID_PASSWORD_PROTOCOL",
+            "This Kaede client did not prepare password protection correctly. Update the app and try again.",
+        )
+    })
+}
+
+fn validate_password_kdf(body: &Value, require_vault_salt: bool) -> Result<(), NativeError> {
+    let Some(kdf) = body.get("password_kdf").and_then(Value::as_object) else {
+        return Err(NativeError::local(
+            "INVALID_PASSWORD_PROTOCOL",
+            "This Kaede client did not submit password protection metadata. Update the app and try again.",
+        ));
+    };
+    let expected_fields = if require_vault_salt { 5 } else { 4 };
+    let auth_salt_valid = kdf
+        .get("auth_salt")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.len() == 22 && canonical_base64url_material(value, 16));
+    let vault_salt_valid = !require_vault_salt
+        || kdf
+            .get("vault_salt")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.len() == 22 && canonical_base64url_material(value, 16));
+    if kdf.len() != expected_fields
+        || kdf.get("version").and_then(Value::as_u64) != Some(2)
+        || kdf.get("algorithm").and_then(Value::as_str) != Some("PBKDF2-SHA256")
+        || kdf.get("iterations").and_then(Value::as_u64) != Some(600_000)
+        || !auth_salt_valid
+        || !vault_salt_valid
+    {
+        return Err(NativeError::local(
+            "INVALID_PASSWORD_PROTOCOL",
+            "This Kaede client submitted invalid password protection metadata. Update the app and try again.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_native_password_request(
+    method: &str,
+    path: &str,
+    body: &Value,
+) -> Result<(), NativeError> {
+    let password_bearing = body.get("password").is_some();
+    match (method, path) {
+        ("POST", "auth/login" | "auth/email/change" | "auth/mfa/setup" | "auth/mfa/disable") => {
+            submitted_derived_password(body)?;
+            submitted_password_kdf_version(body)?;
+            if path == "auth/login" && body.get("password_upgrade").is_some() {
+                return Err(NativeError::local(
+                    "INVALID_PASSWORD_PROTOCOL",
+                    "Password upgrades are not supported during sign-in. Reset the account password before trying again.",
+                ));
+            }
+        }
+        ("POST", "auth/register") => {
+            submitted_derived_password(body)?;
+            validate_password_kdf(body, true)?;
+        }
+        ("POST", "auth/password/reset") => {
+            submitted_derived_password(body)?;
+            validate_password_kdf(body, false)?;
+        }
+        _ if password_bearing => {
+            return Err(NativeError::local(
+                "INVALID_PASSWORD_PROTOCOL",
+                "This Kaede client attempted to send password material through an unsupported route. Update the app and try again.",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 async fn login_request(body: &Value, state: &NativeState) -> Result<Value, NativeError> {
@@ -900,31 +1048,21 @@ async fn login_request(body: &Value, state: &NativeState) -> Result<Value, Nativ
         .and_then(Value::as_str)
         .map(|value| SecretString::from(value.to_owned()));
     let password_kdf_version = submitted_password_kdf_version(body)?;
-    let password_upgrade = body
-        .get("password_upgrade")
-        .filter(|value| !value.is_null());
+    if body.get("password_upgrade").is_some() {
+        return Err(NativeError::local(
+            "INVALID_PASSWORD_PROTOCOL",
+            "Password upgrades are not supported during sign-in. Reset the account password before trying again.",
+        ));
+    }
+    debug_assert_eq!(password_kdf_version, 2);
     let mut outcome = session
-        .login_with_password_protocol(
-            identifier,
-            password,
-            password_kdf_version,
-            password_upgrade,
-            "Kaede Desktop",
-            supplied.as_ref(),
-        )
+        .login_with_password_protocol(identifier, password, "Kaede Desktop", supplied.as_ref())
         .await
         .map_err(NativeError::from)?;
     if matches!(outcome, LoginOutcome::ChallengeRequired) {
         let token = challenge_token(&session, "kaede-login-v1").await?;
         outcome = session
-            .login_with_password_protocol(
-                identifier,
-                password,
-                password_kdf_version,
-                password_upgrade,
-                "Kaede Desktop",
-                token.as_ref(),
-            )
+            .login_with_password_protocol(identifier, password, "Kaede Desktop", token.as_ref())
             .await
             .map_err(NativeError::from)?;
     }
@@ -1014,7 +1152,15 @@ async fn register_request(body: &Value, state: &NativeState) -> Result<Value, Na
         .get("password")
         .and_then(Value::as_str)
         .ok_or_else(|| NativeError::local("INVALID_REGISTRATION", "Enter a password."))?;
-    let password_kdf = body.get("password_kdf").filter(|value| !value.is_null());
+    let password_kdf = body
+        .get("password_kdf")
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| {
+            NativeError::local(
+                "INVALID_PASSWORD_PROTOCOL",
+                "This Kaede client did not prepare password protection metadata. Update the app and try again.",
+            )
+        })?;
     let challenge = challenge_token(&session, "kaede-register-v1").await?;
     let result = session
         .register_with_password_protocol(
@@ -1063,6 +1209,10 @@ async fn native_api_request(
 ) -> Result<NativeResponse, NativeError> {
     let path = request.path.trim_start_matches('/');
     let body = request.body.as_ref().unwrap_or(&Value::Null);
+    // The native bridge is the last trusted boundary before network I/O. Do
+    // not let an old or damaged bundled webview transmit literal passwords
+    // while relying on the server to reject their malformed metadata.
+    validate_native_password_request(&request.method, path, body)?;
     let special = match (request.method.as_str(), path) {
         ("POST", "auth/login") => Some(login_request(body, &state).await?),
         ("POST", "auth/mfa") => Some(mfa_request(body, &state).await?),
@@ -1636,21 +1786,53 @@ async fn native_test_output(
 async fn native_voice_join(
     reference: String,
     is_call: bool,
+    expected_policy: ExpectedVoicePolicy,
     e2ee_key: Option<String>,
     sender_device_id: Option<String>,
     state: State<'_, NativeState>,
 ) -> Result<(), NativeError> {
-    join_native_voice(reference, is_call, e2ee_key, sender_device_id, &state).await
+    join_native_voice(
+        reference,
+        is_call,
+        expected_policy,
+        e2ee_key,
+        sender_device_id,
+        &state,
+    )
+    .await
 }
 
 async fn join_native_voice(
     reference: String,
     is_call: bool,
+    expected_policy: ExpectedVoicePolicy,
     e2ee_key: Option<String>,
     sender_device_id: Option<String>,
     state: &NativeState,
 ) -> Result<(), NativeError> {
-    let generation = state.voice_generation.fetch_add(1, Ordering::AcqRel) + 1;
+    let generation = state.voice_install.begin().await;
+    join_native_voice_reserved(
+        reference,
+        is_call,
+        expected_policy,
+        e2ee_key,
+        sender_device_id,
+        state,
+        generation,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn join_native_voice_reserved(
+    reference: String,
+    is_call: bool,
+    expected_policy: ExpectedVoicePolicy,
+    e2ee_key: Option<String>,
+    sender_device_id: Option<String>,
+    state: &NativeState,
+    generation: u64,
+) -> Result<(), NativeError> {
     let entity = EntityRef::from_str(&reference).map_err(|error| {
         NativeError::operation(
             "INVALID_VOICE_REFERENCE",
@@ -1658,6 +1840,21 @@ async fn join_native_voice(
             error,
         )
     })?;
+    if !is_call
+        && (expected_policy.channel_id != entity.id.to_string()
+            || expected_policy.channel_domain != entity.domain.as_str())
+    {
+        return Err(NativeError::local(
+            "VOICE_E2EE_POLICY_MISMATCH",
+            "The voice channel changed before Kaede could join. Refresh the conversation and try again.",
+        ));
+    }
+    if expected_policy.e2ee != e2ee_key.is_some() {
+        return Err(NativeError::local(
+            "VOICE_E2EE_POLICY_MISMATCH",
+            "The voice encryption policy did not match the supplied media key. Nothing was connected.",
+        ));
+    }
     let account =
         state.account.read().await.clone().ok_or_else(|| {
             NativeError::local("NOT_AUTHENTICATED", "Sign in before joining voice.")
@@ -1690,6 +1887,7 @@ async fn join_native_voice(
             &entity,
             capture,
             output,
+            expected_policy.clone(),
             media_key,
             sender_device_id.as_deref(),
         )
@@ -1700,28 +1898,32 @@ async fn join_native_voice(
             &entity,
             capture,
             output,
+            expected_policy.clone(),
             media_key,
             sender_device_id.as_deref(),
         )
         .await
     }
     .map_err(NativeError::from)?;
-    if state.voice_generation.load(Ordering::Acquire) != generation {
+    let Some(install_guard) = state.voice_install.lock_if_current(generation).await else {
         handle.leave().await;
         return Ok(());
-    }
+    };
     *state.push_to_talk_sender.lock() = Some(handle.commands.clone());
     *state.voice_video.lock().await = handle.video_frames.take();
-    if let Some(previous) = state.voice.lock().await.replace(handle) {
-        previous.leave().await;
-    }
+    let previous = state.voice.lock().await.replace(handle);
     *state.voice_target.write().await = Some(VoiceTarget {
         reference,
         is_call,
+        expected_policy,
         e2ee_key: e2ee_key.map(SecretString::from),
         sender_device_id,
     });
     *state.voice_ui.write().await = VoiceUiState::default();
+    drop(install_guard);
+    if let Some(previous) = previous {
+        previous.leave().await;
+    }
     Ok(())
 }
 
@@ -1788,14 +1990,16 @@ async fn native_voice_control(
 }
 
 async fn leave_active_voice(state: &NativeState) {
-    state.voice_generation.fetch_add(1, Ordering::AcqRel);
+    let install_guard = state.voice_install.invalidate().await;
     *state.push_to_talk_sender.lock() = None;
     *state.voice_video.lock().await = None;
+    let voice = state.voice.lock().await.take();
     *state.voice_target.write().await = None;
-    if let Some(voice) = state.voice.lock().await.take() {
+    *state.voice_ui.write().await = VoiceUiState::default();
+    drop(install_guard);
+    if let Some(voice) = voice {
         voice.leave().await;
     }
-    *state.voice_ui.write().await = VoiceUiState::default();
 }
 
 #[tauri::command]
@@ -1923,21 +2127,26 @@ async fn native_preferences_set(
             )
         })?;
     *state.preferences.write().await = preferences;
-    let target = if restart_voice {
-        state.voice_target.read().await.clone()
+    let restart = if restart_voice {
+        state
+            .voice_install
+            .reserve_restart(&state.voice_target)
+            .await
     } else {
         None
     };
-    if let Some(target) = target {
-        join_native_voice(
+    if let Some((generation, target)) = restart {
+        join_native_voice_reserved(
             target.reference,
             target.is_call,
+            target.expected_policy,
             target
                 .e2ee_key
                 .as_ref()
                 .map(|key| key.expose_secret().to_owned()),
             target.sender_device_id,
             &state,
+            generation,
         )
         .await?;
     }
@@ -2117,7 +2326,7 @@ fn main() {
         voice: Mutex::new(None),
         voice_target: RwLock::new(None),
         voice_video: Mutex::new(None),
-        voice_generation: AtomicU64::new(0),
+        voice_install: VoiceInstallFence::new(),
         voice_ui: RwLock::new(VoiceUiState::default()),
         push_to_talk_sender,
         hotkey: SyncMutex::new(hotkey),
@@ -2291,13 +2500,101 @@ fn show_main_window(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use kaede_api::ApiClientError;
+    use kaede_auth::AuthError;
     use kaede_protocol::ApiError;
     use reqwest::StatusCode;
 
     use super::{
-        NativeError, is_autostart_launch, submitted_password_kdf_version,
-        validate_attachment_media_path,
+        NativeError, VoiceInstallFence, VoiceTarget, is_autostart_launch,
+        submitted_password_kdf_version, validate_attachment_media_path,
+        validate_native_password_request,
     };
+
+    fn plaintext_voice_target() -> VoiceTarget {
+        VoiceTarget {
+            reference: "1@example.com".to_owned(),
+            is_call: false,
+            expected_policy: kaede_voice::ExpectedVoicePolicy {
+                e2ee: false,
+                room: "voice-room".to_owned(),
+                channel_id: "1".to_owned(),
+                channel_domain: "example.com".to_owned(),
+                encryption_policy_generation: None,
+                encryption_epoch: None,
+                media_protocol: None,
+                media_suite: None,
+                media_session_id: None,
+                media_epoch: None,
+            },
+            e2ee_key: None,
+            sender_device_id: None,
+        }
+    }
+
+    fn derived_password() -> String {
+        "A".repeat(43)
+    }
+
+    #[tokio::test]
+    async fn voice_install_fence_rejects_superseded_completion() {
+        let fence = VoiceInstallFence::new();
+        let first = fence.begin().await;
+        let second = fence.begin().await;
+
+        assert!(fence.lock_if_current(first).await.is_none());
+        assert!(fence.lock_if_current(second).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn voice_install_fence_invalidates_an_unpublished_join() {
+        let fence = VoiceInstallFence::new();
+        let joining = fence.begin().await;
+        drop(fence.invalidate().await);
+
+        assert!(fence.lock_if_current(joining).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn voice_restart_snapshot_and_generation_share_the_leave_fence() {
+        let fence = VoiceInstallFence::new();
+        let target = tokio::sync::RwLock::new(Some(plaintext_voice_target()));
+        let Some((restart, _)) = fence.reserve_restart(&target).await else {
+            panic!("an active voice target should reserve a restart generation");
+        };
+
+        let leave_guard = fence.invalidate().await;
+        *target.write().await = None;
+        drop(leave_guard);
+
+        assert!(fence.lock_if_current(restart).await.is_none());
+        assert!(fence.reserve_restart(&target).await.is_none());
+    }
+
+    fn password_kdf(include_vault_salt: bool) -> serde_json::Value {
+        if include_vault_salt {
+            serde_json::json!({
+                "version": 2,
+                "algorithm": "PBKDF2-SHA256",
+                "iterations": 600_000,
+                "auth_salt": "A".repeat(22),
+                "vault_salt": "A".repeat(22),
+            })
+        } else {
+            serde_json::json!({
+                "version": 2,
+                "algorithm": "PBKDF2-SHA256",
+                "iterations": 600_000,
+                "auth_salt": "A".repeat(22),
+            })
+        }
+    }
+
+    fn assert_invalid_password_request(method: &str, path: &str, body: &serde_json::Value) {
+        let Err(error) = validate_native_password_request(method, path, body) else {
+            panic!("malformed password request should be rejected: {method} {path}");
+        };
+        assert_eq!(error.code, "INVALID_PASSWORD_PROTOCOL");
+    }
 
     #[test]
     fn autostart_argument_is_detected_without_hiding_regular_launches() {
@@ -2309,21 +2606,164 @@ mod tests {
     }
 
     #[test]
-    fn password_protocol_versions_preserve_old_webviews_and_reject_unknown_versions() {
-        assert_eq!(
-            submitted_password_kdf_version(&serde_json::json!({})).ok(),
-            Some(0)
-        );
+    fn password_protocol_version_is_required_and_only_accepts_version_two() {
+        let Err(missing) = submitted_password_kdf_version(&serde_json::json!({})) else {
+            panic!("missing password protocol should be rejected");
+        };
+        assert_eq!(missing.code, "INVALID_PASSWORD_PROTOCOL");
         assert_eq!(
             submitted_password_kdf_version(&serde_json::json!({"password_kdf_version": 2})).ok(),
             Some(2)
         );
-        let Err(error) =
-            submitted_password_kdf_version(&serde_json::json!({"password_kdf_version": 1}))
-        else {
-            panic!("unknown password protocol should be rejected");
-        };
-        assert_eq!(error.code, "INVALID_PASSWORD_PROTOCOL");
+        for version in [0, 1, 3] {
+            let Err(error) = submitted_password_kdf_version(
+                &serde_json::json!({"password_kdf_version": version}),
+            ) else {
+                panic!("unknown password protocol should be rejected");
+            };
+            assert_eq!(error.code, "INVALID_PASSWORD_PROTOCOL");
+        }
+    }
+
+    #[test]
+    fn native_password_boundary_accepts_canonical_v2_payloads() {
+        for path in [
+            "auth/login",
+            "auth/email/change",
+            "auth/mfa/setup",
+            "auth/mfa/disable",
+        ] {
+            assert!(
+                validate_native_password_request(
+                    "POST",
+                    path,
+                    &serde_json::json!({
+                        "password": derived_password(),
+                        "password_kdf_version": 2,
+                    }),
+                )
+                .is_ok(),
+                "{path}"
+            );
+        }
+        assert!(
+            validate_native_password_request(
+                "POST",
+                "auth/register",
+                &serde_json::json!({
+                    "password": derived_password(),
+                    "password_kdf": password_kdf(true),
+                }),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_native_password_request(
+                "POST",
+                "auth/password/reset",
+                &serde_json::json!({
+                    "password": derived_password(),
+                    "password_kdf": password_kdf(false),
+                }),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn native_password_boundary_rejects_raw_and_malformed_material() {
+        for path in [
+            "auth/login",
+            "auth/email/change",
+            "auth/mfa/setup",
+            "auth/mfa/disable",
+        ] {
+            assert_invalid_password_request(
+                "POST",
+                path,
+                &serde_json::json!({
+                    "password": "literal-password",
+                    "password_kdf_version": 2,
+                }),
+            );
+            assert_invalid_password_request(
+                "POST",
+                path,
+                &serde_json::json!({
+                    "password": derived_password(),
+                    "password_kdf_version": 1,
+                }),
+            );
+        }
+        assert_invalid_password_request(
+            "POST",
+            "auth/login",
+            &serde_json::json!({
+                "password": derived_password(),
+                "password_kdf_version": 2,
+                "password_upgrade": {},
+            }),
+        );
+
+        for path in ["auth/register", "auth/password/reset"] {
+            assert_invalid_password_request(
+                "POST",
+                path,
+                &serde_json::json!({
+                    "password": "literal-password",
+                    "password_kdf": password_kdf(path == "auth/register"),
+                }),
+            );
+        }
+
+        let mut invalid_registration_kdf = password_kdf(true);
+        invalid_registration_kdf["iterations"] = serde_json::json!(1);
+        assert_invalid_password_request(
+            "POST",
+            "auth/register",
+            &serde_json::json!({
+                "password": derived_password(),
+                "password_kdf": invalid_registration_kdf,
+            }),
+        );
+        assert_invalid_password_request(
+            "POST",
+            "auth/register",
+            &serde_json::json!({
+                "password": derived_password(),
+                "password_kdf": password_kdf(false),
+            }),
+        );
+
+        let mut reset_kdf_with_vault = password_kdf(true);
+        reset_kdf_with_vault["algorithm"] = serde_json::json!("PBKDF2-SHA256");
+        assert_invalid_password_request(
+            "POST",
+            "auth/password/reset",
+            &serde_json::json!({
+                "password": derived_password(),
+                "password_kdf": reset_kdf_with_vault,
+            }),
+        );
+    }
+
+    #[test]
+    fn native_password_boundary_blocks_unsupported_routes_before_network_io() {
+        let payload = serde_json::json!({
+            "password": derived_password(),
+            "password_kdf_version": 2,
+        });
+        assert_invalid_password_request("GET", "auth/login", &payload);
+        assert_invalid_password_request("POST", "auth/login?retry=1", &payload);
+        assert_invalid_password_request("POST", "users/@me", &payload);
+        assert!(
+            validate_native_password_request(
+                "POST",
+                "users/@me",
+                &serde_json::json!({"display_name": "Kaede"}),
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2390,6 +2830,17 @@ mod tests {
         assert!(native.message.contains("Error reference: 7f21d8d0-exa."));
         assert!(!native.message.contains("Internal Server Error"));
         assert_eq!(native.detail["trace_id"], "7f21d8d0-example-trace");
+    }
+
+    #[test]
+    fn invalid_prepared_password_has_safe_actionable_native_error() {
+        let native = NativeError::from(AuthError::InvalidPasswordProtocol);
+
+        assert_eq!(native.code, "INVALID_PASSWORD_PROTOCOL");
+        assert_eq!(native.status, 0);
+        assert!(native.message.contains("Update Kaede"));
+        assert!(!native.message.contains("canonical KDF"));
+        assert_eq!(native.detail, serde_json::Value::Null);
     }
 
     #[test]

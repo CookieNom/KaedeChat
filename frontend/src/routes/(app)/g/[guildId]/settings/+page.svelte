@@ -1114,7 +1114,11 @@
           notice = `${kind === 'icon' ? 'Guild icon' : 'Guild banner'} updated.`;
           return;
         }
-        if (attachment.scan_status === 'infected' || attachment.scan_status === 'failed') {
+        if (
+          attachment.scan_status === 'rejected' ||
+          attachment.scan_status === 'infected' ||
+          attachment.scan_status === 'failed'
+        ) {
           throw new Error('The image did not pass media processing.');
         }
         await cancelableDelay(1000, controller.signal);
@@ -1178,7 +1182,11 @@
             });
             break;
           }
-          if (status.scan_status === 'infected' || status.scan_status === 'failed') {
+          if (
+            status.scan_status === 'rejected' ||
+            status.scan_status === 'infected' ||
+            status.scan_status === 'failed'
+          ) {
             throw new Error('The emoji did not pass media processing.');
           }
         }

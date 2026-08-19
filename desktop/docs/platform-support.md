@@ -5,10 +5,11 @@
 Windows 10 and later use WASAPI through CPAL and Windows Credential Manager.
 Native camera capture, desktop capture, global shortcuts, tray integration, and
 Windows notifications are all supported. Signed NSIS packages are produced
-on Windows runners. Production releases use a per-user NSIS installer under
-`%LOCALAPPDATA%\Kaede Chat`, register a normal Windows uninstaller, and let the
-user opt in to a Start menu shortcut. Supported Windows builds can also show
-the system taskbar-pin consent prompt from Kaede's foreground UI.
+on Windows runners. Production releases ship a per-user NSIS installer. It
+installs under `%LOCALAPPDATA%\Kaede Chat`, registers a normal Windows
+uninstaller, and lets the user opt in to a Start menu shortcut. Supported
+Windows builds can also show the system taskbar-pin consent prompt from
+Kaede's foreground UI.
 
 ## macOS
 
@@ -31,8 +32,8 @@ Windows, macOS, and Linux builds poll the latest GitHub Release for a signed
 Tauri update. Checking is automatic; installation and restart always require a
 user action. The updater signature is independent of Windows Authenticode and
 Apple code signing, and all applicable signatures are required in production.
-On Linux, in-app installation is limited to the AppImage build; Debian-package
-installs direct the user back to their package manager instead of attempting to
+On Linux, in-app installation only works for the AppImage build. Debian-package
+installs point the user back to their package manager instead of trying to
 overwrite a system-owned executable.
 
 All platforms require an operating-system microphone permission the first time

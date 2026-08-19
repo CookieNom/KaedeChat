@@ -2568,6 +2568,7 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
     if (_displayAttachment.scanStatus == 'clean' ||
         _displayAttachment.scanStatus == 'encrypted' ||
         _displayAttachment.scanStatus == 'rejected' ||
+        _displayAttachment.scanStatus == 'infected' ||
         _displayAttachment.scanStatus == 'failed') {
       return;
     }
@@ -2782,7 +2783,7 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
         attachment: attachment,
         icon: Icons.warning_amber_rounded,
         message: rejected
-            ? '${attachment.filename} did not pass the server’s safety scan.'
+            ? '${attachment.filename} was rejected during server processing.'
             : '${attachment.filename} could not be processed by the server. Upload the file again later.',
         error: true,
       );

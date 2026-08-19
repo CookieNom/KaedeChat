@@ -237,6 +237,7 @@ MobileE2EEControlPage parseMobileE2EEControlPage(
         channelRef.wire != '$channelId@$channelDomain' ||
         authorRef.wire != '$authorId@$authorDomain' ||
         channelRef != channel ||
+        recordRef.domain != channel.domain ||
         policyGeneration is! String ||
         !RegExp(r'^[1-9][0-9]{0,18}$').hasMatch(policyGeneration) ||
         epoch is! String ||
@@ -246,7 +247,7 @@ MobileE2EEControlPage parseMobileE2EEControlPage(
         !RegExp(r'^keo_[A-Za-z0-9_-]{43}$').hasMatch(roomOperationId) ||
         roomOperationDomain is! String ||
         Domain(roomOperationDomain).value != roomOperationDomain ||
-        roomOperationDomain != originDomain ||
+        roomOperationDomain != channel.domain.value ||
         envelope is! Map<Object?, Object?> ||
         (previous != null && _compareRefs(recordRef, previous) <= 0)) {
       throw const FormatException('The encryption control record is invalid.');

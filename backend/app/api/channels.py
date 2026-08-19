@@ -61,16 +61,19 @@ from app.db.models import (
     Attachment,
     Channel,
     DMConversation,
+    DMParticipant,
     E2EEDevice,
     FederationEvent,
     FederationOutbox,
     Guild,
     GuildMember,
+    MediaTombstoneSource,
     Message,
     MessageProjection,
     Pin,
     Reaction,
     ReadState,
+    TerminalRoomDeletion,
     User,
 )
 from app.federation.client import signed_request
@@ -89,7 +92,13 @@ from app.federation.dm_storage import (
     lock_federated_dm_authority,
     opaque_dm_history_ref_allowed,
 )
-from app.federation.events import build_envelope, queue_event
+from app.federation.events import (
+    build_envelope,
+    message_attachment_refs,
+    queue_event,
+    record_attachment_recipients,
+)
+from app.federation.guild_media_deletions import queue_guild_media_delete_request
 from app.federation.guilds import (
     GuildSequenceGap,
     apply_guild_message_event,
@@ -109,7 +118,9 @@ from app.federation.replica_storage import (
 )
 from app.federation.replication import profile_from_user
 from app.federation.security import validated_event_envelope
+from app.federation.terminal_rooms import lock_terminal_room
 from app.media.service import attachments_for_messages, finalize_attachment
+from app.media.tombstones import lock_media_tombstone_ref, queue_terminal_attachment_tombstone
 from app.tasks import (
     SET_LATEST_MESSAGE_SCRIPT,
     federation_deliver,
@@ -248,42 +259,41 @@ async def queue_attachment_tombstones(
     session: AsyncSession,
     settings: Settings,
     access: ChannelAccess,
-    actor: User,
+    _actor: User,
     messages: list[Message],
 ) -> tuple[list[Attachment], set[str]]:
     refs = {(message.id, message.origin_domain) for message in messages}
-    attachments = [
-        item
-        for rows in (await attachments_for_messages(session, refs)).values()
-        for item in rows
-        if item.origin_domain == settings.domain
-    ]
+    by_message = await attachments_for_messages(session, refs)
+    attachments = [item for rows in by_message.values() for item in rows]
     if not attachments:
         return [], set()
-    if access.guild is None:
-        destinations = {
-            participant.origin_domain
-            for participant in access.participants
-            if participant.origin_domain != settings.domain
-        }
-    else:
-        destinations = await remote_destinations_with_channel_access(
-            session, settings, access.guild, access.channel
-        )
-    for attachment in attachments:
-        envelope = await build_envelope(
-            session,
-            settings,
-            "media.delete",
-            actor,
-            {
-                "attachment_id": str(attachment.id),
-                "origin_domain": attachment.origin_domain,
-            },
-        )
-        for destination in destinations:
-            await queue_event(session, settings, destination, envelope)
-    return attachments, destinations
+    destinations: set[str] = set()
+    local_attachments: list[Attachment] = []
+    messages_by_ref = {(message.id, message.origin_domain): message for message in messages}
+    for attachment in sorted(attachments, key=lambda item: (item.origin_domain, item.id)):
+        if attachment.message_id is None or attachment.message_domain is None:
+            raise RuntimeError("attachment deletion lost its authoritative message binding")
+        message_ref = (attachment.message_id, attachment.message_domain)
+        message = messages_by_ref.get(message_ref)
+        if message is None or message.deleted_at is None:
+            raise RuntimeError("attachment deletion lost its authoritative message")
+        if attachment.origin_domain == settings.domain:
+            local_attachments.append(attachment)
+            destinations.update(
+                await queue_terminal_attachment_tombstone(session, settings, attachment)
+            )
+        elif access.guild is not None and access.guild.origin_domain == settings.domain:
+            destination = await queue_guild_media_delete_request(
+                session,
+                settings,
+                guild=access.guild,
+                message=message,
+                attachment=attachment,
+                deleted_at=message.deleted_at,
+            )
+            if destination is not None:
+                destinations.add(destination)
+    return local_attachments, destinations
 
 
 def require_local_mutation_authority(access: ChannelAccess, settings: Settings) -> None:
@@ -685,6 +695,54 @@ async def list_messages(
                     query=remote_query,
                     max_response_bytes=MAX_DM_HISTORY_RESPONSE_BYTES,
                 )
+                if conversation.type == "group":
+                    await lock_terminal_room(
+                        session,
+                        "group_dm",
+                        conversation.id,
+                        conversation.origin_domain,
+                    )
+                    terminal_receipt = await session.get(
+                        TerminalRoomDeletion,
+                        (
+                            "group_dm",
+                            conversation.id,
+                            conversation.origin_domain,
+                            settings.domain,
+                        ),
+                    )
+                    live_conversation = await session.get(
+                        DMConversation,
+                        (conversation.id, conversation.origin_domain),
+                        populate_existing=True,
+                    )
+                    live_channel = await session.get(
+                        Channel,
+                        (conversation.id, conversation.origin_domain),
+                        populate_existing=True,
+                    )
+                    live_participant = await session.get(
+                        DMParticipant,
+                        (
+                            conversation.id,
+                            conversation.origin_domain,
+                            auth.user.id,
+                            auth.user.origin_domain,
+                        ),
+                        populate_existing=True,
+                    )
+                    if (
+                        terminal_receipt is not None
+                        or live_conversation is None
+                        or live_channel is None
+                        or live_channel.unavailable
+                        or live_participant is None
+                    ):
+                        raise HTTPException(
+                            status_code=404,
+                            detail={"code": "CHANNEL_NOT_FOUND"},
+                        )
+                    conversation = live_conversation
                 if response.status_code != 200:
                     try:
                         retry_seconds = max(
@@ -821,6 +879,96 @@ async def create_message(
         user_domain=auth.user.origin_domain,
     )
     access = await load_channel_access(session, settings, auth.user, channel_id)
+    prelock_conversation = (
+        await session.get(
+            DMConversation,
+            (access.channel.id, access.channel.origin_domain),
+        )
+        if access.guild is None
+        else None
+    )
+    if access.guild is not None:
+        await lock_terminal_room(
+            session,
+            "guild",
+            access.guild.id,
+            access.guild.origin_domain,
+        )
+    elif prelock_conversation is not None and prelock_conversation.type == "group":
+        await lock_terminal_room(
+            session,
+            "group_dm",
+            prelock_conversation.id,
+            prelock_conversation.origin_domain,
+        )
+    if access.guild is not None:
+        terminal_receipt = await session.get(
+            TerminalRoomDeletion,
+            (
+                "guild",
+                access.guild.id,
+                access.guild.origin_domain,
+                settings.domain,
+            ),
+        )
+        refreshed_guild = await session.get(
+            Guild,
+            (access.guild.id, access.guild.origin_domain),
+            populate_existing=True,
+        )
+        refreshed_channel = await session.get(
+            Channel,
+            (access.channel.id, access.channel.origin_domain),
+            populate_existing=True,
+        )
+        if (
+            terminal_receipt is not None
+            or refreshed_guild is None
+            or refreshed_guild.unavailable
+            or refreshed_channel is None
+            or refreshed_channel.unavailable
+        ):
+            raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+        access = ChannelAccess(channel=refreshed_channel, guild=refreshed_guild, participants=[])
+    elif prelock_conversation is not None and prelock_conversation.type == "group":
+        terminal_receipt = await session.get(
+            TerminalRoomDeletion,
+            (
+                "group_dm",
+                prelock_conversation.id,
+                prelock_conversation.origin_domain,
+                settings.domain,
+            ),
+        )
+        refreshed_conversation = await session.get(
+            DMConversation,
+            (prelock_conversation.id, prelock_conversation.origin_domain),
+            populate_existing=True,
+        )
+        refreshed_channel = await session.get(
+            Channel,
+            (access.channel.id, access.channel.origin_domain),
+            populate_existing=True,
+        )
+        if (
+            terminal_receipt is not None
+            or refreshed_conversation is None
+            or refreshed_channel is None
+            or refreshed_channel.unavailable
+        ):
+            raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+        prelock_conversation = refreshed_conversation
+        access = ChannelAccess(
+            channel=refreshed_channel,
+            guild=None,
+            participants=access.participants,
+        )
+    # Message publication and PhotoDNA terminalization share this canonical
+    # fence. Acquire it before finalize_attachment takes FOR UPDATE so a
+    # verdict can never deadlock the sender or commit between finalization and
+    # recipient-route insertion.
+    for attachment_id in sorted({int(item) for item in payload.attachment_ids}):
+        await lock_media_tombstone_ref(session, attachment_id, settings.domain)
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
     needed = required_permissions("message.create")
@@ -843,11 +991,7 @@ async def create_message(
     await require_dm_send(session, access, auth.user)
     if channel.type not in {0, 1, 5}:
         raise HTTPException(status_code=400, detail={"code": "NOT_TEXT_CHANNEL"})
-    dm_conversation = (
-        await session.get(DMConversation, (channel.id, channel.origin_domain))
-        if access.guild is None
-        else None
-    )
+    dm_conversation = prelock_conversation if access.guild is None else None
     if dm_conversation is not None:
         # Serialize validation with rolling eviction so a reply target cannot
         # disappear between lookup and message admission.
@@ -998,6 +1142,18 @@ async def create_message(
             ],
             "attachments": [attachment_payload(item) for item in message_attachments],
         }
+        if message_attachments:
+            # The remote guild home can commit this proposal and fan its
+            # attachment metadata out before our HTTP response is observed.
+            # Durably remember that authority before making the request so a
+            # crash cannot strand a later terminal media tombstone.
+            await record_attachment_recipients(
+                session,
+                {(item.id, item.origin_domain) for item in message_attachments},
+                access.guild.origin_domain,
+                room_ref=("guild", access.guild.id, access.guild.origin_domain),
+            )
+            await session.commit()
         replica_was_quota_paused = access.guild.sync_status == "quota_paused"
         try:
             response = await signed_request(
@@ -1072,6 +1228,21 @@ async def create_message(
             context = event.get("context")
             content = event.get("content")
             event_message = content.get("message") if isinstance(content, dict) else None
+            expected_attachment_payloads = [
+                attachment_payload(item) for item in message_attachments
+            ]
+            expected_remote_attachment_payloads = []
+            for expected_attachment in expected_attachment_payloads:
+                projected_attachment = dict(expected_attachment)
+                projected_attachment["scan_status"] = (
+                    "encrypted"
+                    if projected_attachment.get("encryption_mode") == "e2ee"
+                    else "clean"
+                )
+                expected_remote_attachment_payloads.append(projected_attachment)
+            expected_attachment_refs = {
+                (item.id, item.origin_domain) for item in message_attachments
+            }
             if (
                 event.get("type") != "guild.message.committed"
                 or not isinstance(context, dict)
@@ -1080,17 +1251,88 @@ async def create_message(
                 or context.get("guild_domain") != access.guild.origin_domain
                 or context.get("seq") != proxied.get("seq")
                 or event_message != proxied["message"]
+                or event_message.get("origin_domain") != access.guild.origin_domain
+                or event_message.get("channel_id") != str(channel.id)
+                or event_message.get("channel_domain") != channel.origin_domain
+                or event_message.get("author_id") != str(auth.user.id)
+                or event_message.get("author_domain") != auth.user.origin_domain
+                or event_message.get("content") != payload.content
+                or event_message.get("e2ee") != payload.e2ee
+                or event_message.get("client_nonce") != payload.client_nonce
+                # The authority is allowed to project the lifecycle status it
+                # assigns while validating the proxy request (plaintext
+                # references become ``clean`` and E2EE references become
+                # ``encrypted``).  Every immutable metadata field and the
+                # exact ordered reference set must still match the request.
+                or event_message.get("attachments") != expected_remote_attachment_payloads
+                or message_attachment_refs(event) != expected_attachment_refs
+                or event_message.get("referenced_message_id")
+                != (str(referenced.id) if referenced is not None else None)
+                or event_message.get("referenced_message_domain")
+                != (referenced.origin_domain if referenced is not None else None)
             ):
                 raise ValueError("guild home returned a mismatched proxy event")
+            # The request crossed a transaction boundary while the remote home
+            # committed the proposal. Re-enter the room/media fence and reload
+            # the projection before applying or binding anything: an exact
+            # terminal guild control may have won while HTTP was in flight.
+            await lock_terminal_room(
+                session,
+                "guild",
+                access.guild.id,
+                access.guild.origin_domain,
+            )
+            for attachment_id, attachment_domain in sorted(
+                expected_attachment_refs, key=lambda item: (item[1], item[0])
+            ):
+                await lock_media_tombstone_ref(session, attachment_id, attachment_domain)
+            terminal_receipt = await session.get(
+                TerminalRoomDeletion,
+                (
+                    "guild",
+                    access.guild.id,
+                    access.guild.origin_domain,
+                    settings.domain,
+                ),
+            )
+            live_guild = await session.get(
+                Guild,
+                (access.guild.id, access.guild.origin_domain),
+                populate_existing=True,
+            )
+            live_channel = await session.get(
+                Channel,
+                (channel.id, channel.origin_domain),
+                populate_existing=True,
+            )
+            if (
+                terminal_receipt is not None
+                or live_guild is None
+                or live_guild.unavailable
+                or live_channel is None
+                or live_channel.unavailable
+            ):
+                raise HTTPException(status_code=410, detail={"code": "GUILD_DELETED"})
+            for item in message_attachments:
+                if (
+                    await session.get(
+                        MediaTombstoneSource,
+                        (item.id, item.origin_domain),
+                    )
+                    is not None
+                ):
+                    raise HTTPException(status_code=410, detail={"code": "ATTACHMENT_DELETED"})
+            access = ChannelAccess(channel=live_channel, guild=live_guild, participants=[])
+            channel = live_channel
             try:
-                replicated = await apply_guild_message_event(session, settings, access.guild, event)
+                replicated = await apply_guild_message_event(session, settings, live_guild, event)
             except GuildSequenceGap:
-                access.guild.sync_status = "stale"
+                live_guild.sync_status = "stale"
                 await session.commit()
                 await enqueue_best_effort(
                     federation_guild_sync,
-                    access.guild.origin_domain,
-                    access.guild.id,
+                    live_guild.origin_domain,
+                    live_guild.id,
                 )
                 for attachment in message_attachments:
                     await enqueue_best_effort(
@@ -1099,10 +1341,10 @@ async def create_message(
                 response_status.status_code = status.HTTP_202_ACCEPTED
                 return {"status": "queued", "client_nonce": payload.client_nonce}
             try:
-                await admit_replica_storage(session, settings, access.guild)
+                await admit_replica_storage(session, settings, live_guild)
             except FederationReplicaQuotaExceeded as exc:
-                guild_id = access.guild.id
-                guild_domain = access.guild.origin_domain
+                guild_id = live_guild.id
+                guild_domain = live_guild.origin_domain
                 await session.rollback()
                 await mark_replica_quota_paused(
                     session,
@@ -1131,15 +1373,6 @@ async def create_message(
             raise HTTPException(
                 status_code=503, detail={"code": "FEDERATED_WRITE_UNAVAILABLE"}
             ) from None
-        await session.commit()
-        if replica_was_quota_paused:
-            refreshed_guild = await session.get(
-                Guild,
-                (access.guild.id, access.guild.origin_domain),
-                populate_existing=True,
-            )
-            if refreshed_guild is not None:
-                await publish_replica_guild_status(redis, refreshed_guild)
         if replicated is None:
             replicated = await session.get(
                 Message,
@@ -1148,9 +1381,32 @@ async def create_message(
         if replicated is None:
             raise RuntimeError("authoritative guild message was not replicated")
         for attachment in message_attachments:
-            attachment.message_id = replicated.id
-            attachment.message_domain = replicated.origin_domain
+            refreshed_attachment = await session.get(
+                Attachment,
+                (attachment.id, attachment.origin_domain),
+                populate_existing=True,
+            )
+            if (
+                refreshed_attachment is None
+                or refreshed_attachment.deleted_at is not None
+                or await session.get(
+                    MediaTombstoneSource,
+                    (attachment.id, attachment.origin_domain),
+                )
+                is not None
+            ):
+                raise HTTPException(status_code=410, detail={"code": "ATTACHMENT_DELETED"})
+            refreshed_attachment.message_id = replicated.id
+            refreshed_attachment.message_domain = replicated.origin_domain
         await session.commit()
+        if replica_was_quota_paused:
+            refreshed_guild = await session.get(
+                Guild,
+                (live_guild.id, live_guild.origin_domain),
+                populate_existing=True,
+            )
+            if refreshed_guild is not None:
+                await publish_replica_guild_status(redis, refreshed_guild)
         for attachment in message_attachments:
             await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
         result = message_payload(replicated, auth.user, message_attachments)
@@ -1394,6 +1650,13 @@ async def edit_message(
 ) -> dict[str, object]:
     access = await load_channel_access(session, settings, auth.user, channel_id)
     require_local_mutation_authority(access, settings)
+    if access.guild is not None:
+        await lock_terminal_room(
+            session,
+            "guild",
+            access.guild.id,
+            access.guild.origin_domain,
+        )
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
     actor_permissions = await require_channel_permissions(
@@ -1473,11 +1736,39 @@ async def delete_message(
 ) -> Response:
     access = await load_channel_access(session, settings, auth.user, channel_id)
     require_local_mutation_authority(access, settings)
+    if access.guild is not None:
+        await lock_terminal_room(
+            session,
+            "guild",
+            access.guild.id,
+            access.guild.origin_domain,
+        )
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
     await require_channel_permissions(
         session, redis, access, auth.user, required_permissions("message.delete.self")
     )
+    unlocked_message = await channel_message(
+        session,
+        settings,
+        channel,
+        message_id,
+        for_update=False,
+    )
+    predelete_attachment_refs = set(
+        (
+            await session.execute(
+                select(Attachment.id, Attachment.origin_domain).where(
+                    Attachment.message_id == unlocked_message.id,
+                    Attachment.message_domain == unlocked_message.origin_domain,
+                )
+            )
+        ).tuples()
+    )
+    for attachment_id, attachment_domain in sorted(
+        predelete_attachment_refs, key=lambda ref: (ref[1], ref[0])
+    ):
+        await lock_media_tombstone_ref(session, attachment_id, attachment_domain)
     message = await channel_message(session, settings, channel, message_id, for_update=True)
     if (message.author_id, message.author_domain) != (auth.user.id, auth.user.origin_domain):
         if access.guild is None:
@@ -1544,6 +1835,13 @@ async def bulk_delete_messages(
 ) -> Response:
     access = await load_channel_access(session, settings, auth.user, channel_id)
     require_local_mutation_authority(access, settings)
+    if access.guild is not None:
+        await lock_terminal_room(
+            session,
+            "guild",
+            access.guild.id,
+            access.guild.origin_domain,
+        )
     access = await lock_local_channel_mutation(session, settings, access)
     if access.guild is None:
         raise HTTPException(status_code=400, detail={"code": "BULK_DELETE_NOT_SUPPORTED"})
@@ -1553,6 +1851,27 @@ async def bulk_delete_messages(
         session, redis, access, auth.user, required_permissions("message.bulk_delete")
     )
     message_refs = [item.resolve(settings.domain) for item in payload.message_ids]
+    predelete_attachment_refs = set(
+        (
+            await session.execute(
+                select(Attachment.id, Attachment.origin_domain)
+                .join(
+                    Message,
+                    (Message.id == Attachment.message_id)
+                    & (Message.origin_domain == Attachment.message_domain),
+                )
+                .where(
+                    tuple_(Message.id, Message.origin_domain).in_(message_refs),
+                    Message.channel_id == access.channel.id,
+                    Message.channel_domain == access.channel.origin_domain,
+                )
+            )
+        ).tuples()
+    )
+    for attachment_id, attachment_domain in sorted(
+        predelete_attachment_refs, key=lambda ref: (ref[1], ref[0])
+    ):
+        await lock_media_tombstone_ref(session, attachment_id, attachment_domain)
     messages = list(
         await session.scalars(
             select(Message)
@@ -1567,6 +1886,10 @@ async def bulk_delete_messages(
     if len(messages) != len(message_refs):
         raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
     deleted_at = datetime.now(UTC)
+    for deleted_message in messages:
+        deleted_message.content = None
+        deleted_message.e2ee = None
+        deleted_message.deleted_at = deleted_at
     deleted_attachments, media_destinations = await queue_attachment_tombstones(
         session, settings, access, auth.user, messages
     )

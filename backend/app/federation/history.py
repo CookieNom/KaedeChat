@@ -36,13 +36,16 @@ from app.db.models import (
     GuildHistoryStagedMessage,
     GuildMember,
     Instance,
+    MediaTombstoneSource,
     Message,
     Pin,
     Reaction,
     ReadState,
+    TerminalRoomDeletion,
     User,
 )
 from app.federation.client import signed_request
+from app.federation.events import attachment_refs_from_payloads
 from app.federation.identity_storage import admit_remote_user_identity
 from app.federation.network import (
     FederationNetworkError,
@@ -70,7 +73,13 @@ from app.federation.replication import (
 )
 from app.federation.schemas import RemoteUserProfile
 from app.federation.security import validated_event_envelope
+from app.federation.terminal_rooms import lock_terminal_room
 from app.media.processing import normalize_declared_type, sanitize_filename
+from app.media.tombstones import (
+    lock_media_tombstone_ref,
+    queue_terminal_attachment_tombstone,
+    terminal_attachment_refs_for_messages,
+)
 
 HISTORY_CAPABILITY = "guild-history-sync/1"
 HISTORY_RECENT_FIRST_CAPABILITY = "guild-history-sync/2"
@@ -143,6 +152,57 @@ class FederatedHistoryLimitExceeded(FederatedHistorySyncError):
             retryable=False,
             resource=resource,
         )
+
+
+async def _lock_live_history_import(
+    session: AsyncSession,
+    settings: Settings,
+    guild: Guild,
+    history_import: GuildHistoryImport,
+) -> tuple[Guild, GuildHistoryImport]:
+    """Fence a post-network history write against terminal guild deletion."""
+
+    await lock_terminal_room(session, "guild", guild.id, guild.origin_domain)
+    terminal_receipt = await session.get(
+        TerminalRoomDeletion,
+        ("guild", guild.id, guild.origin_domain, settings.domain),
+    )
+    live_guild = await session.get(
+        Guild,
+        (guild.id, guild.origin_domain),
+        populate_existing=True,
+    )
+    live_import = await session.get(
+        GuildHistoryImport,
+        (history_import.export_id, history_import.export_domain),
+        populate_existing=True,
+    )
+    if (
+        terminal_receipt is not None
+        or live_guild is None
+        or live_guild.unavailable
+        or live_import is None
+        or live_import.status in {"revoked", "failed"}
+    ):
+        raise RuntimeError("history import room is no longer available")
+    current_member = await session.get(
+        GuildMember,
+        (
+            live_guild.id,
+            live_guild.origin_domain,
+            live_import.requester_user_id,
+            live_import.requester_user_domain,
+        ),
+        populate_existing=True,
+    )
+    if (
+        current_member is None
+        or current_member.member_version != live_import.requester_member_version
+        or live_guild.permission_generation != live_import.permission_generation
+        or live_guild.history_policy_generation != live_import.history_policy_generation
+    ):
+        raise RuntimeError("history grant changed while a remote page was in flight")
+    return live_guild, live_import
 
 
 def _history_response_detail(response: Any) -> dict[str, object]:
@@ -274,6 +334,22 @@ async def cleanup_history_transfers(
             FederatedHistoryMessage.export_domain == GuildHistoryImport.export_domain,
         )
     )
+    abandoned_import_refs = select(
+        GuildHistoryImport.export_id,
+        GuildHistoryImport.export_domain,
+    ).where(GuildHistoryImport.updated_at < current_time - ABANDONED_IMPORT_RETENTION)
+    # A provenance anchor can intentionally keep its import parent for the
+    # lifetime of imported messages, but unfinished staged payloads are merely
+    # transient raw carriers. Drop those children after the abandoned-import
+    # horizon so they cannot pin deleted attachment metadata indefinitely.
+    abandoned_staged = await session.execute(
+        delete(GuildHistoryStagedMessage).where(
+            tuple_(
+                GuildHistoryStagedMessage.export_id,
+                GuildHistoryStagedMessage.export_domain,
+            ).in_(abandoned_import_refs)
+        )
+    )
     abandoned_imports = await session.execute(
         delete(GuildHistoryImport).where(
             GuildHistoryImport.updated_at < current_time - ABANDONED_IMPORT_RETENTION,
@@ -283,6 +359,7 @@ async def cleanup_history_transfers(
     return {
         "history_exports": int(expired_exports.rowcount or 0),  # type: ignore[attr-defined]
         "history_imports": int(abandoned_imports.rowcount or 0),  # type: ignore[attr-defined]
+        "history_staged_messages": int(abandoned_staged.rowcount or 0),  # type: ignore[attr-defined]
     }
 
 
@@ -930,6 +1007,13 @@ async def purge_ineligible_federated_history(
             tuple_(purged_message.channel_id, purged_message.channel_domain).not_in(
                 retained_channels
             ),
+            ~exists(
+                select(Attachment.id).where(
+                    Attachment.message_id == purged_message.id,
+                    Attachment.message_domain == purged_message.origin_domain,
+                    Attachment.origin_domain == settings.domain,
+                )
+            ),
         )
     )
     affected_channel_refs = list(
@@ -956,6 +1040,13 @@ async def purge_ineligible_federated_history(
                         purged_message.channel_id,
                         purged_message.channel_domain,
                     ).not_in(retained_channels),
+                    ~exists(
+                        select(Attachment.id).where(
+                            Attachment.message_id == purged_message.id,
+                            Attachment.message_domain == purged_message.origin_domain,
+                            Attachment.origin_domain == settings.domain,
+                        )
+                    ),
                 )
                 .distinct()
             )
@@ -1450,6 +1541,12 @@ async def _stage_history_pages(
     deadline: float,
 ) -> int:
     for channel_id, upper_bound in channels:
+        guild, history_import = await _lock_live_history_import(
+            session,
+            settings,
+            guild,
+            history_import,
+        )
         channel = await session.get(Channel, (channel_id, guild.origin_domain))
         if channel is None or channel.unavailable:
             raise ValueError("history export references an unavailable local replica channel")
@@ -1509,6 +1606,29 @@ async def _stage_history_pages(
                 query=query,
                 request_timeout=30,
             )
+            guild, history_import = await _lock_live_history_import(
+                session,
+                settings,
+                guild,
+                history_import,
+            )
+            channel = await session.get(
+                Channel,
+                (channel_id, guild.origin_domain),
+                populate_existing=True,
+            )
+            channel_state = await session.get(
+                GuildHistoryImportChannel,
+                (
+                    history_import.export_id,
+                    history_import.export_domain,
+                    channel_id,
+                    guild.origin_domain,
+                ),
+                populate_existing=True,
+            )
+            if channel is None or channel.unavailable or channel_state is None:
+                raise RuntimeError("history channel disappeared while a page was in flight")
             if response.status_code != 200:
                 raise history_response_error(response)
             payload = decode_federation_response_json(response)
@@ -1848,6 +1968,12 @@ async def _reconcile_history_delta(
             raise FederatedHistoryLimitExceeded("duration")
         if response.status_code != 200:
             raise history_response_error(response)
+        guild, history_import = await _lock_live_history_import(
+            session,
+            settings,
+            guild,
+            history_import,
+        )
         payload = decode_federation_response_json(response)
         raw_events = payload.get("events") if isinstance(payload, dict) else None
         if (
@@ -1921,7 +2047,35 @@ async def _merge_history_import_batch(
     history_import: GuildHistoryImport,
     *,
     reconciled_seq: int,
+    tombstone_delivery_wakes: set[str],
 ) -> tuple[int, bool]:
+    guild, history_import = await _lock_live_history_import(
+        session,
+        settings,
+        guild,
+        history_import,
+    )
+    staged_rows = list(
+        await session.scalars(
+            select(GuildHistoryStagedMessage)
+            .where(
+                GuildHistoryStagedMessage.export_id == history_import.export_id,
+                GuildHistoryStagedMessage.export_domain == history_import.export_domain,
+            )
+            .order_by(
+                GuildHistoryStagedMessage.channel_id,
+                GuildHistoryStagedMessage.message_id,
+            )
+            .limit(settings.federation_history_merge_chunk_size)
+        )
+    )
+    staged_attachment_refs: set[tuple[int, str]] = set()
+    for staged in staged_rows:
+        staged_attachment_refs.update(attachment_refs_from_payloads([staged.payload]))
+    for attachment_id, attachment_domain in sorted(
+        staged_attachment_refs, key=lambda ref: (ref[1], ref[0])
+    ):
+        await lock_media_tombstone_ref(session, attachment_id, attachment_domain)
     locked_guild = await session.scalar(
         select(Guild)
         .where(Guild.id == guild.id, Guild.origin_domain == guild.origin_domain)
@@ -1949,20 +2103,6 @@ async def _merge_history_import_batch(
     ):
         raise RuntimeError("history grant changed during finalization")
     guild = locked_guild
-    staged_rows = list(
-        await session.scalars(
-            select(GuildHistoryStagedMessage)
-            .where(
-                GuildHistoryStagedMessage.export_id == history_import.export_id,
-                GuildHistoryStagedMessage.export_domain == history_import.export_domain,
-            )
-            .order_by(
-                GuildHistoryStagedMessage.channel_id,
-                GuildHistoryStagedMessage.message_id,
-            )
-            .limit(settings.federation_history_merge_chunk_size)
-        )
-    )
     imported = 0
     latest_by_channel: dict[tuple[int, str], int] = {}
     for staged in staged_rows:
@@ -1972,6 +2112,40 @@ async def _merge_history_import_batch(
             history_import,
             staged,
         )
+        raw_attachment_refs = attachment_refs_from_payloads([raw])
+        terminal_refs = (
+            set(
+                (
+                    await session.execute(
+                        select(
+                            MediaTombstoneSource.attachment_id,
+                            MediaTombstoneSource.attachment_domain,
+                        ).where(
+                            tuple_(
+                                MediaTombstoneSource.attachment_id,
+                                MediaTombstoneSource.attachment_domain,
+                            ).in_(raw_attachment_refs)
+                        )
+                    )
+                ).tuples()
+            )
+            if raw_attachment_refs
+            else set()
+        )
+        if terminal_refs:
+            raw["attachments"] = [
+                attachment
+                for attachment in raw.get("attachments", [])
+                if not (
+                    isinstance(attachment, dict)
+                    and attachment_refs_from_payloads([{"attachments": [attachment]}])
+                    & terminal_refs
+                )
+            ]
+            if raw.get("content") is None and raw.get("e2ee") is None and not raw["attachments"]:
+                # An attachment-only historical message whose media is already
+                # terminal is itself no longer a useful projection.
+                continue
         staged_channel_ref = (staged.channel_id, staged.channel_domain)
         latest_by_channel[staged_channel_ref] = max(
             latest_by_channel.get(staged_channel_ref, 0), staged.message_id
@@ -2065,6 +2239,21 @@ async def _merge_history_import_batch(
             author,
             raw.get("attachments", []),
         )
+        terminal_attachment_refs = await terminal_attachment_refs_for_messages(
+            session,
+            settings,
+            {(message.id, message.origin_domain)},
+        )
+        for terminal_attachment_ref in terminal_attachment_refs:
+            terminal_attachment = await session.get(Attachment, terminal_attachment_ref)
+            if terminal_attachment is not None:
+                tombstone_delivery_wakes.update(
+                    await queue_terminal_attachment_tombstone(
+                        session,
+                        settings,
+                        terminal_attachment,
+                    )
+                )
         await session.execute(
             pg_insert(FederatedHistoryMessage)
             .values(
@@ -2179,6 +2368,7 @@ async def _merge_history_import(
     *,
     reconciled_seq: int,
     deadline: float,
+    tombstone_delivery_wakes: set[str],
 ) -> int:
     imported = 0
     cursor = reconciled_seq
@@ -2192,6 +2382,7 @@ async def _merge_history_import(
                 guild,
                 history_import,
                 reconciled_seq=cursor,
+                tombstone_delivery_wakes=tombstone_delivery_wakes,
             )
         except HistoryDeltaAdvanced as exc:
             await session.rollback()
@@ -2231,7 +2422,11 @@ async def request_and_import_history(
     settings: Settings,
     guild: Guild,
     user: User,
+    *,
+    tombstone_delivery_wakes: set[str] | None = None,
 ) -> int:
+    if tombstone_delivery_wakes is None:
+        tombstone_delivery_wakes = set()
     if not settings.federation_history_import_enabled or guild.origin_domain == settings.domain:
         return 0
     if not await eligible_history_channels(session, guild, user):
@@ -2400,6 +2595,7 @@ async def request_and_import_history(
                 history_import,
                 reconciled_seq=cursor,
                 deadline=deadline,
+                tombstone_delivery_wakes=tombstone_delivery_wakes,
             )
             await session.commit()
         completed = await signed_request(

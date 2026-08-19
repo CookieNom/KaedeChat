@@ -17,7 +17,18 @@ from app.email.outbox import drain_email_outbox
 from app.main import app
 from app.media.jobs import process_attachment_record, purge_local_attachment
 from scripts.email_tokens import token_from_email
-from scripts.verification import VerificationFailure, failure_message, require
+from scripts.verification import (
+    PASSWORD_KDF_VERSION,
+    VerificationFailure,
+    authentication_secret,
+    failure_message,
+    password_kdf_metadata,
+    require,
+)
+
+PASSWORD = "correct horse battery staple"  # noqa: S105 - disposable validation credential
+AUTH_SALT = bytes(range(16))
+VAULT_SALT = bytes(reversed(range(16)))
 
 _png_buffer = io.BytesIO()
 Image.new("RGB", (16, 16), (181, 57, 34)).save(_png_buffer, format="PNG")
@@ -28,7 +39,8 @@ EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 def register(
     client: TestClient, emails: list[str], deliver_mail: Callable[[], None]
 ) -> dict[str, str]:
-    proxy_secret = get_settings().proxy_secret
+    settings = get_settings()
+    proxy_secret = settings.proxy_secret
     if proxy_secret is None:
         raise VerificationFailure(
             "KAEDE_PROXY_SECRET is not configured for the validation environment"
@@ -42,7 +54,11 @@ def register(
         json={
             "username": "mediaowner",
             "email": "mediaowner@example.com",
-            "password": "correct horse battery staple",
+            "password": authentication_secret(PASSWORD, settings.domain, AUTH_SALT),
+            "password_kdf": password_kdf_metadata(
+                AUTH_SALT,
+                vault_salt=VAULT_SALT,
+            ),
         },
     )
     require(response.status_code == 201, f"registration failed: {response.text}")
@@ -54,7 +70,11 @@ def register(
     login = client.post(
         "/api/v1/auth/login",
         headers={"X-Kaede-Client": "mobile"},
-        json={"identifier": "mediaowner", "password": "correct horse battery staple"},
+        json={
+            "identifier": "mediaowner",
+            "password": authentication_secret(PASSWORD, settings.domain, AUTH_SALT),
+            "password_kdf_version": PASSWORD_KDF_VERSION,
+        },
     )
     require(login.status_code == 200, f"login failed: {login.text}")
     return cast(dict[str, str], login.json())

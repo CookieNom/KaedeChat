@@ -363,6 +363,8 @@ async def create_interaction(
             "installation_id": str(installation.id),
             "guild_ref": f"{access.guild.id}@{access.guild.origin_domain}",
             "channel_ref": f"{access.channel.id}@{access.channel.origin_domain}",
+            "channel_id": str(access.channel.id),
+            "channel_domain": access.channel.origin_domain,
             "user": {
                 "id": str(auth.user.id),
                 "origin_domain": auth.user.origin_domain,
@@ -375,6 +377,7 @@ async def create_interaction(
             "expires_at": interaction.expires_at.isoformat(),
             "bot_user_ref": f"{bot.id}@{bot.origin_domain}",
         },
+        audience_user_refs=(f"{bot.id}@{bot.origin_domain}",),
     )
     return {"id": str(interaction.id), "status": interaction.status}
 

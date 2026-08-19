@@ -98,10 +98,10 @@ separate trust layer.
 On Windows the release artifact is an NSIS setup executable, not a portable
 binary. It installs for the current user under `%LOCALAPPDATA%\Kaede Chat`,
 requires no elevation, and registers a normal uninstaller in Windows Installed
-apps. Its Start menu page allows the user to create or skip a Start menu
-shortcut. Windows does not permit installers to pin applications silently, so
-Kaede offers a foreground **Pin to taskbar** action after launch and Windows
-shows the final consent prompt. On Windows versions that do not expose the
+apps. The installer's Start menu page lets the user create or skip a Start
+menu shortcut. Windows doesn't let installers pin an application silently.
+Kaede offers a foreground **Pin to taskbar** action after launch, and Windows
+shows the final consent prompt. On Windows versions that don't expose the
 pinning API, users can right-click Kaede's running taskbar icon instead.
 
 The desktop client checks `latest.json` after launch and every six hours. It
@@ -110,11 +110,12 @@ restart**. This avoids interrupting calls, uploads, or unsent messages.
 
 The opt-in **Launch at sign-in** setting uses the operating system's startup
 registration. Sign-in launches keep the main window hidden in the system tray,
-but still restore the session and perform the normal immediate update check.
+but still restore the session and run the normal immediate update check.
 Regular launches continue to open the main window.
 
-Do not publish unsigned Windows or macOS packages, unsigned updater artifacts,
-or a release without `latest.json` as a production release. Keep
-the Android upload key stable across releases or users will be unable to install
-updates over an existing copy. Do not embed instance credentials, object-store
-credentials, signing keys, or a Turnstile secret in an application bundle.
+Do not publish unsigned Windows or macOS packages or unsigned updater
+artifacts as production releases, and do not publish a release that lacks
+`latest.json`. Keep the Android upload key stable across releases or users
+will be unable to install updates over an existing copy. Do not embed instance
+credentials, object-store credentials, signing keys, or a Turnstile secret in
+an application bundle.

@@ -6,7 +6,13 @@
 
 #![allow(clippy::missing_errors_doc)]
 
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashSet,
+    future::Future,
+    path::PathBuf,
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 use futures_util::{StreamExt, stream};
 use kaede_api::{
@@ -16,19 +22,26 @@ use kaede_api::{
 use kaede_auth::{AuthError, LoginOutcome, RegistrationResult, SessionManager, StatusResult};
 use kaede_cache::{Cache, CacheError};
 use kaede_core::{
-    AppState, Attachment, LinkPreview, Message, PendingMessage, PendingMessageState, Reduction,
-    User, UserSettings, VoiceState,
+    AppState, Attachment, LinkPreview, Message, PendingMessage, PendingMessageState, ReduceError,
+    Reduction, User, UserSettings, VoiceState,
 };
 use kaede_gateway::{GatewayCommand, GatewayStatus};
 use kaede_platform::{Notification, PlatformError, PlatformPaths, SystemCredentialVault};
 use kaede_protocol::{Domain, EntityRef};
 use kaede_turnstile::EmbeddedTurnstile;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 pub type NativeSession = SessionManager<SystemCredentialVault, EmbeddedTurnstile>;
+
+const PUBLIC_ASSET_BATCH_SIZE: usize = 64;
+const PUBLIC_ASSET_REVALIDATION_SLOTS: usize = 8;
+// Sweep well inside the five-minute disk TTL so assets added between ticks do
+// not remain trusted for another full TTL in an otherwise idle session.
+const PUBLIC_ASSET_REFRESH_INTERVAL: Duration =
+    Duration::from_secs(kaede_media::PUBLIC_ASSET_CACHE_TTL.as_secs() / 5);
 
 #[derive(Clone, Debug)]
 pub struct NativeMediaAsset {
@@ -66,6 +79,7 @@ pub struct AccountRuntime {
     events: mpsc::UnboundedSender<AccountEvent>,
     reconcile_lock: Mutex<()>,
     public_asset_refresh_lock: Mutex<()>,
+    public_asset_revalidations: Mutex<HashSet<String>>,
 }
 
 impl AccountRuntime {
@@ -79,15 +93,27 @@ impl AccountRuntime {
         self.api.endpoint().domain()
     }
 
-    /// Register without ever exposing the verification challenge to an
-    /// external browser. The short-lived restricted helper receives no Kaede
-    /// credentials, and no session is persisted until a later successful
-    /// sign-in.
+    /// This raw-password-shaped compatibility entry point always fails closed.
+    #[deprecated(note = "use register_with_password_protocol with client-derived KDF-v2 material")]
+    #[allow(clippy::unused_async)]
     pub async fn register(
         instance: &str,
         username: &str,
         email: Option<&str>,
         password: &str,
+    ) -> Result<RegistrationResult, AccountError> {
+        let _ = (instance, username, email, password);
+        Err(AuthError::PasswordProtocolRequired.into())
+    }
+
+    /// Register with an authentication secret and full KDF-v2 context prepared
+    /// by a trusted client. No raw account password may cross this boundary.
+    pub async fn register_with_password_protocol(
+        instance: &str,
+        username: &str,
+        email: Option<&str>,
+        authentication_secret: &SecretString,
+        password_kdf: &serde_json::Value,
     ) -> Result<RegistrationResult, AccountError> {
         let session = unauthenticated_session(instance, "registration")?;
         let config = session.config().await?;
@@ -109,7 +135,13 @@ impl AccountRuntime {
             None
         };
         session
-            .register(username, email, password, challenge.as_ref())
+            .register_with_password_protocol(
+                username,
+                email,
+                authentication_secret.expose_secret(),
+                password_kdf,
+                challenge.as_ref(),
+            )
             .await
             .map_err(Into::into)
     }
@@ -124,13 +156,31 @@ impl AccountRuntime {
             .map_err(Into::into)
     }
 
+    #[deprecated(
+        note = "use reset_password_with_password_protocol with client-derived KDF-v2 material"
+    )]
+    #[allow(clippy::unused_async)]
     pub async fn reset_password(
         instance: &str,
         token: &str,
         password: &str,
     ) -> Result<StatusResult, AccountError> {
+        let _ = (instance, token, password);
+        Err(AuthError::PasswordProtocolRequired.into())
+    }
+
+    pub async fn reset_password_with_password_protocol(
+        instance: &str,
+        token: &str,
+        authentication_secret: &SecretString,
+        password_kdf: &serde_json::Value,
+    ) -> Result<StatusResult, AccountError> {
         unauthenticated_session(instance, "recovery")?
-            .reset_password(&SecretString::from(token.to_owned()), password)
+            .reset_password_with_password_protocol(
+                &SecretString::from(token.to_owned()),
+                authentication_secret.expose_secret(),
+                password_kdf,
+            )
             .await
             .map_err(Into::into)
     }
@@ -185,10 +235,27 @@ impl AccountRuntime {
         }
     }
 
+    /// This raw-password-shaped compatibility entry point always fails closed.
+    #[deprecated(note = "use connect_with_password_protocol with client-derived KDF-v2 material")]
+    #[allow(clippy::unused_async)]
     pub async fn connect(
         instance: &str,
         identifier: &str,
         password: &str,
+        device_name: &str,
+        events: mpsc::UnboundedSender<AccountEvent>,
+    ) -> Result<Arc<Self>, AccountError> {
+        let _ = (instance, identifier, password, device_name, events);
+        Err(AuthError::PasswordProtocolRequired.into())
+    }
+
+    /// Connect with an authentication secret and exact full KDF-v2 context
+    /// prepared by a trusted client after selecting the instance origin.
+    pub async fn connect_with_password_protocol(
+        instance: &str,
+        identifier: &str,
+        authentication_secret: &SecretString,
+        password_kdf: &serde_json::Value,
         device_name: &str,
         events: mpsc::UnboundedSender<AccountEvent>,
     ) -> Result<Arc<Self>, AccountError> {
@@ -202,7 +269,14 @@ impl AccountRuntime {
             Arc::new(EmbeddedTurnstile),
             account_key.clone(),
         ));
-        authenticate(&session, identifier, password, device_name).await?;
+        authenticate_prepared(
+            &session,
+            identifier,
+            authentication_secret,
+            password_kdf,
+            device_name,
+        )
+        .await?;
 
         Self::finish_connect(api, session, account_key, events).await
     }
@@ -319,6 +393,7 @@ impl AccountRuntime {
             events: events.clone(),
             reconcile_lock: Mutex::new(()),
             public_asset_refresh_lock: Mutex::new(()),
+            public_asset_revalidations: Mutex::new(HashSet::new()),
         });
         tokio::spawn(async move {
             loop {
@@ -331,7 +406,11 @@ impl AccountRuntime {
                             let current = state.read().await;
                             notification_for_event(&current, &event)
                         };
-                        match state.write().await.reduce(event) {
+                        let reduction = {
+                            let mut current = state.write().await;
+                            reduce_gateway_event(&mut current, event)
+                        };
+                        match reduction {
                             Ok(reduction) => {
                                 purge_revoked_channels(
                                     &cache,
@@ -390,6 +469,14 @@ impl AccountRuntime {
             }
         });
         runtime.refresh_public_assets().await;
+        tokio::spawn(run_periodic_public_asset_refresh(
+            Arc::downgrade(&runtime),
+            PUBLIC_ASSET_REFRESH_INTERVAL,
+            |runtime| async move {
+                runtime.refresh_public_assets().await;
+                let _ = runtime.events.send(AccountEvent::StateChanged);
+            },
+        ));
         Ok(runtime)
     }
 
@@ -399,50 +486,46 @@ impl AccountRuntime {
     /// rendering or make account sign-in fail.
     pub async fn refresh_public_assets(&self) {
         let _guard = self.public_asset_refresh_lock.lock().await;
-        let requests = {
-            let state = self.state.read().await;
-            let mut requests = HashSet::new();
-            for user in state.users.values().chain(state.current_user.iter()) {
-                if let Some(hash) = user.avatar_hash.as_deref() {
-                    requests.insert((
-                        user.origin_domain.clone(),
-                        hash.to_owned(),
-                        "thumbnail_128".to_owned(),
-                    ));
-                }
-                if let Some(hash) = user.banner_hash.as_deref() {
-                    requests.insert((
-                        user.origin_domain.clone(),
-                        hash.to_owned(),
-                        "thumbnail_1024".to_owned(),
-                    ));
-                }
-            }
-            for guild in state.guilds.values() {
-                if let Some(hash) = guild.icon_hash.as_deref() {
-                    requests.insert((
-                        guild.origin_domain.clone(),
-                        hash.to_owned(),
-                        "thumbnail_128".to_owned(),
-                    ));
-                }
-                if let Some(hash) = guild.banner_hash.as_deref() {
-                    requests.insert((
-                        guild.origin_domain.clone(),
-                        hash.to_owned(),
-                        "thumbnail_1024".to_owned(),
-                    ));
-                }
-            }
+        let cached_entries = {
+            let mut state = self.state.write().await;
+            let requests = prune_unreferenced_public_assets(&mut state);
             requests
-                .into_iter()
-                .filter(|(origin, hash, variant)| {
-                    !state
+                .iter()
+                .filter_map(|(origin, hash, variant)| {
+                    let key = public_asset_key(origin, hash, variant);
+                    state
                         .public_assets
-                        .contains_key(&public_asset_key(origin, hash, variant))
+                        .get(&key)
+                        .map(|path| (key, path.clone()))
                 })
                 .collect::<Vec<_>>()
         };
+        let unusable_entries = unusable_public_asset_entries(cached_entries).await;
+        let (requests, available_keys, active_keys, newly_unusable_keys) = {
+            let mut state = self.state.write().await;
+            let requests = prune_unreferenced_public_assets(&mut state);
+            let mut newly_unusable_keys = HashSet::new();
+            for (key, checked_path) in unusable_entries {
+                if state.public_assets.get(&key) == Some(&checked_path) {
+                    state.public_assets.remove(&key);
+                    newly_unusable_keys.insert(key);
+                }
+            }
+            let available_keys = state.public_assets.keys().cloned().collect::<HashSet<_>>();
+            let active_keys = requests
+                .iter()
+                .map(|(origin, hash, variant)| public_asset_key(origin, hash, variant))
+                .collect::<HashSet<_>>();
+            (requests, available_keys, active_keys, newly_unusable_keys)
+        };
+        let revalidation_keys = {
+            let mut pending = self.public_asset_revalidations.lock().await;
+            pending.retain(|key| active_keys.contains(key) && !available_keys.contains(key));
+            pending.extend(newly_unusable_keys);
+            pending.clone()
+        };
+        let requests =
+            schedule_public_asset_requests(requests, &available_keys, &revalidation_keys);
         if requests.is_empty() {
             return;
         }
@@ -452,7 +535,7 @@ impl AccountRuntime {
         // continue filling the content-addressed cache in bounded batches.
         let media = kaede_media::MediaClient::new(self.api.clone());
         let public_asset_dir = self.public_asset_dir.clone();
-        let resolved = stream::iter(requests.into_iter().take(64))
+        let resolved = stream::iter(requests)
             .map(|(origin, hash, variant)| {
                 let media = media.clone();
                 let public_asset_dir = public_asset_dir.clone();
@@ -482,9 +565,26 @@ impl AccountRuntime {
             .filter_map(|item| async move { item })
             .collect::<Vec<_>>()
             .await;
-        if !resolved.is_empty() {
-            self.state.write().await.public_assets.extend(resolved);
-        }
+        let resolved_keys = resolved
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<HashSet<_>>();
+        let mut state = self.state.write().await;
+        let current_requests = prune_unreferenced_public_assets(&mut state);
+        let current_keys = current_requests
+            .iter()
+            .map(|(origin, hash, variant)| public_asset_key(origin, hash, variant))
+            .collect::<HashSet<_>>();
+        state.public_assets.extend(
+            resolved
+                .into_iter()
+                .filter(|(key, _)| current_keys.contains(key)),
+        );
+        drop(state);
+        self.public_asset_revalidations
+            .lock()
+            .await
+            .retain(|key| !resolved_keys.contains(key));
     }
 
     pub async fn load_channel(&self, channel: &EntityRef) -> Result<Vec<Message>, AccountError> {
@@ -1018,7 +1118,11 @@ impl AccountRuntime {
         patch: &kaede_api::service::ProfilePatch,
     ) -> Result<User, AccountError> {
         let user = self.service.update_me(patch).await?;
-        self.state.write().await.hydrate_identity(user.clone());
+        {
+            let mut state = self.state.write().await;
+            state.hydrate_identity(user.clone());
+            let _ = prune_unreferenced_public_assets(&mut state);
+        }
         let _ = self.events.send(AccountEvent::StateChanged);
         Ok(user)
     }
@@ -1420,14 +1524,21 @@ async fn purge_revoked_channels(cache: &Cache, account: &str, channels: &[Entity
     }
 }
 
-async fn authenticate(
+async fn authenticate_prepared(
     session: &NativeSession,
     identifier: &str,
-    password: &str,
+    authentication_secret: &SecretString,
+    password_kdf: &serde_json::Value,
     device_name: &str,
 ) -> Result<(), AccountError> {
     match session
-        .login(identifier, password, device_name, None)
+        .login_with_prepared_password(
+            identifier,
+            authentication_secret,
+            password_kdf,
+            device_name,
+            None,
+        )
         .await?
     {
         LoginOutcome::Authenticated => Ok(()),
@@ -1442,7 +1553,13 @@ async fn authenticate(
                 .solve_turnstile(site_key, "kaede-login-v1", uuid::Uuid::new_v4().to_string())
                 .await?;
             match session
-                .login(identifier, password, device_name, Some(&token))
+                .login_with_prepared_password(
+                    identifier,
+                    authentication_secret,
+                    password_kdf,
+                    device_name,
+                    Some(&token),
+                )
                 .await?
             {
                 LoginOutcome::Authenticated => Ok(()),
@@ -1463,6 +1580,134 @@ fn first_http_url(content: &str) -> Option<&str> {
 
 fn public_asset_key(origin: &Domain, content_hash: &str, variant: &str) -> String {
     format!("{origin}/{content_hash}/{variant}")
+}
+
+type PublicAssetRequest = (Domain, String, String);
+
+fn prune_unreferenced_public_assets(state: &mut AppState) -> HashSet<PublicAssetRequest> {
+    let mut requests = HashSet::new();
+    for user in state.users.values().chain(state.current_user.iter()) {
+        if let Some(hash) = user.avatar_hash.as_deref() {
+            requests.insert((
+                user.origin_domain.clone(),
+                hash.to_owned(),
+                "thumbnail_128".to_owned(),
+            ));
+        }
+        if let Some(hash) = user.banner_hash.as_deref() {
+            requests.insert((
+                user.origin_domain.clone(),
+                hash.to_owned(),
+                "thumbnail_1024".to_owned(),
+            ));
+        }
+    }
+    for guild in state.guilds.values() {
+        if let Some(hash) = guild.icon_hash.as_deref() {
+            requests.insert((
+                guild.origin_domain.clone(),
+                hash.to_owned(),
+                "thumbnail_128".to_owned(),
+            ));
+        }
+        if let Some(hash) = guild.banner_hash.as_deref() {
+            requests.insert((
+                guild.origin_domain.clone(),
+                hash.to_owned(),
+                "thumbnail_1024".to_owned(),
+            ));
+        }
+    }
+    let current_keys = requests
+        .iter()
+        .map(|(origin, hash, variant)| public_asset_key(origin, hash, variant))
+        .collect::<HashSet<_>>();
+    state
+        .public_assets
+        .retain(|key, _| current_keys.contains(key));
+    requests
+}
+
+fn schedule_public_asset_requests(
+    requests: HashSet<PublicAssetRequest>,
+    available_keys: &HashSet<String>,
+    revalidation_keys: &HashSet<String>,
+) -> Vec<PublicAssetRequest> {
+    let mut missing = Vec::new();
+    let mut revalidations = Vec::new();
+    for request in requests {
+        let key = public_asset_key(&request.0, &request.1, &request.2);
+        if available_keys.contains(&key) {
+            continue;
+        }
+        if revalidation_keys.contains(&key) {
+            revalidations.push(request);
+        } else {
+            missing.push(request);
+        }
+    }
+    let reserved_revalidations = revalidations.len().min(PUBLIC_ASSET_REVALIDATION_SLOTS);
+    let missing_count = missing
+        .len()
+        .min(PUBLIC_ASSET_BATCH_SIZE - reserved_revalidations);
+    let mut scheduled = Vec::with_capacity(PUBLIC_ASSET_BATCH_SIZE);
+    scheduled.extend(missing.drain(..missing_count));
+    let revalidation_count = revalidations
+        .len()
+        .min(PUBLIC_ASSET_BATCH_SIZE - scheduled.len());
+    scheduled.extend(revalidations.drain(..revalidation_count));
+    let remaining = PUBLIC_ASSET_BATCH_SIZE - scheduled.len();
+    scheduled.extend(missing.into_iter().take(remaining));
+    scheduled
+}
+
+async fn unusable_public_asset_entries(entries: Vec<(String, String)>) -> Vec<(String, String)> {
+    stream::iter(entries)
+        .map(|(key, path)| async move {
+            let cache_path = PathBuf::from(&path);
+            match kaede_media::public_asset_cache_is_fresh(&cache_path).await {
+                Ok(true) => None,
+                Ok(false) => Some((key, path)),
+                Err(error) => {
+                    tracing::debug!(%error, %path, "public media cache path was unreadable");
+                    Some((key, path))
+                }
+            }
+        })
+        .buffer_unordered(32)
+        .filter_map(|entry| async move { entry })
+        .collect()
+        .await
+}
+
+fn reduce_gateway_event(
+    state: &mut AppState,
+    event: kaede_protocol::GatewayEnvelope,
+) -> Result<Reduction, ReduceError> {
+    let reduction = state.reduce(event)?;
+    let _ = prune_unreferenced_public_assets(state);
+    Ok(reduction)
+}
+
+async fn run_periodic_public_asset_refresh<T, F, Fut>(
+    owner: Weak<T>,
+    period: Duration,
+    mut refresh: F,
+) where
+    T: Send + Sync + 'static,
+    F: FnMut(Arc<T>) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let first_tick = tokio::time::Instant::now() + period;
+    let mut interval = tokio::time::interval_at(first_tick, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let Some(owner) = owner.upgrade() else {
+            break;
+        };
+        refresh(owner).await;
+    }
 }
 
 fn safe_cache_component(value: &str) -> String {
@@ -1724,8 +1969,29 @@ pub enum AccountError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use kaede_protocol::GatewayEnvelope;
+
+    const PUBLIC_ASSET_HASH: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn public_asset_user(avatar_hash: Option<&str>) -> User {
+        let Ok(user) = serde_json::from_value(serde_json::json!({
+            "id": "1",
+            "origin_domain": "home.example",
+            "username": "turtle",
+            "display_name": null,
+            "avatar_hash": avatar_hash,
+            "banner_hash": null,
+            "bio": null,
+            "custom_status": null
+        })) else {
+            panic!("public asset user fixture should deserialize");
+        };
+        user
+    }
 
     fn history_attachment(path: &str) -> Attachment {
         let Ok(attachment) = serde_json::from_value(serde_json::json!({
@@ -1744,6 +2010,235 @@ mod tests {
             panic!("attachment fixture should deserialize");
         };
         attachment
+    }
+
+    #[allow(deprecated)]
+    #[tokio::test]
+    async fn raw_password_account_entry_points_fail_closed_before_io() {
+        assert!(matches!(
+            AccountRuntime::register("not a domain", "turtle", None, "raw-password").await,
+            Err(AccountError::Auth(AuthError::PasswordProtocolRequired))
+        ));
+        assert!(matches!(
+            AccountRuntime::reset_password("not a domain", "token", "raw-password").await,
+            Err(AccountError::Auth(AuthError::PasswordProtocolRequired))
+        ));
+        let (events, _receiver) = mpsc::unbounded_channel();
+        assert!(matches!(
+            AccountRuntime::connect(
+                "not a domain",
+                "turtle",
+                "raw-password",
+                "Kaede Desktop",
+                events,
+            )
+            .await,
+            Err(AccountError::Auth(AuthError::PasswordProtocolRequired))
+        ));
+    }
+
+    #[test]
+    fn public_asset_pruning_removes_paths_after_metadata_clears_hash() {
+        let mut state = AppState::default();
+        let user = public_asset_user(Some(PUBLIC_ASSET_HASH));
+        let current_key = public_asset_key(&user.origin_domain, PUBLIC_ASSET_HASH, "thumbnail_128");
+        let stale_key = public_asset_key(
+            &user.origin_domain,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "thumbnail_128",
+        );
+        state.hydrate_identity(user);
+        state
+            .public_assets
+            .insert(current_key.clone(), "/cache/current".to_owned());
+        state
+            .public_assets
+            .insert(stale_key, "/cache/stale".to_owned());
+
+        let requests = prune_unreferenced_public_assets(&mut state);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            state.public_assets.get(&current_key).map(String::as_str),
+            Some("/cache/current")
+        );
+        assert_eq!(state.public_assets.len(), 1);
+
+        state.hydrate_identity(public_asset_user(None));
+        let requests = prune_unreferenced_public_assets(&mut state);
+
+        assert!(requests.is_empty());
+        assert!(state.public_assets.is_empty());
+    }
+
+    #[test]
+    fn gateway_metadata_clear_prunes_public_asset_before_publish() {
+        let mut state = AppState::default();
+        let user = public_asset_user(Some(PUBLIC_ASSET_HASH));
+        let key = public_asset_key(&user.origin_domain, PUBLIC_ASSET_HASH, "thumbnail_128");
+        state.hydrate_identity(user);
+        state.public_assets.insert(key, "/cache/avatar".to_owned());
+        let Ok(payload) = serde_json::to_value(public_asset_user(None)) else {
+            panic!("public asset user fixture should serialize");
+        };
+        let event = GatewayEnvelope {
+            op: 0,
+            d: payload,
+            s: Some(1),
+            t: Some("USER_UPDATE".to_owned()),
+        };
+
+        let Ok(reduction) = reduce_gateway_event(&mut state, event) else {
+            panic!("user update should reduce");
+        };
+
+        assert!(reduction.changed);
+        assert!(state.public_assets.is_empty());
+        assert!(
+            state
+                .current_user
+                .as_ref()
+                .is_some_and(|user| user.avatar_hash.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn unusable_in_memory_public_asset_paths_are_selected_for_revalidation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory =
+            std::env::temp_dir().join(format!("kaede-app-public-assets-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&directory).await?;
+        let fresh = directory.join("fresh.asset");
+        let stale = directory.join("stale.asset");
+        let future = directory.join("future.asset");
+        let non_file = directory.join("directory.asset");
+        let missing = directory.join("missing.asset");
+        tokio::fs::write(&fresh, b"fresh").await?;
+        tokio::fs::write(&stale, b"stale").await?;
+        tokio::fs::write(&future, b"future").await?;
+        tokio::fs::create_dir(&non_file).await?;
+        std::fs::File::open(&stale)?
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60))?;
+        std::fs::File::open(&future)?
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60 * 60))?;
+
+        let unusable = unusable_public_asset_entries(vec![
+            ("fresh".to_owned(), fresh.to_string_lossy().into_owned()),
+            ("stale".to_owned(), stale.to_string_lossy().into_owned()),
+            ("future".to_owned(), future.to_string_lossy().into_owned()),
+            (
+                "non-file".to_owned(),
+                non_file.to_string_lossy().into_owned(),
+            ),
+            ("missing".to_owned(), missing.to_string_lossy().into_owned()),
+        ])
+        .await
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<HashSet<_>>();
+
+        assert_eq!(
+            unusable,
+            HashSet::from([
+                "stale".to_owned(),
+                "future".to_owned(),
+                "non-file".to_owned(),
+                "missing".to_owned(),
+            ])
+        );
+        tokio::fs::remove_dir_all(directory).await?;
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_batch_reserves_capacity_for_stale_revalidation() {
+        let Ok(domain) = Domain::parse("home.example") else {
+            panic!("test domain should parse");
+        };
+        let mut requests = HashSet::new();
+        for index in 0_u8..80 {
+            requests.insert((
+                domain.clone(),
+                format!("{index:064x}"),
+                "thumbnail_128".to_owned(),
+            ));
+        }
+        let revalidation = (
+            domain.clone(),
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned(),
+            "thumbnail_128".to_owned(),
+        );
+        let revalidation_key = public_asset_key(&revalidation.0, &revalidation.1, &revalidation.2);
+        requests.insert(revalidation);
+        let revalidation_keys = HashSet::from([revalidation_key.clone()]);
+
+        let scheduled =
+            schedule_public_asset_requests(requests.clone(), &HashSet::new(), &revalidation_keys);
+
+        assert_eq!(
+            scheduled.len(),
+            PUBLIC_ASSET_BATCH_SIZE,
+            "the network batch must stay bounded"
+        );
+        assert_eq!(
+            scheduled
+                .iter()
+                .filter(|request| {
+                    public_asset_key(&request.0, &request.1, &request.2) == revalidation_key
+                })
+                .count(),
+            1,
+            "a recurring missing backlog must not starve an expired cache entry"
+        );
+        let scheduled_after_failed_revalidation =
+            schedule_public_asset_requests(requests, &HashSet::new(), &revalidation_keys);
+        assert!(scheduled_after_failed_revalidation.iter().any(|request| {
+            public_asset_key(&request.0, &request.1, &request.2) == revalidation_key
+        }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_refresh_waits_for_interval_and_stops_with_weak_owner() {
+        assert_eq!(PUBLIC_ASSET_REFRESH_INTERVAL, Duration::from_secs(60));
+        assert!(PUBLIC_ASSET_REFRESH_INTERVAL < kaede_media::PUBLIC_ASSET_CACHE_TTL);
+        let owner = Arc::new(());
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let callback_invocations = Arc::clone(&invocations);
+        let task = tokio::spawn(run_periodic_public_asset_refresh(
+            Arc::downgrade(&owner),
+            PUBLIC_ASSET_REFRESH_INTERVAL,
+            move |_| {
+                let callback_invocations = Arc::clone(&callback_invocations);
+                async move {
+                    callback_invocations.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        ));
+        tokio::task::yield_now().await;
+
+        assert_eq!(Arc::strong_count(&owner), 1);
+        assert_eq!(invocations.load(Ordering::SeqCst), 0);
+        let Some(before_first_tick) =
+            PUBLIC_ASSET_REFRESH_INTERVAL.checked_sub(Duration::from_secs(1))
+        else {
+            panic!("public asset refresh interval should exceed one second");
+        };
+        tokio::time::advance(before_first_tick).await;
+        tokio::task::yield_now().await;
+        assert_eq!(invocations.load(Ordering::SeqCst), 0);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(invocations.load(Ordering::SeqCst), 1);
+        assert_eq!(Arc::strong_count(&owner), 1);
+
+        drop(owner);
+        tokio::time::advance(PUBLIC_ASSET_REFRESH_INTERVAL).await;
+        tokio::task::yield_now().await;
+        let Ok(()) = task.await else {
+            panic!("periodic refresh task should stop cleanly");
+        };
+        assert_eq!(invocations.load(Ordering::SeqCst), 1);
     }
 
     #[test]

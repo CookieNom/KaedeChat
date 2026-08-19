@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 from typing import cast
+from urllib.parse import urlsplit
 
 import structlog
 from fastapi import HTTPException
@@ -28,6 +29,68 @@ VOICE_SERVER_DEAF = 1 << 1
 VOICE_FLAG_MASK = VOICE_SERVER_MUTE | VOICE_SERVER_DEAF
 MEDIA_E2EE_PROTOCOL = "livekit-e2ee-v1"
 MEDIA_E2EE_SUITE = "AES-256-GCM"
+
+
+def valid_federated_voice_url(value: str, authority_domain: str) -> bool:
+    """Accept only a configured TLS LiveKit endpoint on the signed authority."""
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme == "wss"
+        and parsed.hostname == authority_domain
+        and port in {None, 443}
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/", "/livekit"}
+        and "?" not in value
+        and "#" not in value
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def federated_voice_grant_matches(
+    grant: VoiceTokenResponse,
+    channel: Channel,
+    *,
+    expected_room: str,
+    authority_domain: str,
+) -> bool:
+    """Bind a federated media grant to the exact requested room and policy.
+
+    The channel reference and endpoint are authorization context even for a
+    plaintext room.  Keeping those checks outside the encrypted-only branch
+    prevents an authority response from substituting a different room or media
+    host while still returning ``e2ee=false``.
+    """
+
+    encrypted = channel.encryption_mode == "e2ee"
+    if (
+        grant.room != expected_room
+        or not valid_federated_voice_url(grant.url, authority_domain)
+        or grant.channel_id != str(channel.id)
+        or grant.channel_domain != channel.origin_domain
+        or grant.e2ee != encrypted
+    ):
+        return False
+    if not encrypted:
+        # VoiceTokenResponse already requires every encryption-context field to
+        # be absent for a plaintext grant.
+        return True
+    return bool(
+        channel.encryption_state == "active"
+        and channel.encryption_epoch is not None
+        and grant.encryption_policy_generation == str(channel.encryption_policy_generation)
+        and grant.encryption_epoch == str(channel.encryption_epoch)
+        and grant.media_protocol == MEDIA_E2EE_PROTOCOL
+        and grant.media_suite == MEDIA_E2EE_SUITE
+        and grant.media_session_id == media_session_id(channel, expected_room)
+        and grant.media_epoch == str(channel.encryption_epoch)
+    )
 
 
 def media_session_id(channel: Channel, room: str) -> str:

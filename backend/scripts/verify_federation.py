@@ -34,9 +34,17 @@ from app.db.models import (
 )
 from app.db.session import create_engine_and_sessionmaker
 from app.federation.delivery import drain_destination
-from scripts.verification import VerificationFailure, failure_message, require
+from scripts.verification import (
+    PASSWORD_KDF_VERSION,
+    VerificationFailure,
+    authentication_secret,
+    failure_message,
+    require,
+)
 
 PASSWORD = "correct horse battery staple"  # noqa: S105 - disposable validation credential
+PASSWORD_AUTH_SALT = bytes(range(16))
+PASSWORD_VAULT_SALT = bytes(reversed(range(16)))
 ALPHA_URL = os.getenv("ALPHA_URL", "http://alpha-api:8000")
 BETA_URL = os.getenv("BETA_URL", "http://beta-api:8000")
 ALPHA_DATABASE_URL = os.environ["ALPHA_DATABASE_URL"]
@@ -71,6 +79,9 @@ async def seed_user(database_url: str, domain: str, user_id: int, username: str)
     try:
         async with sessionmaker() as session:
             user = await session.get(User, (user_id, domain))
+            password_hash = hash_password(
+                authentication_secret(PASSWORD, domain, PASSWORD_AUTH_SALT)
+            )
             if user is None:
                 user = User(
                     id=user_id,
@@ -78,8 +89,11 @@ async def seed_user(database_url: str, domain: str, user_id: int, username: str)
                     is_local=True,
                     username=username,
                     email=f"{username}@example.test",
-                    password_hash=hash_password(PASSWORD),
                     email_verified_at=datetime.now(UTC),
+                    password_hash=password_hash,
+                    password_kdf_version=2,
+                    password_auth_salt=PASSWORD_AUTH_SALT,
+                    e2ee_vault_salt=PASSWORD_VAULT_SALT,
                 )
                 session.add(user)
                 await session.flush()
@@ -91,7 +105,12 @@ async def seed_user(database_url: str, domain: str, user_id: int, username: str)
                         dm_privacy="everyone",
                     )
                 )
-                await session.commit()
+            else:
+                user.password_hash = password_hash
+                user.password_kdf_version = 2
+                user.password_auth_salt = PASSWORD_AUTH_SALT
+                user.e2ee_vault_salt = PASSWORD_VAULT_SALT
+            await session.commit()
     finally:
         await engine.dispose()
 
@@ -145,11 +164,15 @@ async def wait_for(
     raise VerificationFailure(f"{message}; last observed result: {detail}")
 
 
-async def login(client: httpx.AsyncClient, username: str) -> dict[str, str]:
+async def login(client: httpx.AsyncClient, username: str, domain: str) -> dict[str, str]:
     response = await client.post(
         "/api/v1/auth/login",
         headers={"X-Kaede-Client": "mobile"},
-        json={"identifier": username, "password": PASSWORD},
+        json={
+            "identifier": username,
+            "password": authentication_secret(PASSWORD, domain, PASSWORD_AUTH_SALT),
+            "password_kdf_version": PASSWORD_KDF_VERSION,
+        },
     )
     require(response.status_code == 200, f"{username} login failed: {response.text}")
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
@@ -347,8 +370,8 @@ async def verify() -> None:
         httpx.AsyncClient(base_url=ALPHA_URL, timeout=15, verify=TLS_CA_FILE or True) as alpha,
         httpx.AsyncClient(base_url=BETA_URL, timeout=15, verify=TLS_CA_FILE or True) as beta,
     ):
-        alice = await login(alpha, "alice")
-        bob = await login(beta, "bob")
+        alice = await login(alpha, "alice", "alpha.localhost")
+        bob = await login(beta, "bob", "beta.localhost")
         profile_update = await alpha.patch(
             "/api/v1/users/@me",
             headers=alice,

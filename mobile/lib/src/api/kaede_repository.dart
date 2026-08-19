@@ -107,11 +107,13 @@ Future<Map<String, Object?>> commitScannedMedia({
 }
 
 void _throwForTerminalMediaStatus(String status) {
-  if (status != 'infected' && status != 'failed') return;
+  if (status != 'rejected' && status != 'infected' && status != 'failed') {
+    return;
+  }
   throw KaedeException(
     code: 'MEDIA_PROCESSING_REJECTED',
-    message: status == 'infected'
-        ? 'The image did not pass the server’s safety scan. Choose a different file.'
+    message: status == 'rejected' || status == 'infected'
+        ? 'The server rejected this image during processing. Choose a different file.'
         : 'The server could not process the image. Try another file or try again later.',
     status: 422,
   );
@@ -231,8 +233,6 @@ final class KaedeRepository {
         'identifier': identifier,
         'password': prepared.authenticationSecret,
         'password_kdf_version': prepared.context.version,
-        if (prepared.passwordUpgrade case final upgrade?)
-          'password_upgrade': upgrade,
         'device_name': deviceName ?? '${Platform.operatingSystem} mobile',
         if (turnstileToken != null) 'turnstile_token': turnstileToken,
       });

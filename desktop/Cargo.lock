@@ -3307,6 +3307,7 @@ name = "kaede-auth"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "kaede-api",
  "kaede-platform",
  "secrecy",

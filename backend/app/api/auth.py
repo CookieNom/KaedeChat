@@ -172,14 +172,19 @@ def fake_password_salt(settings: Settings, identifier: str, purpose: str) -> byt
     ).digest()[:16]
 
 
-def password_kdf_version(user: User | None) -> int:
-    return 2 if user is not None and user.password_kdf_version == 2 else 0
-
-
 def submitted_password_protocol_matches(user: User | None, submitted: int) -> bool:
     # Unknown accounts deliberately behave like modern accounts so the public
     # KDF lookup cannot be turned into a reliable account-enumeration oracle.
-    expected = password_kdf_version(user) if user is not None else 2
+    expected = (
+        2
+        if user is None
+        or (
+            user.password_kdf_version == 2
+            and user.password_auth_salt is not None
+            and user.e2ee_vault_salt is not None
+        )
+        else -1
+    )
     return secrets.compare_digest(str(expected), str(submitted))
 
 
@@ -335,8 +340,7 @@ async def password_key_derivation(
     if not await redis.set(f"auth:kdf:{rate_key}", "1", ex=1, nx=True):
         raise auth_error("RATE_LIMITED", "Try again shortly", 429)
     user = await session.scalar(
-        select(User)
-        .where(
+        select(User).where(
             User.is_local.is_(True),
             User.account_type == "human",
             or_(
@@ -344,9 +348,13 @@ async def password_key_derivation(
                 func.lower(User.username) == canonical_identifier,
             ),
         )
-        .with_for_update()
     )
-    if user is None:
+    if (
+        user is None
+        or user.password_kdf_version != 2
+        or user.password_auth_salt is None
+        or user.e2ee_vault_salt is None
+    ):
         return {
             "version": 2,
             "algorithm": "PBKDF2-SHA256",
@@ -358,22 +366,11 @@ async def password_key_derivation(
                 fake_password_salt(settings, canonical_identifier, "vault")
             ),
         }
-    if user.e2ee_vault_salt is None:
-        user.e2ee_vault_salt = secrets.token_bytes(16)
-        await session.commit()
-    if user.password_kdf_version == 2 and user.password_auth_salt is not None:
-        return {
-            "version": 2,
-            "algorithm": "PBKDF2-SHA256",
-            "iterations": 600_000,
-            "auth_salt": encode_password_salt(user.password_auth_salt),
-            "vault_salt": encode_password_salt(user.e2ee_vault_salt),
-        }
     return {
-        "version": 0,
-        "algorithm": "legacy",
-        "iterations": 0,
-        "auth_salt": None,
+        "version": 2,
+        "algorithm": "PBKDF2-SHA256",
+        "iterations": 600_000,
+        "auth_salt": encode_password_salt(user.password_auth_salt),
         "vault_salt": encode_password_salt(user.e2ee_vault_salt),
     }
 
@@ -732,16 +729,6 @@ async def login(
             turnstile_enabled=settings.turnstile_enabled,
             failed_account_key=account_key,
         )
-    credentials_upgraded = False
-    if user.password_kdf_version is None and payload.password_upgrade is not None:
-        user.password_hash = await hash_submitted_password(payload.password_upgrade.password)
-        user.password_kdf_version = payload.password_upgrade.password_kdf.version
-        user.password_auth_salt = decode_password_salt(
-            payload.password_upgrade.password_kdf.auth_salt
-        )
-        if user.e2ee_vault_salt is None:
-            user.e2ee_vault_salt = secrets.token_bytes(16)
-        credentials_upgraded = True
     if user.disabled_at is not None:
         await reject_invalid_login(
             limiter,
@@ -758,11 +745,6 @@ async def login(
     if user.totp_secret_encrypted is not None:
         if await mfa_attempt_locked(redis, user.id, user.origin_domain, ip):
             raise mfa_rate_limited()
-        # The MFA ticket is fingerprinted to the upgraded credentials. Persist
-        # them before returning the ticket so /auth/mfa observes the same
-        # fingerprint in its independent request/transaction.
-        if credentials_upgraded:
-            await session.commit()
         ticket = await issue_mfa_ticket(redis, user)
         return JSONResponse({"mfa_required": True, "mfa_ticket": ticket, "token_type": "opaque"})
     issued = await create_session(

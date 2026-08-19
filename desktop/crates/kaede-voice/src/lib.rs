@@ -69,7 +69,6 @@ pub struct VoiceGrant {
     pub can_use_vad: bool,
     #[serde(default)]
     pub move_session_id: Option<String>,
-    #[serde(default)]
     pub e2ee: bool,
     #[serde(default)]
     pub channel_id: Option<String>,
@@ -87,6 +86,77 @@ pub struct VoiceGrant {
     pub media_session_id: Option<String>,
     #[serde(default)]
     pub media_epoch: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExpectedVoicePolicy {
+    pub e2ee: bool,
+    pub room: String,
+    pub channel_id: String,
+    pub channel_domain: String,
+    pub encryption_policy_generation: Option<String>,
+    pub encryption_epoch: Option<String>,
+    pub media_protocol: Option<String>,
+    pub media_suite: Option<String>,
+    pub media_session_id: Option<String>,
+    pub media_epoch: Option<String>,
+}
+
+impl ExpectedVoicePolicy {
+    fn matches(&self, grant: &VoiceGrant) -> bool {
+        let context = (
+            self.encryption_policy_generation.as_deref(),
+            self.encryption_epoch.as_deref(),
+            self.media_protocol.as_deref(),
+            self.media_suite.as_deref(),
+            self.media_session_id.as_deref(),
+            self.media_epoch.as_deref(),
+        );
+        let internally_valid = if self.e2ee {
+            context.0.is_some_and(valid_decimal)
+                && context.1.is_some_and(valid_decimal)
+                && context.2 == Some("livekit-e2ee-v1")
+                && context.3 == Some("AES-256-GCM")
+                && context.4.is_some_and(valid_media_session_id)
+                && context.5 == context.1
+        } else {
+            [
+                context.0, context.1, context.2, context.3, context.4, context.5,
+            ]
+            .iter()
+            .all(Option::is_none)
+        };
+        internally_valid
+            && !self.room.is_empty()
+            && !self.channel_id.is_empty()
+            && !self.channel_domain.is_empty()
+            && grant.e2ee == self.e2ee
+            && grant.room == self.room
+            && grant.channel_id.as_deref() == Some(self.channel_id.as_str())
+            && grant.channel_domain.as_deref() == Some(self.channel_domain.as_str())
+            && grant.encryption_policy_generation == self.encryption_policy_generation
+            && grant.encryption_epoch == self.encryption_epoch
+            && grant.media_protocol == self.media_protocol
+            && grant.media_suite == self.media_suite
+            && grant.media_session_id == self.media_session_id
+            && grant.media_epoch == self.media_epoch
+    }
+}
+
+fn valid_decimal(value: &str) -> bool {
+    value == "0"
+        || (value
+            .bytes()
+            .next()
+            .is_some_and(|byte| matches!(byte, b'1'..=b'9'))
+            && value.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn valid_media_session_id(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -166,6 +236,7 @@ pub async fn join_channel(
     channel: &EntityRef,
     capture_settings: CaptureSettings,
     output_device: Option<String>,
+    expected_policy: ExpectedVoicePolicy,
     media_key: Option<Vec<u8>>,
     sender_device_id: Option<&str>,
 ) -> Result<VoiceHandle, VoiceError> {
@@ -175,7 +246,14 @@ pub async fn join_channel(
             &serde_json::json!({"sender_device_id": sender_device_id}),
         )
         .await?;
-    Box::pin(join(grant, capture_settings, output_device, media_key)).await
+    Box::pin(join(
+        grant,
+        capture_settings,
+        output_device,
+        expected_policy,
+        media_key,
+    ))
+    .await
 }
 
 /// Obtains a home-instance grant and joins a direct-message call.
@@ -189,6 +267,7 @@ pub async fn join_call(
     call: &EntityRef,
     capture_settings: CaptureSettings,
     output_device: Option<String>,
+    expected_policy: ExpectedVoicePolicy,
     media_key: Option<Vec<u8>>,
     sender_device_id: Option<&str>,
 ) -> Result<VoiceHandle, VoiceError> {
@@ -198,16 +277,24 @@ pub async fn join_call(
             &serde_json::json!({"sender_device_id": sender_device_id}),
         )
         .await?;
-    Box::pin(join(grant, capture_settings, output_device, media_key)).await
+    Box::pin(join(
+        grant,
+        capture_settings,
+        output_device,
+        expected_policy,
+        media_key,
+    ))
+    .await
 }
 
 async fn join(
     grant: VoiceGrant,
     capture_settings: CaptureSettings,
     output_device: Option<String>,
+    expected_policy: ExpectedVoicePolicy,
     media_key: Option<Vec<u8>>,
 ) -> Result<VoiceHandle, VoiceError> {
-    let room_options = media_room_options(&grant, media_key)?;
+    let room_options = media_room_options(&grant, &expected_policy, media_key)?;
     let move_session_id = grant.move_session_id.clone();
     if grant.can_speak
         && capture_settings.mode == kaede_audio::InputMode::VoiceActivity
@@ -296,8 +383,15 @@ async fn join(
 
 fn media_room_options(
     grant: &VoiceGrant,
+    expected: &ExpectedVoicePolicy,
     media_key: Option<Vec<u8>>,
 ) -> Result<RoomOptions, VoiceError> {
+    if !expected.matches(grant) {
+        if let Some(mut key) = media_key {
+            key.fill(0);
+        }
+        return Err(VoiceError::EncryptionPolicyMismatch);
+    }
     match (grant.e2ee, media_key) {
         (false, None) => Ok(RoomOptions::default()),
         (false, Some(mut key)) => {
@@ -316,12 +410,10 @@ fn media_room_options(
                 || grant.encryption_epoch.as_deref().is_none_or(str::is_empty)
                 || grant.media_protocol.as_deref() != Some("livekit-e2ee-v1")
                 || grant.media_suite.as_deref() != Some("AES-256-GCM")
-                || grant.media_session_id.as_deref().is_none_or(|value| {
-                    value.len() != 43
-                        || !value
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-                })
+                || grant
+                    .media_session_id
+                    .as_deref()
+                    .is_none_or(|value| !valid_media_session_id(value))
                 || grant.media_epoch != grant.encryption_epoch
             {
                 key.fill(0);
@@ -1037,7 +1129,50 @@ fn disconnect_message(reason: DisconnectReason) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{DisconnectReason, VoiceError, disconnect_message};
+    use secrecy::SecretString;
+
+    use super::{
+        DisconnectReason, ExpectedVoicePolicy, VoiceError, VoiceGrant, disconnect_message,
+        media_room_options,
+    };
+
+    fn grant(e2ee: bool) -> VoiceGrant {
+        VoiceGrant {
+            token: SecretString::from("x".repeat(32)),
+            url: "wss://chat.example/livekit".to_owned(),
+            room: "g.1.2".to_owned(),
+            generation: 0,
+            expires_at: "2026-08-18T12:00:00Z".to_owned(),
+            can_speak: true,
+            can_stream: true,
+            can_use_vad: true,
+            move_session_id: None,
+            e2ee,
+            channel_id: Some("2".to_owned()),
+            channel_domain: Some("chat.example".to_owned()),
+            encryption_policy_generation: e2ee.then(|| "4".to_owned()),
+            encryption_epoch: e2ee.then(|| "7".to_owned()),
+            media_protocol: e2ee.then(|| "livekit-e2ee-v1".to_owned()),
+            media_suite: e2ee.then(|| "AES-256-GCM".to_owned()),
+            media_session_id: e2ee.then(|| "a".repeat(43)),
+            media_epoch: e2ee.then(|| "7".to_owned()),
+        }
+    }
+
+    fn expected(e2ee: bool) -> ExpectedVoicePolicy {
+        ExpectedVoicePolicy {
+            e2ee,
+            room: "g.1.2".to_owned(),
+            channel_id: "2".to_owned(),
+            channel_domain: "chat.example".to_owned(),
+            encryption_policy_generation: e2ee.then(|| "4".to_owned()),
+            encryption_epoch: e2ee.then(|| "7".to_owned()),
+            media_protocol: e2ee.then(|| "livekit-e2ee-v1".to_owned()),
+            media_suite: e2ee.then(|| "AES-256-GCM".to_owned()),
+            media_session_id: e2ee.then(|| "a".repeat(43)),
+            media_epoch: e2ee.then(|| "7".to_owned()),
+        }
+    }
 
     #[test]
     fn voice_errors_explain_the_recovery_action() {
@@ -1059,5 +1194,41 @@ mod tests {
             "This account joined voice from another client, so this connection was closed."
         );
         assert!(disconnect_message(DisconnectReason::ConnectionTimeout).contains("join again"));
+    }
+
+    #[test]
+    fn native_voice_policy_is_bidirectional_before_media_setup() {
+        assert!(media_room_options(&grant(false), &expected(false), None).is_ok());
+        assert!(media_room_options(&grant(true), &expected(true), Some(vec![7; 32])).is_ok());
+        assert!(matches!(
+            media_room_options(&grant(false), &expected(true), None),
+            Err(VoiceError::EncryptionPolicyMismatch)
+        ));
+        assert!(matches!(
+            media_room_options(&grant(true), &expected(false), Some(vec![7; 32])),
+            Err(VoiceError::EncryptionPolicyMismatch)
+        ));
+        let mut changed = grant(true);
+        changed.media_session_id = Some("b".repeat(43));
+        assert!(matches!(
+            media_room_options(&changed, &expected(true), Some(vec![7; 32])),
+            Err(VoiceError::EncryptionPolicyMismatch)
+        ));
+    }
+
+    #[test]
+    fn native_voice_grant_requires_an_explicit_encryption_mode() {
+        let value = serde_json::json!({
+            "token": "x".repeat(32),
+            "url": "wss://chat.example/livekit",
+            "room": "g.1.2",
+            "generation": 0,
+            "expires_at": "2026-08-18T12:00:00Z",
+            "can_speak": true,
+            "can_stream": true,
+            "channel_id": "2",
+            "channel_domain": "chat.example"
+        });
+        assert!(serde_json::from_value::<VoiceGrant>(value).is_err());
     }
 }

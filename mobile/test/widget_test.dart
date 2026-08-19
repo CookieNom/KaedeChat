@@ -726,7 +726,7 @@ void main() {
       await expectLater(
         commitScannedMedia(
           commit: () async => <String, Object?>{'scan_status': 'pending'},
-          status: () async => <String, Object?>{'scan_status': 'infected'},
+          status: () async => <String, Object?>{'scan_status': 'rejected'},
           pollInterval: Duration.zero,
         ),
         throwsA(isA<KaedeException>().having(

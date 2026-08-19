@@ -16,7 +16,7 @@ export const PASSWORD_KDF_VERSION = 2 as const;
 export const PASSWORD_KDF_ALGORITHM = 'PBKDF2-SHA256' as const;
 export const PASSWORD_KDF_ITERATIONS = 600_000;
 
-export interface ModernPasswordKdfContext {
+export interface PasswordKdfContext {
   version: typeof PASSWORD_KDF_VERSION;
   algorithm: typeof PASSWORD_KDF_ALGORITHM;
   iterations: typeof PASSWORD_KDF_ITERATIONS;
@@ -24,42 +24,23 @@ export interface ModernPasswordKdfContext {
   vault_salt: string;
 }
 
-export type PasswordKdfRegistration = ModernPasswordKdfContext;
-
-export interface LegacyPasswordKdfContext {
-  version: 0;
-  algorithm: 'legacy';
-  iterations: 0;
-  auth_salt: null;
-  vault_salt: string;
-}
-
-export type PasswordKdfContext = ModernPasswordKdfContext | LegacyPasswordKdfContext;
+export type PasswordKdfRegistration = PasswordKdfContext;
 
 export interface PreparedPassword {
   authenticationSecret: string;
   vaultKey: CryptoKey;
   context: PasswordKdfContext;
-  passwordUpgrade?: {
-    password: string;
-    password_kdf: Omit<PasswordKdfRegistration, 'vault_salt'>;
-  };
 }
 
 function requireContext(value: PasswordKdfContext): PasswordKdfContext {
-  const modern =
+  const supported =
     value.version === PASSWORD_KDF_VERSION &&
     value.algorithm === PASSWORD_KDF_ALGORITHM &&
     value.iterations === PASSWORD_KDF_ITERATIONS;
-  const legacy =
-    value.version === 0 &&
-    value.algorithm === 'legacy' &&
-    value.iterations === 0 &&
-    value.auth_salt === null;
-  if (!modern && !legacy) {
+  if (!supported) {
     throw new Error('This server uses an unsupported password protection scheme.');
   }
-  if (modern) validatePasswordSalt(value.auth_salt as string, 'authentication');
+  validatePasswordSalt(value.auth_salt, 'authentication');
   validatePasswordSalt(value.vault_salt, 'encryption-vault');
   return value;
 }
@@ -192,24 +173,6 @@ export async function preparePassword(
 ): Promise<PreparedPassword> {
   const checked = requireContext(context);
   const material = await passwordMaterial(password);
-  if (checked.version === 0) {
-    const authSalt = randomBase64url(16);
-    const upgradedSecret = await authenticationSecret(material, authSalt);
-    return {
-      authenticationSecret: password,
-      vaultKey: await encryptionVaultKey(material, checked.vault_salt),
-      context: checked,
-      passwordUpgrade: {
-        password: upgradedSecret,
-        password_kdf: {
-          version: PASSWORD_KDF_VERSION,
-          algorithm: PASSWORD_KDF_ALGORITHM,
-          iterations: PASSWORD_KDF_ITERATIONS,
-          auth_salt: authSalt
-        }
-      }
-    };
-  }
   const [authSecret, vaultKey] = await Promise.all([
     authenticationSecret(material, checked.auth_salt),
     encryptionVaultKey(material, checked.vault_salt)

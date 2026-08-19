@@ -60,8 +60,10 @@ from app.federation.replication import (
     replicate_group_notice,
 )
 from app.federation.schemas import RemoteUserProfile
+from app.federation.terminal_rooms import queue_terminal_room_deletion
 from app.federation.users import resolve_handle
-from app.tasks import federation_deliver
+from app.media.tombstones import prepare_terminal_channel_media
+from app.tasks import federation_deliver, media_local_purge
 
 router = APIRouter(prefix="/api/v1/users/@me/channels", tags=["direct messages"])
 
@@ -118,14 +120,8 @@ async def queue_group_state(
     deleted: bool = False,
     notice: dict[str, object] | None = None,
 ) -> set[str]:
-    envelope = await build_envelope(
-        session,
-        settings,
-        "dm.group.state",
-        actor,
-        group_conversation_content(
-            conversation, channel, participants, deleted=deleted, notice=notice
-        ),
+    content = group_conversation_content(
+        conversation, channel, participants, deleted=deleted, notice=notice
     )
     destinations = {
         participant.origin_domain
@@ -133,8 +129,31 @@ async def queue_group_state(
         if participant.origin_domain != settings.domain
     } | (extra_domains or set())
     destinations.discard(settings.domain)
-    for destination in destinations:
-        await queue_event(session, settings, destination, envelope)
+    if deleted:
+        if notice is not None or participants:
+            raise RuntimeError("terminal group state must not retain participants or a notice")
+        await queue_terminal_room_deletion(
+            session,
+            settings,
+            room_kind="group_dm",
+            room_id=conversation.id,
+            room_domain=conversation.origin_domain,
+            actor=actor,
+            event_type="dm.group.state",
+            content=content,
+            context={},
+            destinations=destinations,
+        )
+    else:
+        envelope = await build_envelope(
+            session,
+            settings,
+            "dm.group.state",
+            actor,
+            content,
+        )
+        for destination in destinations:
+            await queue_event(session, settings, destination, envelope)
     return destinations
 
 
@@ -914,6 +933,15 @@ async def mutate_group(
     notice_ref = (
         (notice_message.id, notice_message.origin_domain) if notice_message is not None else None
     )
+    local_media_purges: list[tuple[int, str]] = []
+    terminal_state_destinations: set[str] = set()
+    media_delivery_wakes: set[str] = set()
+    if deleted:
+        (
+            local_media_purges,
+            terminal_state_destinations,
+            media_delivery_wakes,
+        ) = await prepare_terminal_channel_media(session, settings, channel)
     destinations = await queue_group_state(
         session,
         settings,
@@ -921,7 +949,7 @@ async def mutate_group(
         conversation,
         channel,
         participants,
-        extra_domains={user.origin_domain for user in before},
+        extra_domains={user.origin_domain for user in before} | terminal_state_destinations,
         deleted=deleted,
         notice=notice_payload,
     )
@@ -938,8 +966,10 @@ async def mutate_group(
         notice_ref,
         participants,
     )
-    for destination in destinations:
+    for destination in destinations | media_delivery_wakes:
         await enqueue_best_effort(federation_deliver, destination)
+    for attachment_id, attachment_domain in local_media_purges:
+        await enqueue_best_effort(media_local_purge, attachment_id, attachment_domain)
     if deleted or not any(
         (user.id, user.origin_domain) == (auth.user.id, auth.user.origin_domain)
         for user in participants

@@ -53,9 +53,7 @@ from app.voice.schemas import (
     VoiceTokenResponse,
 )
 from app.voice.service import (
-    MEDIA_E2EE_PROTOCOL,
-    MEDIA_E2EE_SUITE,
-    media_session_id,
+    federated_voice_grant_matches,
     require_e2ee_voice_device,
     require_voice_enabled,
     voice_e2ee_context,
@@ -718,19 +716,11 @@ async def call_voice_token(
         raise HTTPException(
             status_code=502, detail={"code": "VOICE_HOME_INVALID_RESPONSE"}
         ) from exc
-    if grant.e2ee != (channel.encryption_mode == "e2ee") or (
-        grant.e2ee
-        and (
-            channel.encryption_state != "active"
-            or grant.channel_id != str(channel.id)
-            or grant.channel_domain != channel.origin_domain
-            or grant.encryption_policy_generation != str(channel.encryption_policy_generation)
-            or grant.encryption_epoch != str(channel.encryption_epoch)
-            or grant.media_protocol != MEDIA_E2EE_PROTOCOL
-            or grant.media_suite != MEDIA_E2EE_SUITE
-            or grant.media_session_id != media_session_id(channel, str(record["room"]))
-            or grant.media_epoch != str(channel.encryption_epoch)
-        )
+    if not federated_voice_grant_matches(
+        grant,
+        channel,
+        expected_room=str(record["room"]),
+        authority_domain=authority,
     ):
         raise HTTPException(status_code=502, detail={"code": "VOICE_HOME_INVALID_RESPONSE"})
     await discard_all_federated_voice_home_sessions(redis, identity)

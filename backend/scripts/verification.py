@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import re
+from typing import Any
 
 MAX_FAILURE_MESSAGE_LENGTH = 2_000
 _PRIVATE_KEY_BLOCK = re.compile(
@@ -41,6 +44,48 @@ _BEARER_CREDENTIAL = re.compile(r"(?i)\bbearer\s+[^\s,;\"']+")
 _CREDENTIAL_URL = re.compile(r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@")
 _KAEDE_TOKEN = re.compile(r"\bkc1_(?:at|rt|mfa|ot)_[A-Za-z0-9._~-]+")
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+
+PASSWORD_KDF_VERSION = 2
+PASSWORD_KDF_ALGORITHM = "PBKDF2-SHA256"  # noqa: S105 - protocol label
+PASSWORD_KDF_ITERATIONS = 600_000
+
+
+def authentication_secret(password: str, domain: str, auth_salt: bytes) -> str:
+    """Derive the exact v2 authentication secret used by verification clients."""
+
+    if len(auth_salt) != 16:
+        raise ValueError("verification password authentication salt must be 16 bytes")
+    bound_salt = f"kaede-password-kdf-v2\0auth\0{domain}\0".encode() + auth_salt
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode(),
+        bound_salt,
+        PASSWORD_KDF_ITERATIONS,
+        dklen=32,
+    )
+    return base64.urlsafe_b64encode(derived).decode().rstrip("=")
+
+
+def password_kdf_metadata(
+    auth_salt: bytes,
+    *,
+    vault_salt: bytes | None = None,
+) -> dict[str, Any]:
+    """Render the strict v2 registration/reset metadata for a test credential."""
+
+    if len(auth_salt) != 16:
+        raise ValueError("verification password authentication salt must be 16 bytes")
+    if vault_salt is not None and len(vault_salt) != 16:
+        raise ValueError("verification password vault salt must be 16 bytes")
+    payload: dict[str, Any] = {
+        "version": PASSWORD_KDF_VERSION,
+        "algorithm": PASSWORD_KDF_ALGORITHM,
+        "iterations": PASSWORD_KDF_ITERATIONS,
+        "auth_salt": base64.urlsafe_b64encode(auth_salt).decode().rstrip("="),
+    }
+    if vault_salt is not None:
+        payload["vault_salt"] = base64.urlsafe_b64encode(vault_salt).decode().rstrip("=")
+    return payload
 
 
 def _sanitize_failure_message(message: str) -> str:

@@ -543,13 +543,13 @@ async def _eligible_replica_messages(
             MessageProjection.message_domain == Message.origin_domain,
             MessageProjection.processed_at.is_(None),
         ),
-        # Locally uploaded bytes are authoritative on this instance. Preserve
-        # their owning message so signed media authorization remains possible.
+        # Locally uploaded bytes and their terminal recipient ledger are
+        # authoritative on this instance. Preserve the owning message through
+        # the tombstone's indefinite delivery/re-sign lifecycle.
         ~exists().where(
             Attachment.message_id == Message.id,
             Attachment.message_domain == Message.origin_domain,
             Attachment.origin_domain == settings.domain,
-            Attachment.deleted_at.is_(None),
         ),
     ]
     if conversation is not None:

@@ -17,7 +17,18 @@ from app.email.outbox import drain_email_outbox
 from app.gateway import app as gateway_app
 from app.main import app as api_app
 from scripts.email_tokens import token_from_email
-from scripts.verification import VerificationFailure, failure_message, require
+from scripts.verification import (
+    PASSWORD_KDF_VERSION,
+    VerificationFailure,
+    authentication_secret,
+    failure_message,
+    password_kdf_metadata,
+    require,
+)
+
+PASSWORD = "correct horse battery staple"  # noqa: S105 - disposable validation credential
+AUTH_SALT = bytes(range(16))
+VAULT_SALT = bytes(reversed(range(16)))
 
 
 def register(
@@ -27,7 +38,8 @@ def register(
     client_ip: str,
     deliver_mail: Callable[[], None],
 ) -> None:
-    proxy_secret = get_settings().proxy_secret
+    settings = get_settings()
+    proxy_secret = settings.proxy_secret
     if proxy_secret is None:
         raise VerificationFailure(
             "KAEDE_PROXY_SECRET is not configured for the validation environment"
@@ -41,7 +53,11 @@ def register(
         json={
             "username": username,
             "email": f"{username}@example.com",
-            "password": "correct horse battery staple",
+            "password": authentication_secret(PASSWORD, settings.domain, AUTH_SALT),
+            "password_kdf": password_kdf_metadata(
+                AUTH_SALT,
+                vault_salt=VAULT_SALT,
+            ),
         },
     )
     require(response.status_code == 201, f"{username} registration failed: {response.text}")
@@ -53,10 +69,15 @@ def register(
 
 
 def login(client: TestClient, username: str) -> dict[str, str]:
+    settings = get_settings()
     response = client.post(
         "/api/v1/auth/login",
         headers={"X-Kaede-Client": "mobile"},
-        json={"identifier": username, "password": "correct horse battery staple"},
+        json={
+            "identifier": username,
+            "password": authentication_secret(PASSWORD, settings.domain, AUTH_SALT),
+            "password_kdf_version": PASSWORD_KDF_VERSION,
+        },
     )
     require(response.status_code == 200, f"{username} login failed: {response.text}")
     return cast(dict[str, str], response.json())

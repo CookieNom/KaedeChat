@@ -4,6 +4,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -717,6 +718,197 @@ async def test_guild_delivery_fails_closed_after_lost_membership_dispatch(
     assert (42, "alpha.test") not in summary.guilds
     assert (42, "alpha.test") not in summary.channels
     assert (42, "alpha.test") not in summary.acl_fences
+
+
+@pytest.mark.asyncio
+async def test_live_interaction_delivery_is_hidden_from_human_guild_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway, "current_acl_fence", AsyncMock(return_value=(3, 7)))
+
+    class Socket:
+        sent: list[dict[str, Any]] = []
+
+        async def send_json(self, value: dict[str, Any]) -> None:
+            self.sent.append(value)
+
+    class PubSub:
+        async def unsubscribe(self, *_topics: str) -> None:
+            raise AssertionError("a targeted event must not revoke guild membership")
+
+    user = User(
+        id=7,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        email="maple@example.com",
+        password_hash="hash",
+    )
+    visibility = gateway.VisibilitySummary(
+        {(42, "alpha.test")},
+        {(42, "alpha.test"): {(99, "alpha.test")}},
+        {(42, "alpha.test"): (3, 7)},
+    )
+    cursors = {"guild:alpha.test:42": 0}
+    socket = Socket()
+    sequence = await gateway.deliver_topic_event(
+        socket,  # type: ignore[arg-type]
+        PubSub(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        user,
+        visibility,
+        "guild:alpha.test:42",
+        {
+            "t": "INTERACTION_CREATE",
+            "topic_seq": 1,
+            # Even a list that contains the current user must fail closed when
+            # an interaction has more than its one canonical bot recipient.
+            "audience_user_refs": ["10@apps.test", "7@alpha.test"],
+            "d": {
+                "bot_user_ref": "10@apps.test",
+                "channel_id": "99",
+                "channel_domain": "alpha.test",
+                "options": {"secret": "value"},
+            },
+        },
+        ["guild:alpha.test:42"],
+        cursors,
+        4,
+    )
+
+    assert sequence == 4
+    assert socket.sent == []
+    assert cursors == {"guild:alpha.test:42": 1}
+
+
+def test_interactions_without_a_valid_explicit_audience_fail_closed() -> None:
+    user = User(
+        id=10,
+        origin_domain="apps.test",
+        is_local=False,
+        account_type="bot",
+        username="weather_bot",
+        password_hash=None,
+    )
+    base = {
+        "t": "INTERACTION_CREATE",
+        "d": {"bot_user_ref": "10@apps.test", "options": {"secret": "value"}},
+    }
+    assert not gateway.dispatch_audience_allows(user, base)
+    assert not gateway.dispatch_audience_allows(user, {**base, "audience_user_refs": []})
+    assert not gateway.dispatch_audience_allows(
+        user, {**base, "audience_user_refs": ["11@apps.test"]}
+    )
+    assert not gateway.dispatch_audience_allows(
+        user, {**base, "audience_user_refs": ["10@apps.test", "7@people.test"]}
+    )
+    assert not gateway.dispatch_audience_allows(
+        user,
+        {
+            **base,
+            "d": {**base["d"], "bot_user_ref": "010@apps.test"},
+            "audience_user_refs": ["010@apps.test"],
+        },
+    )
+    assert gateway.dispatch_audience_allows(user, {**base, "audience_user_refs": ["10@apps.test"]})
+
+
+@pytest.mark.asyncio
+async def test_attachment_update_is_filtered_by_private_channel_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unchanged_fence(*_args: object) -> tuple[int, int]:
+        return 3, 7
+
+    monkeypatch.setattr(gateway, "current_acl_fence", unchanged_fence)
+    summary = gateway.VisibilitySummary(
+        {(42, "alpha.test")},
+        {(42, "alpha.test"): {(99, "alpha.test")}},
+        {(42, "alpha.test"): (3, 7)},
+    )
+    user = User(
+        id=7,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        email="maple@example.com",
+        password_hash="hash",
+    )
+
+    visible, member = await gateway.event_visibility(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        user,
+        summary,
+        "guild:alpha.test:42",
+        {
+            "t": "ATTACHMENT_UPDATE",
+            "d": {
+                "message_id": "11",
+                "message_domain": "alpha.test",
+                "channel_id": "100",
+                "channel_domain": "alpha.test",
+                "attachment": {"id": "13", "scan_status": "rejected"},
+            },
+        },
+    )
+
+    assert not visible
+    assert member
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "channel_fields",
+    [
+        {},
+        {"channel_id": "99"},
+        {"channel_domain": "alpha.test"},
+        {"channel_id": "not-a-snowflake", "channel_domain": "alpha.test"},
+    ],
+)
+async def test_attachment_update_without_a_canonical_channel_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    channel_fields: dict[str, str],
+) -> None:
+    async def unchanged_fence(*_args: object) -> tuple[int, int]:
+        return 3, 7
+
+    monkeypatch.setattr(gateway, "current_acl_fence", unchanged_fence)
+    summary = gateway.VisibilitySummary(
+        {(42, "alpha.test")},
+        {(42, "alpha.test"): {(99, "alpha.test")}},
+        {(42, "alpha.test"): (3, 7)},
+    )
+    user = User(
+        id=7,
+        origin_domain="alpha.test",
+        is_local=True,
+        username="maple",
+        email="maple@example.com",
+        password_hash="hash",
+    )
+
+    visible, member = await gateway.event_visibility(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        user,
+        summary,
+        "guild:alpha.test:42",
+        {
+            "t": "ATTACHMENT_UPDATE",
+            "d": {
+                "message_id": "11",
+                "message_domain": "alpha.test",
+                "attachment": {"id": "13", "scan_status": "rejected"},
+                **channel_fields,
+            },
+        },
+    )
+
+    assert not visible
+    assert member
 
 
 @pytest.mark.asyncio

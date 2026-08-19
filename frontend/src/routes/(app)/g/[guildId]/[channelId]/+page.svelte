@@ -2157,10 +2157,19 @@
     } else if (dispatch.t === 'VOICE_TOKEN') {
       const update = dispatch.d as {
         move_session_id?: string;
+        channel_id: string;
+        channel_domain: string;
         grant: import('$lib/voice/session').VoiceToken;
       };
       if ((update.move_session_id ?? null) === (update.grant.move_session_id ?? null)) {
-        window.dispatchEvent(new CustomEvent('kaede:voice-token', { detail: update.grant }));
+        window.dispatchEvent(
+          new CustomEvent('kaede:voice-token', {
+            detail: {
+              grant: update.grant,
+              channelRef: `${update.channel_id}@${update.channel_domain}`
+            }
+          })
+        );
       }
     }
   }

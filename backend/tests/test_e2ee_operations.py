@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
@@ -75,6 +76,18 @@ def test_room_operation_requests_require_canonical_operation_and_vault_context()
         RoomActivationRequest.model_validate(
             {**activation.model_dump(), "prepared_vault_digest": VAULT_DIGEST + "="}
         )
+
+
+def test_control_capture_migration_defaults_unreconciled_controls_to_audit() -> None:
+    migration = (
+        Path(__file__).parents[1]
+        / "migrations/versions/e5c7b9a1d204_fail_closed_e2ee_control_capture.py"
+    ).read_text()
+    assert 'down_revision: str | None = "a1c6e8f2d940"' in migration
+    assert (
+        '_create_control_capture_function(welcome_mode="audit", commit_mode="audit")' in migration
+    )
+    assert "WHERE room_operation_id IS NULL" in migration
 
 
 def test_federation_activation_requires_complete_positive_attestation() -> None:
@@ -443,7 +456,7 @@ async def test_claiming_operation_retry_releases_room_lock_before_user_package_l
         participant_refs=[{"id": "7", "domain": "alpha.localhost"}],
         key_packages=[],
         prepared_response=None,
-        expires_at=datetime(2026, 8, 19, tzinfo=UTC),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     session = SimpleNamespace(
         scalar=AsyncMock(side_effect=[operation, operation]),

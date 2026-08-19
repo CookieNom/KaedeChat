@@ -6,6 +6,7 @@ import binascii
 import json
 import secrets
 import time
+from collections.abc import Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from functools import reduce
@@ -24,10 +25,9 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from redis.asyncio import Redis
-from sqlalchemy import and_, delete, exists, func, or_, select, tuple_
+from sqlalchemy import and_, delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -38,7 +38,6 @@ from app.api.e2ee import (
     RoomRekeyActivationRequest,
     activate_room_encryption_attested,
     activate_room_rekey_attested,
-    apply_e2ee_control_metadata,
     claim_local_room_key_packages,
     propose_room_encryption,
     propose_room_rekey,
@@ -59,6 +58,11 @@ from app.chat.e2ee import (
     validate_channel_encryption_policy_transition,
     validate_e2ee_envelope,
     validate_message_encryption_policy,
+)
+from app.chat.e2ee_controls import (
+    authority_attested_direct_dm_control,
+    authority_attested_room_policy_change,
+    room_policy_change_context,
 )
 from app.chat.e2ee_membership import (
     e2ee_policy_destinations,
@@ -99,7 +103,14 @@ from app.chat.permissions import (
 )
 from app.chat.privacy import require_can_direct_message
 from app.core.dm import dm_authority_domain, dm_pair_key
-from app.core.federation import FEDERATION_CAPABILITIES, canonical_json, verify_envelope
+from app.core.federation import (
+    FEDERATION_CAPABILITIES,
+    canonical_json,
+    guild_media_delete_request_ref,
+    terminal_room_event_ref,
+    terminal_room_generation,
+    verify_envelope,
+)
 from app.core.json_limits import strict_json_loads
 from app.core.metrics import increment_metric
 from app.core.permissions import Permission
@@ -125,6 +136,8 @@ from app.db.models import (
     GuildMember,
     Instance,
     Invite,
+    MediaTombstoneDestination,
+    MediaTombstoneSource,
     MemberRole,
     Message,
     MessageProjection,
@@ -132,8 +145,11 @@ from app.db.models import (
     Pin,
     Reaction,
     RemoteGuildMembershipIntent,
+    RemoteMediaCache,
     RemoteMediaTombstone,
     Role,
+    RoomFederationRecipient,
+    TerminalRoomDeletion,
     User,
 )
 from app.federation.client import signed_request
@@ -146,7 +162,19 @@ from app.federation.dm_storage import (
     dm_history_metadata,
     register_federated_dm_conversation,
 )
-from app.federation.events import build_envelope, queue_event
+from app.federation.events import (
+    attachment_refs_from_payloads,
+    build_envelope,
+    locked_retained_media_delete_events,
+    media_delete_generation,
+    media_delete_order,
+    message_attachment_refs,
+    metadata_room_ref,
+    queue_event,
+    record_attachment_recipients,
+    record_disclosed_attachment_recipients,
+    record_room_federation_recipient,
+)
 from app.federation.guilds import (
     GUILD_MUTATION_EVENT_TYPES,
     HISTORY_ACCESS_MUTATION_EVENT_TYPES,
@@ -244,11 +272,31 @@ from app.federation.storage import (
     current_federation_storage_usage,
     federation_storage_quota_exceeded,
 )
+from app.federation.terminal_rooms import (
+    lock_terminal_room,
+    queue_terminal_room_deletion,
+    terminal_room_base_content,
+)
+from app.media.payloads import terminal_attachment_update_payload
+from app.media.service import discard_attachment
 from app.media.storage import S3Storage, StorageError
+from app.media.tombstones import (
+    historical_attachment_destinations_by_ref,
+    lock_media_tombstone_ref,
+    lock_terminal_room_media_fences,
+    prepare_terminal_channel_media,
+    prepare_terminal_guild_media,
+    prepare_terminal_room_media_by_ref,
+    queue_terminal_attachment_tombstone,
+    record_media_tombstone_destinations,
+    terminal_attachment_refs_for_messages,
+)
 from app.tasks import (
     federation_deliver,
     federation_guild_sync,
     federation_history_sync_guild,
+    media_cache_gc,
+    media_local_purge,
     media_remote_purge,
     mentions_fanout,
 )
@@ -309,6 +357,12 @@ async def heartbeat_federation_link(
 
 class FederationResyncRetry(RuntimeError):
     """A valid resync marker could not yet complete its callback sync."""
+
+
+class RemoteMediaTombstoneQuotaExceeded(RuntimeError):
+    """A valid media tombstone must be retried after retention capacity frees."""
+
+    federation_code = "KAED_FED_REMOTE_MEDIA_TOMBSTONE_QUOTA_EXCEEDED"
 
 
 @router.websocket("/_kaede/v1/link")
@@ -456,7 +510,15 @@ async def federation_link(websocket: WebSocket) -> None:
                         )
                         continue
                     policy_code = await federation_event_policy_code(
-                        session, principal.origin, event.type
+                        session,
+                        principal.origin,
+                        event.type,
+                        deletion_control=(
+                            event.type == "media.delete"
+                            or terminal_room_event_ref(event.model_dump(mode="json")) is not None
+                            or guild_media_delete_request_ref(event.model_dump(mode="json"))
+                            is not None
+                        ),
                     )
                     if policy_code is not None:
                         results.append(
@@ -867,6 +929,78 @@ async def remote_guild_snapshot_is_pending(
     )
 
 
+async def media_delete_cascade_is_complete(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    attachment_id: int,
+    attachment_domain: str,
+    event_id: str,
+    upstream_domain: str,
+) -> bool:
+    """Return whether every downstream recipient acknowledged this proof.
+
+    A relay must keep its upstream sender retrying until all children have
+    durably accepted the selected origin-signed generation.  Otherwise the
+    origin can compact its source proof and retire its signing key while a
+    transitive recipient is still offline.
+    """
+
+    destinations = await historical_attachment_destinations_by_ref(
+        session,
+        attachment_id,
+        attachment_domain,
+    )
+    destinations.difference_update(
+        {settings.domain, attachment_domain, normalize_domain(upstream_domain)}
+    )
+    if not destinations:
+        return True
+    delivered = set(
+        await session.scalars(
+            select(FederationOutbox.destination).where(
+                FederationOutbox.destination.in_(destinations),
+                FederationOutbox.event_origin_domain == attachment_domain,
+                FederationOutbox.event_id == event_id,
+                FederationOutbox.status == "delivered",
+            )
+        )
+    )
+    return destinations <= delivered
+
+
+def post_commit_inbox_result(event_id: str, *, media_delete_cascade_pending: bool) -> InboxResult:
+    """Preserve transitive media acknowledgement after a durable commit."""
+
+    if media_delete_cascade_pending:
+        return InboxResult(
+            event_id=event_id,
+            status="retry",
+            code="KAED_FED_MEDIA_DELETE_CASCADE_PENDING",
+        )
+    return InboxResult(event_id=event_id, status="accepted")
+
+
+def superseded_media_delete_result(
+    event_id: str,
+    *,
+    incoming_generation: int,
+    selected_event_id: str,
+    selected_generation: int,
+) -> InboxResult | None:
+    """Classify a proof that cannot advance the retained generation."""
+
+    if incoming_generation < selected_generation:
+        return InboxResult(event_id=event_id, status="duplicate")
+    if incoming_generation == selected_generation and event_id != selected_event_id:
+        return InboxResult(
+            event_id=event_id,
+            status="rejected",
+            code="KAED_FED_MEDIA_DELETE_GENERATION_CONFLICT",
+        )
+    return None
+
+
 async def process_event(
     session: AsyncSession,
     redis: Redis,
@@ -880,20 +1014,71 @@ async def process_event(
         "dm.group.message.committed",
         "dm.group.call.create",
     }
-    if envelope.origin != principal.origin or (
+    relayed_media_delete = envelope.type == "media.delete" and envelope.origin != principal.origin
+    authority_attested_direct_control = authority_attested_direct_dm_control(
+        envelope.type,
+        envelope.content,
+        expected_authority=envelope.origin,
+        actor_id=envelope.actor.id,
+        actor_domain=envelope.actor.domain,
+    )
+    authority_attested_policy_change = authority_attested_room_policy_change(
+        envelope.type,
+        envelope.content,
+        envelope.context,
+        expected_authority=envelope.origin,
+        actor_id=envelope.actor.id,
+        actor_domain=envelope.actor.domain,
+    )
+    if (envelope.origin != principal.origin and not relayed_media_delete) or (
         envelope.actor.domain != principal.origin
         and envelope.type not in authority_attested_group_types
+        and not authority_attested_direct_control
+        and not authority_attested_policy_change
+        and not relayed_media_delete
     ):
         return InboxResult(
             event_id=envelope.event_id,
             status="rejected",
             code="KAED_FED_AUTHOR_ORIGIN_MISMATCH",
         )
+    if envelope.type == "media.delete" and envelope.actor.domain != envelope.origin:
+        # Relays transport the origin's exact signed proof; they do not gain
+        # authority to attribute that proof to a user on another instance.
+        return InboxResult(
+            event_id=envelope.event_id,
+            status="rejected",
+            code="KAED_FED_AUTHOR_ORIGIN_MISMATCH",
+        )
+    if relayed_media_delete:
+        origin_policy_code = await federation_event_policy_code(
+            session,
+            envelope.origin,
+            envelope.type,
+            deletion_control=True,
+        )
+        if origin_policy_code is not None:
+            return InboxResult(
+                event_id=envelope.event_id,
+                status="retry",
+                code=origin_policy_code,
+            )
+    serialized_envelope = envelope.model_dump(mode="json")
+    terminal_room_ref = terminal_room_event_ref(serialized_envelope)
+    guild_media_request_ref = guild_media_delete_request_ref(serialized_envelope)
     if not event_timestamp_allowed(
         envelope.ts,
         now_ms=int(time.time() * 1000),
         future_skew_seconds=settings.federation_clock_skew_seconds,
         retention_days=settings.federation_event_retention_days,
+        # Origin-signed media tombstones are permanent invalidation records.
+        # A peer recovering after a long outage must still accept them; future
+        # skew remains bounded and signature/replay checks still apply.
+        allow_past=(
+            envelope.type == "media.delete"
+            or terminal_room_ref is not None
+            or guild_media_request_ref is not None
+        ),
     ):
         return InboxResult(
             event_id=envelope.event_id,
@@ -915,11 +1100,21 @@ async def process_event(
 
     valid, refresh_key = await verify_cached_event_signatures()
     if not valid and refresh_key is not None:
+        signing_principal = (
+            FederationPrincipal(
+                origin=envelope.origin,
+                key_id=refresh_key,
+                silenced=False,
+                source_ip=principal.source_ip,
+            )
+            if relayed_media_delete
+            else principal
+        )
         refreshed = await refresh_event_signing_keys(
             session,
             redis,
             settings,
-            principal,
+            signing_principal,
             refresh_key,
         )
         if not refreshed:
@@ -934,8 +1129,307 @@ async def process_event(
         return InboxResult(
             event_id=envelope.event_id, status="rejected", code="KAED_FED_BAD_EVENT_SIGNATURE"
         )
-    serialized_envelope = envelope.model_dump(mode="json")
+    ordinary_room_ref = metadata_room_ref(serialized_envelope)
+    ordinary_attachment_refs = message_attachment_refs(serialized_envelope)
+    if guild_media_request_ref is not None:
+        (
+            request_guild_id,
+            request_guild_domain,
+            _request_message_id,
+            _request_message_domain,
+            request_attachment_id,
+            request_attachment_domain,
+            _request_generation,
+        ) = guild_media_request_ref
+        await lock_terminal_room(
+            session,
+            "guild",
+            request_guild_id,
+            request_guild_domain,
+        )
+        await lock_media_tombstone_ref(
+            session,
+            request_attachment_id,
+            request_attachment_domain,
+        )
+    if ordinary_room_ref is not None and terminal_room_ref is None:
+        # A durable terminal receipt is a no-resurrection fence for every
+        # delayed pre-delete room event. Serialize this check with disclosure
+        # and terminal apply before claiming inbox quota or creating replicas.
+        await lock_terminal_room(session, *ordinary_room_ref)
+        if (
+            await session.get(
+                TerminalRoomDeletion,
+                (*ordinary_room_ref, settings.domain),
+                populate_existing=True,
+            )
+            is not None
+        ):
+            await session.rollback()
+            return InboxResult(event_id=envelope.event_id, status="duplicate")
+    if terminal_room_ref is None and guild_media_request_ref is None:
+        # Every attachment-bearing writer takes its media fences before the
+        # global quota Instance row.  queue_event/replication later reacquire
+        # these transaction-scoped advisory locks, preserving the canonical
+        # room -> media -> global -> outbox order.
+        for attachment_id, attachment_domain in sorted(
+            ordinary_attachment_refs, key=lambda ref: (ref[1], ref[0])
+        ):
+            await lock_media_tombstone_ref(session, attachment_id, attachment_domain)
     envelope_bytes = len(canonical_json(serialized_envelope))
+    media_attachment_ref: tuple[int, str] | None = None
+    media_replacement_event: FederationEvent | None = None
+    media_replacement_inbox: FederationInbox | None = None
+    media_signing_key_id: str | None = None
+    terminal_room_receipt: TerminalRoomDeletion | None = None
+    terminal_room_replacement_event: FederationEvent | None = None
+    terminal_room_replacement_inbox: FederationInbox | None = None
+    terminal_room_signing_key_id: str | None = None
+    terminal_room_incoming_generation: int | None = None
+    past_ordinary_retention = envelope.ts < int(
+        (datetime.now(UTC) - timedelta(days=settings.federation_event_retention_days)).timestamp()
+        * 1000
+    )
+    if guild_media_request_ref is not None:
+        request_attachment_ref = (
+            guild_media_request_ref[4],
+            guild_media_request_ref[5],
+        )
+        if request_attachment_ref[1] != settings.domain:
+            return InboxResult(
+                event_id=envelope.event_id,
+                status="rejected",
+                code="KAED_FED_EVENT_INVALID",
+            )
+        if await session.get(MediaTombstoneSource, request_attachment_ref) is not None:
+            await session.rollback()
+            return InboxResult(event_id=envelope.event_id, status="duplicate")
+        if past_ordinary_retention:
+            request_route_exists = (
+                await session.scalar(
+                    select(MediaTombstoneDestination.attachment_id)
+                    .where(
+                        MediaTombstoneDestination.attachment_id == request_attachment_ref[0],
+                        MediaTombstoneDestination.attachment_domain == request_attachment_ref[1],
+                        MediaTombstoneDestination.destination_domain == envelope.origin,
+                        MediaTombstoneDestination.room_kind == "guild",
+                        MediaTombstoneDestination.room_id == guild_media_request_ref[0],
+                        MediaTombstoneDestination.room_domain == guild_media_request_ref[1],
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+            if (
+                await session.get(Attachment, request_attachment_ref) is None
+                and not request_route_exists
+            ):
+                await session.rollback()
+                return InboxResult(event_id=envelope.event_id, status="duplicate")
+    elif envelope.type == "media.delete":
+        try:
+            attachment_origin = normalize_domain(str(envelope.content.get("origin_domain", "")))
+            if attachment_origin != envelope.origin:
+                raise ValueError("media tombstone is not authoritative for the attachment")
+            attachment_number = database_snowflake(
+                envelope.content.get("attachment_id"), "attachment id"
+            )
+            incoming_generation = media_delete_generation(serialized_envelope)
+            if len(signatures) != 1:
+                raise ValueError("media tombstone must have exactly one origin signature")
+            media_signing_key_id = next(iter(signatures))
+        except (FederationNetworkError, ValueError):
+            return InboxResult(
+                event_id=envelope.event_id,
+                status="rejected",
+                code="KAED_FED_EVENT_INVALID",
+            )
+        media_attachment_ref = (attachment_number, attachment_origin)
+        # Serialize generation comparison before quota admission and before the
+        # inbox/event claim. A delayed E1 can therefore never overwrite E2,
+        # even if both transactions passed signature verification together.
+        await locked_retained_media_delete_events(
+            session,
+            attachment_number,
+            attachment_origin,
+        )
+        await lock_media_tombstone_ref(session, attachment_number, attachment_origin)
+        existing_source = await session.scalar(
+            select(MediaTombstoneSource)
+            .where(
+                MediaTombstoneSource.attachment_id == attachment_number,
+                MediaTombstoneSource.attachment_domain == attachment_origin,
+            )
+            .with_for_update()
+        )
+        if existing_source is not None:
+            superseded = superseded_media_delete_result(
+                envelope.event_id,
+                incoming_generation=incoming_generation,
+                selected_event_id=existing_source.event_id,
+                selected_generation=existing_source.generation,
+            )
+            if superseded is not None:
+                # Delayed older outboxes may drain; equal-generation
+                # equivocation is terminally rejected for operator visibility.
+                await session.rollback()
+                return superseded
+            if incoming_generation == existing_source.generation:
+                cascade_complete = bool(
+                    await media_delete_cascade_is_complete(
+                        session,
+                        settings,
+                        attachment_id=attachment_number,
+                        attachment_domain=attachment_origin,
+                        event_id=existing_source.event_id,
+                        upstream_domain=principal.origin,
+                    )
+                )
+                await session.rollback()
+                return InboxResult(
+                    event_id=envelope.event_id,
+                    status="duplicate" if cascade_complete else "retry",
+                    code=(None if cascade_complete else "KAED_FED_MEDIA_DELETE_CASCADE_PENDING"),
+                )
+            media_replacement_event = await session.get(
+                FederationEvent,
+                (attachment_origin, existing_source.event_id),
+            )
+            media_replacement_inbox = await session.get(
+                FederationInbox,
+                (attachment_origin, existing_source.event_id),
+            )
+        elif past_ordinary_retention:
+            has_live_media_state = any(
+                (
+                    await session.get(
+                        Attachment,
+                        (attachment_number, attachment_origin),
+                    )
+                    is not None,
+                    await session.get(
+                        RemoteMediaTombstone,
+                        (attachment_origin, attachment_number),
+                    )
+                    is not None,
+                    await session.scalar(
+                        select(RemoteMediaCache.attachment_id)
+                        .where(
+                            RemoteMediaCache.origin_domain == attachment_origin,
+                            RemoteMediaCache.attachment_id == attachment_number,
+                        )
+                        .limit(1)
+                    )
+                    is not None,
+                    await session.scalar(
+                        select(MediaTombstoneDestination.attachment_id)
+                        .where(
+                            MediaTombstoneDestination.attachment_id == attachment_number,
+                            MediaTombstoneDestination.attachment_domain == attachment_origin,
+                        )
+                        .limit(1)
+                    )
+                    is not None,
+                )
+            )
+            if not has_live_media_state:
+                await session.rollback()
+                return InboxResult(event_id=envelope.event_id, status="duplicate")
+    elif terminal_room_ref is not None:
+        room_kind, room_id, room_domain = terminal_room_ref
+        try:
+            terminal_room_incoming_generation = terminal_room_generation(serialized_envelope)
+            if len(signatures) != 1:
+                raise ValueError("terminal room deletion must have one origin signature")
+            terminal_room_signing_key_id = next(iter(signatures))
+        except ValueError:
+            return InboxResult(
+                event_id=envelope.event_id,
+                status="rejected",
+                code="KAED_FED_EVENT_INVALID",
+            )
+        # Close the room's bound + routed media set before quota admission.
+        # Terminal apply can safely reuse all three transaction locks below.
+        await lock_terminal_room_media_fences(
+            session,
+            room_kind=room_kind,
+            room_id=room_id,
+            room_domain=room_domain,
+        )
+        terminal_room_receipt = await session.scalar(
+            select(TerminalRoomDeletion)
+            .where(
+                TerminalRoomDeletion.room_kind == room_kind,
+                TerminalRoomDeletion.room_id == room_id,
+                TerminalRoomDeletion.room_domain == room_domain,
+                TerminalRoomDeletion.destination_domain == settings.domain,
+            )
+            .with_for_update()
+        )
+        if terminal_room_receipt is not None:
+            incoming_terminal_content = terminal_room_base_content(serialized_envelope)
+            if (
+                terminal_room_receipt.actor_id
+                != database_snowflake(envelope.actor.id, "terminal room actor id")
+                or terminal_room_receipt.actor_domain != envelope.actor.domain
+                or terminal_room_receipt.event_type != envelope.type
+                or terminal_room_receipt.content != incoming_terminal_content
+                or terminal_room_receipt.context != envelope.context
+            ):
+                await session.rollback()
+                return InboxResult(
+                    event_id=envelope.event_id,
+                    status="rejected",
+                    code="KAED_FED_AUTHOR_ORIGIN_MISMATCH",
+                )
+            if terminal_room_incoming_generation <= terminal_room_receipt.generation:
+                await session.rollback()
+                return InboxResult(event_id=envelope.event_id, status="duplicate")
+            terminal_room_replacement_event = await session.get(
+                FederationEvent,
+                (room_domain, terminal_room_receipt.event_id),
+            )
+            terminal_room_replacement_inbox = await session.get(
+                FederationInbox,
+                (room_domain, terminal_room_receipt.event_id),
+            )
+        elif past_ordinary_retention:
+            room_route_exists = (
+                await session.scalar(
+                    select(MediaTombstoneDestination.attachment_id)
+                    .where(
+                        MediaTombstoneDestination.room_kind == room_kind,
+                        MediaTombstoneDestination.room_id == room_id,
+                        MediaTombstoneDestination.room_domain == room_domain,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+            room_recipient_exists = (
+                await session.scalar(
+                    select(RoomFederationRecipient.room_id)
+                    .where(
+                        RoomFederationRecipient.room_kind == room_kind,
+                        RoomFederationRecipient.room_id == room_id,
+                        RoomFederationRecipient.room_domain == room_domain,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+            if room_kind == "guild":
+                room_projection_exists = (
+                    await session.get(Guild, (room_id, room_domain)) is not None
+                )
+            else:
+                room_projection_exists = (
+                    await session.get(DMConversation, (room_id, room_domain)) is not None
+                    or await session.get(Channel, (room_id, room_domain)) is not None
+                )
+            if not (room_route_exists or room_recipient_exists or room_projection_exists):
+                await session.rollback()
+                return InboxResult(event_id=envelope.event_id, status="duplicate")
     prior = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
     if prior is not None:
         if prior.status == "processed":
@@ -980,7 +1474,23 @@ async def process_event(
             code="KAED_FED_EVENT_RETRY",
         )
     usage = current_federation_storage_usage(peer, global_ledger)
-    if federation_storage_quota_exceeded(settings, usage, incoming_bytes=envelope_bytes):
+    if federation_storage_quota_exceeded(
+        settings,
+        usage,
+        incoming_bytes=envelope_bytes,
+        replacing_event=(
+            media_replacement_inbox is not None or terminal_room_replacement_inbox is not None
+        ),
+        replacing_bytes=(
+            media_replacement_event.envelope_bytes
+            if media_replacement_event is not None
+            else (
+                terminal_room_replacement_event.envelope_bytes
+                if terminal_room_replacement_event is not None
+                else 0
+            )
+        ),
+    ):
         await increment_metric(redis, "federation_inbox_quota_rejections")
         await session.rollback()
         return InboxResult(
@@ -1040,7 +1550,14 @@ async def process_event(
             event_type=envelope.type,
             envelope=serialized_envelope,
             envelope_bytes=envelope_bytes,
-            expires_at=datetime.now(UTC) + timedelta(days=settings.federation_event_retention_days),
+            # A verified origin-signed media tombstone is the relay source for
+            # replicas that learn about the attachment after the initial
+            # verdict. Retain it independently of ordinary history retention.
+            expires_at=(
+                None
+                if envelope.type == "media.delete" or terminal_room_ref is not None
+                else datetime.now(UTC) + timedelta(days=settings.federation_event_retention_days)
+            ),
         )
         .on_conflict_do_nothing(index_elements=["origin_domain", "event_id"])
         .returning(FederationEvent.event_id)
@@ -1093,6 +1610,13 @@ async def process_event(
     access_revocation_target: tuple[int, str] | None = None
     instance_access_revoked_users: list[int] = []
     media_purge_target: tuple[str, int] | None = None
+    media_tombstone_dispatch_payload: dict[str, object] | None = None
+    media_tombstone_channel_ref: tuple[int, str] | None = None
+    media_tombstone_guild_ref: tuple[int, str] | None = None
+    media_delete_cascade_pending = False
+    local_media_purge_refs: list[tuple[int, str]] = []
+    remote_media_purge_refs: list[tuple[str, int]] = []
+    remote_cache_gc_needed = terminal_room_ref is not None
     relationship_application: RelationshipApplication | None = None
     history_access_changed = False
     authoritative_leave_guild: Guild | None = None
@@ -1102,7 +1626,80 @@ async def process_event(
     e2ee_policy_channels: list[Channel] = []
     durably_committed = False
     try:
-        if envelope.type in {
+        if guild_media_request_ref is not None:
+            (
+                request_guild_id,
+                request_guild_domain,
+                request_message_id,
+                request_message_domain,
+                request_attachment_id,
+                request_attachment_domain,
+                _request_generation,
+            ) = guild_media_request_ref
+            if request_attachment_domain != settings.domain:
+                raise ValueError("guild media deletion request was sent to the wrong origin")
+            retained_route = await session.get(
+                MediaTombstoneDestination,
+                (
+                    request_attachment_id,
+                    request_attachment_domain,
+                    request_guild_domain,
+                ),
+            )
+            if retained_route is None or (
+                retained_route.room_kind,
+                retained_route.room_id,
+                retained_route.room_domain,
+            ) != ("guild", request_guild_id, request_guild_domain):
+                raise ValueError("guild media deletion request has no authoritative route")
+            # The exact request is signed by the guild authority and bound to
+            # a retained guild/media route above.  Do not compare its actor to
+            # a replica that may have gone stale before an ownership transfer;
+            # losing visibility is precisely why this durable control exists.
+            request_attachment = await session.scalar(
+                select(Attachment)
+                .where(
+                    Attachment.id == request_attachment_id,
+                    Attachment.origin_domain == request_attachment_domain,
+                )
+                .with_for_update()
+            )
+            if request_attachment is None:
+                raise ValueError("guild media deletion request references unknown local media")
+            if request_attachment.message_id is not None and (
+                request_attachment.message_id,
+                request_attachment.message_domain,
+            ) != (request_message_id, request_message_domain):
+                raise ValueError("guild media deletion request message binding is invalid")
+            request_message = await session.get(
+                Message,
+                (request_message_id, request_message_domain),
+            )
+            if request_message is not None:
+                request_channel = await session.get(
+                    Channel,
+                    (request_message.channel_id, request_message.channel_domain),
+                )
+                if request_channel is None or (
+                    request_channel.guild_id,
+                    request_channel.guild_domain,
+                ) != (request_guild_id, request_guild_domain):
+                    raise ValueError("guild media deletion request references the wrong room")
+            delivery_wakes.update(
+                await queue_terminal_attachment_tombstone(
+                    session,
+                    settings,
+                    request_attachment,
+                    force_authoritative=True,
+                )
+            )
+            if request_attachment.staging_object_key is None:
+                request_attachment.staging_object_key = request_attachment.object_key
+            await discard_attachment(session, settings, request_attachment)
+            request_attachment.message_id = None
+            request_attachment.message_domain = None
+            local_media_purge_refs.append((request_attachment.id, request_attachment.origin_domain))
+        elif envelope.type in {
             "relationship.request",
             "relationship.accept",
             "relationship.remove",
@@ -1148,12 +1745,15 @@ async def process_event(
                             "channel_domain": channel.origin_domain,
                             "encryption_policy": channel_encryption_policy_payload(channel),
                         },
+                        context=room_policy_change_context(channel, changed_user),
                         authority_attested_actor=True,
                     )
                     for destination in destinations:
                         await queue_event(session, settings, destination, policy_envelope)
                     delivery_wakes.update(destinations)
         elif envelope.type == "e2ee.room-policy.changed":
+            if not authority_attested_policy_change:
+                raise ValueError("E2EE room policy context is not authority-bound")
             raw_channel_id = envelope.content.get("channel_id")
             raw_channel_domain = envelope.content.get("channel_domain")
             channel_id = database_snowflake(raw_channel_id, "E2EE policy channel id")
@@ -1163,6 +1763,43 @@ async def process_event(
             if loaded_e2ee_channel is None or loaded_e2ee_channel.unavailable:
                 raise ValueError("E2EE room policy references an unknown channel")
             channel = loaded_e2ee_channel
+            raw_scope = cast(dict[str, object], envelope.context["scope"])
+            scope_id = database_snowflake(raw_scope.get("id"), "E2EE policy scope id")
+            scope_domain = normalize_domain(str(raw_scope.get("domain", "")))
+            actor_id = database_snowflake(envelope.actor.id, "E2EE policy actor id")
+            actor_membership: GuildMember | DMParticipant | None
+            if raw_scope.get("type") == "guild":
+                if (
+                    channel.guild_id is None
+                    or channel.guild_domain is None
+                    or (channel.guild_id, channel.guild_domain) != (scope_id, scope_domain)
+                    or scope_domain != envelope.origin
+                ):
+                    raise ValueError("E2EE room policy guild context does not match its channel")
+                actor_membership = await session.get(
+                    GuildMember,
+                    (scope_id, scope_domain, actor_id, envelope.actor.domain),
+                )
+            else:
+                if (
+                    channel.guild_id is not None
+                    or channel.type != 1
+                    or (channel.id, channel.origin_domain) != (scope_id, scope_domain)
+                ):
+                    raise ValueError("E2EE room policy DM context does not match its channel")
+                conversation = await session.get(DMConversation, (scope_id, scope_domain))
+                if (
+                    conversation is None
+                    or conversation.origin_domain != envelope.origin
+                    or conversation.authority_domain != envelope.origin
+                ):
+                    raise ValueError("E2EE room policy DM context is not authoritative")
+                actor_membership = await session.get(
+                    DMParticipant,
+                    (scope_id, scope_domain, actor_id, envelope.actor.domain),
+                )
+            if actor_membership is None:
+                raise ValueError("E2EE room policy actor is not a room participant")
             incoming_policy = validate_channel_encryption_policy(
                 envelope.content.get("encryption_policy")
             )
@@ -1177,6 +1814,34 @@ async def process_event(
             channel.encryption_group_id = incoming_policy["group_id"]
             channel.encryption_epoch = incoming_policy["epoch"]
             e2ee_policy_channels.append(channel)
+        elif (
+            envelope.type == "dm.group.state"
+            and terminal_room_ref is not None
+            and await session.get(
+                DMConversation,
+                (terminal_room_ref[1], terminal_room_ref[2]),
+            )
+            is None
+        ):
+            # A current-key regeneration can arrive after the first terminal
+            # generation already purged the replica. Independent media routes
+            # can outlive that projection, so terminalize them again before
+            # acknowledging the proof rather than assuming an empty room.
+            (
+                missing_group_local_purges,
+                missing_group_remote_purges,
+                _missing_group_destinations,
+                missing_group_wakes,
+            ) = await prepare_terminal_room_media_by_ref(
+                session,
+                settings,
+                room_kind="group_dm",
+                room_id=terminal_room_ref[1],
+                room_domain=terminal_room_ref[2],
+            )
+            local_media_purge_refs.extend(missing_group_local_purges)
+            remote_media_purge_refs.extend(missing_group_remote_purges)
+            delivery_wakes.update(missing_group_wakes)
         elif envelope.type == "dm.group.state":
             raw_conversation = envelope.content.get("conversation")
             raw_participants = envelope.content.get("participants")
@@ -1216,7 +1881,7 @@ async def process_event(
                 existing_group is not None
                 and existing_group.state_version == incoming_state_version
             )
-            deleted_group_state = bool(raw_conversation.get("deleted"))
+            deleted_group_state = raw_conversation.get("deleted") is True
             if older_group_state:
                 created_dm_channel = await session.get(Channel, (conversation_id, envelope.origin))
                 if created_dm_channel is None:
@@ -1232,11 +1897,25 @@ async def process_event(
             elif deleted_group_state:
                 if existing_group is None:
                     raise ValueError("unknown group DM cannot be deleted")
-                if actor_ref not in prior_refs:
+                # An exact terminal shape is authority-signed and cannot rely
+                # on a participant replica that may be stale after access was
+                # lost. Ordinary group state still requires a known actor.
+                if terminal_room_ref is None and actor_ref not in prior_refs:
                     raise ValueError("group DM state actor is not a participant")
                 created_dm_channel = await session.get(Channel, (conversation_id, envelope.origin))
                 if created_dm_channel is None:
                     raise ValueError("group DM channel is missing")
+                (
+                    deleted_group_media_purges,
+                    _deleted_group_state_destinations,
+                    deleted_group_media_wakes,
+                ) = await prepare_terminal_channel_media(
+                    session,
+                    settings,
+                    created_dm_channel,
+                )
+                local_media_purge_refs.extend(deleted_group_media_purges)
+                delivery_wakes.update(deleted_group_media_wakes)
                 for membership in list(
                     await session.scalars(
                         select(DMParticipant).where(
@@ -1494,6 +2173,15 @@ async def process_event(
                 normalize_domain(str(raw_message.get("channel_domain", ""))),
             )
             message_conversation = await session.get(DMConversation, conversation_ref)
+            if authority_attested_direct_control and (
+                message_conversation is None
+                or message_conversation.type != "direct"
+                or message_conversation.authority_domain != envelope.origin
+                or message_conversation.origin_domain != envelope.origin
+            ):
+                raise ValueError(
+                    "authority-attested DM control is not bound to its direct conversation"
+                )
             if envelope.type != "dm.message.create":
                 if message_conversation is None:
                     if envelope.type == "dm.group.message.committed":
@@ -1540,12 +2228,21 @@ async def process_event(
                 )
             if replicated_message is None:
                 raise RuntimeError("replicated DM message disappeared")
-            await apply_e2ee_control_metadata(
+            terminal_attachment_refs = await terminal_attachment_refs_for_messages(
                 session,
-                replicated_message,
-                envelope.content.get("e2ee_control"),
-                expected_authority=envelope.origin,
+                settings,
+                {(replicated_message.id, replicated_message.origin_domain)},
             )
+            for terminal_attachment_ref in terminal_attachment_refs:
+                terminal_attachment = await session.get(Attachment, terminal_attachment_ref)
+                if terminal_attachment is not None:
+                    delivery_wakes.update(
+                        await queue_terminal_attachment_tombstone(
+                            session,
+                            settings,
+                            terminal_attachment,
+                        )
+                    )
             if envelope.type == "dm.group.message.proposed":
                 if message_conversation is None:
                     raise RuntimeError("validated group DM proposal lost its conversation")
@@ -1640,12 +2337,26 @@ async def process_event(
                 )
             if replicated_guild_message is None:
                 raise RuntimeError("replicated guild message disappeared")
-            await apply_e2ee_control_metadata(
+            terminal_attachment_refs = await terminal_attachment_refs_for_messages(
                 session,
-                replicated_guild_message,
-                envelope.content.get("e2ee_control"),
-                expected_authority=envelope.origin,
+                settings,
+                {
+                    (
+                        replicated_guild_message.id,
+                        replicated_guild_message.origin_domain,
+                    )
+                },
             )
+            for attachment_ref in terminal_attachment_refs:
+                terminal_attachment = await session.get(Attachment, attachment_ref)
+                if terminal_attachment is not None:
+                    delivery_wakes.update(
+                        await queue_terminal_attachment_tombstone(
+                            session,
+                            settings,
+                            terminal_attachment,
+                        )
+                    )
         elif envelope.type == "guild.member.add":
             guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
             guild_domain = str(envelope.context.get("guild_domain"))
@@ -1768,6 +2479,13 @@ async def process_event(
             target = envelope.content.get("target")
             if not isinstance(target, dict):
                 raise ValueError("guild access revocation target is invalid")
+            revocation_reason = envelope.content.get("reason")
+            if revocation_reason not in {
+                "member_left",
+                "member_kicked",
+                "member_banned",
+            }:
+                raise ValueError("guild access revocation reason is invalid")
             access_revocation_target = (
                 database_snowflake(target.get("id"), "guild access revocation target id"),
                 normalize_domain(str(target.get("domain", ""))),
@@ -1779,6 +2497,28 @@ async def process_event(
                 user_id=access_revocation_target[0],
                 user_domain=access_revocation_target[1],
             )
+        elif (
+            envelope.type == "guild.instance_access.revoked"
+            and terminal_room_ref is not None
+            and await session.get(Guild, (terminal_room_ref[1], terminal_room_ref[2])) is None
+        ):
+            if envelope.content.get("target_domain") != settings.domain:
+                raise ValueError("terminal guild deletion targeted another instance")
+            (
+                missing_guild_local_purges,
+                missing_guild_remote_purges,
+                _missing_guild_destinations,
+                missing_guild_wakes,
+            ) = await prepare_terminal_room_media_by_ref(
+                session,
+                settings,
+                room_kind="guild",
+                room_id=terminal_room_ref[1],
+                room_domain=terminal_room_ref[2],
+            )
+            local_media_purge_refs.extend(missing_guild_local_purges)
+            remote_media_purge_refs.extend(missing_guild_remote_purges)
+            delivery_wakes.update(missing_guild_wakes)
         elif envelope.type == "guild.instance_access.revoked":
             guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
             guild_domain = normalize_domain(str(envelope.context.get("guild_domain", "")))
@@ -1787,16 +2527,38 @@ async def process_event(
             replicated_guild = await session.get(Guild, (guild_id, guild_domain))
             if replicated_guild is None:
                 raise ValueError("guild instance revocation references an unknown replica")
-            if (
+            # Terminal deletion is authenticated by the exact origin-signed
+            # control. The retained owner can legitimately be stale after a
+            # transfer while this instance no longer has snapshot access.
+            if terminal_room_ref is None and (
                 database_snowflake(envelope.actor.id, "guild instance revocation actor id"),
                 envelope.actor.domain,
             ) != (replicated_guild.owner_id, replicated_guild.owner_domain):
                 raise ValueError("guild instance revocation was not signed for the guild owner")
+            revocation_reason = envelope.content.get("reason")
+            target_domain = normalize_domain(str(envelope.content.get("target_domain", "")))
+            if revocation_reason == "guild_deleted":
+                if terminal_room_ref is None or target_domain != settings.domain:
+                    raise ValueError("terminal guild deletion target is invalid")
+                (
+                    terminal_guild_purges,
+                    _terminal_guild_destinations,
+                    terminal_guild_wakes,
+                ) = await prepare_terminal_guild_media(session, settings, replicated_guild)
+                local_media_purge_refs.extend(terminal_guild_purges)
+                delivery_wakes.update(terminal_guild_wakes)
+            elif revocation_reason not in {
+                "instance_banned",
+                "instance_suspended",
+                "instance_silenced",
+                "instance_blocked",
+            }:
+                raise ValueError("guild instance revocation reason is invalid")
             instance_access_revoked_users = await apply_guild_instance_access_revocation(
                 session,
                 settings,
                 replicated_guild,
-                target_domain=normalize_domain(str(envelope.content.get("target_domain", ""))),
+                target_domain=target_domain,
             )
         elif envelope.type == "guild.resync.required":
             guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
@@ -2113,19 +2875,28 @@ async def process_event(
                 "timeout_indefinite": timeout_indefinite,
             }
         elif envelope.type == "media.delete":
-            attachment_origin = normalize_domain(str(envelope.content.get("origin_domain", "")))
-            if attachment_origin != envelope.origin:
-                raise ValueError("media tombstone is not authoritative for the attachment")
-            attachment_number = database_snowflake(
-                envelope.content.get("attachment_id"), "attachment id"
+            if media_attachment_ref is None or media_signing_key_id is None:
+                raise RuntimeError("validated media tombstone state disappeared")
+            attachment_number, attachment_origin = media_attachment_ref
+            # Validate the signed generation before accepting this as terminal
+            # truth. The retained set is ordered by signed generation rather
+            # than receive time so a delayed pre-rotation event cannot replace
+            # or be relayed ahead of a newer proof.
+            media_delete_order(serialized_envelope)
+            retained_proofs = await locked_retained_media_delete_events(
+                session,
+                attachment_number,
+                attachment_origin,
             )
-            await session.scalar(
-                select(
-                    func.pg_advisory_xact_lock(
-                        func.hashtextextended("kaede-remote-media-cache-budget", 0)
-                    )
-                )
-            )
+            if not retained_proofs:
+                raise RuntimeError("verified media tombstone was not retained")
+            selected_proof = retained_proofs[0]
+            selected_envelope = selected_proof.envelope
+            incoming_is_selected = selected_proof.event_id == envelope.event_id
+            if not incoming_is_selected:
+                raise RuntimeError("new media tombstone generation was not selected")
+            selected_generation = media_delete_generation(selected_envelope)
+            signer_number = database_snowflake(envelope.actor.id, "media tombstone actor id")
             remote_attachment = await session.get(
                 Attachment, (attachment_number, attachment_origin)
             )
@@ -2133,47 +2904,270 @@ async def process_event(
                 RemoteMediaTombstone,
                 (attachment_origin, attachment_number),
             )
-            if existing_tombstone is None:
+            remote_cache_exists = (
+                await session.scalar(
+                    select(RemoteMediaCache.attachment_id)
+                    .where(
+                        RemoteMediaCache.origin_domain == attachment_origin,
+                        RemoteMediaCache.attachment_id == attachment_number,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+            create_fast_tombstone = (
+                existing_tombstone is not None
+                or existing_source is None
+                or remote_attachment is not None
+                or remote_cache_exists
+            )
+            if existing_tombstone is None and existing_source is None:
                 retained_tombstones = int(
                     await session.scalar(
                         select(func.count())
-                        .select_from(RemoteMediaTombstone)
-                        .where(RemoteMediaTombstone.origin_domain == attachment_origin)
+                        .select_from(MediaTombstoneSource)
+                        .where(MediaTombstoneSource.attachment_domain == attachment_origin)
                     )
                     or 0
                 )
                 if retained_tombstones >= settings.federation_remote_media_tombstones_per_origin:
-                    raise ValueError("remote media tombstone quota exceeded")
+                    raise RemoteMediaTombstoneQuotaExceeded("remote media tombstone quota exceeded")
             # Keep a bounded tombstone even if the corresponding create has
             # not arrived yet. This preserves delete-before-create ordering
             # without allowing permanent attacker-selected state: admission is
             # per origin and retention expires the row.
+            if create_fast_tombstone:
+                await session.execute(
+                    pg_insert(RemoteMediaTombstone)
+                    .values(
+                        origin_domain=attachment_origin,
+                        attachment_id=attachment_number,
+                        event_id=selected_proof.event_id,
+                        expires_at=datetime.now(UTC)
+                        + timedelta(days=settings.federation_event_retention_days),
+                    )
+                    .on_conflict_do_update(
+                        index_elements=["origin_domain", "attachment_id"],
+                        set_={
+                            "event_id": selected_proof.event_id,
+                            "deleted_at": datetime.now(UTC),
+                            "expires_at": datetime.now(UTC)
+                            + timedelta(days=settings.federation_event_retention_days),
+                        },
+                    )
+                )
+            if remote_attachment is not None:
+                remote_attachment.deleted_at = datetime.now(UTC)
+                if (
+                    remote_attachment.message_id is not None
+                    and remote_attachment.message_domain is not None
+                ):
+                    remote_message = await session.get(
+                        Message,
+                        (
+                            remote_attachment.message_id,
+                            remote_attachment.message_domain,
+                        ),
+                    )
+                    if remote_message is not None:
+                        remote_channel = await session.get(
+                            Channel,
+                            (remote_message.channel_id, remote_message.channel_domain),
+                        )
+                        if remote_channel is not None:
+                            media_tombstone_dispatch_payload = terminal_attachment_update_payload(
+                                remote_attachment,
+                                message_id=remote_message.id,
+                                message_domain=remote_message.origin_domain,
+                                channel_id=remote_channel.id,
+                                channel_domain=remote_channel.origin_domain,
+                            )
+                            media_tombstone_channel_ref = (
+                                remote_channel.id,
+                                remote_channel.origin_domain,
+                            )
+                            if (
+                                remote_channel.guild_id is not None
+                                and remote_channel.guild_domain is not None
+                            ):
+                                media_tombstone_guild_ref = (
+                                    remote_channel.guild_id,
+                                    remote_channel.guild_domain,
+                                )
+            # The cache-budget fence was acquired before this attachment's
+            # media fence during preflight and remains held through commit.
+            # Expire every admitted variant transactionally: a cache writer
+            # that won the lock race is invalidated here, while a later writer
+            # waits and observes the durable source inserted below.
             await session.execute(
-                pg_insert(RemoteMediaTombstone)
+                update(RemoteMediaCache)
+                .where(
+                    RemoteMediaCache.origin_domain == attachment_origin,
+                    RemoteMediaCache.attachment_id == attachment_number,
+                )
+                .values(expires_at=datetime.now(UTC))
+            )
+            await session.execute(
+                pg_insert(MediaTombstoneSource)
                 .values(
-                    origin_domain=attachment_origin,
                     attachment_id=attachment_number,
-                    event_id=envelope.event_id,
-                    expires_at=datetime.now(UTC)
-                    + timedelta(days=settings.federation_event_retention_days),
+                    attachment_domain=attachment_origin,
+                    signer_id=signer_number,
+                    signer_domain=envelope.actor.domain,
+                    event_id=selected_proof.event_id,
+                    key_id=media_signing_key_id,
+                    generation=selected_generation,
+                    updated_at=datetime.now(UTC),
                 )
                 .on_conflict_do_update(
-                    index_elements=["origin_domain", "attachment_id"],
+                    index_elements=["attachment_id", "attachment_domain"],
                     set_={
-                        "event_id": envelope.event_id,
-                        "deleted_at": datetime.now(UTC),
-                        "expires_at": datetime.now(UTC)
-                        + timedelta(days=settings.federation_event_retention_days),
+                        "signer_id": signer_number,
+                        "signer_domain": envelope.actor.domain,
+                        "event_id": selected_proof.event_id,
+                        "key_id": media_signing_key_id,
+                        "generation": selected_generation,
+                        "updated_at": datetime.now(UTC),
                     },
                 )
             )
-            if remote_attachment is not None:
-                remote_attachment.deleted_at = datetime.now(UTC)
+            historical_recipients = await historical_attachment_destinations_by_ref(
+                session,
+                attachment_number,
+                attachment_origin,
+            )
+            historical_recipients.difference_update(
+                {settings.domain, envelope.origin, principal.origin}
+            )
+            for destination in sorted(historical_recipients):
+                await queue_event(
+                    session,
+                    settings,
+                    destination,
+                    selected_envelope,
+                )
+            await record_media_tombstone_destinations(
+                session,
+                attachment_number,
+                attachment_origin,
+                historical_recipients,
+            )
+            delivery_wakes.update(historical_recipients)
+            # Committing the local tombstone and relay outboxes is only the
+            # first half of transitive acknowledgement. Keep the immediate
+            # upstream retrying until every pre-existing downstream route has
+            # accepted this exact selected generation.
+            media_delete_cascade_pending = bool(historical_recipients)
+            # A newly selected generation makes every older pending relay
+            # permanently obsolete. Marking them explicitly prevents a stale
+            # key proof from retrying forever after the current proof arrived.
+            stale_proofs = [
+                proof for proof in retained_proofs[1:] if proof.event_id != selected_proof.event_id
+            ]
+            stale_proof_ids = [proof.event_id for proof in stale_proofs]
+            if stale_proof_ids:
+                compacted_bytes = sum(
+                    proof.envelope_bytes
+                    for proof in stale_proofs
+                    if not (inserted_event is not None and proof.event_id == envelope.event_id)
+                )
+                peer.federation_inbox_event_bytes = max(
+                    0,
+                    peer.federation_inbox_event_bytes - compacted_bytes,
+                )
+                global_ledger.federation_inbox_event_bytes = max(
+                    0,
+                    global_ledger.federation_inbox_event_bytes - compacted_bytes,
+                )
+                stale_inbox_ids = list(
+                    await session.scalars(
+                        select(FederationInbox.event_id).where(
+                            FederationInbox.origin_domain == attachment_origin,
+                            FederationInbox.event_id.in_(stale_proof_ids),
+                        )
+                    )
+                )
+                if stale_inbox_ids:
+                    peer.federation_inbox_events = max(
+                        0,
+                        peer.federation_inbox_events - len(stale_inbox_ids),
+                    )
+                    global_ledger.federation_inbox_events = max(
+                        0,
+                        global_ledger.federation_inbox_events - len(stale_inbox_ids),
+                    )
+                    await session.execute(
+                        delete(FederationInbox).where(
+                            FederationInbox.origin_domain == attachment_origin,
+                            FederationInbox.event_id.in_(stale_inbox_ids),
+                        )
+                    )
+                await session.execute(
+                    delete(FederationEvent).where(
+                        FederationEvent.origin_domain == attachment_origin,
+                        FederationEvent.event_id.in_(stale_proof_ids),
+                    )
+                )
+                if not incoming_is_selected:
+                    # The just-inserted stale proof was compacted before it
+                    # became durable, so it must not be added to retained-event
+                    # quota accounting after commit.
+                    inserted_event = None
             media_purge_target = (attachment_origin, attachment_number)
         else:
             raise ValueError("unsupported event type")
         if replicated_guild is not None and replicated_guild not in session.deleted:
             await admit_replica_storage(session, settings, replicated_guild)
+        if terminal_room_ref is not None:
+            if terminal_room_incoming_generation is None or terminal_room_signing_key_id is None:
+                raise RuntimeError("terminal room verification state disappeared")
+            room_kind, room_id, room_domain = terminal_room_ref
+            now = datetime.now(UTC)
+            base_content = terminal_room_base_content(serialized_envelope)
+            actor_id = database_snowflake(envelope.actor.id, "terminal room actor id")
+            if terminal_room_receipt is None:
+                terminal_room_receipt = TerminalRoomDeletion(
+                    room_kind=room_kind,
+                    room_id=room_id,
+                    room_domain=room_domain,
+                    destination_domain=settings.domain,
+                    actor_id=actor_id,
+                    actor_domain=envelope.actor.domain,
+                    event_type=envelope.type,
+                    content=base_content,
+                    context=envelope.context,
+                    event_id=envelope.event_id,
+                    key_id=terminal_room_signing_key_id,
+                    generation=terminal_room_incoming_generation,
+                    acknowledged_at=now,
+                    updated_at=now,
+                )
+                session.add(terminal_room_receipt)
+            else:
+                terminal_room_receipt.event_id = envelope.event_id
+                terminal_room_receipt.key_id = terminal_room_signing_key_id
+                terminal_room_receipt.generation = terminal_room_incoming_generation
+                terminal_room_receipt.acknowledged_at = now
+                terminal_room_receipt.updated_at = now
+            if terminal_room_replacement_event is not None:
+                peer.federation_inbox_event_bytes = max(
+                    0,
+                    peer.federation_inbox_event_bytes
+                    - terminal_room_replacement_event.envelope_bytes,
+                )
+                global_ledger.federation_inbox_event_bytes = max(
+                    0,
+                    global_ledger.federation_inbox_event_bytes
+                    - terminal_room_replacement_event.envelope_bytes,
+                )
+            if terminal_room_replacement_inbox is not None:
+                peer.federation_inbox_events = max(0, peer.federation_inbox_events - 1)
+                global_ledger.federation_inbox_events = max(
+                    0, global_ledger.federation_inbox_events - 1
+                )
+                await session.delete(terminal_room_replacement_inbox)
+            if terminal_room_replacement_event is not None:
+                await session.delete(terminal_room_replacement_event)
         inbox.status = "processed"
         inbox.result_code = None
         inbox.processed_at = datetime.now(UTC)
@@ -2183,6 +3177,29 @@ async def process_event(
             global_ledger.federation_inbox_event_bytes += envelope_bytes
         await session.commit()
         durably_committed = True
+        if media_tombstone_dispatch_payload is not None and media_tombstone_channel_ref is not None:
+            if media_tombstone_guild_ref is not None:
+                await publish_dispatch(
+                    redis,
+                    guild_topic(media_tombstone_guild_ref[1], media_tombstone_guild_ref[0]),
+                    "ATTACHMENT_UPDATE",
+                    media_tombstone_dispatch_payload,
+                )
+            else:
+                local_participants = await session.execute(
+                    select(DMParticipant.user_id, DMParticipant.user_domain).where(
+                        DMParticipant.conversation_id == media_tombstone_channel_ref[0],
+                        DMParticipant.conversation_domain == media_tombstone_channel_ref[1],
+                        DMParticipant.user_domain == settings.domain,
+                    )
+                )
+                for user_id, user_domain in local_participants:
+                    await publish_dispatch(
+                        redis,
+                        user_topic(user_domain, user_id),
+                        "ATTACHMENT_UPDATE",
+                        media_tombstone_dispatch_payload,
+                    )
         if replicated_message is not None:
             await publish_replicated_dm_message(session, redis, settings, replicated_message)
             await enqueue_best_effort(
@@ -2434,6 +3451,20 @@ async def process_event(
             await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
         for destination in delivery_wakes:
             await enqueue_best_effort(federation_deliver, destination)
+        for attachment_id, attachment_domain in local_media_purge_refs:
+            await enqueue_best_effort(
+                media_local_purge,
+                attachment_id,
+                attachment_domain,
+            )
+        for attachment_domain, attachment_id in remote_media_purge_refs:
+            await enqueue_best_effort(
+                media_remote_purge,
+                attachment_domain,
+                attachment_id,
+            )
+        if remote_cache_gc_needed:
+            await enqueue_best_effort(media_cache_gc)
         if rejection_target is not None and rejection_payload is not None:
             await publish_dispatch(
                 redis,
@@ -2454,12 +3485,16 @@ async def process_event(
                 media_purge_target[0],
                 media_purge_target[1],
             )
-        return InboxResult(event_id=envelope.event_id, status="accepted")
+        return post_commit_inbox_result(
+            envelope.event_id,
+            media_delete_cascade_pending=media_delete_cascade_pending,
+        )
     except Exception as exc:
         if durably_committed:
             # Redis fanout and Taskiq wakeups are best-effort projections after
-            # the authoritative SQL transaction commits. Reporting a rejection
-            # here would invite the sender to retry an event already applied.
+            # the authoritative SQL transaction commits. Ordinary events stay
+            # accepted; a media relay must still preserve its deliberate retry
+            # until the committed child outboxes are acknowledged.
             await session.rollback()
             log.exception(
                 "federation_post_commit_projection_failed",
@@ -2467,7 +3502,10 @@ async def process_event(
                 event_id=envelope.event_id,
                 event_type=envelope.type,
             )
-            return InboxResult(event_id=envelope.event_id, status="accepted")
+            return post_commit_inbox_result(
+                envelope.event_id,
+                media_delete_cascade_pending=media_delete_cascade_pending,
+            )
         if not event_work.is_active:
             # The savepoint was released and the outer commit itself failed.
             # Nothing is known to be durable, so invite a clean replay instead
@@ -2483,6 +3521,24 @@ async def process_event(
             # Nothing from this event is durable without its required outbound
             # follow-up. Remove the inbox claim so the sender can replay after
             # the bounded destination queue drains.
+            inbox = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
+            if inbox is not None:
+                await session.delete(inbox)
+                peer.federation_inbox_events = max(0, peer.federation_inbox_events - 1)
+                global_ledger.federation_inbox_events = max(
+                    0, global_ledger.federation_inbox_events - 1
+                )
+            await session.commit()
+            return InboxResult(
+                event_id=envelope.event_id,
+                status="retry",
+                code=exc.federation_code,
+            )
+        if isinstance(exc, RemoteMediaTombstoneQuotaExceeded):
+            # Terminal media invalidation must not become a permanent reject
+            # merely because this bounded replica cache is temporarily full.
+            # Remove the replay claim and preserve exact quota accounting so
+            # the sender can retry after retention or operator intervention.
             inbox = await session.get(FederationInbox, (envelope.origin, envelope.event_id))
             if inbox is not None:
                 await session.delete(inbox)
@@ -2955,7 +4011,16 @@ async def federation_inbox(
                 ).model_dump()
             )
             continue
-        policy_code = await federation_event_policy_code(session, principal.origin, event.type)
+        policy_code = await federation_event_policy_code(
+            session,
+            principal.origin,
+            event.type,
+            deletion_control=(
+                event.type == "media.delete"
+                or terminal_room_event_ref(event.model_dump(mode="json")) is not None
+                or guild_media_delete_request_ref(event.model_dump(mode="json")) is not None
+            ),
+        )
         if policy_code is not None:
             results.append(
                 InboxResult(
@@ -3342,6 +4407,79 @@ async def federation_presence_update(
     return Response(status_code=204)
 
 
+def _strip_terminal_attachments(
+    messages: Sequence[object],
+    terminal_refs: set[tuple[int, str]],
+) -> None:
+    """Remove terminal media metadata while its ref fences are held."""
+
+    if not terminal_refs:
+        return
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        attachments = item.get("attachments")
+        if not isinstance(attachments, list):
+            continue
+        item["attachments"] = [
+            raw
+            for raw in attachments
+            if not (
+                isinstance(raw, dict)
+                and bool(attachment_refs_from_payloads([{"attachments": [raw]}]) & terminal_refs)
+            )
+        ]
+
+
+async def _redact_terminal_guild_events(
+    session: AsyncSession,
+    settings: Settings,
+    guild_id: int,
+    events: Sequence[object],
+    terminal_refs: set[tuple[int, str]],
+) -> list[dict[str, object]]:
+    """Replace immutable signed events that disclose terminal media by seq."""
+
+    guild = await session.get(Guild, (guild_id, settings.domain))
+    if guild is None:
+        raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+    rendered: list[dict[str, object]] = []
+    owner: User | None = None
+    for raw in events:
+        if not isinstance(raw, dict):
+            continue
+        if not (message_attachment_refs(raw) & terminal_refs):
+            rendered.append(raw)
+            continue
+        context = raw.get("context")
+        if not isinstance(context, dict) or context.get("seq") is None:
+            raise RuntimeError("terminal guild history event has no sequence")
+        if owner is None:
+            owner = await session.get(User, (guild.owner_id, guild.owner_domain))
+        if owner is None or owner.origin_domain != settings.domain:
+            raise RuntimeError("guild owner cannot sign a terminal-media redaction")
+        replacement = await build_envelope(
+            session,
+            settings,
+            "guild.event.redacted",
+            owner,
+            {"original_type": str(raw.get("type", ""))},
+            context={
+                "guild_id": str(guild.id),
+                "guild_domain": guild.origin_domain,
+                "seq": str(context["seq"]),
+                **(
+                    {"snapshot_generation": str(context["snapshot_generation"])}
+                    if context.get("snapshot_generation") is not None
+                    else {}
+                ),
+                **({"snapshot_required": True} if guild_event_requires_snapshot(raw) else {}),
+            },
+        )
+        rendered.append(cast(dict[str, object], replacement))
+    return rendered
+
+
 @router.get("/_kaede/v1/dms/{conversation_id}/messages")
 async def federation_dm_history_page(
     conversation_id: Snowflake,
@@ -3495,6 +4633,22 @@ async def federation_dm_history_page(
             status_code=413,
             detail={"code": "KAED_FED_HISTORY_MESSAGE_TOO_LARGE"},
         )
+    disclosed, terminal_wakes, terminal_refs = await record_disclosed_attachment_recipients(
+        session,
+        settings,
+        attachment_refs_from_payloads(rendered),
+        principal.origin,
+        room_ref=(
+            ("group_dm", conversation.id, conversation.origin_domain)
+            if conversation.type == "group"
+            else None
+        ),
+    )
+    _strip_terminal_attachments(rendered, terminal_refs)
+    if conversation.type == "group" or disclosed or terminal_wakes:
+        await session.commit()
+    for destination in terminal_wakes:
+        await enqueue_best_effort(federation_deliver, destination)
     return result
 
 
@@ -3517,6 +4671,11 @@ async def _federation_media_attachment(
     attachment = await session.get(Attachment, (attachment_id, settings.domain))
     if (
         attachment is None
+        or await session.get(
+            MediaTombstoneSource,
+            (attachment_id, settings.domain),
+        )
+        is not None
         or attachment.scan_status not in {"clean", "encrypted"}
         or attachment.deleted_at is not None
         or attachment.message_id is None
@@ -3580,7 +4739,114 @@ async def _federation_media_attachment(
     if not authorized:
         # Do not disclose whether the attachment exists to a non-participating peer.
         raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
-    return attachment
+    await record_attachment_recipients(
+        session,
+        {(attachment.id, attachment.origin_domain)},
+        principal.origin,
+        room_ref=(
+            ("guild", channel.guild_id, channel.guild_domain)
+            if channel.guild_id is not None and channel.guild_domain is not None
+            else (
+                ("group_dm", channel.id, channel.origin_domain)
+                if conversation is not None and conversation.type == "group"
+                else None
+            )
+        ),
+    )
+    # The recipient ledger must be durable before authorization or bytes are
+    # returned. A later membership/permission revocation cannot erase the only
+    # evidence that this peer may retain a cache.
+    await session.commit()
+    refreshed_attachment = await session.scalar(
+        select(Attachment)
+        .where(
+            Attachment.id == attachment.id,
+            Attachment.origin_domain == attachment.origin_domain,
+        )
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if (
+        refreshed_attachment is None
+        or await session.get(
+            MediaTombstoneSource,
+            (attachment_id, settings.domain),
+            populate_existing=True,
+        )
+        is not None
+        or refreshed_attachment.scan_status not in {"clean", "encrypted"}
+        or refreshed_attachment.deleted_at is not None
+        or refreshed_attachment.message_id is None
+        or refreshed_attachment.message_domain is None
+    ):
+        # The ledger insert can wait behind the terminal worker's row lock.
+        # Recheck after that transaction commits so rejected bytes are never
+        # opened merely because they were clean during the first read.
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    refreshed_message = await session.scalar(
+        select(Message)
+        .where(
+            Message.id == refreshed_attachment.message_id,
+            Message.origin_domain == refreshed_attachment.message_domain,
+        )
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if refreshed_message is None or refreshed_message.deleted_at is not None:
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    refreshed_channel = await session.get(
+        Channel,
+        (refreshed_message.channel_id, refreshed_message.channel_domain),
+        populate_existing=True,
+    )
+    if refreshed_channel is None:
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    if (expected_conversation is not None or expected_message is not None) and (
+        expected_conversation is None
+        or expected_message is None
+        or (refreshed_attachment.message_id, refreshed_attachment.message_domain)
+        != expected_message
+        or (refreshed_message.channel_id, refreshed_message.channel_domain) != expected_conversation
+        or refreshed_channel.guild_id is not None
+    ):
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    if refreshed_channel.guild_id is None:
+        reauthorized = (
+            await session.scalar(
+                select(DMParticipant.user_id)
+                .where(
+                    DMParticipant.conversation_id == refreshed_channel.id,
+                    DMParticipant.conversation_domain == refreshed_channel.origin_domain,
+                    DMParticipant.user_domain
+                    == (requester[1] if requester is not None else principal.origin),
+                    *([DMParticipant.user_id == requester[0]] if requester is not None else []),
+                )
+                .limit(1)
+            )
+            is not None
+        )
+    else:
+        refreshed_guild = await session.get(
+            Guild,
+            (refreshed_channel.guild_id, refreshed_channel.guild_domain),
+            populate_existing=True,
+        )
+        reauthorized = False
+        if refreshed_guild is not None:
+            visible_channels = await cached_visible_guild_channels_for_origin(
+                session,
+                redis,
+                refreshed_guild,
+                principal.origin,
+            )
+            reauthorized = any(
+                (visible.id, visible.origin_domain)
+                == (refreshed_channel.id, refreshed_channel.origin_domain)
+                for visible in visible_channels
+            )
+    if not reauthorized:
+        raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
+    return refreshed_attachment
 
 
 def _dm_history_media_scope(
@@ -3664,10 +4930,12 @@ async def federation_dm_history_media_authorize(
         expected_message=scope[1],
         requester=requester,
     )
-    return Response(
+    response = Response(
         status_code=204,
         headers={"X-Kaede-Media-Encryption": attachment.encryption_mode},
     )
+    await session.commit()
+    return response
 
 
 @router.get("/_kaede/v1/media/{attachment_id}/{variant}")
@@ -3734,19 +5002,19 @@ async def federation_media_get(
         key = raw["object_key"]
         content_type = str(raw.get("content_type", "application/octet-stream"))
     try:
-        body = await S3Storage(settings).open_get(
+        body = await S3Storage(settings).get(
             bucket, key, max_bytes=settings.media_max_attachment_bytes
         )
     except StorageError as exc:
         raise HTTPException(status_code=503, detail={"code": "KAED_MEDIA_UNAVAILABLE"}) from exc
+    await session.commit()
     headers = {
         "Cache-Control": "private, max-age=86400, immutable",
         "X-Content-Type-Options": "nosniff",
+        "Content-Length": str(len(body)),
     }
-    if body.size is not None:
-        headers["Content-Length"] = str(body.size)
-    return StreamingResponse(
-        body.chunks(),
+    return Response(
+        content=body,
         media_type=content_type,
         headers=headers,
     )
@@ -3898,21 +5166,48 @@ async def federation_group_dm_mutate(
         deleted=deleted,
         notice=notice_payload,
     )
+    local_media_purges: list[tuple[int, str]] = []
+    terminal_state_destinations: set[str] = set()
+    media_delivery_wakes: set[str] = set()
+    if deleted:
+        (
+            local_media_purges,
+            terminal_state_destinations,
+            media_delivery_wakes,
+        ) = await prepare_terminal_channel_media(session, settings, channel)
     # The authenticated actor's home requested this mutation, while this
     # instance is the conversation authority that signs the resulting state.
     # Preserve the semantic actor for notice and transition validation on
     # replicas without opening remote-actor signing to any other event type.
-    envelope = await build_envelope(
-        session,
-        settings,
-        "dm.group.state",
-        actor,
-        content,
-        authority_attested_actor=True,
-    )
-    destinations = {user.origin_domain for user in [*before, *participants]} - {settings.domain}
-    for destination in destinations:
-        await queue_event(session, settings, destination, envelope)
+    destinations = (
+        {user.origin_domain for user in [*before, *participants]} | terminal_state_destinations
+    ) - {settings.domain}
+    if deleted:
+        if participants or notice_payload is not None:
+            raise RuntimeError("terminal group state must not retain participants or a notice")
+        await queue_terminal_room_deletion(
+            session,
+            settings,
+            room_kind="group_dm",
+            room_id=conversation.id,
+            room_domain=conversation.origin_domain,
+            actor=actor,
+            event_type="dm.group.state",
+            content=content,
+            context={},
+            destinations=destinations,
+        )
+    else:
+        envelope = await build_envelope(
+            session,
+            settings,
+            "dm.group.state",
+            actor,
+            content,
+            authority_attested_actor=True,
+        )
+        for destination in destinations:
+            await queue_event(session, settings, destination, envelope)
     before_refs = {(item.id, item.origin_domain) for item in before}
     conversation_ref = (conversation.id, conversation.origin_domain)
     await session.commit()
@@ -3960,8 +5255,10 @@ async def federation_group_dm_mutate(
                 "CHANNEL_DELETE",
                 {"id": str(channel.id), "origin_domain": channel.origin_domain},
             )
-    for destination in destinations:
+    for destination in destinations | media_delivery_wakes:
         await enqueue_best_effort(federation_deliver, destination)
+    for attachment_id, attachment_domain in local_media_purges:
+        await enqueue_best_effort(media_local_purge, attachment_id, attachment_domain)
     return content
 
 
@@ -4145,6 +5442,11 @@ async def federation_guild_join(
         raise HTTPException(status_code=403, detail={"code": "INSTANCE_BANNED_FROM_GUILD"})
     member = await session.get(
         GuildMember, (guild.id, guild.origin_domain, user.id, user.origin_domain)
+    )
+    await record_room_federation_recipient(
+        session,
+        ("guild", guild.id, guild.origin_domain),
+        principal.origin,
     )
     if member is None:
         if not active_invite(invite):
@@ -4583,6 +5885,11 @@ async def federation_history_export_create(
     if payload.user.domain != principal.origin:
         raise HTTPException(status_code=403, detail={"code": "KAED_FED_HISTORY_FORBIDDEN"})
     guild = await home_guild(session, settings, guild_id, for_share=True)
+    await record_room_federation_recipient(
+        session,
+        ("guild", guild.id, guild.origin_domain),
+        principal.origin,
+    )
     user = await session.get(User, (int(payload.user.id), payload.user.domain))
     if user is None:
         raise HTTPException(status_code=403, detail={"code": "NOT_A_GUILD_MEMBER"})
@@ -4595,6 +5902,7 @@ async def federation_history_export_create(
         principal.origin,
     )
     if export is None:
+        await session.commit()
         return {"available": False}
     await session.commit()
     return {
@@ -4610,6 +5918,7 @@ async def federation_history_export_manifest(
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     require_guild_federation_access(principal)
     await enforce_federation_route_rate_limit(
@@ -4618,6 +5927,12 @@ async def federation_history_export_manifest(
     manifest = await history_export_manifest(session, export_id, principal.origin)
     if database_snowflake(manifest["guild_id"], "history guild id") != guild_id:
         raise HTTPException(status_code=404, detail={"code": "KAED_FED_HISTORY_NOT_FOUND"})
+    await record_room_federation_recipient(
+        session,
+        ("guild", int(guild_id), settings.domain),
+        principal.origin,
+    )
+    await session.commit()
     return manifest
 
 
@@ -4654,6 +5969,21 @@ async def federation_history_export_channel(
         or database_snowflake(page["export_id"], "history export id") != export_id
     ):
         raise HTTPException(status_code=404, detail={"code": "KAED_FED_HISTORY_NOT_FOUND"})
+    _disclosed, terminal_wakes, terminal_refs = await record_disclosed_attachment_recipients(
+        session,
+        settings,
+        attachment_refs_from_payloads(page.get("messages")),
+        principal.origin,
+        room_ref=("guild", int(guild_id), settings.domain),
+    )
+    messages = page.get("messages")
+    if isinstance(messages, list):
+        _strip_terminal_attachments(messages, terminal_refs)
+    # The room-recipient ledger is durable access history even when this page
+    # contains no attachments, so commit it before returning the response.
+    await session.commit()
+    for destination in terminal_wakes:
+        await enqueue_best_effort(federation_deliver, destination)
     return page
 
 
@@ -4665,6 +5995,7 @@ async def federation_history_export_changes(
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     require_guild_federation_access(principal)
     await enforce_federation_route_rate_limit(
@@ -4673,7 +6004,32 @@ async def federation_history_export_changes(
     manifest = await history_export_manifest(session, export_id, principal.origin)
     if database_snowflake(manifest["guild_id"], "history guild id") != guild_id:
         raise HTTPException(status_code=404, detail={"code": "KAED_FED_HISTORY_NOT_FOUND"})
-    return await history_export_delta(session, export_id, principal.origin, after_seq)
+    delta = await history_export_delta(session, export_id, principal.origin, after_seq)
+    delta_events = delta.get("events")
+    attachment_refs: set[tuple[int, str]] = set()
+    if isinstance(delta_events, list):
+        for event in delta_events:
+            if isinstance(event, dict):
+                attachment_refs.update(message_attachment_refs(event))
+    _disclosed, terminal_wakes, terminal_refs = await record_disclosed_attachment_recipients(
+        session,
+        settings,
+        attachment_refs,
+        principal.origin,
+        room_ref=("guild", int(guild_id), settings.domain),
+    )
+    if isinstance(delta_events, list):
+        delta["events"] = await _redact_terminal_guild_events(
+            session,
+            settings,
+            int(guild_id),
+            delta_events,
+            terminal_refs,
+        )
+    await session.commit()
+    for destination in terminal_wakes:
+        await enqueue_best_effort(federation_deliver, destination)
+    return delta
 
 
 @router.post("/_kaede/v1/guilds/{guild_id}/history-exports/{export_id}/complete", status_code=204)
@@ -4683,6 +6039,7 @@ async def federation_history_export_complete(
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
 ) -> Response:
     require_guild_federation_access(principal)
     await enforce_federation_route_rate_limit(
@@ -4692,6 +6049,11 @@ async def federation_history_export_complete(
     if database_snowflake(manifest["guild_id"], "history guild id") != guild_id:
         raise HTTPException(status_code=404, detail={"code": "KAED_FED_HISTORY_NOT_FOUND"})
     await complete_history_export(session, export_id, principal.origin)
+    await record_room_federation_recipient(
+        session,
+        ("guild", int(guild_id), settings.domain),
+        principal.origin,
+    )
     await session.commit()
     return Response(status_code=204)
 
@@ -4910,7 +6272,7 @@ async def federation_guild_snapshot(
     )
     if len(emojis) > 1000:
         raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
-    return guild_snapshot_payload(
+    payload = guild_snapshot_payload(
         guild,
         roles,
         channels,
@@ -4922,6 +6284,13 @@ async def federation_guild_snapshot(
         next_member_cursor=next_member_cursor,
         snapshot_seq=snapshot_seq,
     )
+    await record_room_federation_recipient(
+        session,
+        ("guild", guild.id, guild.origin_domain),
+        principal.origin,
+    )
+    await session.commit()
+    return payload
 
 
 @router.get("/_kaede/v1/guilds/{guild_id}/events")
@@ -5037,6 +6406,26 @@ async def federation_guild_events(
                 },
             )
         )
+    disclosed_refs: set[tuple[int, str]] = set()
+    for rendered_event in rendered_events:
+        disclosed_refs.update(message_attachment_refs(rendered_event))
+    _disclosed, terminal_wakes, terminal_refs = await record_disclosed_attachment_recipients(
+        session,
+        settings,
+        disclosed_refs,
+        principal.origin,
+        room_ref=("guild", int(guild_id), settings.domain),
+    )
+    rendered_events = await _redact_terminal_guild_events(
+        session,
+        settings,
+        int(guild_id),
+        rendered_events,
+        terminal_refs,
+    )
+    await session.commit()
+    for destination in terminal_wakes:
+        await enqueue_best_effort(federation_deliver, destination)
     return {
         "events": rendered_events,
         "latest_seq": str(latest_seq),
@@ -5056,6 +6445,28 @@ async def federation_guild_proxy(
     require_guild_federation_access(principal)
     if payload.actor.origin_domain != principal.origin:
         raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
+    room_ref = ("guild", int(guild_id), settings.domain)
+    await lock_terminal_room(session, *room_ref)
+    incoming_attachment_refs = attachment_refs_from_payloads([{"attachments": payload.attachments}])
+    for attachment_id, attachment_domain in sorted(
+        incoming_attachment_refs, key=lambda ref: (ref[1], ref[0])
+    ):
+        await lock_media_tombstone_ref(session, attachment_id, attachment_domain)
+    if (
+        incoming_attachment_refs
+        and await session.scalar(
+            select(MediaTombstoneSource.attachment_id)
+            .where(
+                tuple_(
+                    MediaTombstoneSource.attachment_id,
+                    MediaTombstoneSource.attachment_domain,
+                ).in_(incoming_attachment_refs)
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        raise HTTPException(status_code=410, detail={"code": "ATTACHMENT_DELETED"})
     actor = await upsert_remote_user(session, settings, payload.actor)
     guild = await home_guild(session, settings, guild_id, for_update=True)
     channel = await session.get(Channel, (int(payload.channel_id), guild.origin_domain))
@@ -5089,6 +6500,11 @@ async def federation_guild_proxy(
         needed,
         channel=channel,
     )
+    await record_room_federation_recipient(
+        session,
+        ("guild", guild.id, guild.origin_domain),
+        principal.origin,
+    )
     await validate_custom_emoji_use(
         session,
         actor,
@@ -5115,6 +6531,26 @@ async def federation_guild_proxy(
         stored_message = stored_content.get("message") if isinstance(stored_content, dict) else None
         if not isinstance(stored_message, dict):
             raise HTTPException(status_code=409, detail={"code": "KAED_GUILD_NONCE_STATE_CONFLICT"})
+        stored_attachment_refs = message_attachment_refs(existing_event.envelope)
+        for attachment_id, attachment_domain in sorted(
+            stored_attachment_refs, key=lambda ref: (ref[1], ref[0])
+        ):
+            await lock_media_tombstone_ref(session, attachment_id, attachment_domain)
+        if (
+            stored_attachment_refs
+            and await session.scalar(
+                select(MediaTombstoneSource.attachment_id)
+                .where(
+                    tuple_(
+                        MediaTombstoneSource.attachment_id,
+                        MediaTombstoneSource.attachment_domain,
+                    ).in_(stored_attachment_refs)
+                )
+                .limit(1)
+            )
+            is not None
+        ):
+            raise HTTPException(status_code=410, detail={"code": "ATTACHMENT_DELETED"})
         return {
             "message": stored_message,
             "seq": str(existing_event.seq),

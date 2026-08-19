@@ -524,7 +524,7 @@ void main() {
   });
 
   test('control-log pages require ascending non-looping composite cursors', () {
-    final channel = EntityRef.parse('9@example.com');
+    final channel = EntityRef.parse('9@authority.example');
     Map<String, Object?> control(String id, {String? channelRef}) {
       final target = EntityRef.parse(channelRef ?? channel.wire);
       return <String, Object?>{
@@ -574,6 +574,15 @@ void main() {
       <String, Object?>{
         'controls': <Object?>[
           <String, Object?>{...control('10')}..remove('apply'),
+        ],
+        'next_after': null,
+      },
+      <String, Object?>{
+        'controls': <Object?>[
+          <String, Object?>{
+            ...control('10'),
+            'origin_domain': 'participant.example',
+          },
         ],
         'next_after': null,
       },

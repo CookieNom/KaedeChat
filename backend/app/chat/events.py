@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from typing import Any, cast
 
 import structlog
 from redis.asyncio import Redis
+
+from app.core.types import validate_entity_reference
 
 log = structlog.get_logger()
 
@@ -49,10 +51,48 @@ def user_topic(domain: str, user_id: int) -> str:
     return f"user:{domain}:{user_id}"
 
 
+def interaction_dispatch_audience(event: dict[str, Any]) -> str | None:
+    """Return the one canonical bot audience for an interaction dispatch.
+
+    Interaction options can contain credentials and other private command
+    input.  Treat both the explicit audience and the payload bot reference as
+    one immutable authorization binding so a malformed retained dispatch
+    cannot add a second recipient during live delivery or replay.
+    """
+
+    if event.get("t") != "INTERACTION_CREATE":
+        return None
+    data = event.get("d")
+    audience = event.get("audience_user_refs")
+    if not isinstance(data, dict) or not isinstance(audience, list) or len(audience) != 1:
+        return None
+    bot_ref = data.get("bot_user_ref")
+    if not isinstance(bot_ref, str) or audience[0] != bot_ref:
+        return None
+    try:
+        parsed = validate_entity_reference(bot_ref)
+    except ValueError:
+        return None
+    if parsed.domain is None or str(parsed) != bot_ref:
+        return None
+    return bot_ref
+
+
 async def publish_dispatch(
-    redis: Redis, topic: str, event_type: str, data: dict[str, Any]
+    redis: Redis,
+    topic: str,
+    event_type: str,
+    data: dict[str, Any],
+    *,
+    audience_user_refs: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     try:
+        event: dict[str, Any] = {"t": event_type, "d": data}
+        if audience_user_refs is not None:
+            audience = list(dict.fromkeys(audience_user_refs))
+            if not audience or not all(isinstance(item, str) and item for item in audience):
+                raise ValueError("dispatch audience is invalid")
+            event["audience_user_refs"] = audience
         result = await cast(
             Awaitable[object],
             redis.eval(
@@ -61,7 +101,7 @@ async def publish_dispatch(
                 f"dispatch:seq:{topic}",
                 f"dispatch:stream:{topic}",
                 f"dispatch:{topic}",
-                json.dumps({"t": event_type, "d": data}, separators=(",", ":")),
+                json.dumps(event, separators=(",", ":")),
             ),
         )
         if not isinstance(result, (list, tuple)) or len(result) != 2:
@@ -75,7 +115,7 @@ async def publish_dispatch(
         if not isinstance(event, dict):
             raise RuntimeError("Dragonfly returned an invalid dispatch event")
         event["topic_seq"] = int(sequence)
-        return cast(dict[str, Any], event)
+        return event
     except Exception:
         # Dispatch streams are a recoverable projection of committed SQL/outbox
         # state. Never turn a successful mutation into a false 5xx response.
