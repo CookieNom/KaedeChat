@@ -377,6 +377,11 @@ services:
       <<: *backend-environment
       ALLOW_NONPRODUCTION_DEPLOYMENT: ${ALLOW_NONPRODUCTION_DEPLOYMENT:-false}
       KAEDE_SERVICE_ROLE: preflight
+      KAEDE_PHOTODNA_ENABLED: ${KAEDE_PHOTODNA_ENABLED:-false}
+      KAEDE_PHOTODNA_SUBSCRIPTION_KEY: ${KAEDE_PHOTODNA_SUBSCRIPTION_KEY:-}
+      KAEDE_PHOTODNA_HASH_TIMEOUT_SECONDS: ${KAEDE_PHOTODNA_HASH_TIMEOUT_SECONDS:-30}
+      KAEDE_PHOTODNA_MATCH_TIMEOUT_SECONDS: ${KAEDE_PHOTODNA_MATCH_TIMEOUT_SECONDS:-20}
+      PHOTODNA_EDGEHASHGENERATOR: /opt/photodna
       KAEDE_EDGE_SECRET: ${KAEDE_EDGE_SECRET:?set KAEDE_EDGE_SECRET}
       KAEDE_GATEWAY_SECRET_KEY: ${KAEDE_GATEWAY_SECRET_KEY:?set KAEDE_GATEWAY_SECRET_KEY}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
@@ -391,6 +396,10 @@ services:
     volumes:
       - ${KAEDE_OPERATOR_ENV_FILE:-../.env}:/run/kaede/operator.env:ro
       - ./validate_deploy_env.py:/run/kaede/validate_deploy_env.py:ro
+      - type: bind
+        source: ${PHOTODNA_EDGEHASHGENERATOR:-/dev/null}
+        target: /opt/photodna
+        read_only: true
     command:
       [
         "sh",
