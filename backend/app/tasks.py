@@ -115,7 +115,11 @@ from app.media.asset_invalidation import (
     invalidate_terminal_asset_binding,
     invalidate_terminal_digest_binding_batch,
 )
-from app.media.digest_revocation import try_lock_asset_digest, valid_content_digest
+from app.media.digest_revocation import (
+    TERMINAL_ATTACHMENT_STATUSES,
+    try_lock_asset_digest,
+    valid_content_digest,
+)
 from app.media.jobs import (
     enforce_remote_cache_limit,
     process_attachment_record,
@@ -128,7 +132,6 @@ from app.media.jobs import (
 from app.media.payloads import attachment_update_payload
 from app.media.processing import IMAGE_PIPELINE_VERSION
 from app.media.tombstones import (
-    TERMINAL_ATTACHMENT_STATUSES,
     lock_media_tombstone_ref,
     queue_media_delete_tombstone,
     queue_terminal_attachment_tombstone,

@@ -13,7 +13,7 @@ from app.core.types import MAX_SNOWFLAKE
 from app.db.models import Attachment, Emoji, Guild, MediaTombstoneSource, User
 from app.federation.relationships import queue_friend_profile_updates
 from app.media.digest_revocation import (
-    TERMINAL_DIGEST_STATUSES,
+    DIGEST_REVOCATION_STATUSES,
     lock_asset_digest,
     valid_content_digest,
 )
@@ -259,7 +259,7 @@ async def invalidate_terminal_digest_binding_batch(
         .where(
             Attachment.origin_domain == settings.domain,
             Attachment.content_sha256 == digest,
-            Attachment.scan_status.in_(TERMINAL_DIGEST_STATUSES),
+            Attachment.scan_status.in_(DIGEST_REVOCATION_STATUSES),
         )
         .limit(1)
     )

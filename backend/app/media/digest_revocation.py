@@ -6,7 +6,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
 
-TERMINAL_DIGEST_STATUSES = frozenset({"infected", "quarantined", "rejected"})
+# Every terminal verdict prevents the individual upload from being published,
+# but only affirmative moderation findings are evidence against the digest.
+# ``rejected`` also represents neutral decoder/policy failures and propagated
+# duplicate cleanup, so treating it as digest evidence would permanently poison
+# valid bytes after a transient software-policy regression.
+TERMINAL_ATTACHMENT_STATUSES = frozenset({"infected", "quarantined", "rejected"})
+DIGEST_REVOCATION_STATUSES = frozenset({"infected", "quarantined"})
 
 
 def valid_content_digest(digest: object) -> TypeGuard[str]:

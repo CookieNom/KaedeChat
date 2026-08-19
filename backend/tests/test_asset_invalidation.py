@@ -44,6 +44,11 @@ def attachment(binding: str) -> Attachment:
     )
 
 
+def test_neutral_rejection_is_not_digest_revocation_evidence() -> None:
+    assert {"infected", "quarantined"} == digest_revocation.DIGEST_REVOCATION_STATUSES
+    assert "rejected" in digest_revocation.TERMINAL_ATTACHMENT_STATUSES
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "field_name"),
@@ -345,6 +350,9 @@ async def test_bind_asset_rejects_retained_terminal_digest_evidence(
     statement_sql = str(statements[0].compile(dialect=postgresql.dialect()))
     assert "attachments.content_sha256 =" in statement_sql
     assert "attachments.scan_status IN" in statement_sql
+    assert set(statements[0].compile().params["scan_status_1"]) == (
+        digest_revocation.DIGEST_REVOCATION_STATUSES
+    )
 
 
 @pytest.mark.asyncio

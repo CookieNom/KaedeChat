@@ -44,6 +44,11 @@ is normative in [kaede-fed-v1.md](kaede-fed-v1.md).
   25-million-decoded-pixel budget are terminally policy-rejected without a
   provider request, report, or retry, and legacy derivative repair persists
   that outcome instead of repeatedly enqueueing a deterministic failure.
+- A terminal decoder or safety-policy rejection deletes that individual upload
+  but is not retained as evidence against future uploads of the same digest.
+  Cross-upload digest revocation is reserved for affirmative ClamAV infections
+  and PhotoDNA matches, preventing a corrected policy regression from
+  permanently poisoning otherwise valid bytes.
 - pyvips emits animated-preserving WebP variants at 128, 512, and 1024 pixels
   plus blurhash and perceptual hash metadata. FFmpeg produces bounded WebP
   posters for supported videos.

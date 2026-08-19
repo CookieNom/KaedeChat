@@ -61,7 +61,7 @@ from app.federation.dm_history import history_media_capability_status, history_m
 from app.federation.network import FederationNetworkError, normalize_domain
 from app.federation.relationships import queue_friend_profile_updates
 from app.media.digest_revocation import (
-    TERMINAL_DIGEST_STATUSES,
+    DIGEST_REVOCATION_STATUSES,
     lock_asset_digest,
     valid_content_digest,
 )
@@ -838,7 +838,7 @@ async def public_asset(
                 select(terminal_duplicate.id).where(
                     terminal_duplicate.origin_domain == settings.domain,
                     terminal_duplicate.content_sha256 == content_hash,
-                    terminal_duplicate.scan_status.in_(TERMINAL_DIGEST_STATUSES),
+                    terminal_duplicate.scan_status.in_(DIGEST_REVOCATION_STATUSES),
                 )
             ),
         )
@@ -904,7 +904,7 @@ async def public_emoji(
                 select(terminal_duplicate.id).where(
                     terminal_duplicate.origin_domain == settings.domain,
                     terminal_duplicate.content_sha256 == Attachment.content_sha256,
-                    terminal_duplicate.scan_status.in_(TERMINAL_DIGEST_STATUSES),
+                    terminal_duplicate.scan_status.in_(DIGEST_REVOCATION_STATUSES),
                 )
             ),
         )

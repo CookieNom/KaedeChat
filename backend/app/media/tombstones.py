@@ -56,12 +56,11 @@ from app.federation.events import (
     queue_event,
 )
 from app.media.digest_revocation import (
-    TERMINAL_DIGEST_STATUSES,
+    DIGEST_REVOCATION_STATUSES,
+    TERMINAL_ATTACHMENT_STATUSES,
     try_lock_asset_digest,
     valid_content_digest,
 )
-
-TERMINAL_ATTACHMENT_STATUSES = TERMINAL_DIGEST_STATUSES
 
 
 @dataclass(frozen=True)
@@ -794,7 +793,7 @@ def _media_tombstone_cleanup_candidates(
             terminal_attachment.id == source.attachment_id,
             terminal_attachment.origin_domain == source.attachment_domain,
             terminal_attachment.content_sha256.is_not(None),
-            terminal_attachment.scan_status.in_(TERMINAL_ATTACHMENT_STATUSES),
+            terminal_attachment.scan_status.in_(DIGEST_REVOCATION_STATUSES),
             active_public_attachment.origin_domain == settings.domain,
             active_public_attachment.purpose != "attachment",
             or_(

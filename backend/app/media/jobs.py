@@ -17,7 +17,7 @@ from app.db.models import (
     RemoteMediaTombstone,
 )
 from app.media.digest_revocation import (
-    TERMINAL_DIGEST_STATUSES,
+    DIGEST_REVOCATION_STATUSES,
     try_lock_asset_digest,
     valid_content_digest,
 )
@@ -189,7 +189,7 @@ async def process_attachment_record(
             .where(
                 Attachment.origin_domain == settings.domain,
                 Attachment.content_sha256 == digest,
-                Attachment.scan_status.in_(TERMINAL_DIGEST_STATUSES),
+                Attachment.scan_status.in_(DIGEST_REVOCATION_STATUSES),
             )
             .limit(1)
         )

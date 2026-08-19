@@ -13,7 +13,7 @@ from app.core.snowflake import SnowflakeGenerator
 from app.db.bot_models import BotInstallation
 from app.db.models import Attachment, User, UserStorageUsage
 from app.media.digest_revocation import (
-    TERMINAL_DIGEST_STATUSES,
+    DIGEST_REVOCATION_STATUSES,
     try_lock_asset_digest,
     valid_content_digest,
 )
@@ -285,13 +285,13 @@ async def bind_asset(
         .where(
             Attachment.origin_domain == attachment.origin_domain,
             Attachment.content_sha256 == digest,
-            Attachment.scan_status.in_(TERMINAL_DIGEST_STATUSES),
+            Attachment.scan_status.in_(DIGEST_REVOCATION_STATUSES),
         )
         .limit(1)
     )
     if terminal_evidence is not None:
-        # Do not disclose whether the retained digest evidence was malware,
-        # PhotoDNA, or a neutral fail-closed validation rejection.
+        # Do not disclose whether the retained affirmative digest evidence was
+        # malware or a PhotoDNA match.
         raise HTTPException(status_code=409, detail={"code": "MEDIA_NOT_AVAILABLE"})
     if attachment.asset_binding not in {None, binding}:
         raise HTTPException(status_code=409, detail={"code": "ASSET_ALREADY_USED"})
