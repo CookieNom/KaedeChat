@@ -27,7 +27,8 @@
         browserNotifications.supported,
         browserNotifications.permission,
         browserNotifications.enabled,
-        browserNotifications.promptHandled
+        browserNotifications.promptHandled,
+        browserNotifications.configured
       )
   );
 

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Message, UserSummary } from '$lib/chat/types';
 import { chatEntities } from '$lib/stores/entities.svelte';
 import {
+  browserNotificationsConfigured,
   browserNotificationsFromSettings,
   BrowserNotifications,
   guildNotificationPreferenceKey,
@@ -58,6 +59,12 @@ describe('browser notification settings', () => {
     expect(browserNotificationsFromSettings({ browser_notifications: 'true' })).toBe(false);
   });
 
+  it('distinguishes an erased preference from an explicit opt-out', () => {
+    expect(browserNotificationsConfigured({})).toBe(false);
+    expect(browserNotificationsConfigured({ browser_notifications: false })).toBe(true);
+    expect(browserNotificationsConfigured({ browser_notifications: true })).toBe(true);
+  });
+
   it('offers notification opt-in once without attempting to prompt automatically', () => {
     expect(shouldOfferBrowserNotificationPrompt(true, 'default', false, false)).toBe(true);
     expect(shouldOfferBrowserNotificationPrompt(true, 'default', true, false)).toBe(true);
@@ -66,6 +73,8 @@ describe('browser notification settings', () => {
     expect(shouldOfferBrowserNotificationPrompt(true, 'denied', false, false)).toBe(false);
     expect(shouldOfferBrowserNotificationPrompt(true, 'default', false, true)).toBe(false);
     expect(shouldOfferBrowserNotificationPrompt(false, 'default', false, false)).toBe(false);
+    expect(shouldOfferBrowserNotificationPrompt(true, 'granted', false, true, false)).toBe(true);
+    expect(shouldOfferBrowserNotificationPrompt(true, 'granted', false, true, true)).toBe(false);
   });
 
   it('notifies for DMs and explicit guild mentions, but never for the sender’s own message', () => {

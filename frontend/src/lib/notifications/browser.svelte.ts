@@ -34,6 +34,10 @@ export function browserNotificationsFromSettings(settings: Record<string, unknow
   return settings.browser_notifications === true;
 }
 
+export function browserNotificationsConfigured(settings: Record<string, unknown>): boolean {
+  return typeof settings.browser_notifications === 'boolean';
+}
+
 export function resolveNotificationPresence(
   storedPreference: string | null,
   projectedPresence: PresenceStatus
@@ -50,9 +54,15 @@ export function shouldOfferBrowserNotificationPrompt(
   supported: boolean,
   permission: NotificationPermission,
   enabled: boolean,
-  promptHandled: boolean
+  promptHandled: boolean,
+  configured = true
 ): boolean {
-  if (!supported || permission === 'denied' || promptHandled) return false;
+  if (!supported || permission === 'denied') return false;
+  // Account data can be restored or reset independently of browser storage.
+  // In that case an old local "handled" flag must not hide the only route to
+  // recreate the missing account-level notification preference.
+  if (!configured) return true;
+  if (promptHandled) return false;
   return permission === 'default' || !enabled;
 }
 
@@ -83,6 +93,7 @@ export function notificationAuthorName(author: UserSummary | null | undefined): 
 
 export class BrowserNotifications {
   enabled = $state(false);
+  configured = $state(false);
   permission = $state<NotificationPermission>('default');
   permissionError = $state('');
   promptHandled = $state(false);
@@ -101,6 +112,7 @@ export class BrowserNotifications {
   }
 
   apply(settings: Record<string, unknown>): void {
+    this.configured = browserNotificationsConfigured(settings);
     this.enabled = browserNotificationsFromSettings(settings);
     this.#settingsLoaded = true;
     this.clearHealthIssue('settings');
@@ -190,6 +202,7 @@ export class BrowserNotifications {
   disable(): void {
     this.#generation += 1;
     this.enabled = false;
+    this.configured = false;
     this.promptHandled = false;
     this.#settingsLoaded = false;
     this.#guildPreferencesLoaded = false;
