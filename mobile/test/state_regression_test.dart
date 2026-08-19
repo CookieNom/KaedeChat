@@ -206,6 +206,14 @@ void main() {
       expect(classifyGatewaySequence(8, 10), GatewaySequenceDecision.gap);
     });
 
+    test('heartbeats leave scheduling margin before the gateway deadline', () {
+      expect(
+        gatewayHeartbeatCadence(41250),
+        const Duration(milliseconds: 30937),
+      );
+      expect(gatewayHeartbeatCadence(1000), const Duration(seconds: 1));
+    });
+
     test('turns structured close reasons into safe recovery guidance', () {
       final limited = gatewayCloseDetails(
         GatewayCloseCode.rateLimited.value,
@@ -294,6 +302,43 @@ void main() {
 
       final health = await reconnecting.timeout(const Duration(seconds: 1));
       expect(health.message, contains('did not respond'));
+    });
+
+    test('authenticates then heartbeats immediately after hello', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final received = Completer<List<int>>();
+      server.listen((request) async {
+        final socket = await WebSocketTransformer.upgrade(request);
+        final ops = <int>[];
+        socket.listen((raw) {
+          final payload = jsonDecode(raw as String) as Map<String, Object?>;
+          ops.add(payload['op']! as int);
+          if (ops.length == 2 && !received.isCompleted) {
+            received.complete(List<int>.unmodifiable(ops));
+          }
+        });
+        socket.add(jsonEncode(<String, Object?>{
+          'op': GatewayOp.hello.value,
+          'd': <String, Object?>{'heartbeat_interval': 1000},
+        }));
+      });
+      addTearDown(() => server.close(force: true));
+      final endpoint = Uri.parse('ws://127.0.0.1:${server.port}');
+      final client = GatewayClient(
+        tokens: () async => tokens,
+        socketConnector: (_) => IOWebSocketChannel.connect(endpoint),
+        transportReadyTimeout: const Duration(seconds: 1),
+        sessionReadyTimeout: const Duration(seconds: 1),
+        transportCloseTimeout: const Duration(milliseconds: 40),
+      );
+      addTearDown(client.close);
+
+      await client.connect(tokens);
+
+      expect(
+        await received.future.timeout(const Duration(seconds: 1)),
+        <int>[GatewayOp.identify.value, GatewayOp.heartbeat.value],
+      );
     });
   });
 

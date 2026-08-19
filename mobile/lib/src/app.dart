@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -20,11 +21,15 @@ final class KaedeApp extends ConsumerStatefulWidget {
 final class _KaedeAppState extends ConsumerState<KaedeApp>
     with WidgetsBindingObserver {
   late final GoRouter _router;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+  bool? _networkAvailable;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _connectivitySubscription =
+        Connectivity().onConnectivityChanged.listen(_handleConnectivity);
     _router = GoRouter(
       routes: <RouteBase>[
         GoRoute(
@@ -40,6 +45,20 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
       ],
       errorBuilder: (context, state) => const _SessionGate(),
     );
+  }
+
+  void _handleConnectivity(List<ConnectivityResult> results) {
+    final available =
+        results.any((result) => result != ConnectivityResult.none);
+    final restored = _networkAvailable == false && available;
+    _networkAvailable = available;
+    if (restored) {
+      unawaited(
+        ref
+            .read(mobileControllerProvider.notifier)
+            .retryRealtime(foreground: true),
+      );
+    }
   }
 
   @override
@@ -66,6 +85,7 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _connectivitySubscription?.cancel();
     _router.dispose();
     super.dispose();
   }

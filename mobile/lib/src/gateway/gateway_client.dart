@@ -210,6 +210,12 @@ GatewaySequenceDecision classifyGatewaySequence(int? previous, int next) {
   return GatewaySequenceDecision.gap;
 }
 
+/// Renews early enough to absorb ordinary mobile main-isolate scheduling
+/// stalls instead of using the server's entire heartbeat grace period.
+Duration gatewayHeartbeatCadence(int advertisedMilliseconds) => Duration(
+      milliseconds: max(1000, advertisedMilliseconds * 3 ~/ 4),
+    );
+
 final class GatewayClient {
   GatewayClient({
     required this.tokens,
@@ -217,6 +223,7 @@ final class GatewayClient {
     this.transportReadyTimeout = const Duration(seconds: 12),
     this.sessionReadyTimeout = const Duration(seconds: 15),
     this.transportCloseTimeout = const Duration(seconds: 1),
+    this.recoveryWatchdogInterval = const Duration(seconds: 30),
   }) : _socketConnector =
             socketConnector ?? ((uri) => WebSocketChannel.connect(uri));
 
@@ -225,12 +232,14 @@ final class GatewayClient {
   final Duration transportReadyTimeout;
   final Duration sessionReadyTimeout;
   final Duration transportCloseTimeout;
+  final Duration recoveryWatchdogInterval;
   final _events = StreamController<GatewayEvent>.broadcast();
   final _healthEvents = StreamController<GatewayHealth>.broadcast(sync: true);
   WebSocketChannel? _socket;
   StreamSubscription<Object?>? _subscription;
   Timer? _heartbeat;
   Timer? _sessionReadyWatchdog;
+  Timer? _recoveryWatchdog;
   SessionTokens? _tokens;
   String? _sessionId;
   int? _sequence;
@@ -399,6 +408,8 @@ final class GatewayClient {
   Future<void> close() async {
     _closed = true;
     _generation += 1;
+    _recoveryWatchdog?.cancel();
+    _recoveryWatchdog = null;
     await _disconnectTransport();
     await _events.close();
     await _healthEvents.close();
@@ -407,6 +418,8 @@ final class GatewayClient {
   Future<void> disconnect() async {
     _closed = true;
     _generation += 1;
+    _recoveryWatchdog?.cancel();
+    _recoveryWatchdog = null;
     _tokens = null;
     _sessionId = null;
     _sequence = null;
@@ -434,7 +447,12 @@ final class GatewayClient {
       final interval = (rawInterval as num?)?.toInt() ?? 41250;
       _heartbeat?.cancel();
       _awaitingHeartbeatAck = false;
-      _heartbeat = Timer.periodic(Duration(milliseconds: interval), (_) {
+      // The gateway permits only a small scheduling grace after its advertised
+      // interval. Mobile main isolates can easily be delayed longer than that
+      // while waking, decoding media, or changing networks, so renew at 75%
+      // of the interval and send once immediately after authentication.
+      final heartbeatCadence = gatewayHeartbeatCadence(interval);
+      _heartbeat = Timer.periodic(heartbeatCadence, (_) {
         if (_awaitingHeartbeatAck) {
           unawaited(_reconnect(
             generation,
@@ -469,6 +487,8 @@ final class GatewayClient {
           },
         });
       }
+      _awaitingHeartbeatAck = true;
+      _send(GatewayOp.heartbeat, _sequence);
       return;
     }
     if (op == GatewayOp.heartbeatAck.value) {
@@ -678,11 +698,37 @@ final class GatewayClient {
     }
   }
 
+  void _syncRecoveryWatchdog() {
+    _recoveryWatchdog?.cancel();
+    _recoveryWatchdog = null;
+    if (_closed || _tokens == null || _health.isConnected) return;
+    _recoveryWatchdog = Timer(recoveryWatchdogInterval, () {
+      _recoveryWatchdog = null;
+      if (_closed || _tokens == null || _health.isConnected) {
+        return;
+      }
+      if (_reconnecting != null) {
+        _syncRecoveryWatchdog();
+        return;
+      }
+      // Socket callbacks and delayed futures are not guaranteed to survive a
+      // long event-loop stall. If they disappear, a non-connected health state
+      // would otherwise remain forever even though the app is still running.
+      _reconnectAttempts = 0;
+      unawaited(_reconnect(
+        _generation,
+        reason: 'Restoring realtime updates…',
+      ));
+    });
+  }
+
   void _setHealth(GatewayHealth health) {
     if (_health.phase == health.phase && _health.message == health.message) {
+      _syncRecoveryWatchdog();
       return;
     }
     _health = health;
+    _syncRecoveryWatchdog();
     if (!_healthEvents.isClosed) _healthEvents.add(health);
   }
 }
