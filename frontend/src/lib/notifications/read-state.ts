@@ -44,7 +44,12 @@ export function applyIncomingMessage(
   ) {
     return readStates;
   }
-  const mentioned = message.mention_user_refs.some(
+  // Older retained gateway events may contain `{}` here because Lua cjson
+  // collapsed empty JSON arrays while assigning their topic sequence. Treat
+  // malformed/legacy empty mention projections as empty so one event cannot
+  // abort all unread-state reducers in the tab.
+  const mentions = Array.isArray(message.mention_user_refs) ? message.mention_user_refs : [];
+  const mentioned = mentions.some(
     (reference) =>
       reference.id === currentUser.id && reference.origin_domain === currentUser.origin_domain
   );

@@ -13,9 +13,12 @@ log = structlog.get_logger()
 
 PUBLISH_DISPATCH_SCRIPT = """
 local sequence = redis.call('INCR', KEYS[1])
-local event = cjson.decode(ARGV[1])
-event['topic_seq'] = sequence
-local encoded = cjson.encode(event)
+-- Do not round-trip the event through Lua cjson. Redis/Dragonfly's bundled
+-- cjson cannot distinguish an empty JSON array from an empty JSON object, so
+-- fields such as mention_user_refs and attachments were changed from [] to {}
+-- before reaching gateway clients. The Python encoder always gives us a
+-- compact top-level object, so append the sequence without decoding its body.
+local encoded = string.sub(ARGV[1], 1, -2) .. ',"topic_seq":' .. tostring(sequence) .. '}'
 redis.call('XADD', KEYS[2], 'MAXLEN', '~', 1000, '*', 'event', encoded)
 redis.call('PUBLISH', KEYS[3], encoded)
 return {sequence, encoded}

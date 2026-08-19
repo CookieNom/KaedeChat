@@ -155,6 +155,20 @@ describe('realtime read-state reduction', () => {
     expect(directMessageUnreadCount([created])).toBe(1);
   });
 
+  it('handles legacy gateway events that encoded empty mentions as an object', () => {
+    const directState = { ...initial, guild_id: null, guild_domain: null };
+    const [updated] = applyIncomingMessage(
+      [directState],
+      message({ id: '21', mention_user_refs: {} as never }),
+      currentUser,
+      directMessageChannel
+    );
+
+    expect(updated.unread).toBe(true);
+    expect(updated.last_message_id).toBe('21');
+    expect(directMessageUnreadCount([updated])).toBe(1);
+  });
+
   it('does not invent a read state without matching channel metadata', () => {
     expect(applyIncomingMessage([], message(), currentUser, null)).toEqual([]);
   });

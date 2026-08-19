@@ -70,7 +70,8 @@ export function shouldNotifyForMessage(
   if (isDirectMessage) return true;
   if (guildLevel === 'none') return false;
   if (guildLevel === 'all') return true;
-  return message.mention_user_refs.some(
+  const mentions = Array.isArray(message.mention_user_refs) ? message.mention_user_refs : [];
+  return mentions.some(
     (reference) =>
       reference.id === currentUser.id && reference.origin_domain === currentUser.origin_domain
   );

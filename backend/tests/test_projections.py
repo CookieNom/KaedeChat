@@ -3,7 +3,7 @@ from typing import Any, cast
 
 import pytest
 
-from app.chat.events import publish_dispatch
+from app.chat.events import PUBLISH_DISPATCH_SCRIPT, publish_dispatch
 from app.core.task_wake import enqueue_best_effort
 
 
@@ -31,6 +31,14 @@ async def test_targeted_dispatch_persists_its_audience_in_the_durable_event() ->
     assert rendered is not None
     assert rendered["audience_user_refs"] == ["10@apps.test"]
     assert json.loads(cast(str, redis.encoded))["audience_user_refs"] == ["10@apps.test"]
+
+
+def test_dispatch_lua_does_not_round_trip_json_through_cjson() -> None:
+    """Empty protocol arrays must remain arrays in retained/live dispatches."""
+
+    assert "cjson.decode" not in PUBLISH_DISPATCH_SCRIPT
+    assert "cjson.encode" not in PUBLISH_DISPATCH_SCRIPT
+    assert "string.sub(ARGV[1], 1, -2)" in PUBLISH_DISPATCH_SCRIPT
 
 
 @pytest.mark.asyncio
