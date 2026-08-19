@@ -147,11 +147,20 @@
       readStates = applyReadStateDispatch(readStates, update);
     } else if (dispatch.t === 'MESSAGE_CREATE') {
       const message = dispatch.d as Message;
-      readStates = applyIncomingMessage(readStates, message, currentUser);
-      const channel = directMessages.find(
+      const directMessage = directMessages.find(
         (item) => item.id === message.channel_id && item.origin_domain === message.channel_domain
       );
-      if (channel) directMessages = promoteDirectMessage(directMessages, channel);
+      const channel =
+        directMessage ??
+        guilds
+          .flatMap((guild) => guild.channels ?? [])
+          .find(
+            (item) =>
+              item.id === message.channel_id && item.origin_domain === message.channel_domain
+          ) ??
+        null;
+      readStates = applyIncomingMessage(readStates, message, currentUser, channel);
+      if (directMessage) directMessages = promoteDirectMessage(directMessages, directMessage);
     } else if (dispatch.t === 'CHANNEL_CREATE') {
       const channel = dispatch.d as Channel;
       if (channel.type === 1 && !directMessages.some((item) => sameEntity(item, channel))) {

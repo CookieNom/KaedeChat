@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Message, ReadStateStatus, UserSummary } from '$lib/chat/types';
+import type { Channel, Message, ReadStateStatus, UserSummary } from '$lib/chat/types';
+import { directMessageUnreadCount } from './counts';
 import { applyIncomingMessage, applyReadStateDispatch } from './read-state';
 
 const currentUser = {
@@ -20,6 +21,19 @@ const initial: ReadStateStatus = {
   mention_count: 0,
   unread: false
 };
+
+const guildChannel = {
+  id: '10',
+  origin_domain: 'home.test',
+  guild_id: '5',
+  guild_domain: 'home.test'
+} as Channel;
+
+const directMessageChannel = {
+  ...guildChannel,
+  guild_id: null,
+  guild_domain: null
+} as Channel;
 
 function message(overrides: Partial<Message> = {}): Message {
   return {
@@ -49,7 +63,8 @@ describe('realtime read-state reduction', () => {
     const [updated] = applyIncomingMessage(
       [initial],
       message({ mention_user_refs: [{ id: '1', origin_domain: 'home.test' }] }),
-      currentUser
+      currentUser,
+      guildChannel
     );
 
     expect(updated).toMatchObject({
@@ -63,7 +78,8 @@ describe('realtime read-state reduction', () => {
     const [unchanged] = applyIncomingMessage(
       [initial],
       message({ author_id: '1', author_domain: 'home.test' }),
-      currentUser
+      currentUser,
+      guildChannel
     );
 
     expect(unchanged).toEqual(initial);
@@ -108,14 +124,38 @@ describe('realtime read-state reduction', () => {
     const once = applyIncomingMessage(
       [initial],
       message({ mention_user_refs: [{ id: '1', origin_domain: 'home.test' }] }),
-      currentUser
+      currentUser,
+      guildChannel
     );
     const twice = applyIncomingMessage(
       once,
       message({ mention_user_refs: [{ id: '1', origin_domain: 'home.test' }] }),
-      currentUser
+      currentUser,
+      guildChannel
     );
 
     expect(twice[0].mention_count).toBe(1);
+  });
+
+  it('creates a realtime unread state when a direct message has no loaded read state yet', () => {
+    const [created] = applyIncomingMessage([], message(), currentUser, directMessageChannel);
+
+    expect(created).toEqual({
+      channel_id: '10',
+      channel_domain: 'home.test',
+      guild_id: null,
+      guild_domain: null,
+      last_message_id: '20',
+      last_message_domain: 'home.test',
+      read_message_id: null,
+      read_message_domain: null,
+      mention_count: 0,
+      unread: true
+    });
+    expect(directMessageUnreadCount([created])).toBe(1);
+  });
+
+  it('does not invent a read state without matching channel metadata', () => {
+    expect(applyIncomingMessage([], message(), currentUser, null)).toEqual([]);
   });
 });

@@ -1,5 +1,7 @@
 import { compareEntityRefs } from '$lib/chat/refs';
-import type { Message, ReadStateStatus, UserSummary } from '$lib/chat/types';
+import type { Channel, Message, ReadStateStatus, UserSummary } from '$lib/chat/types';
+
+type ReadStateChannel = Pick<Channel, 'id' | 'origin_domain' | 'guild_id' | 'guild_domain'>;
 
 export interface ReadStateDispatch {
   channel_id: string;
@@ -33,7 +35,8 @@ function latestMessageIsUnread(state: ReadStateStatus, update: ReadStateDispatch
 export function applyIncomingMessage(
   readStates: ReadStateStatus[],
   message: Message,
-  currentUser: UserSummary | null
+  currentUser: UserSummary | null,
+  channel: ReadStateChannel | null
 ): ReadStateStatus[] {
   if (
     !currentUser ||
@@ -45,6 +48,34 @@ export function applyIncomingMessage(
     (reference) =>
       reference.id === currentUser.id && reference.origin_domain === currentUser.origin_domain
   );
+  const existing = readStates.some(
+    (state) =>
+      state.channel_id === message.channel_id && state.channel_domain === message.channel_domain
+  );
+  if (!existing) {
+    if (
+      !channel ||
+      channel.id !== message.channel_id ||
+      channel.origin_domain !== message.channel_domain
+    ) {
+      return readStates;
+    }
+    return [
+      ...readStates,
+      {
+        channel_id: message.channel_id,
+        channel_domain: message.channel_domain,
+        guild_id: channel.guild_id,
+        guild_domain: channel.guild_domain,
+        last_message_id: message.id,
+        last_message_domain: message.origin_domain,
+        read_message_id: null,
+        read_message_domain: null,
+        mention_count: mentioned ? 1 : 0,
+        unread: true
+      }
+    ];
+  }
   return readStates.map((state) => {
     const sameChannel =
       state.channel_id === message.channel_id && state.channel_domain === message.channel_domain;

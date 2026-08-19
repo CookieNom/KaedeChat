@@ -76,7 +76,12 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       const channel = chatEntities.channels.get(`${message.channel_id}@${message.channel_domain}`);
       if (channel?.guild_id === null) chatEntities.channels.upsert(channel, { append: false });
       chatEntities.readStates.replace(
-        applyIncomingMessage(chatEntities.readStates.values, message, chatEntities.currentUser)
+        applyIncomingMessage(
+          chatEntities.readStates.values,
+          message,
+          chatEntities.currentUser,
+          channel ?? null
+        )
       );
       return;
     }
