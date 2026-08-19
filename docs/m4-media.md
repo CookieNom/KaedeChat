@@ -30,17 +30,20 @@ is normative in [kaede-fed-v1.md](kaede-fed-v1.md).
   metadata-only automated report; the image and PhotoDNA hash are not retained.
   Non-admin APIs expose only the same generic `rejected` status used for other
   terminal safety-policy decisions.
-- Images below 160x160 pixels and provider statuses 3206/3208 are terminally
+- Images between the native SDK's 50-pixel floor and MatchHash's 160-pixel
+  floor are proportionally upscaled only inside the isolated moderation
+  adapter. The original validated bytes remain unchanged for publication.
+  Images below 50 pixels and provider statuses 3206/3208 are terminally
   ineligible: they get the same neutral `rejected` state, are deleted, and are
   never published as clean. A source file over 4 MB is not exempt, because
   MatchHash receives the fixed-size Edge Hash rather than the file; the
   provider's 4 MB source-image limit applies to its deprecated direct-image
   representation, not the preferred fixed-size `PreHashV2` request used here.
-  Kaede enforces its own upload and decoded-image safety limits before hash
-  generation: images above the local 256-frame or 25-million-decoded-pixel
-  budget are terminally policy-rejected without a provider request, report, or
-  retry, and legacy derivative repair persists that outcome instead of
-  repeatedly enqueueing a deterministic failure.
+  Kaede enforces its own upload, normalized-frame, and decoded-image safety
+  limits before hash generation: images above the local 256-frame or
+  25-million-decoded-pixel budget are terminally policy-rejected without a
+  provider request, report, or retry, and legacy derivative repair persists
+  that outcome instead of repeatedly enqueueing a deterministic failure.
 - pyvips emits animated-preserving WebP variants at 128, 512, and 1024 pixels
   plus blurhash and perceptual hash metadata. FFmpeg produces bounded WebP
   posters for supported videos.
@@ -62,7 +65,7 @@ is normative in [kaede-fed-v1.md](kaede-fed-v1.md).
   behind a five-minute redirect. Message deletion asynchronously removes the
   original and all derivatives and releases the uploader's quota.
 - Remote attachment identities remain `(origin_domain, attachment_id,
-  variant)`. Fetches use a fixed signed `/_kaede/v1/media/...` path through the
+variant)`. Fetches use a fixed signed `/_kaede/v1/media/...` path through the
   shared DNS-pinning SSRF guard, reject redirects and oversized responses,
   re-sniff and re-scan bytes locally (including PhotoDNA for plaintext images
   when enabled), and cache them in the selected store with a 100 GiB LRU

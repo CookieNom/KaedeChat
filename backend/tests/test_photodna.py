@@ -375,13 +375,51 @@ def test_sdk_adapter_rejects_images_below_the_native_eligibility_floor(
         photodna_sdk._hash(rendered.getvalue())
 
 
-def test_cloud_eligibility_is_decided_without_hashing() -> None:
+def test_sdk_adapter_normalizes_small_icons_to_the_cloud_dimension_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded = base64.b64encode(b"x" * 924)
+    calls: list[tuple[int, int]] = []
+
+    class Generator:
+        def PhotoDnaEdgeHash(
+            self,
+            pixels: object,
+            output: Any,
+            width: int,
+            height: int,
+            stride: int,
+            options: object,
+        ) -> int:
+            del pixels, stride, options
+            output.raw = encoded
+            calls.append((width, height))
+            return 0
+
+    edge = SimpleNamespace(
+        PhotoDnaOptions=SimpleNamespace(
+            Rgb=0,
+            Rgba=0x100,
+            Cmyk=0x300,
+            HashFormatEdgeV2Base64=0x90,
+        ),
+        HashSize=SimpleNamespace(EdgeV2Base64=SimpleNamespace(value=1232)),
+    )
+    monkeypatch.setattr(photodna_sdk, "_sdk", lambda: (edge, Generator()))
+    rendered = io.BytesIO()
+    Image.new("RGB", (128, 128), "teal").save(rendered, format="JPEG")
+
+    assert photodna_sdk._hash(rendered.getvalue()) == encoded.decode("ascii")
+    assert calls == [(160, 160)]
+
+
+def test_cloud_eligibility_allows_safe_small_icon_normalization() -> None:
     too_small = io.BytesIO()
     Image.new("RGB", (159, 160), "teal").save(too_small, format="PNG")
     large_source = io.BytesIO()
     Image.new("RGB", (1200, 1200), "teal").save(large_source, format="BMP")
 
-    assert image_ineligibility_reason(too_small.getvalue()) == "dimension_below_160_pixels"
+    assert image_ineligibility_reason(too_small.getvalue()) is None
     assert len(large_source.getvalue()) > 4_000_000
     # MatchHash receives the fixed-size Edge Hash, not the source file. Do not
     # create an unscanned large-file bypass; Microsoft can return status 3208

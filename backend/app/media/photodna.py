@@ -19,6 +19,10 @@ from PIL import Image
 
 from app.core.settings import Settings
 from app.db.bot_models import AbuseReport
+from app.media.photodna_dimensions import (
+    MIN_NATIVE_IMAGE_DIMENSION,
+    normalized_photodna_dimensions,
+)
 from app.media.processing import MediaValidationError
 
 MAX_BATCH_SIZE = 5
@@ -26,7 +30,6 @@ MAX_HASH_LENGTH = 16_384
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_MATCH_FLAGS = 32
 EDGE_V2_DECODED_BYTES = 924
-MIN_CLOUD_IMAGE_DIMENSION = 160
 MAX_ANIMATION_FRAMES = 256
 MAX_ANIMATION_TOTAL_PIXELS = 25_000_000
 MAX_GENERATOR_RESPONSE_BYTES = 384 * 1024
@@ -439,8 +442,11 @@ def image_ineligibility_reason(data: bytes) -> str | None:
         raise PhotoDNAInputRejected("animated image has too many frames to scan safely")
     if width * height * frames > MAX_ANIMATION_TOTAL_PIXELS:
         raise PhotoDNAInputRejected("animated image is too large to scan safely")
-    if width < MIN_CLOUD_IMAGE_DIMENSION or height < MIN_CLOUD_IMAGE_DIMENSION:
-        return "dimension_below_160_pixels"
+    if width < MIN_NATIVE_IMAGE_DIMENSION or height < MIN_NATIVE_IMAGE_DIMENSION:
+        return "dimension_below_50_pixels"
+    normalized_width, normalized_height = normalized_photodna_dimensions(width, height)
+    if normalized_width * normalized_height * frames > MAX_ANIMATION_TOTAL_PIXELS:
+        raise PhotoDNAInputRejected("normalized image is too large to scan safely")
     return None
 
 
@@ -448,9 +454,10 @@ async def scan_image(data: bytes, settings: Settings) -> PhotoDNAFinding | None:
     if not settings.photodna_enabled:
         return None
     if image_ineligibility_reason(data) is not None:
-        # PhotoDNA cannot verify this image. Publishing it as clean would turn
-        # an eligibility boundary into a moderation bypass, so use the same
-        # neutral terminal rejection as provider statuses 3206/3208.
+        # The native SDK cannot safely inspect images below its own input
+        # floor. Publishing one as clean would turn that boundary into a
+        # moderation bypass, so use the same neutral terminal rejection as
+        # provider statuses 3206/3208.
         raise PhotoDNAInputRejected("PhotoDNA cannot verify this image size")
     generated = await generate_edge_hashes(data, settings)
     input_rejected = False

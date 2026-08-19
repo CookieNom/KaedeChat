@@ -11,6 +11,11 @@ from typing import Any, NoReturn
 import numpy as np
 from PIL import Image
 
+from app.media.photodna_dimensions import (
+    MIN_NATIVE_IMAGE_DIMENSION,
+    normalized_photodna_dimensions,
+)
+
 Image.MAX_IMAGE_PIXELS = 25_000_000
 MAX_ANIMATION_FRAMES = 256
 MAX_ANIMATION_TOTAL_PIXELS = 25_000_000
@@ -76,6 +81,18 @@ def _hashes(data: bytes) -> list[str]:
                 raise PhotoDNASDKError("PhotoDNA animation frame limit exceeded")
             if image.width * image.height * frames > MAX_ANIMATION_TOTAL_PIXELS:
                 raise PhotoDNASDKError("PhotoDNA animation pixel limit exceeded")
+            if (
+                image.width < MIN_NATIVE_IMAGE_DIMENSION
+                or image.height < MIN_NATIVE_IMAGE_DIMENSION
+            ):
+                raise PhotoDNASDKError(
+                    "PhotoDNA requires both image dimensions to be at least 50 pixels"
+                )
+            normalized_width, normalized_height = normalized_photodna_dimensions(
+                image.width, image.height
+            )
+            if normalized_width * normalized_height * frames > MAX_ANIMATION_TOTAL_PIXELS:
+                raise PhotoDNASDKError("PhotoDNA normalized image pixel limit exceeded")
             for frame_index in range(frames):
                 image.seek(frame_index)
                 # Pillow's seek state composites GIF/WebP disposal frames. A
@@ -96,9 +113,16 @@ def _hashes(data: bytes) -> list[str]:
                 else:
                     rendered = image.convert("RGB")
                     input_format = edge_hash.PhotoDnaOptions.Rgb
-                if rendered.width < 50 or rendered.height < 50:
-                    raise PhotoDNASDKError(
-                        "PhotoDNA requires both image dimensions to be at least 50 pixels"
+                if (rendered.width, rendered.height) != (
+                    normalized_width,
+                    normalized_height,
+                ):
+                    # MatchHash rejects Edge Hashes produced from source images
+                    # below 160 pixels on either axis. Upscaling only the
+                    # isolated moderation frame lets ordinary 50–159px icons
+                    # be checked without altering the bytes later published.
+                    rendered = rendered.resize(
+                        (normalized_width, normalized_height), Image.Resampling.LANCZOS
                     )
                 pixels = np.ascontiguousarray(np.asarray(rendered))
                 options = input_format | edge_hash.PhotoDnaOptions.HashFormatEdgeV2Base64
