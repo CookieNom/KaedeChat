@@ -31,7 +31,9 @@ def normalize_guild_navigation(
             if guild in accessible and guild not in seen:
                 guilds.append(guild)
                 seen.add(guild)
-        if guilds:
+        if len(guilds) == 1:
+            items.append({"kind": "guild", "guild": guilds[0]})
+        elif guilds:
             items.append(
                 {
                     "kind": "group",

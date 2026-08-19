@@ -66,3 +66,47 @@ def test_guild_navigation_rejects_duplicate_and_malformed_groups() -> None:
 def test_corrupt_stored_guild_navigation_falls_back_safely() -> None:
     parsed = parse_stored_guild_navigation({"items": [{"kind": "unknown"}]})
     assert parsed.items == []
+
+
+def test_guild_navigation_canonicalizes_singleton_groups() -> None:
+    payload = GuildNavigationUpdate.model_validate(
+        {
+            "items": [
+                {
+                    "kind": "group",
+                    "id": "singleton",
+                    "name": "Singleton",
+                    "guilds": ["11@home.example"],
+                }
+            ]
+        }
+    )
+
+    assert normalize_guild_navigation(
+        payload,
+        [(11, "home.example")],
+        "home.example",
+    ) == {"items": [{"kind": "guild", "guild": "11@home.example"}]}
+
+
+def test_guild_navigation_rejects_nested_group_items() -> None:
+    with pytest.raises(ValidationError):
+        GuildNavigationUpdate.model_validate(
+            {
+                "items": [
+                    {
+                        "kind": "group",
+                        "id": "outer",
+                        "name": "Outer",
+                        "guilds": [
+                            {
+                                "kind": "group",
+                                "id": "nested",
+                                "name": "Nested",
+                                "guilds": ["11@home.example"],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )

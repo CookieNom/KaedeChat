@@ -65,6 +65,10 @@ export function parseGuildNavigation(value: unknown): GuildNavigation {
       })
       .slice(0, 100);
     if (!guilds.length) continue;
+    if (guilds.length === 1) {
+      items.push({ kind: 'guild', guild: guilds[0] });
+      continue;
+    }
     seenGroups.add(item.id);
     items.push({
       kind: 'group',
@@ -97,7 +101,11 @@ export function reconcileGuildNavigation(
       seen.add(guild);
       return true;
     });
-    if (groupGuilds.length) items.push({ ...item, guilds: groupGuilds });
+    if (groupGuilds.length === 1) {
+      items.push({ kind: 'guild', guild: groupGuilds[0] });
+    } else if (groupGuilds.length > 1) {
+      items.push({ ...item, guilds: groupGuilds });
+    }
   }
   for (const guild of guilds) {
     const ref = entityRef(guild);
@@ -106,7 +114,11 @@ export function reconcileGuildNavigation(
   return { items };
 }
 
-function withoutGuild(items: GuildNavigationItem[], guild: string): GuildNavigationItem[] {
+function withoutGuild(
+  items: GuildNavigationItem[],
+  guild: string,
+  dissolveSingletonGroups = false
+): GuildNavigationItem[] {
   const remaining: GuildNavigationItem[] = [];
   for (const item of items) {
     if (item.kind === 'guild') {
@@ -114,7 +126,11 @@ function withoutGuild(items: GuildNavigationItem[], guild: string): GuildNavigat
       continue;
     }
     const guilds = item.guilds.filter((candidate) => candidate !== guild);
-    if (guilds.length) remaining.push({ ...item, guilds });
+    if (dissolveSingletonGroups && guilds.length === 1) {
+      remaining.push({ kind: 'guild', guild: guilds[0] });
+    } else if (guilds.length) {
+      remaining.push({ ...item, guilds });
+    }
   }
   return remaining;
 }
@@ -127,7 +143,29 @@ export function placeGuild(
   newGroupId: string
 ): GuildNavigation {
   if (source === target) return navigation;
-  let items = withoutGuild(navigation.items, source);
+  const sourceExists = navigation.items.some((item) =>
+    item.kind === 'guild' ? item.guild === source : item.guilds.includes(source)
+  );
+  const targetExists = navigation.items.some((item) =>
+    item.kind === 'guild' ? item.guild === target : item.guilds.includes(target)
+  );
+  if (!sourceExists || !targetExists) return navigation;
+  const sourceGroup = navigation.items.find(
+    (item): item is GuildNavigationGroupItem =>
+      item.kind === 'group' && item.guilds.includes(source)
+  );
+  if (sourceGroup?.guilds.includes(target)) {
+    const guilds = sourceGroup.guilds.filter((guild) => guild !== source);
+    const targetIndex = guilds.indexOf(target);
+    guilds.splice(position === 'before' ? targetIndex : targetIndex + 1, 0, source);
+    return {
+      items: navigation.items.map((item) =>
+        item.kind === 'group' && item.id === sourceGroup.id ? { ...item, guilds } : item
+      )
+    };
+  }
+
+  let items = withoutGuild(navigation.items, source, true);
   const groupIndex = items.findIndex(
     (item) => item.kind === 'group' && item.guilds.includes(target)
   );
@@ -164,11 +202,43 @@ export function placeGuildInGroup(
   guild: string,
   groupId: string
 ): GuildNavigation {
-  const items = withoutGuild(navigation.items, guild).map((item) =>
+  const sourceExists = navigation.items.some((item) =>
+    item.kind === 'guild' ? item.guild === guild : item.guilds.includes(guild)
+  );
+  const targetGroup = navigation.items.find(
+    (item): item is GuildNavigationGroupItem => item.kind === 'group' && item.id === groupId
+  );
+  if (!sourceExists || !targetGroup) return navigation;
+  const existingGroup = navigation.items.find(
+    (item) => item.kind === 'group' && item.guilds.includes(guild)
+  );
+  if (existingGroup?.kind === 'group' && existingGroup.id === groupId) return navigation;
+  const items = withoutGuild(navigation.items, guild, true).map((item) =>
     item.kind === 'group' && item.id === groupId
       ? { ...item, guilds: [...item.guilds, guild], collapsed: false }
       : item
   );
+  return { items };
+}
+
+export function placeGuildAtTopLevel(
+  navigation: GuildNavigation,
+  guild: string,
+  index: number
+): GuildNavigation {
+  const sourceIndex = navigation.items.findIndex((item) =>
+    item.kind === 'guild' ? item.guild === guild : item.guilds.includes(guild)
+  );
+  if (sourceIndex < 0) return navigation;
+
+  const source = navigation.items[sourceIndex];
+  const removesSourceContainer =
+    source.kind === 'guild' || (source.kind === 'group' && source.guilds.length === 1);
+  const items = withoutGuild(navigation.items, guild, true);
+  let insertAt = Math.max(0, Math.min(Math.trunc(index), navigation.items.length));
+  if (removesSourceContainer && sourceIndex < insertAt) insertAt -= 1;
+  insertAt = Math.min(insertAt, items.length);
+  items.splice(insertAt, 0, { kind: 'guild', guild });
   return { items };
 }
 

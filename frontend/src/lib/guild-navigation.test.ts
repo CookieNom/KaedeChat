@@ -4,6 +4,7 @@ import {
   parseGuildNavigation,
   moveGuildGroup,
   placeGuild,
+  placeGuildAtTopLevel,
   placeGuildInGroup,
   reconcileGuildNavigation,
   ungroupGuilds
@@ -35,13 +36,7 @@ describe('guild navigation', () => {
       )
     ).toEqual({
       items: [
-        {
-          kind: 'group',
-          id: 'friends',
-          name: 'Friends',
-          guilds: ['1@remote.example'],
-          collapsed: true
-        },
+        { kind: 'guild', guild: '1@remote.example' },
         { kind: 'guild', guild: '1@home.example' },
         { kind: 'guild', guild: '2@home.example' }
       ]
@@ -75,6 +70,43 @@ describe('guild navigation', () => {
     ).toEqual({ items: [{ kind: 'guild', guild: '1@home.example' }] });
   });
 
+  it('canonicalizes singleton folders and rejects nested folder-shaped members', () => {
+    expect(
+      parseGuildNavigation({
+        items: [
+          {
+            kind: 'group',
+            id: 'singleton',
+            name: 'Singleton',
+            guilds: ['1@home.example'],
+            collapsed: false
+          },
+          {
+            kind: 'group',
+            id: 'outer',
+            name: 'Outer',
+            guilds: [
+              {
+                kind: 'group',
+                id: 'nested',
+                name: 'Nested',
+                guilds: ['2@home.example']
+              }
+            ]
+          }
+        ]
+      })
+    ).toEqual({ items: [{ kind: 'guild', guild: '1@home.example' }] });
+  });
+
+  it('does not mutate navigation for stale drag sources or targets', () => {
+    const navigation = reconcileGuildNavigation({ items: [] }, guilds);
+    expect(placeGuild(navigation, '99@home.example', '1@home.example', 'inside', 'group_1')).toBe(
+      navigation
+    );
+    expect(placeGuildInGroup(navigation, '1@home.example', 'missing_group')).toBe(navigation);
+  });
+
   it('moves whole groups without changing their members', () => {
     const navigation = parseGuildNavigation({
       items: [
@@ -82,7 +114,7 @@ describe('guild navigation', () => {
           kind: 'group',
           id: 'friends',
           name: 'Friends',
-          guilds: ['1@home.example'],
+          guilds: ['1@home.example', '1@remote.example'],
           collapsed: false
         },
         { kind: 'guild', guild: '2@home.example' }
@@ -92,5 +124,50 @@ describe('guild navigation', () => {
       { kind: 'guild', guild: '2@home.example' },
       navigation.items[0]
     ]);
+  });
+
+  it('extracts a guild at a top-level drop point and dissolves a singleton folder', () => {
+    const navigation = parseGuildNavigation({
+      items: [
+        {
+          kind: 'group',
+          id: 'friends',
+          name: 'Friends',
+          guilds: ['1@home.example', '1@remote.example'],
+          collapsed: false
+        },
+        { kind: 'guild', guild: '2@home.example' }
+      ]
+    });
+
+    expect(placeGuildAtTopLevel(navigation, '1@home.example', 1).items).toEqual([
+      { kind: 'guild', guild: '1@remote.example' },
+      { kind: 'guild', guild: '1@home.example' },
+      { kind: 'guild', guild: '2@home.example' }
+    ]);
+  });
+
+  it('keeps the folder when reordering its members', () => {
+    const navigation = parseGuildNavigation({
+      items: [
+        {
+          kind: 'group',
+          id: 'friends',
+          name: 'Friends',
+          guilds: ['1@home.example', '1@remote.example'],
+          collapsed: false
+        },
+        { kind: 'guild', guild: '2@home.example' }
+      ]
+    });
+
+    expect(
+      placeGuild(navigation, '1@remote.example', '1@home.example', 'before', 'unused_group')
+        .items[0]
+    ).toMatchObject({
+      kind: 'group',
+      id: 'friends',
+      guilds: ['1@remote.example', '1@home.example']
+    });
   });
 });

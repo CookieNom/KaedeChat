@@ -4,6 +4,7 @@
   import { entityKey } from '$lib/chat/refs';
   import {
     placeGuild,
+    placeGuildAtTopLevel,
     placeGuildInGroup,
     moveGuildGroup,
     reconcileGuildNavigation,
@@ -39,6 +40,7 @@
   let draggedGroup = $state<string | null>(null);
   let editingGroup = $state<GuildNavigationGroupItem | null>(null);
   let editingName = $state('');
+  let railDropActive = $state(false);
 
   function compactBadge(count: number): string {
     return count > 99 ? '99+' : String(count);
@@ -61,12 +63,40 @@
   function guildDragEnd() {
     draggedGuild = null;
     draggedGroup = null;
+    railDropActive = false;
   }
 
   function allowDrop(event: DragEvent) {
     if ((!draggedGuild && !draggedGroup) || guildNavigation.saving) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  }
+
+  function allowRailDrop(event: DragEvent) {
+    if (event.target !== event.currentTarget || !draggedGuild || guildNavigation.saving) return;
+    event.preventDefault();
+    railDropActive = true;
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  }
+
+  function railDropIndex(event: DragEvent): number {
+    const rail = event.currentTarget as HTMLElement;
+    const items = rail.querySelectorAll<HTMLElement>(':scope > [data-navigation-index]');
+    for (const item of items) {
+      const bounds = item.getBoundingClientRect();
+      if (event.clientY < bounds.top + bounds.height / 2) {
+        return Number(item.dataset.navigationIndex ?? 0);
+      }
+    }
+    return navigation.items.length;
+  }
+
+  function dropOnRail(event: DragEvent) {
+    if (event.target !== event.currentTarget || !draggedGuild || guildNavigation.saving) return;
+    event.preventDefault();
+    const next = placeGuildAtTopLevel(navigation, draggedGuild, railDropIndex(event));
+    guildDragEnd();
+    void guildNavigation.save(next.items);
   }
 
   function dropPosition(event: DragEvent): GuildDropPosition {
@@ -153,7 +183,16 @@
   }
 </script>
 
-<nav class="guild-spine" aria-label="Guilds">
+<nav
+  class:rail-drop-active={railDropActive}
+  class="guild-spine"
+  aria-label="Guilds"
+  ondragover={allowRailDrop}
+  ondragleave={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) railDropActive = false;
+  }}
+  ondrop={dropOnRail}
+>
   <a
     class:active={homeActive}
     class="spine-home"
@@ -171,12 +210,13 @@
   </a>
   <div class="spine-separator" aria-hidden="true"></div>
 
-  {#each navigation.items as item (item.kind === 'guild' ? item.guild : item.id)}
+  {#each navigation.items as item, itemIndex (item.kind === 'guild' ? item.guild : item.id)}
     {#if item.kind === 'guild'}
       {@const guild = guildByRef.get(item.guild)}
       {#if guild}
         {@const mentions = mentionCount(guild)}
         <a
+          data-navigation-index={itemIndex}
           class:active={activeGuildKey === item.guild}
           class:dragging={draggedGuild === item.guild}
           href={resolve(guildHref(guild) as `/g/${string}/${string}`)}
@@ -203,6 +243,7 @@
         return guild ? [{ ref, guild }] : [];
       })}
       <section
+        data-navigation-index={itemIndex}
         class:active={item.guilds.includes(activeGuildKey ?? '')}
         class:collapsed={item.collapsed}
         class="guild-folder"
@@ -246,7 +287,7 @@
                   ? `${member.guild.name}, ${mentions} mentions`
                   : member.guild.name}
                 aria-current={activeGuildKey === member.ref ? 'page' : undefined}
-                title={`${member.guild.name} · drag to reorder`}
+                title={`${member.guild.name} · drag into a rail gap to remove from folder`}
                 ondragstart={(event) => {
                   event.stopPropagation();
                   guildDragStart(event, member.ref);
@@ -326,6 +367,10 @@
     border-radius: 20px;
     padding: 5px;
     background: color-mix(in srgb, var(--rail-hover) 82%, transparent);
+  }
+
+  .guild-spine.rail-drop-active {
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent);
   }
 
   .guild-folder.active {
