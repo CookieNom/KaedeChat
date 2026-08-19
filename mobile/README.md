@@ -2,6 +2,9 @@
 
 Kaede's Android and iOS clients share one Flutter presentation and domain layer. Native platform integrations remain for credentials, biometrics, notifications, media capture, and LiveKit voice/video. The layouts are mobile-first rather than scaled versions of the desktop shell.
 
+The implementation-level web/desktop comparison, known gaps, and release-device
+checklist live in [`docs/mobile-parity.md`](../docs/mobile-parity.md).
+
 The client connects only to the account's home instance. That instance brokers federation, remote media authorization, presence, history import, direct messages, and voice grants. A mobile client must never call peer federation endpoints directly.
 
 ## Included functionality
@@ -9,9 +12,9 @@ The client connects only to the account's home instance. That instance brokers f
 - registration, email verification, password recovery, MFA, rotating sessions, optional biometric/PIN device lock;
 - home-instance discovery, guilds, federated guilds, direct messages, friends and blocks;
 - paginated chat history with replies, pins, reactions, mentions, and custom emoji; attachments, image viewing, video playback, and GIFs; typing, read state, and offline snapshots;
-- complete guild administration: overview, channels/categories, synchronized permission overwrites, and roles and hierarchy; members, moderation, bans, and instance bans; invites, emoji, webhooks, and audit records; ownership transfer, leave, and deletion;
-- LiveKit guild voice and DM calls with native WebRTC echo cancellation, noise suppression, automatic gain control, push-to-talk, voice activity, mute/deafen, camera, screen sharing, and route selection;
-- Android notification channels for DMs, mentions, guild messages, calls, and account/moderation events, with equivalent iOS notification categories;
+- core guild administration: overview, channels/categories, synchronized permission overwrites, and roles and hierarchy; members, moderation, bans, and instance bans; invites, emoji, webhooks, and audit records; ownership transfer, leave, and deletion; see the parity matrix for the remaining advanced controls;
+- LiveKit guild voice and DM calls with native WebRTC echo cancellation, noise suppression, automatic gain control, push-to-talk, voice activity, mute/deafen, camera, screen-share controls subject to the platform notes below, and route selection;
+- Android notification channels for DMs, mentions, guild messages, calls, and account/moderation events, with equivalent iOS notification categories; only message-event delivery is currently wired end to end;
 - adaptive network behavior: cached navigation and recent messages, small first pages, retryable writes, and deferred full-resolution media.
 
 All snowflakes and permission masks remain decimal strings on the wire. Entity caches are keyed by the composite `id@origin-domain` identity.
@@ -108,9 +111,9 @@ device can decrypt locally. Full protocol and privacy details are in
 
 ## Platform notes
 
-- Android screen sharing requires a user-approved MediaProjection session and an active foreground media-projection service.
+- Android background voice intentionally protects audio only. Camera capture is foreground-only; screen sharing requires a user-approved MediaProjection session and an active foreground media-projection service before system-wide/background sharing can be claimed.
 - iOS screen sharing uses ReplayKit and requires an app-group/upload extension in the signed release target.
-- Background voice/call presentation should be completed with Android Telecom/foreground service integration and iOS CallKit for store releases.
+- Android background voice uses a microphone/media-playback foreground service. System call presentation still requires Android Telecom and iOS CallKit/VoIP push integration for store releases.
 - Flutter's LiveKit client uses native WebRTC audio processing. A future neural isolation model belongs after echo cancellation and before the publication gate; it must not replace acoustic echo cancellation.
 
 ## Generated protocol

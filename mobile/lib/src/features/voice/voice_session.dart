@@ -11,6 +11,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/features/voice/e2ee_policy.dart';
+import 'package:kaede_mobile/src/platform/voice_background_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart' as permissions;
@@ -25,6 +26,208 @@ final voiceSessionProvider = ChangeNotifierProvider<VoiceSession>((ref) {
 });
 
 enum VoiceAudioRoute { phone, speaker, bluetooth }
+
+enum VoiceConnectionPhase { idle, connecting, reconnecting, connected }
+
+enum VoiceResumeAction {
+  none,
+  retryProtectedJoin,
+  activateBackgroundService,
+  restoreConnectedMedia,
+  recoverDisconnectedRoom,
+}
+
+@visibleForTesting
+bool voiceCanBeginProtectedJoin({
+  required bool isAndroid,
+  required bool appActive,
+}) =>
+    !isAndroid || appActive;
+
+const _voiceBluetoothDeniedMessage =
+    'Allow Nearby devices access to find and use Bluetooth headsets.';
+const _voiceBluetoothSettingsMessage =
+    'Bluetooth access is disabled. Enable Nearby devices for Kaede in system settings to use a headset.';
+
+@visibleForTesting
+VoiceResumeAction resolveVoiceResumeAction({
+  required bool connecting,
+  required bool hasRoom,
+  required ConnectionState? connectionState,
+  required bool recoverableDisconnect,
+  bool pendingJoin = false,
+}) {
+  if (!connecting && !hasRoom && pendingJoin) {
+    return VoiceResumeAction.retryProtectedJoin;
+  }
+  if (connecting || !hasRoom || connectionState == null) {
+    return VoiceResumeAction.none;
+  }
+  return switch (connectionState) {
+    ConnectionState.connected => VoiceResumeAction.restoreConnectedMedia,
+    ConnectionState.reconnecting => VoiceResumeAction.activateBackgroundService,
+    ConnectionState.disconnected when recoverableDisconnect =>
+      VoiceResumeAction.recoverDisconnectedRoom,
+    ConnectionState.connecting ||
+    ConnectionState.disconnected =>
+      VoiceResumeAction.none,
+  };
+}
+
+@visibleForTesting
+final class VoiceMediaRestoreResult {
+  const VoiceMediaRestoreResult({
+    required this.camera,
+    required this.screen,
+    required this.cameraFailed,
+    required this.screenFailed,
+  });
+
+  final bool camera;
+  final bool screen;
+  final bool cameraFailed;
+  final bool screenFailed;
+
+  bool get failed => cameraFailed || screenFailed;
+}
+
+@visibleForTesting
+Future<VoiceMediaRestoreResult> restoreVoiceMediaIntent({
+  required bool canStream,
+  required bool cameraRequested,
+  required bool screenRequested,
+  required Future<void> Function() publishCamera,
+  required Future<void> Function() publishScreen,
+}) async {
+  if (!canStream) {
+    return const VoiceMediaRestoreResult(
+      camera: false,
+      screen: false,
+      cameraFailed: false,
+      screenFailed: false,
+    );
+  }
+  var camera = false;
+  var screen = false;
+  var cameraFailed = false;
+  var screenFailed = false;
+  if (cameraRequested) {
+    try {
+      await publishCamera();
+      camera = true;
+    } on Object {
+      cameraFailed = true;
+    }
+  }
+  if (screenRequested) {
+    try {
+      await publishScreen();
+      screen = true;
+    } on Object {
+      screenFailed = true;
+    }
+  }
+  return VoiceMediaRestoreResult(
+    camera: camera,
+    screen: screen,
+    cameraFailed: cameraFailed,
+    screenFailed: screenFailed,
+  );
+}
+
+@visibleForTesting
+Future<List<Object>> disposeTerminalVoiceResources({
+  required Future<void> Function() stopBackgroundService,
+  required Future<void> Function() disposeEvents,
+  required Future<void> Function() disposeRoom,
+}) async {
+  final errors = <Object>[];
+  for (final operation in <Future<void> Function()>[
+    stopBackgroundService,
+    disposeEvents,
+    disposeRoom,
+  ]) {
+    try {
+      await operation();
+    } on Object catch (error) {
+      errors.add(error);
+    }
+  }
+  return List.unmodifiable(errors);
+}
+
+@visibleForTesting
+bool voiceBluetoothPermissionsGranted(
+  Iterable<permissions.PermissionStatus> statuses,
+) =>
+    statuses.every((status) => status.isGranted);
+
+@visibleForTesting
+String voiceBluetoothPermissionMessage(
+  Iterable<permissions.PermissionStatus> statuses,
+) {
+  final blockedInSettings = statuses.any(
+    (status) => status.isPermanentlyDenied || status.isRestricted,
+  );
+  return blockedInSettings
+      ? _voiceBluetoothSettingsMessage
+      : _voiceBluetoothDeniedMessage;
+}
+
+@visibleForTesting
+bool voiceDisconnectIsRecoverable(DisconnectReason? reason) => switch (reason) {
+      null ||
+      DisconnectReason.unknown ||
+      DisconnectReason.serverShutdown ||
+      DisconnectReason.disconnected ||
+      DisconnectReason.signalingConnectionFailure ||
+      DisconnectReason.reconnectAttemptsExceeded =>
+        true,
+      DisconnectReason.clientInitiated ||
+      DisconnectReason.duplicateIdentity ||
+      DisconnectReason.participantRemoved ||
+      DisconnectReason.roomDeleted ||
+      DisconnectReason.stateMismatch ||
+      DisconnectReason.joinFailure =>
+        false,
+    };
+
+@visibleForTesting
+VoiceConnectionPhase resolveVoiceConnectionPhase({
+  required bool connecting,
+  required bool hasRoom,
+  required ConnectionState? connectionState,
+  required bool recoverableDisconnect,
+}) {
+  if (connecting || connectionState == ConnectionState.connecting) {
+    return VoiceConnectionPhase.connecting;
+  }
+  if (!hasRoom || connectionState == null) return VoiceConnectionPhase.idle;
+  return switch (connectionState) {
+    ConnectionState.connected => VoiceConnectionPhase.connected,
+    ConnectionState.reconnecting => VoiceConnectionPhase.reconnecting,
+    ConnectionState.disconnected => recoverableDisconnect
+        ? VoiceConnectionPhase.reconnecting
+        : VoiceConnectionPhase.idle,
+    ConnectionState.connecting => VoiceConnectionPhase.connecting,
+  };
+}
+
+KaedeChannel? findVoiceSessionChannel({
+  required EntityRef target,
+  required Iterable<KaedeChannel> directMessages,
+  required Iterable<KaedeGuild> guilds,
+}) {
+  for (final channel in directMessages) {
+    if (channel.ref == target) return channel;
+  }
+  for (final guild in guilds) {
+    for (final channel in guild.channels) {
+      if (channel.ref == target) return channel;
+    }
+  }
+  return null;
+}
 
 String voiceDisconnectMessage(DisconnectReason? reason) => switch (reason) {
       DisconnectReason.duplicateIdentity =>
@@ -52,10 +255,17 @@ String voiceDisconnectMessage(DisconnectReason? reason) => switch (reason) {
 /// increasing generation fences late token and LiveKit completions when a user
 /// switches rooms quickly.
 final class VoiceSession extends ChangeNotifier {
-  VoiceSession(this._repository, this._e2eeClient);
+  VoiceSession(
+    this._repository,
+    this._e2eeClient, {
+    VoiceBackgroundService backgroundService = const VoiceBackgroundService(),
+  }) : _backgroundService = backgroundService;
 
   final KaedeRepository _repository;
   final Future<MobileE2EEClient> Function() _e2eeClient;
+  final VoiceBackgroundService _backgroundService;
+  static const _backgroundServiceError =
+      'Voice is connected, but Android could not keep the call active in the background.';
   Room? _room;
   EventsListener<RoomEvent>? _events;
   KaedeChannel? _channel;
@@ -73,6 +283,9 @@ final class VoiceSession extends ChangeNotifier {
   var _canSpeak = false;
   var _canStream = false;
   var _canUseVad = false;
+  var _appActive = true;
+  var _recoverableDisconnect = false;
+  var _retryJoinOnResume = false;
   var _disposed = false;
   Timer? _occupancyTimer;
   final Map<String, Map<String, Object?>> _occupants =
@@ -85,6 +298,14 @@ final class VoiceSession extends ChangeNotifier {
   Room? get room => _room;
   bool get connecting => _connecting;
   bool get connected => _room?.connectionState == ConnectionState.connected;
+  VoiceConnectionPhase get phase => resolveVoiceConnectionPhase(
+        connecting: _connecting,
+        hasRoom: _room != null,
+        connectionState: _room?.connectionState,
+        recoverableDisconnect: _recoverableDisconnect,
+      );
+  bool get joined => phase == VoiceConnectionPhase.connected || reconnecting;
+  bool get reconnecting => phase == VoiceConnectionPhase.reconnecting;
   bool get muted => _muted;
   bool get deafened => _deafened;
   bool get camera => _camera;
@@ -96,6 +317,8 @@ final class VoiceSession extends ChangeNotifier {
   bool get canSpeak => _canSpeak;
   bool get canStream => _canStream;
   bool get canUseVad => _canUseVad;
+  bool get _microphoneShouldPublish =>
+      _canSpeak && !_muted && (!_pushToTalk || _pushHeld);
   String? get error => _error;
   Map<String, Object?>? occupant(String identity) => _occupants[identity];
   double participantVolume(String identity) =>
@@ -121,6 +344,8 @@ final class VoiceSession extends ChangeNotifier {
         _callRef == callRef) {
       return;
     }
+    final requestedCamera = _camera;
+    final requestedScreen = _screen;
     final generation = ++_generation;
     await _disposeRoom(notify: false);
     if (generation != _generation) return;
@@ -128,13 +353,43 @@ final class VoiceSession extends ChangeNotifier {
     _callRef = callRef;
     _connecting = true;
     _error = null;
+    _recoverableDisconnect = false;
+    _retryJoinOnResume = false;
     _canUseVad = callRef != null || target.allows(Permission.useVad);
     if (!_canUseVad) _pushToTalk = true;
     notifyListeners();
 
     Room? candidate;
     EventsListener<RoomEvent>? candidateEvents;
+    var backgroundServiceStarted = false;
+    var connectedSuccessfully = false;
     try {
+      final isAndroid =
+          !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+      if (!voiceCanBeginProtectedJoin(
+        isAndroid: isAndroid,
+        appActive: _appActive,
+      )) {
+        _retryJoinOnResume = true;
+        throw const KaedeException(
+          code: 'VOICE_FOREGROUND_REQUIRED',
+          message:
+              'Return to Kaede to finish joining voice. Android will not start a call service from the background.',
+          status: 409,
+        );
+      }
+      if (isAndroid) {
+        backgroundServiceStarted = await _backgroundService.setActive(true);
+        if (generation != _generation) return;
+        if (!backgroundServiceStarted) {
+          _retryJoinOnResume = true;
+          throw const KaedeException(
+            code: 'VOICE_FOREGROUND_SERVICE_UNAVAILABLE',
+            message: _backgroundServiceError,
+            status: 503,
+          );
+        }
+      }
       MobileE2EEClient? e2ee;
       if (target.encryptionMode == 'e2ee') {
         e2ee = await _e2eeClient();
@@ -224,10 +479,31 @@ final class VoiceSession extends ChangeNotifier {
       );
       final events = candidateEvents = room.createListener();
       events
+        ..on<RoomReconnectingEvent>((_) {
+          if (_room != room) return;
+          _recoverableDisconnect = true;
+          _error = 'Voice connection interrupted. Reconnecting…';
+          notifyListeners();
+        })
+        ..on<RoomReconnectedEvent>((_) {
+          if (_room != room) return;
+          _recoverableDisconnect = false;
+          _error = null;
+          notifyListeners();
+          if (_appActive) unawaited(_restoreForegroundMedia(room));
+          unawaited(refreshOccupancy());
+        })
         ..on<RoomDisconnectedEvent>((event) {
           if (_room != room) return;
-          _error = voiceDisconnectMessage(event.reason);
+          final recoverable = voiceDisconnectIsRecoverable(event.reason);
+          if (!recoverable) {
+            unawaited(_finishTerminalDisconnect(room, event.reason));
+            return;
+          }
+          _recoverableDisconnect = true;
+          _error = 'Voice connection interrupted. Reconnecting…';
           notifyListeners();
+          if (_appActive) unawaited(_recoverDisconnectedRoom(room));
         })
         ..on<ParticipantConnectedEvent>((_) {
           _roomChanged(room);
@@ -282,20 +558,47 @@ final class VoiceSession extends ChangeNotifier {
         final microphone = await permissions.Permission.microphone.request();
         if (generation != _generation || _room != room) return;
         if (microphone.isGranted) {
-          await room.localParticipant?.setMicrophoneEnabled(
-            !_muted && (!_pushToTalk || _pushHeld),
-          );
-          if (generation != _generation || _room != room) {
-            await room.localParticipant?.setMicrophoneEnabled(false);
-            return;
+          final protected = !isAndroid ||
+              (_appActive && await _activateBackgroundService(room));
+          if (generation != _generation || _room != room) return;
+          if (protected) {
+            await room.localParticipant?.setMicrophoneEnabled(
+              _microphoneShouldPublish,
+            );
+            if (generation != _generation || _room != room) {
+              await room.localParticipant?.setMicrophoneEnabled(false);
+              return;
+            }
+          } else if (!_appActive) {
+            _error =
+                'Voice connected in listen-only mode while Kaede is in the background. Return to resume the microphone.';
           }
         } else {
           _muted = true;
           _error = 'Joined listen-only. Allow microphone access to speak.';
         }
       }
+      if (!_canStream) {
+        _camera = false;
+        _screen = false;
+      } else if (_appActive && (requestedCamera || requestedScreen)) {
+        await _restorePublishedMedia(
+          room,
+          cameraRequested: requestedCamera,
+          screenRequested: requestedScreen,
+        );
+      }
+      connectedSuccessfully = generation == _generation && _room == room;
+      if (connectedSuccessfully) _retryJoinOnResume = false;
     } on Object catch (exception) {
-      if (generation == _generation) _error = _friendly(exception);
+      if (generation == _generation) {
+        final error = _friendly(exception);
+        if (_room != null) await _disposeRoom(notify: false);
+        _canSpeak = false;
+        _canStream = false;
+        _recoverableDisconnect = false;
+        _error = error;
+      }
     } finally {
       if (candidate != null) {
         await candidate.disconnect();
@@ -303,6 +606,9 @@ final class VoiceSession extends ChangeNotifier {
         await candidate.dispose();
       }
       if (generation == _generation) {
+        if (!connectedSuccessfully && backgroundServiceStarted) {
+          await _backgroundService.setActive(false);
+        }
         _connecting = false;
         notifyListeners();
       }
@@ -356,9 +662,20 @@ final class VoiceSession extends ChangeNotifier {
   Future<void> toggleMute() async {
     if (!_canSpeak) return;
     final next = !_muted;
-    await _room?.localParticipant
-        ?.setMicrophoneEnabled(!next && (!_pushToTalk || _pushHeld));
+    final room = _room;
+    final publish = !next && (!_pushToTalk || _pushHeld);
+    if (publish && room != null) {
+      final protected = await _activateBackgroundService(
+        room,
+        microphone: true,
+      );
+      if (defaultTargetPlatform == TargetPlatform.android && !protected) return;
+    }
+    await room?.localParticipant?.setMicrophoneEnabled(publish);
     _muted = next;
+    if (!publish && room != null && _appActive) {
+      await _activateBackgroundService(room, microphone: false);
+    }
     notifyListeners();
   }
 
@@ -413,6 +730,7 @@ final class VoiceSession extends ChangeNotifier {
       VoiceAudioRoute.phone,
       VoiceAudioRoute.speaker,
     ];
+    if (!(await _ensureBluetoothPermission())) return routes;
     try {
       final devices = await rtc.navigator.mediaDevices.enumerateDevices();
       final hasBluetooth = devices.any((device) {
@@ -427,7 +745,11 @@ final class VoiceSession extends ChangeNotifier {
       });
       if (hasBluetooth) routes.add(VoiceAudioRoute.bluetooth);
     } on Object {
-      // Phone and speaker routes remain usable when enumeration is restricted.
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        _error =
+            'Bluetooth devices could not be checked. Reconnect the headset and try again.';
+        notifyListeners();
+      }
     }
     return routes;
   }
@@ -444,12 +766,38 @@ final class VoiceSession extends ChangeNotifier {
         _speaker = true;
         break;
       case VoiceAudioRoute.bluetooth:
+        if (!(await _ensureBluetoothPermission())) {
+          await Hardware.instance
+              .setSpeakerphoneOn(true, forceSpeakerOutput: true);
+          _speaker = true;
+          _audioRoute = VoiceAudioRoute.speaker;
+          notifyListeners();
+          return;
+        }
         await rtc.Helper.setSpeakerphoneOnButPreferBluetooth();
         _speaker = false;
         break;
     }
     _audioRoute = route;
     notifyListeners();
+  }
+
+  Future<bool> _ensureBluetoothPermission() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return true;
+    final results = await <permissions.Permission>[
+      permissions.Permission.bluetoothConnect,
+    ].request();
+    final statuses = results.values;
+    if (voiceBluetoothPermissionsGranted(statuses)) {
+      if (_error == _voiceBluetoothDeniedMessage ||
+          _error == _voiceBluetoothSettingsMessage) {
+        _error = null;
+      }
+      return true;
+    }
+    _error = voiceBluetoothPermissionMessage(statuses);
+    notifyListeners();
+    return false;
   }
 
   Future<void> refreshOccupancy() async {
@@ -533,18 +881,250 @@ final class VoiceSession extends ChangeNotifier {
     if (next) {
       await _room?.localParticipant?.setMicrophoneEnabled(false);
     } else if (!_muted) {
+      final room = _room;
+      if (room != null) {
+        final protected = await _activateBackgroundService(
+          room,
+          microphone: true,
+        );
+        if (defaultTargetPlatform == TargetPlatform.android && !protected) {
+          return;
+        }
+      }
       await _room?.localParticipant?.setMicrophoneEnabled(true);
     }
     _pushToTalk = next;
     _pushHeld = false;
+    final activeRoom = _room;
+    if (next && _appActive && activeRoom != null) {
+      await _activateBackgroundService(activeRoom, microphone: false);
+    }
     notifyListeners();
   }
 
   Future<void> setPushHeld(bool held) async {
     if (!_pushToTalk || _muted || held == _pushHeld) return;
+    final room = _room;
+    if (held && room != null) {
+      final protected = await _activateBackgroundService(
+        room,
+        microphone: true,
+      );
+      if (defaultTargetPlatform == TargetPlatform.android && !protected) return;
+    }
     _pushHeld = held;
-    await _room?.localParticipant?.setMicrophoneEnabled(held);
+    await room?.localParticipant?.setMicrophoneEnabled(held);
+    if (!held && room != null && _appActive) {
+      await _activateBackgroundService(room, microphone: false);
+    }
     notifyListeners();
+  }
+
+  /// Records that the UI moved into the background without changing the
+  /// desired room membership. LiveKit and the Android foreground service keep
+  /// audio alive; transient reconnecting states continue to render as joined.
+  void didEnterBackground() {
+    _appActive = false;
+  }
+
+  /// Reconciles native audio and, if the operating system exhausted LiveKit's
+  /// reconnect attempts while suspended, obtains a fresh short-lived grant.
+  Future<void> didResume() async {
+    _appActive = true;
+    final room = _room;
+    final action = resolveVoiceResumeAction(
+      connecting: _connecting,
+      hasRoom: room != null && _channel != null,
+      connectionState: room?.connectionState,
+      recoverableDisconnect: _recoverableDisconnect,
+      pendingJoin: _retryJoinOnResume,
+    );
+    switch (action) {
+      case VoiceResumeAction.none:
+        break;
+      case VoiceResumeAction.retryProtectedJoin:
+        final target = _channel;
+        final call = _callRef;
+        _retryJoinOnResume = false;
+        if (target != null) {
+          await connect(target, callRef: call, force: true);
+          return;
+        }
+        break;
+      case VoiceResumeAction.activateBackgroundService:
+        await _activateBackgroundService(room!);
+        break;
+      case VoiceResumeAction.restoreConnectedMedia:
+        await _restoreForegroundMedia(room!);
+        unawaited(refreshOccupancy());
+        break;
+      case VoiceResumeAction.recoverDisconnectedRoom:
+        await _recoverDisconnectedRoom(room!);
+        return;
+    }
+    notifyListeners();
+  }
+
+  Future<void> _recoverDisconnectedRoom(Room room) async {
+    final target = _channel;
+    final call = _callRef;
+    if (!_appActive ||
+        target == null ||
+        _room != room ||
+        room.connectionState != ConnectionState.disconnected ||
+        !_recoverableDisconnect ||
+        _connecting) {
+      return;
+    }
+    await connect(target, callRef: call, force: true);
+  }
+
+  Future<void> _restoreForegroundMedia(Room room) async {
+    if (_room != room || room.connectionState != ConnectionState.connected) {
+      return;
+    }
+    final generation = _generation;
+    bool isCurrent() => generation == _generation && _room == room;
+    final protected = await _activateBackgroundService(room);
+    if (!isCurrent() ||
+        (defaultTargetPlatform == TargetPlatform.android && !protected)) {
+      return;
+    }
+    var deviceRestoreFailed = false;
+    try {
+      await selectAudioRoute(_audioRoute);
+    } on Object {
+      deviceRestoreFailed = true;
+    }
+    if (!isCurrent() || room.connectionState != ConnectionState.connected) {
+      return;
+    }
+    if (_canSpeak) {
+      try {
+        await room.localParticipant?.setMicrophoneEnabled(
+          _microphoneShouldPublish,
+        );
+      } on Object {
+        deviceRestoreFailed = true;
+      }
+    }
+    if (!isCurrent()) return;
+    final media = await _restorePublishedMedia(
+      room,
+      cameraRequested: _camera,
+      screenRequested: _screen,
+    );
+    if (!isCurrent()) return;
+    if (deviceRestoreFailed && !media.failed) {
+      _error =
+          'Voice reconnected, but a media device could not be restored. Check the microphone and audio route.';
+      notifyListeners();
+    }
+  }
+
+  Future<VoiceMediaRestoreResult> _restorePublishedMedia(
+    Room room, {
+    required bool cameraRequested,
+    required bool screenRequested,
+  }) async {
+    final generation = _generation;
+    final participant = room.localParticipant;
+    final result = await restoreVoiceMediaIntent(
+      canStream: _canStream,
+      cameraRequested: cameraRequested,
+      screenRequested: screenRequested,
+      publishCamera: () async {
+        if (participant == null) {
+          throw StateError('The local voice participant is unavailable.');
+        }
+        await participant.setCameraEnabled(true);
+      },
+      publishScreen: () async {
+        if (participant == null) {
+          throw StateError('The local voice participant is unavailable.');
+        }
+        await participant.setScreenShareEnabled(true);
+      },
+    );
+    if (generation != _generation || _room != room) return result;
+    _camera = result.camera;
+    _screen = result.screen;
+    if (result.failed) {
+      final failed = <String>[
+        if (result.cameraFailed) 'camera',
+        if (result.screenFailed) 'screen sharing',
+      ].join(' and ');
+      _error =
+          'Voice reconnected, but $failed could not be restored. Turn it on again to retry.';
+      notifyListeners();
+    }
+    return result;
+  }
+
+  Future<bool> _activateBackgroundService(
+    Room room, {
+    bool? microphone,
+  }) async {
+    if (!_appActive || _room != room) return false;
+    final generation = _generation;
+    final ready = await _backgroundService.setActive(
+      true,
+      microphone: microphone ?? _microphoneShouldPublish,
+    );
+    if (generation != _generation || _room != room) return false;
+    if (!ready && defaultTargetPlatform == TargetPlatform.android) {
+      _error = _backgroundServiceError;
+      notifyListeners();
+      return false;
+    }
+    if (ready && _error == _backgroundServiceError) {
+      _error = null;
+      notifyListeners();
+    }
+    return ready;
+  }
+
+  Future<void> _finishTerminalDisconnect(
+    Room room,
+    DisconnectReason? reason,
+  ) async {
+    if (_room != room) return;
+    _generation += 1;
+    final events = _events;
+    _room = null;
+    _events = null;
+    room.removeListener(_notifyRoomChanged);
+    _occupancyTimer?.cancel();
+    _occupancyTimer = null;
+    _occupants.clear();
+    _participantVolumes.clear();
+    _channel = null;
+    _callRef = null;
+    _connecting = false;
+    _muted = false;
+    _deafened = false;
+    _camera = false;
+    _screen = false;
+    _pushHeld = false;
+    _canSpeak = false;
+    _canStream = false;
+    _canUseVad = false;
+    _recoverableDisconnect = false;
+    _retryJoinOnResume = false;
+    _error = voiceDisconnectMessage(reason);
+    _notify();
+    await disposeTerminalVoiceResources(
+      stopBackgroundService: () async {
+        await _backgroundService.setActive(false);
+      },
+      disposeEvents: () async {
+        await events?.dispose();
+      },
+      // The room has already emitted its terminal disconnect. Calling
+      // disconnect() here can recursively emit the same event; dispose the
+      // detached owner directly instead.
+      disposeRoom: room.dispose,
+    );
   }
 
   Future<void> leave({String? reason}) async {
@@ -560,6 +1140,8 @@ final class VoiceSession extends ChangeNotifier {
     _pushHeld = false;
     _canSpeak = false;
     _canStream = false;
+    _recoverableDisconnect = false;
+    _retryJoinOnResume = false;
     _error = reason;
     notifyListeners();
   }
@@ -583,6 +1165,7 @@ final class VoiceSession extends ChangeNotifier {
     _room = null;
     _events = null;
     room?.removeListener(_notifyRoomChanged);
+    await _backgroundService.setActive(false);
     await room?.localParticipant?.setMicrophoneEnabled(false);
     await room?.disconnect();
     await events?.dispose();

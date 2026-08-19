@@ -1,8 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
-import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/auth/auth_screen.dart';
 import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
@@ -16,12 +17,14 @@ final class KaedeApp extends ConsumerStatefulWidget {
   ConsumerState<KaedeApp> createState() => _KaedeAppState();
 }
 
-final class _KaedeAppState extends ConsumerState<KaedeApp> {
+final class _KaedeAppState extends ConsumerState<KaedeApp>
+    with WidgetsBindingObserver {
   late final GoRouter _router;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _router = GoRouter(
       routes: <RouteBase>[
         GoRoute(
@@ -40,7 +43,29 @@ final class _KaedeAppState extends ConsumerState<KaedeApp> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final active = state == AppLifecycleState.resumed;
+    ref.read(mobileControllerProvider.notifier).setAppActive(active);
+    final voice = ref.read(voiceSessionProvider);
+    switch (state) {
+      case AppLifecycleState.resumed:
+        unawaited(voice.didResume());
+        break;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+        voice.didEnterBackground();
+        break;
+      case AppLifecycleState.detached:
+      case AppLifecycleState.inactive:
+        // Inactive also covers temporary interruptions such as permission and
+        // biometric prompts. It must not tear down a healthy call.
+        break;
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _router.dispose();
     super.dispose();
   }
@@ -56,12 +81,11 @@ final class _KaedeAppState extends ConsumerState<KaedeApp> {
       }
       final activeVoice = voice.channel;
       if (activeVoice != null && next.phase == SessionPhase.ready) {
-        KaedeChannel? fresh;
-        for (final guild in next.guilds) {
-          for (final channel in guild.channels) {
-            if (channel.ref == activeVoice.ref) fresh = channel;
-          }
-        }
+        final fresh = findVoiceSessionChannel(
+          target: activeVoice.ref,
+          directMessages: next.dms,
+          guilds: next.guilds,
+        );
         if (fresh == null) {
           voice.leave(reason: 'This voice channel is no longer available.');
         } else {

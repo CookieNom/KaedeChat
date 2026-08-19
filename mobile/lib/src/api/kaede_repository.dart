@@ -825,15 +825,7 @@ final class KaedeRepository {
         'PATCH',
         '/api/v1/guilds/${guild.wire}/roles',
         data: <String, Object?>{
-          'roles': [
-            for (var index = 0; index < roles.length; index++)
-              <String, Object?>{
-                'id': roles[index].ref.wire,
-                'position': index + 1,
-                if (roles[index].version != null)
-                  'version': roles[index].version,
-              },
-          ],
+          'roles': guildRolePositionRequest(roles),
         },
       );
   Future<List<Map<String, Object?>>> overwrites(
@@ -1489,6 +1481,25 @@ final class KaedeRepository {
       }
     }
   }
+}
+
+/// Serializes a complete bottom-to-top role ordering for the local guild API.
+/// Role IDs are local snowflakes; every item needs an optimistic-lock version.
+List<Map<String, Object?>> guildRolePositionRequest(List<KaedeRole> roles) {
+  final positions = <Map<String, Object?>>[];
+  for (var index = 0; index < roles.length; index++) {
+    final role = roles[index];
+    final version = role.version;
+    if (version == null || version.isEmpty) {
+      throw StateError('Refresh the guild before reordering its roles.');
+    }
+    positions.add(<String, Object?>{
+      'id': role.ref.id.value,
+      'position': index + 1,
+      'version': version,
+    });
+  }
+  return positions;
 }
 
 final class MfaRequired implements Exception {

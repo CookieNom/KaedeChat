@@ -1,14 +1,18 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/app/message_store.dart';
+import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/auth/turnstile_challenge.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/storage/local_database.dart';
+import 'package:web_socket_channel/io.dart';
 
 void main() {
   group('private self moderation status', () {
@@ -134,6 +138,12 @@ void main() {
   });
 
   group('gateway trust boundary', () {
+    final tokens = SessionTokens(
+      instance: Domain('chat.example'),
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+    );
+
     test('accepts validated hello and ready envelopes', () {
       final hello = decodeGatewayEnvelope(jsonEncode(<String, Object?>{
         'op': GatewayOp.hello.value,
@@ -236,6 +246,54 @@ void main() {
       expect(details.message, contains('interrupted'));
       expect(details.message, isNot(contains('password')));
       expect(details.message, isNot(contains('/srv')));
+    });
+
+    test('abandons a transport upgrade that never completes', () async {
+      final stalledSocket = Completer<WebSocket>();
+      final client = GatewayClient(
+        tokens: () async => tokens,
+        socketConnector: (_) => IOWebSocketChannel(stalledSocket.future),
+        transportReadyTimeout: const Duration(milliseconds: 20),
+        sessionReadyTimeout: const Duration(milliseconds: 40),
+        transportCloseTimeout: const Duration(milliseconds: 20),
+      );
+      addTearDown(client.close);
+
+      await expectLater(
+        client.connect(tokens),
+        throwsA(isA<TimeoutException>()),
+      );
+
+      expect(
+        client.currentHealth.phase,
+        GatewayConnectionPhase.reconnecting,
+      );
+    });
+
+    test('retries when an upgraded transport never starts a session', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        await WebSocketTransformer.upgrade(request);
+      });
+      addTearDown(() => server.close(force: true));
+      final endpoint = Uri.parse('ws://127.0.0.1:${server.port}');
+      final client = GatewayClient(
+        tokens: () async => tokens,
+        socketConnector: (_) => IOWebSocketChannel.connect(endpoint),
+        transportReadyTimeout: const Duration(seconds: 1),
+        sessionReadyTimeout: const Duration(milliseconds: 40),
+        transportCloseTimeout: const Duration(milliseconds: 40),
+      );
+      addTearDown(client.close);
+      final reconnecting = client.health.firstWhere(
+        (health) => health.phase == GatewayConnectionPhase.reconnecting,
+      );
+
+      await client.connect(tokens);
+      expect(client.currentHealth.phase, GatewayConnectionPhase.connecting);
+
+      final health = await reconnecting.timeout(const Duration(seconds: 1));
+      expect(health.message, contains('did not respond'));
     });
   });
 

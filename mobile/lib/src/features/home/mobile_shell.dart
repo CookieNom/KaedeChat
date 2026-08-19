@@ -19,8 +19,52 @@ import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/voice/voice_room.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
+import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:uuid/uuid.dart';
+
+String conversationHeaderTitle(KaedeChannel channel) {
+  if (channel.guildRef != null) {
+    final name = channel.name?.trim();
+    return '#${name?.isNotEmpty == true ? name : 'channel'}';
+  }
+  if (channel.conversationType == 'group' &&
+      channel.name?.trim().isNotEmpty == true) {
+    return channel.name!.trim();
+  }
+  final names = channel.recipients.map((user) => user.name).toList();
+  if (names.isEmpty) {
+    return channel.conversationType == 'group'
+        ? 'Group conversation'
+        : 'Conversation';
+  }
+  return names.take(3).join(', ') +
+      (names.length > 3 ? ' +${names.length - 3}' : '');
+}
+
+bool supportsPinnedMessages(KaedeChannel channel) =>
+    channel.type == ChannelType.dm ||
+    channel.type == ChannelType.text ||
+    channel.type == ChannelType.announcement;
+
+bool conversationCallUsesOverflow(double width) => width <= 360;
+
+@visibleForTesting
+bool messageSearchRouteCanDismiss(BuildContext context) =>
+    context.mounted && ModalRoute.of(context)?.isCurrent == true;
+
+String? conversationHeaderSubtitle(KaedeChannel channel) {
+  final ordinary = channel.guildRef != null
+      ? channel.topic?.trim()
+      : channel.conversationType == 'group'
+          ? '${channel.recipients.length + 1} members'
+          : channel.topic?.trim();
+  if (channel.encryptionMode != 'e2ee') return ordinary;
+  final status = channel.encryptionState == 'active'
+      ? 'Encrypted · identities unverified'
+      : 'Encryption paused · key rotation required';
+  return ordinary?.isNotEmpty == true ? '$status · $ordinary' : status;
+}
 
 Future<void> _showE2eeRoomSettings(
   BuildContext context,
@@ -203,8 +247,7 @@ final class MobileShell extends ConsumerStatefulWidget {
   ConsumerState<MobileShell> createState() => _MobileShellState();
 }
 
-final class _MobileShellState extends ConsumerState<MobileShell>
-    with WidgetsBindingObserver {
+final class _MobileShellState extends ConsumerState<MobileShell> {
   var _section = _ShellSection.messages;
   late final PageController _pages;
   var _messagePage = 0;
@@ -213,19 +256,10 @@ final class _MobileShellState extends ConsumerState<MobileShell>
   void initState() {
     super.initState();
     _pages = PageController();
-    WidgetsBinding.instance.addObserver(this);
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    ref
-        .read(mobileControllerProvider.notifier)
-        .setAppActive(state == AppLifecycleState.resumed);
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     _pages.dispose();
     super.dispose();
   }
@@ -272,18 +306,26 @@ final class _MobileShellState extends ConsumerState<MobileShell>
                 state.gatewayHealth.message ??
                     'Realtime updates are temporarily unavailable.',
               ),
-              trailing:
-                  state.gatewayHealth.phase == GatewayConnectionPhase.connecting
-                      ? const SizedBox.square(
-                          dimension: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : TextButton(
-                          onPressed: () => ref
-                              .read(mobileControllerProvider.notifier)
-                              .retryRealtime(),
-                          child: const Text('Retry'),
-                        ),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (state.gatewayHealth.phase !=
+                      GatewayConnectionPhase.offline) ...[
+                    const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                  TextButton(
+                    key: const ValueKey('retry-realtime-button'),
+                    onPressed: () => ref
+                        .read(mobileControllerProvider.notifier)
+                        .retryRealtime(),
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
             ),
           ),
         if (state.gatewayProtocolWarning case final warning?)
@@ -337,14 +379,24 @@ final class _MobileShellState extends ConsumerState<MobileShell>
               ),
             ),
           ),
-        if (voice.connected && voice.channel?.ref != activeChannel?.ref)
+        if (voice.joined && voice.channel?.ref != activeChannel?.ref)
           Material(
             color: const Color(0xFF174C3E),
             child: ListTile(
               dense: true,
-              leading: const Icon(Icons.graphic_eq_rounded),
-              title: Text('Voice connected · ${voice.channel?.name ?? 'Room'}'),
-              subtitle: Text('${voice.participants.length} connected'),
+              leading: voice.reconnecting
+                  ? const SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.graphic_eq_rounded),
+              title: Text(
+                '${voice.reconnecting ? 'Voice reconnecting' : 'Voice connected'} · '
+                '${voice.channel?.name ?? 'Room'}',
+              ),
+              subtitle: Text(voice.reconnecting
+                  ? 'Keeping your place in the call…'
+                  : '${voice.participants.length} connected'),
               onTap: () async {
                 final channel = voice.channel;
                 if (channel == null) return;
@@ -501,7 +553,7 @@ final class _SectionScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Column(
         children: [
-          _CompactHeader(
+          ConversationCompactHeader(
             leading: IconButton(
               onPressed: onBack,
               icon: const Icon(Icons.arrow_back_rounded),
@@ -540,24 +592,11 @@ final class _ConversationScreenState
   bool get _isGroup => widget.channel.conversationType == 'group';
 
   String get _title {
-    if (_isGroup && widget.channel.name?.trim().isNotEmpty == true) {
-      return widget.channel.name!.trim();
-    }
-    final names = widget.channel.recipients.map((user) => user.name).toList();
-    if (names.isEmpty) return _isGroup ? 'Group conversation' : 'Conversation';
-    return names.take(3).join(', ') +
-        (names.length > 3 ? ' +${names.length - 3}' : '');
+    return conversationHeaderTitle(widget.channel);
   }
 
   String? get _subtitle {
-    final ordinary = _isGroup
-        ? '${widget.channel.recipients.length + 1} members'
-        : widget.channel.topic?.trim();
-    if (widget.channel.encryptionMode != 'e2ee') return ordinary;
-    final status = widget.channel.encryptionState == 'active'
-        ? 'Encrypted · identities unverified'
-        : 'Encryption paused · key rotation required';
-    return ordinary?.isNotEmpty == true ? '$status · $ordinary' : status;
+    return conversationHeaderSubtitle(widget.channel);
   }
 
   @override
@@ -737,6 +776,46 @@ final class _ConversationScreenState
     );
   }
 
+  Future<void> _showPinnedMessages() => showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (_) => _PinnedMessagesSheet(channel: widget.channel),
+      );
+
+  Future<void> _showMessageSearch() => Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (searchContext) => MessageSearchScreen(
+            repository: ref.read(mobileControllerProvider.notifier).repository,
+            scope: widget.channel.guildRef == null ? 'channel' : 'guild',
+            scopeRef: widget.channel.guildRef ?? widget.channel.ref,
+            channel: widget.channel,
+            accountRef:
+                ref.read(mobileControllerProvider.notifier).api.tokens?.userRef,
+            users: messageSearchUserCandidates(<KaedeUser?>[
+              ref.read(mobileControllerProvider).user,
+              ...ref.read(mobileControllerProvider).userProfiles.values,
+              ...widget.channel.recipients,
+            ]),
+            onJump: (result) async {
+              final controller = ref.read(mobileControllerProvider.notifier);
+              final opened = await controller.selectAndJumpToMessage(
+                result.channel,
+                result.message.ref,
+                shouldContinue: () =>
+                    messageSearchRouteCanDismiss(searchContext),
+              );
+              if (!searchContext.mounted ||
+                  !opened ||
+                  !messageSearchRouteCanDismiss(searchContext)) {
+                return;
+              }
+              Navigator.of(searchContext).pop();
+            },
+          ),
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
     final activationEnabled = ref.watch(
@@ -745,9 +824,34 @@ final class _ConversationScreenState
     final recipient = widget.channel.recipients.isEmpty
         ? null
         : widget.channel.recipients.first;
+    final compactHeader = MediaQuery.sizeOf(context).width <= 400;
+    final callUsesOverflow = conversationCallUsesOverflow(
+      MediaQuery.sizeOf(context).width,
+    );
+    final showEncryption =
+        widget.channel.encryptionMode == 'e2ee' || activationEnabled;
+    final overflowItems = <PopupMenuEntry<String>>[
+      if (showEncryption)
+        PopupMenuItem(
+          value: 'encryption',
+          child: Text(widget.channel.encryptionMode == 'e2ee'
+              ? 'Encryption settings'
+              : 'Enable encryption'),
+        ),
+      if (_isGroup)
+        const PopupMenuItem(value: 'group', child: Text('Group settings')),
+      if (widget.channel.type == ChannelType.dm && callUsesOverflow)
+        PopupMenuItem(
+          value: 'call',
+          enabled: !_callBusy,
+          child: Text(_activeCall == null ? 'Start call' : 'Join call'),
+        ),
+      if (widget.onMembers != null)
+        const PopupMenuItem(value: 'members', child: Text('Member list')),
+    ];
     return Column(
       children: [
-        _CompactHeader(
+        ConversationCompactHeader(
           leading: IconButton(
             onPressed: widget.onBack,
             icon: const Icon(Icons.arrow_back_rounded),
@@ -765,7 +869,7 @@ final class _ConversationScreenState
           title: _title,
           subtitle: _subtitle,
           actions: [
-            if (widget.channel.encryptionMode == 'e2ee' || activationEnabled)
+            if (showEncryption && !compactHeader)
               IconButton(
                 tooltip: widget.channel.encryptionMode == 'e2ee'
                     ? 'End-to-end encrypted · view safety number'
@@ -775,13 +879,13 @@ final class _ConversationScreenState
                     ? Icons.lock_rounded
                     : Icons.lock_open_rounded),
               ),
-            if (_isGroup)
+            if (_isGroup && !compactHeader)
               IconButton(
                 tooltip: 'Group settings',
                 onPressed: _showGroupSettings,
                 icon: const Icon(Icons.group_outlined),
               ),
-            if (widget.channel.type == ChannelType.dm)
+            if (widget.channel.type == ChannelType.dm && !callUsesOverflow)
               IconButton(
                 tooltip: _activeCall == null ? 'Start call' : 'Join call',
                 onPressed: _callBusy ? null : _startOrJoinCall,
@@ -789,49 +893,43 @@ final class _ConversationScreenState
                     ? Icons.call_outlined
                     : Icons.call_rounded),
               ),
+            if (supportsPinnedMessages(widget.channel))
+              IconButton(
+                tooltip: 'Pinned messages',
+                onPressed: _showPinnedMessages,
+                icon: const Icon(Icons.push_pin_outlined),
+              ),
             IconButton(
               tooltip: 'Search',
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => MessageSearchScreen(
-                    repository: ProviderScope.containerOf(context)
-                        .read(mobileControllerProvider.notifier)
-                        .repository,
-                    scope:
-                        widget.channel.guildRef == null ? 'channel' : 'guild',
-                    scopeRef: widget.channel.guildRef ?? widget.channel.ref,
-                    channel: widget.channel,
-                    accountRef: ProviderScope.containerOf(context)
-                        .read(mobileControllerProvider.notifier)
-                        .api
-                        .tokens
-                        ?.userRef,
-                    users: ProviderScope.containerOf(context)
-                        .read(mobileControllerProvider)
-                        .userProfiles
-                        .values
-                        .toList(growable: false),
-                    onJump: (result) async {
-                      final controller = ProviderScope.containerOf(context)
-                          .read(mobileControllerProvider.notifier);
-                      if (result.channel.guildRef == null) {
-                        await controller.selectDm(result.channel);
-                      } else {
-                        await controller.selectChannel(result.channel);
-                      }
-                      await controller.loadAround(result.message.ref);
-                      if (context.mounted) Navigator.of(context).pop();
-                    },
-                  ),
-                ),
-              ),
+              onPressed: _showMessageSearch,
               icon: const Icon(Icons.search_rounded),
             ),
-            if (widget.onMembers != null)
+            if (widget.onMembers != null && !compactHeader)
               IconButton(
                 tooltip: 'Member list',
                 onPressed: widget.onMembers,
                 icon: const Icon(Icons.people_alt_outlined),
+              ),
+            if (compactHeader && overflowItems.isNotEmpty)
+              PopupMenuButton<String>(
+                tooltip: 'More conversation actions',
+                onSelected: (action) {
+                  switch (action) {
+                    case 'encryption':
+                      unawaited(_showEncryptionSettings());
+                      return;
+                    case 'group':
+                      unawaited(_showGroupSettings());
+                      return;
+                    case 'members':
+                      widget.onMembers?.call();
+                      return;
+                    case 'call':
+                      unawaited(_startOrJoinCall());
+                      return;
+                  }
+                },
+                itemBuilder: (_) => overflowItems,
               ),
           ],
         ),
@@ -839,6 +937,248 @@ final class _ConversationScreenState
       ],
     );
   }
+}
+
+final class _PinnedMessagesSheet extends ConsumerStatefulWidget {
+  const _PinnedMessagesSheet({required this.channel});
+
+  final KaedeChannel channel;
+
+  @override
+  ConsumerState<_PinnedMessagesSheet> createState() =>
+      _PinnedMessagesSheetState();
+}
+
+final class _PinnedMessagesSheetState
+    extends ConsumerState<_PinnedMessagesSheet> {
+  List<KaedeMessage> _messages = const [];
+  final _unpinning = <EntityRef>{};
+  var _loading = true;
+  String? _error;
+
+  bool get _canManage =>
+      widget.channel.type == ChannelType.dm ||
+      widget.channel.allows(Permission.manageMessages);
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final controller = ref.read(mobileControllerProvider.notifier);
+      var messages = await controller.repository.pins(widget.channel.ref);
+      if (widget.channel.encryptionMode == 'e2ee') {
+        messages = await (await controller.e2eeClient())
+            .decryptMessages(widget.channel, messages);
+      }
+      messages.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      if (mounted) setState(() => _messages = List.unmodifiable(messages));
+    } on Object catch (error) {
+      if (mounted) {
+        setState(() => _error = userFacingError(
+              error,
+              summary: 'Could not load pinned messages',
+            ));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _jump(KaedeMessage message) async {
+    Navigator.of(context).pop();
+    await ref
+        .read(mobileControllerProvider.notifier)
+        .jumpToMessage(message.ref, expectedChannel: widget.channel.ref);
+  }
+
+  Future<void> _unpin(KaedeMessage message) async {
+    if (_unpinning.contains(message.ref)) return;
+    setState(() {
+      _unpinning.add(message.ref);
+      _error = null;
+    });
+    try {
+      await ref
+          .read(mobileControllerProvider.notifier)
+          .setMessagePinned(message, false);
+      if (mounted) {
+        setState(() => _messages = List.unmodifiable(
+              _messages.where((item) => item.ref != message.ref),
+            ));
+      }
+    } on Object catch (error) {
+      if (mounted) {
+        setState(() => _error = userFacingError(
+              error,
+              summary: 'Could not unpin that message',
+            ));
+      }
+    } finally {
+      if (mounted) setState(() => _unpinning.remove(message.ref));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * .72,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 2, 8, 12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.push_pin_rounded),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'Pinned messages',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Close',
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                  ],
+                ),
+              ),
+              if (_error case final error?)
+                Material(
+                  color: Theme.of(context).colorScheme.errorContainer,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                    child: Row(
+                      children: [
+                        Expanded(child: Text(error)),
+                        TextButton(
+                            onPressed: _load, child: const Text('Retry')),
+                      ],
+                    ),
+                  ),
+                ),
+              Expanded(
+                child: _loading
+                    ? const Center(child: CircularProgressIndicator())
+                    : _error != null && _messages.isEmpty
+                        ? const Center(
+                            child: Padding(
+                              padding: EdgeInsets.all(28),
+                              child: Text(
+                                'Pinned messages are unavailable right now.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(color: KaedeColors.muted),
+                              ),
+                            ),
+                          )
+                        : _messages.isEmpty
+                            ? const _EmptyPinnedMessages()
+                            : ListView.separated(
+                                padding:
+                                    const EdgeInsets.fromLTRB(12, 8, 12, 20),
+                                itemCount: _messages.length,
+                                separatorBuilder: (_, __) =>
+                                    const SizedBox(height: 8),
+                                itemBuilder: (context, index) {
+                                  final message = _messages[index];
+                                  final author = message.author?.name ??
+                                      message.authorRef.wire;
+                                  final content = message.content?.trim();
+                                  final preview = content?.isNotEmpty == true
+                                      ? content!
+                                      : message.attachments.isNotEmpty
+                                          ? '${message.attachments.length} attachment${message.attachments.length == 1 ? '' : 's'}'
+                                          : 'Message';
+                                  return Card(
+                                    margin: EdgeInsets.zero,
+                                    child: ListTile(
+                                      key: ValueKey(
+                                          'pinned-${message.ref.wire}'),
+                                      onTap: () => _jump(message),
+                                      title: Text(
+                                        author,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        preview,
+                                        maxLines: 3,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      trailing: _canManage
+                                          ? IconButton(
+                                              tooltip: 'Unpin message',
+                                              onPressed: _unpinning
+                                                      .contains(message.ref)
+                                                  ? null
+                                                  : () => _unpin(message),
+                                              icon: _unpinning
+                                                      .contains(message.ref)
+                                                  ? const SizedBox.square(
+                                                      dimension: 18,
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                      ),
+                                                    )
+                                                  : const Icon(
+                                                      Icons.push_pin_rounded),
+                                            )
+                                          : const Icon(
+                                              Icons.chevron_right_rounded),
+                                    ),
+                                  );
+                                },
+                              ),
+              ),
+            ],
+          ),
+        ),
+      );
+}
+
+final class _EmptyPinnedMessages extends StatelessWidget {
+  const _EmptyPinnedMessages();
+
+  @override
+  Widget build(BuildContext context) => const Center(
+        child: Padding(
+          padding: EdgeInsets.all(28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.push_pin_outlined, size: 38, color: KaedeColors.muted),
+              SizedBox(height: 12),
+              Text(
+                'No pinned messages yet.',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              SizedBox(height: 5),
+              Text(
+                'Pinned messages stay easy to find here.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: KaedeColors.muted),
+              ),
+            ],
+          ),
+        ),
+      );
 }
 
 final class _DmCallRoom extends ConsumerWidget {
@@ -1173,7 +1513,7 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane>
     final mobile = ref.watch(mobileControllerProvider);
     return Column(
       children: [
-        _CompactHeader(
+        ConversationCompactHeader(
           leading: IconButton(
             onPressed: widget.onBack,
             icon: const Icon(Icons.arrow_back_rounded),
@@ -1725,7 +2065,7 @@ final class _DirectMessageBrowser extends ConsumerWidget {
                     icon: Icons.search_rounded,
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute<void>(
-                        builder: (_) => MessageSearchScreen(
+                        builder: (searchContext) => MessageSearchScreen(
                           repository: ref
                               .read(mobileControllerProvider.notifier)
                               .repository,
@@ -1737,14 +2077,28 @@ final class _DirectMessageBrowser extends ConsumerWidget {
                               .api
                               .tokens
                               ?.userRef,
-                          users:
-                              state.userProfiles.values.toList(growable: false),
+                          users: messageSearchUserCandidates(<KaedeUser?>[
+                            state.user,
+                            ...state.userProfiles.values,
+                            for (final channel in state.dms)
+                              ...channel.recipients,
+                          ]),
                           onJump: (result) async {
                             final controller =
                                 ref.read(mobileControllerProvider.notifier);
-                            await controller.selectDm(result.channel);
-                            await controller.loadAround(result.message.ref);
-                            if (context.mounted) Navigator.of(context).pop();
+                            final opened =
+                                await controller.selectAndJumpToMessage(
+                              result.channel,
+                              result.message.ref,
+                              shouldContinue: () =>
+                                  messageSearchRouteCanDismiss(searchContext),
+                            );
+                            if (!searchContext.mounted ||
+                                !opened ||
+                                !messageSearchRouteCanDismiss(searchContext)) {
+                              return;
+                            }
+                            Navigator.of(searchContext).pop();
                             onOpenChannel();
                           },
                         ),
@@ -1861,6 +2215,13 @@ final class _GuildBrowser extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = ref.read(mobileControllerProvider.notifier);
+    final localGuild = controller.api.tokens?.instance == guild.ref.domain;
+    final canManageChannels = localGuild &&
+        (state.user?.ref == guild.ownerRef ||
+            guild.allows(Permission.manageChannels));
+    final canCreateInvite = localGuild &&
+        (state.user?.ref == guild.ownerRef ||
+            guild.allows(Permission.createInvite));
     final banner = publicAssetUri(guild.ref.domain, guild.bannerHash,
         variant: 'thumbnail_1024');
     final channels = [...guild.channels]
@@ -1930,7 +2291,7 @@ final class _GuildBrowser extends ConsumerWidget {
                           ],
                         ),
                       ),
-                      if (controller.api.tokens?.instance == guild.ref.domain)
+                      if (localGuild)
                         IconButton.filledTonal(
                           tooltip: 'Guild settings',
                           onPressed: () => Navigator.of(context).push(
@@ -1957,18 +2318,30 @@ final class _GuildBrowser extends ConsumerWidget {
                     title: 'Search',
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute<void>(
-                        builder: (_) => MessageSearchScreen(
+                        builder: (searchContext) => MessageSearchScreen(
                           repository: controller.repository,
                           scope: 'guild',
                           scopeRef: guild.ref,
                           channel: null,
                           accountRef: controller.api.tokens?.userRef,
-                          users:
-                              state.userProfiles.values.toList(growable: false),
+                          users: messageSearchUserCandidates(<KaedeUser?>[
+                            state.user,
+                            ...state.userProfiles.values,
+                          ]),
                           onJump: (result) async {
-                            await controller.selectChannel(result.channel);
-                            await controller.loadAround(result.message.ref);
-                            if (context.mounted) Navigator.of(context).pop();
+                            final opened =
+                                await controller.selectAndJumpToMessage(
+                              result.channel,
+                              result.message.ref,
+                              shouldContinue: () =>
+                                  messageSearchRouteCanDismiss(searchContext),
+                            );
+                            if (!searchContext.mounted ||
+                                !opened ||
+                                !messageSearchRouteCanDismiss(searchContext)) {
+                              return;
+                            }
+                            Navigator.of(searchContext).pop();
                             onOpenChannel();
                           },
                         ),
@@ -1976,30 +2349,45 @@ final class _GuildBrowser extends ConsumerWidget {
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
-                _SquareAction(
-                  tooltip: 'Invite people',
-                  icon: Icons.person_add_alt_1_rounded,
-                  onTap: () {
-                    final target = channels.where((channel) =>
-                        channel.type == ChannelType.text ||
-                        channel.type == ChannelType.announcement);
-                    final channel = target.isEmpty ? null : target.first;
-                    if (channel == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Create a text channel before creating an invite.',
+                if (canCreateInvite) ...[
+                  const SizedBox(width: 8),
+                  _SquareAction(
+                    tooltip: 'Invite people',
+                    icon: Icons.person_add_alt_1_rounded,
+                    onTap: () async {
+                      final targets = guildTextChannelTargets(channels);
+                      if (targets.isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'Create a text or announcement channel before creating an invite.',
+                            ),
                           ),
-                        ),
+                        );
+                        return;
+                      }
+                      final channel = await showGuildTextChannelPicker(
+                        context,
+                        channels: targets,
+                        title: 'Invite people to…',
                       );
-                      return;
-                    }
-                    _createAndShowInvite(context, controller, guild, channel);
-                  },
-                ),
+                      if (channel == null || !context.mounted) return;
+                      _createAndShowInvite(context, controller, guild, channel);
+                    },
+                  ),
+                ],
               ],
             ),
+          ),
+          GuildChannelsHeader(
+            onAddChannel: canManageChannels
+                ? () => _createGuildChannel(
+                      context,
+                      controller,
+                      guild,
+                      channels,
+                    )
+                : null,
           ),
           Expanded(
             child: ListView(
@@ -2034,6 +2422,83 @@ final class _GuildBrowser extends ConsumerWidget {
         ],
       ),
     );
+  }
+}
+
+final class GuildChannelsHeader extends StatelessWidget {
+  const GuildChannelsHeader({
+    this.onAddChannel,
+    super.key,
+  });
+
+  final VoidCallback? onAddChannel;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 2, 8, 0),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Channels',
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: .45,
+                ),
+              ),
+            ),
+            if (onAddChannel != null)
+              TextButton.icon(
+                key: const ValueKey('guild-add-channel-button'),
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(0, 44),
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  visualDensity: VisualDensity.compact,
+                  textStyle: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                onPressed: onAddChannel,
+                icon: const Icon(Icons.add_rounded, size: 18),
+                label: const Text('Add channel'),
+              ),
+          ],
+        ),
+      );
+}
+
+Future<void> _createGuildChannel(
+  BuildContext context,
+  MobileController controller,
+  KaedeGuild guild,
+  List<KaedeChannel> channels,
+) async {
+  final draft = await showGuildChannelEditorSheet(
+    context,
+    channels: channels,
+  );
+  if (draft == null || !context.mounted) return;
+  try {
+    final created = await controller.createGuildChannel(guild.ref, draft.json);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('#${created.name ?? draft.name} created')),
+    );
+  } on Object catch (error) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(userFacingError(
+            error,
+            summary: 'Could not create the channel',
+          )),
+          backgroundColor: KaedeColors.danger,
+        ),
+      );
+    }
   }
 }
 
@@ -2506,7 +2971,6 @@ Future<void> _createAndShowInvite(BuildContext context,
   try {
     final result = await controller.repository.createInvite(guild.ref, {
       'channel_id': channel.ref.id.value,
-      'channel_domain': channel.ref.domain.value,
     });
     if (!context.mounted) return;
     final code = '${result['code'] ?? ''}';
@@ -2534,8 +2998,9 @@ Future<void> _createAndShowInvite(BuildContext context,
   }
 }
 
-final class _CompactHeader extends StatelessWidget {
-  const _CompactHeader({
+final class ConversationCompactHeader extends StatelessWidget {
+  const ConversationCompactHeader({
+    super.key,
     this.leading,
     this.avatar,
     required this.title,

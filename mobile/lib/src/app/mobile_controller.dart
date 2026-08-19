@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
@@ -229,6 +230,15 @@ bool shouldAcknowledgeVisibleChannel({
 }) =>
     appActive && conversationPaneVisible && selectedChannel == channel;
 
+@visibleForTesting
+bool messageJumpSelectionIsCurrent({
+  required int expectedGeneration,
+  required int currentGeneration,
+  required EntityRef expectedChannel,
+  required EntityRef? activeChannel,
+}) =>
+    expectedGeneration == currentGeneration && expectedChannel == activeChannel;
+
 final class TypingParticipant {
   const TypingParticipant({
     required this.user,
@@ -239,6 +249,22 @@ final class TypingParticipant {
   final EntityRef user;
   final String name;
   final DateTime expiresAt;
+}
+
+/// A one-shot request for the active channel view to reveal a message.
+///
+/// Keeping this in application state lets navigation sources request a jump
+/// before the conversation pane has mounted (for example from guild search).
+final class MessageJumpRequest {
+  const MessageJumpRequest({
+    required this.channel,
+    required this.message,
+    required this.generation,
+  });
+
+  final EntityRef channel;
+  final EntityRef message;
+  final int generation;
 }
 
 final class _PendingAcknowledgement {
@@ -296,6 +322,7 @@ final class MobileState {
     this.presenceByUser = const <EntityRef, PresenceStatus>{},
     this.userProfiles = const <EntityRef, KaedeUser>{},
     this.selfModerationByGuild = const <EntityRef, GuildSelfModerationStatus>{},
+    this.messageJump,
     this.gatewayHealth = const GatewayHealth(
       GatewayConnectionPhase.offline,
       message: 'Realtime updates are not connected.',
@@ -330,6 +357,7 @@ final class MobileState {
   final Map<EntityRef, PresenceStatus> presenceByUser;
   final Map<EntityRef, KaedeUser> userProfiles;
   final Map<EntityRef, GuildSelfModerationStatus> selfModerationByGuild;
+  final MessageJumpRequest? messageJump;
   final GatewayHealth gatewayHealth;
   final Map<DegradedFeature, String> degradedWarnings;
   final String? gatewayProtocolWarning;
@@ -398,6 +426,8 @@ final class MobileState {
     Map<EntityRef, PresenceStatus>? presenceByUser,
     Map<EntityRef, KaedeUser>? userProfiles,
     Map<EntityRef, GuildSelfModerationStatus>? selfModerationByGuild,
+    MessageJumpRequest? messageJump,
+    bool clearMessageJump = false,
     GatewayHealth? gatewayHealth,
     Map<DegradedFeature, String>? degradedWarnings,
     String? gatewayProtocolWarning,
@@ -436,6 +466,7 @@ final class MobileState {
         userProfiles: userProfiles ?? this.userProfiles,
         selfModerationByGuild:
             selfModerationByGuild ?? this.selfModerationByGuild,
+        messageJump: clearMessageJump ? null : messageJump ?? this.messageJump,
         gatewayHealth: gatewayHealth ?? this.gatewayHealth,
         degradedWarnings: degradedWarnings ?? this.degradedWarnings,
         gatewayProtocolWarning: clearGatewayProtocolWarning
@@ -505,7 +536,10 @@ final class MobileController extends StateNotifier<MobileState> {
   var _sessionLoadGeneration = 0;
   var _authenticationGeneration = 0;
   var _selfModerationRequestGeneration = 0;
+  var _messageJumpGeneration = 0;
+  var _conversationSelectionGeneration = 0;
   Future<void>? _navigationRefresh;
+  var _navigationRefreshQueued = false;
   Future<void>? _notificationActivation;
   Future<void> _cacheWriteTail = Future<void>.value();
   String? _activeAccountKey;
@@ -1130,13 +1164,52 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> refreshNavigation() {
-    if (_navigationRefresh case final pending?) return pending;
-    final pending = _refreshNavigation();
-    _navigationRefresh = pending;
-    pending.whenComplete(() {
-      if (identical(_navigationRefresh, pending)) _navigationRefresh = null;
-    });
-    return pending;
+    // A mutation or gateway event can arrive while a navigation request is
+    // already in flight. Returning only that older request can preserve the
+    // pre-mutation guild snapshot until the user leaves and reopens a screen.
+    // Coalesce callers, but drain one follow-up request whenever anything
+    // invalidated navigation during the active fetch.
+    _navigationRefreshQueued = true;
+    return _navigationRefresh ??= _drainNavigationRefreshes();
+  }
+
+  Future<void> _drainNavigationRefreshes() async {
+    try {
+      while (_navigationRefreshQueued) {
+        _navigationRefreshQueued = false;
+        await _refreshNavigation();
+      }
+    } finally {
+      _navigationRefresh = null;
+    }
+  }
+
+  /// Creates a guild channel and immediately reconciles the navigation
+  /// projection so the channel drawer does not depend on a later gateway event
+  /// or a full navigation refresh before showing it.
+  Future<KaedeChannel> createGuildChannel(
+    EntityRef guild,
+    Map<String, Object?> request,
+  ) async {
+    final created = await repository.createChannel(guild, request);
+    final guilds = state.guilds.map((candidate) {
+      if (candidate.ref != guild) return candidate;
+      return KaedeGuild.fromJson(<String, Object?>{
+        ...candidate.toJson(),
+        'channels': <Object?>[
+          for (final channel in candidate.channels)
+            if (channel.ref != created.ref) channel.toJson(),
+          created.toJson(),
+        ],
+      });
+    }).toList(growable: false);
+    state = state.copyWith(
+      guilds: List.unmodifiable(guilds),
+      clearError: true,
+    );
+    _scheduleMetadataCache();
+    _scheduleNavigationRefresh();
+    return created;
   }
 
   void _scheduleNavigationRefresh() {
@@ -1345,19 +1418,38 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> selectGuild(KaedeGuild guild) {
-    state = state.copyWith(selectedGuild: guild.ref, clearChannel: true);
+    _beginConversationSelection();
+    state = state.copyWith(
+      selectedGuild: guild.ref,
+      clearChannel: true,
+      clearMessageJump: true,
+    );
     push.setAppVisibility(active: _appActive);
     unawaited(refreshSelfModeration(guild.ref));
     return Future<void>.value();
   }
 
   void selectHome() {
-    state = state.copyWith(clearGuild: true, clearChannel: true);
+    _beginConversationSelection();
+    state = state.copyWith(
+      clearGuild: true,
+      clearChannel: true,
+      clearMessageJump: true,
+    );
     push.setAppVisibility(active: _appActive);
   }
 
-  Future<void> selectDm(KaedeChannel channel) async {
-    state = state.copyWith(clearGuild: true, selectedChannel: channel.ref);
+  Future<void> selectDm(KaedeChannel channel) {
+    _beginConversationSelection();
+    return _selectDm(channel);
+  }
+
+  Future<void> _selectDm(KaedeChannel channel) async {
+    state = state.copyWith(
+      clearGuild: true,
+      selectedChannel: channel.ref,
+      clearMessageJump: true,
+    );
     push.setAppVisibility(
       active: _appActive,
       visibleChannel:
@@ -1368,10 +1460,16 @@ final class MobileController extends StateNotifier<MobileState> {
     await loadMessages();
   }
 
-  Future<void> selectChannel(KaedeChannel channel) async {
+  Future<void> selectChannel(KaedeChannel channel) {
+    _beginConversationSelection();
+    return _selectChannel(channel);
+  }
+
+  Future<void> _selectChannel(KaedeChannel channel) async {
     state = state.copyWith(
       selectedGuild: channel.guildRef ?? state.selectedGuild,
       selectedChannel: channel.ref,
+      clearMessageJump: true,
     );
     push.setAppVisibility(
       active: _appActive,
@@ -1388,6 +1486,12 @@ final class MobileController extends StateNotifier<MobileState> {
         channel.type == ChannelType.dm) {
       await loadMessages();
     }
+  }
+
+  int _beginConversationSelection() {
+    _conversationSelectionGeneration += 1;
+    _messageJumpGeneration += 1;
+    return _conversationSelectionGeneration;
   }
 
   Future<void> refreshSelfModeration(EntityRef guild) async {
@@ -1513,14 +1617,14 @@ final class MobileController extends StateNotifier<MobileState> {
           state.copyWith(error: 'This conversation is no longer available.');
       return false;
     }
+    if (destination.message case final message?) {
+      return selectAndJumpToMessage(channel, message);
+    }
     if (guild != null) {
       state = state.copyWith(selectedGuild: guild.ref);
       await selectChannel(channel);
     } else {
       await selectDm(channel);
-    }
-    if (destination.message case final message?) {
-      await loadAround(message);
     }
     return true;
   }
@@ -1810,6 +1914,24 @@ final class MobileController extends StateNotifier<MobileState> {
     await _cacheMessages(message.channelRef);
   }
 
+  Future<void> setMessagePinned(KaedeMessage message, bool pinned) async {
+    if (pinned) {
+      await repository.pin(message.channelRef, message.ref);
+    } else {
+      await repository.unpin(message.channelRef, message.ref);
+    }
+    final messages = state.messageStore[message.channelRef];
+    if (messages == null) return;
+    _setChannelMessages(
+      message.channelRef,
+      messages
+          .map((item) =>
+              item.ref == message.ref ? item.copyWith(pinned: pinned) : item)
+          .toList(growable: false),
+    );
+    await _cacheMessages(message.channelRef);
+  }
+
   Future<void> loadAround(EntityRef message) async {
     final channel = state.activeChannel;
     if (channel == null) return;
@@ -1863,6 +1985,85 @@ final class MobileController extends StateNotifier<MobileState> {
         _setChannelLoading(channelRef, false);
       }
     }
+  }
+
+  /// Loads the page containing [message] and asks the mounted (or next mounted)
+  /// channel view to scroll to and briefly highlight it.
+  Future<void> jumpToMessage(
+    EntityRef message, {
+    EntityRef? expectedChannel,
+  }) async {
+    await _jumpToMessage(message, expectedChannel: expectedChannel);
+  }
+
+  /// Selects [channel] and reveals [message] only if no newer conversation
+  /// selection or caller cancellation supersedes this request while loading.
+  Future<bool> selectAndJumpToMessage(
+    KaedeChannel channel,
+    EntityRef message, {
+    bool Function()? shouldContinue,
+  }) async {
+    if (shouldContinue?.call() == false) return false;
+    final selectionGeneration = _beginConversationSelection();
+    final selection =
+        channel.guildRef == null ? _selectDm(channel) : _selectChannel(channel);
+    await selection;
+    if (shouldContinue?.call() == false) return false;
+    return _jumpToMessage(
+      message,
+      expectedChannel: channel.ref,
+      expectedSelectionGeneration: selectionGeneration,
+      shouldContinue: shouldContinue,
+    );
+  }
+
+  Future<bool> _jumpToMessage(
+    EntityRef message, {
+    EntityRef? expectedChannel,
+    int? expectedSelectionGeneration,
+    bool Function()? shouldContinue,
+  }) async {
+    if (shouldContinue?.call() == false) return false;
+    final channel = state.activeChannel;
+    if (channel == null) return false;
+    final channelRef = channel.ref;
+    if (expectedChannel != null && channelRef != expectedChannel) return false;
+    if (expectedSelectionGeneration != null &&
+        !messageJumpSelectionIsCurrent(
+          expectedGeneration: expectedSelectionGeneration,
+          currentGeneration: _conversationSelectionGeneration,
+          expectedChannel: channelRef,
+          activeChannel: state.activeChannel?.ref,
+        )) {
+      return false;
+    }
+    final generation = ++_messageJumpGeneration;
+    await loadAround(message);
+    if (generation != _messageJumpGeneration ||
+        state.activeChannel?.ref != channelRef ||
+        shouldContinue?.call() == false ||
+        (expectedSelectionGeneration != null &&
+            !messageJumpSelectionIsCurrent(
+              expectedGeneration: expectedSelectionGeneration,
+              currentGeneration: _conversationSelectionGeneration,
+              expectedChannel: channelRef,
+              activeChannel: state.activeChannel?.ref,
+            ))) {
+      return false;
+    }
+    state = state.copyWith(
+      messageJump: MessageJumpRequest(
+        channel: channelRef,
+        message: message,
+        generation: generation,
+      ),
+    );
+    return true;
+  }
+
+  void consumeMessageJump(int generation) {
+    if (state.messageJump?.generation != generation) return;
+    state = state.copyWith(clearMessageJump: true);
   }
 
   Future<void> publishTyping(EntityRef channel) async {

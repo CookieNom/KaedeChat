@@ -16,6 +16,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/media.dart';
+import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/voice/voice_room.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -29,6 +30,74 @@ import 'package:video_player/video_player.dart';
 
 final _mentionPattern = RegExp(r'<@([1-9][0-9]{0,18}@[A-Za-z0-9.-]+)>');
 final _urlPattern = RegExp(r'https?://[^\s<>"\u0027]+', caseSensitive: false);
+const _messageSpoilerPattern = r'\|\|([^|](?:(?!\|\|)[\s\S])*?)\|\|';
+const _messageTokenPattern =
+    r'(<a?:[A-Za-z0-9_]{2,32}:[1-9][0-9]{0,18}@[A-Za-z0-9.-]{1,253}>|<@&[1-9][0-9]{0,18}@[A-Za-z0-9.-]+>|<@[1-9][0-9]{0,18}(?:@[A-Za-z0-9.-]+)?>|@[A-Za-z0-9_.-]{1,64}@[A-Za-z0-9.-]+|#[A-Za-z0-9_-]{1,100})';
+final _messageSpoilerRegExp = RegExp(_messageSpoilerPattern);
+final _messageTokenRegExp = RegExp(_messageTokenPattern);
+
+int messageListItemIndex({
+  required int messageCount,
+  required int messageIndex,
+  int pendingCount = 0,
+}) =>
+    pendingCount + messageCount - messageIndex - 1;
+
+@visibleForTesting
+bool messageJumpRevealIsCurrent({
+  required MessageJumpRequest request,
+  required EntityRef? renderedChannel,
+  required int? handledGeneration,
+}) =>
+    request.channel == renderedChannel &&
+    request.generation == handledGeneration;
+
+final _explicitMentionToken = RegExp(
+  r'^<@([1-9][0-9]{0,18})(?:@([A-Za-z0-9.-]+))?>$',
+);
+final _roleMentionToken = RegExp(
+  r'^<@&([1-9][0-9]{0,18})@([A-Za-z0-9.-]+)>$',
+);
+final _customEmojiToken = RegExp(
+  r'^<(?:(a)?):([A-Za-z0-9_]{2,32}):([1-9][0-9]{0,18})@([A-Za-z0-9.-]{1,253})>$',
+);
+
+final class MessageSpoilerSyntax extends md.InlineSyntax {
+  MessageSpoilerSyntax()
+      : super(
+          _messageSpoilerPattern,
+          startCharacter: 0x7c,
+        );
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    parser.addNode(md.Element.text('kaede-spoiler', match.group(1)!));
+    return true;
+  }
+}
+
+final class MessageTokenSyntax extends md.InlineSyntax {
+  MessageTokenSyntax()
+      : super(
+          _messageTokenPattern,
+        );
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    final token = match.group(1)!;
+    final tag = token.startsWith('<@&')
+        ? 'kaede-role-mention'
+        : token.startsWith('<:') || token.startsWith('<a:')
+            ? 'kaede-custom-emoji'
+            : token.startsWith('#')
+                ? 'kaede-channel-token'
+                : 'kaede-user-mention';
+    final element = md.Element.text(tag, token);
+    element.attributes['token'] = token;
+    parser.addNode(element);
+    return true;
+  }
+}
 
 List<EntityRef> mentionReferences(String content) {
   final references = <EntityRef>{};
@@ -225,7 +294,8 @@ String renderMentionLabels(String content, MobileState state) =>
     });
 
 Uri? previewMediaUrl(String content) {
-  for (final match in _urlPattern.allMatches(content)) {
+  final visibleContent = content.replaceAll(_messageSpoilerRegExp, ' ');
+  for (final match in _urlPattern.allMatches(visibleContent)) {
     final raw = match.group(0)!.replaceFirst(RegExp(r'[),.!?:;\]}]+$'), '');
     final uri = Uri.tryParse(raw);
     if (uri == null || !const <String>{'http', 'https'}.contains(uri.scheme)) {
@@ -244,6 +314,196 @@ Uri? previewMediaUrl(String content) {
   return null;
 }
 
+String spoilerSafeReplyPreview(String content) =>
+    content.replaceAll(_messageSpoilerRegExp, 'Spoiler');
+
+String _withoutVisibleMediaUrl(String content, Uri mediaUrl) {
+  final target = mediaUrl.toString();
+  var cursor = 0;
+  for (final spoiler in _messageSpoilerRegExp.allMatches(content)) {
+    final before = content.substring(cursor, spoiler.start);
+    final relative = before.indexOf(target);
+    if (relative >= 0) {
+      final start = cursor + relative;
+      return content.replaceRange(start, start + target.length, '');
+    }
+    cursor = spoiler.end;
+  }
+  final relative = content.substring(cursor).indexOf(target);
+  if (relative < 0) return content;
+  final start = cursor + relative;
+  return content.replaceRange(start, start + target.length, '');
+}
+
+KaedeUser? _knownMessageUser(MobileState state, EntityRef reference) {
+  if (state.user?.ref == reference) return state.user;
+  final profile = state.userProfiles[reference];
+  if (profile != null) return profile;
+  for (final dm in state.dms) {
+    for (final user in dm.recipients) {
+      if (user.ref == reference) return user;
+    }
+  }
+  for (final messages in state.messageStore.values) {
+    for (final message in messages) {
+      if (message.author?.ref == reference) return message.author;
+    }
+  }
+  return null;
+}
+
+EntityRef? _mentionTokenReference(String token, MobileState state) {
+  final match = _explicitMentionToken.firstMatch(token);
+  if (match == null) return null;
+  final domain = match.group(2) ??
+      state.user?.ref.domain.value ??
+      state.activeGuild?.ref.domain.value;
+  if (domain == null) return null;
+  try {
+    return EntityRef(Snowflake(match.group(1)!), Domain(domain));
+  } on FormatException {
+    return null;
+  }
+}
+
+KaedeUser? _mentionTokenUser(String token, MobileState state) {
+  final reference = _mentionTokenReference(token, state);
+  if (reference != null) return _knownMessageUser(state, reference);
+  if (!token.startsWith('@')) return null;
+  final handle = token.substring(1).toLowerCase();
+  final candidates = <KaedeUser?>[
+    state.user,
+    ...state.userProfiles.values,
+    for (final dm in state.dms) ...dm.recipients,
+  ];
+  for (final user in candidates) {
+    if (user?.handle.toLowerCase() == handle) return user;
+  }
+  return null;
+}
+
+KaedeRole? _mentionTokenRole(String token, MobileState state) {
+  final match = _roleMentionToken.firstMatch(token);
+  if (match == null) return null;
+  try {
+    final reference =
+        EntityRef(Snowflake(match.group(1)!), Domain(match.group(2)!));
+    for (final role in state.activeGuild?.roles ?? const <KaedeRole>[]) {
+      if (role.ref == reference) return role;
+    }
+  } on FormatException {
+    // Malformed federated markup remains an unknown role token.
+  }
+  return null;
+}
+
+int _messageMarkdownRevision(String content, MobileState state) {
+  final values = <Object?>[content];
+  for (final match in _messageTokenRegExp.allMatches(content)) {
+    final token = match.group(1)!;
+    if (token.startsWith('<@&')) {
+      final role = _mentionTokenRole(token, state);
+      values.addAll(<Object?>[
+        token,
+        role?.ref.wire,
+        role?.name,
+        role?.color,
+      ]);
+    } else if (token.startsWith('@') || token.startsWith('<@')) {
+      final user = _mentionTokenUser(token, state);
+      values.addAll(<Object?>[
+        token,
+        user?.ref.wire,
+        user?.name,
+        user?.profileResolved,
+      ]);
+    }
+  }
+  return Object.hashAll(values);
+}
+
+final class KaedeMessageMarkdown extends StatelessWidget {
+  const KaedeMessageMarkdown({
+    required this.content,
+    required this.state,
+    this.omitMediaUrl,
+    super.key,
+  });
+
+  final String content;
+  final MobileState state;
+  final Uri? omitMediaUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final data = (omitMediaUrl == null
+            ? content
+            : _withoutVisibleMediaUrl(content, omitMediaUrl!))
+        .trim();
+    return MarkdownBody(
+      key: ValueKey<int>(_messageMarkdownRevision(data, state)),
+      data: data,
+      inlineSyntaxes: <md.InlineSyntax>[
+        MessageSpoilerSyntax(),
+        MessageTokenSyntax(),
+      ],
+      builders: <String, MarkdownElementBuilder>{
+        'kaede-spoiler': _SpoilerBuilder(),
+        'kaede-user-mention': _MessageTokenBuilder(
+          state: state,
+          kind: _MessageTokenKind.user,
+        ),
+        'kaede-role-mention': _MessageTokenBuilder(
+          state: state,
+          kind: _MessageTokenKind.role,
+        ),
+        'kaede-channel-token': _MessageTokenBuilder(
+          state: state,
+          kind: _MessageTokenKind.channel,
+        ),
+        'kaede-custom-emoji': _MessageTokenBuilder(
+          state: state,
+          kind: _MessageTokenKind.emoji,
+        ),
+      },
+      selectable: true,
+      softLineBreak: true,
+      styleSheet: MarkdownStyleSheet(
+        p: const TextStyle(
+          color: KaedeColors.text,
+          fontSize: 16,
+          height: 1.24,
+        ),
+        pPadding: EdgeInsets.zero,
+        code: const TextStyle(
+          color: KaedeColors.text,
+          backgroundColor: KaedeColors.rail,
+          fontSize: 14,
+        ),
+        codeblockDecoration: BoxDecoration(
+          color: KaedeColors.rail,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: KaedeColors.border),
+        ),
+        blockquoteDecoration: const BoxDecoration(
+          border: Border(
+            left: BorderSide(
+              color: KaedeColors.muted,
+              width: 3,
+            ),
+          ),
+        ),
+      ),
+      onTapLink: (_, href, __) async {
+        final uri = Uri.tryParse(href ?? '');
+        if (uri != null && (uri.scheme == 'https' || uri.scheme == 'http')) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        }
+      },
+    );
+  }
+}
+
 final class ChannelView extends ConsumerStatefulWidget {
   const ChannelView({super.key});
 
@@ -253,6 +513,7 @@ final class ChannelView extends ConsumerStatefulWidget {
 
 final class _ChannelViewState extends ConsumerState<ChannelView> {
   final _composer = TextEditingController();
+  final _composerFocus = FocusNode();
   final _scroll = ScrollController();
   final _messageKeys = <String, GlobalKey>{};
   final _uploads = <_PendingUpload>[];
@@ -273,6 +534,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   var _automaticHistoryCheckScheduled = false;
   var _automaticHistoryLoadInFlight = false;
   String? _mentionQuery;
+  int? _handledJumpGeneration;
+  EntityRef? _highlightedMessage;
+  Timer? _highlightTimer;
 
   @override
   void initState() {
@@ -285,6 +549,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   void dispose() {
     _draftTimer?.cancel();
     _slowModeTimer?.cancel();
+    _highlightTimer?.cancel();
     if (_composerChannel case final channel?) {
       ref.read(mobileControllerProvider.notifier).setDraft(
             channel,
@@ -297,6 +562,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     _composer
       ..removeListener(_composerChanged)
       ..dispose();
+    _composerFocus.dispose();
     _scroll.removeListener(_handleScroll);
     _scroll.dispose();
     super.dispose();
@@ -326,10 +592,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             channel.allows(Permission.sendMessages));
     final messages = state.messages;
     final pending = state.pendingMessages;
+    final jump = state.messageJump;
     final channelChanged = _renderedChannel != channel.ref;
     final lastMessage = messages.isEmpty ? null : messages.last.ref;
     _renderedChannel = channel.ref;
     if (channelChanged) {
+      _highlightedMessage = null;
       _initialScrollPending = !_savedOffsets.containsKey(channel.ref);
       _scheduleRestore(channel.ref);
     } else if (_initialScrollPending &&
@@ -343,6 +611,15 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       _scheduleScrollToBottom(animated: true);
     }
     _renderedLastMessage = lastMessage;
+    if (jump != null &&
+        jump.channel == channel.ref &&
+        jump.generation != _handledJumpGeneration &&
+        !state.loadingMessages) {
+      _handledJumpGeneration = jump.generation;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_revealRequestedMessage(jump));
+      });
+    }
     if (state.channelsWithOlderMessages.contains(channel.ref) &&
         !state.loadingMessages &&
         state.error == null) {
@@ -462,34 +739,45 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                         message.ref.wire, GlobalKey.new);
                     return KeyedSubtree(
                       key: key,
-                      child: _MessageTile(
-                        state: state,
-                        message: message,
-                        compact: compact,
-                        referenced: message.reference == null
-                            ? null
-                            : messages
-                                .where((candidate) =>
-                                    candidate.ref == message.reference)
-                                .firstOrNull,
-                        onReply: () => setState(() {
-                          _reply = message;
-                          _notifyReply = message.authorRef != state.user?.ref &&
-                              channel.type != ChannelType.dm;
-                        }),
-                        onJump: message.reference == null
-                            ? null
-                            : () => _jumpTo(message.reference!),
-                        onMenu: () => _showMessageActions(message),
-                        onReaction: (emoji) => _toggleReaction(message, emoji),
-                        onAuthorTap: message.author == null
-                            ? null
-                            : () => showUserProfile(
-                                  context,
-                                  message.author!,
-                                  state.presenceByUser[message.author!.ref] ??
-                                      message.author!.presence,
-                                ),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 220),
+                        color: _highlightedMessage == message.ref
+                            ? Theme.of(context)
+                                .colorScheme
+                                .primary
+                                .withValues(alpha: .16)
+                            : Colors.transparent,
+                        child: _MessageTile(
+                          state: state,
+                          message: message,
+                          compact: compact,
+                          referenced: message.reference == null
+                              ? null
+                              : messages
+                                  .where((candidate) =>
+                                      candidate.ref == message.reference)
+                                  .firstOrNull,
+                          onReply: () => setState(() {
+                            _reply = message;
+                            _notifyReply =
+                                message.authorRef != state.user?.ref &&
+                                    channel.type != ChannelType.dm;
+                          }),
+                          onJump: message.reference == null
+                              ? null
+                              : () => _jumpTo(message.reference!),
+                          onMenu: () => _showMessageActions(message),
+                          onReaction: (emoji) =>
+                              _toggleReaction(message, emoji),
+                          onAuthorTap: message.author == null
+                              ? null
+                              : () => showUserProfile(
+                                    context,
+                                    message.author!,
+                                    state.presenceByUser[message.author!.ref] ??
+                                        message.author!.presence,
+                                  ),
+                        ),
                       ),
                     );
                   },
@@ -516,12 +804,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             ignoring: !composerReady,
             child: _Composer(
               controller: _composer,
+              focusNode: _composerFocus,
               reply: _reply,
               notifyReply: _notifyReply,
               uploads: _uploads,
               sending: _sending,
-              canAttach: channel.type == ChannelType.dm ||
-                  channel.allows(Permission.attachFiles),
               slowModeRemaining: _slowModeRemaining(channel.ref),
               onNotifyChanged: (value) => setState(() => _notifyReply = value),
               onCancelReply: () => setState(() => _reply = null),
@@ -529,7 +816,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 setState(() => _uploads.remove(item));
                 unawaited(item.deleteIfTemporary());
               },
-              onAttach: _pickFiles,
+              onAdd: () => _showComposerActions(channel),
               onSend: _send,
             ),
           ),
@@ -731,18 +1018,236 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   }
 
   Future<void> _jumpTo(EntityRef reference) async {
-    var key = _messageKeys[reference.wire];
-    if (key?.currentContext == null) {
-      await ref.read(mobileControllerProvider.notifier).loadAround(reference);
-      if (!mounted) return;
-      await WidgetsBinding.instance.endOfFrame;
-      if (!mounted) return;
-      key = _messageKeys[reference.wire];
+    await ref.read(mobileControllerProvider.notifier).jumpToMessage(
+          reference,
+          expectedChannel: _renderedChannel,
+        );
+  }
+
+  Future<void> _revealRequestedMessage(MessageJumpRequest request) async {
+    if (!mounted ||
+        !messageJumpRevealIsCurrent(
+          request: request,
+          renderedChannel: _renderedChannel,
+          handledGeneration: _handledJumpGeneration,
+        )) {
+      return;
     }
-    final targetContext = key?.currentContext;
-    if (targetContext != null && targetContext.mounted) {
-      await Scrollable.ensureVisible(targetContext,
-          duration: const Duration(milliseconds: 320), alignment: .35);
+    ref
+        .read(mobileControllerProvider.notifier)
+        .consumeMessageJump(request.generation);
+    // The reversed lazy list may not have built an around-page's middle row.
+    // Start with a proportional estimate, then walk by viewports until the
+    // requested row has a BuildContext that ensureVisible can target exactly.
+    for (var attempt = 0; attempt < 60; attempt++) {
+      final targetContext = _messageKeys[request.message.wire]?.currentContext;
+      if (targetContext != null && targetContext.mounted) {
+        await Scrollable.ensureVisible(
+          targetContext,
+          duration: const Duration(milliseconds: 320),
+          alignment: .35,
+        );
+        if (!mounted ||
+            !messageJumpRevealIsCurrent(
+              request: request,
+              renderedChannel: _renderedChannel,
+              handledGeneration: _handledJumpGeneration,
+            )) {
+          return;
+        }
+        _highlightTimer?.cancel();
+        setState(() => _highlightedMessage = request.message);
+        _highlightTimer = Timer(const Duration(seconds: 2), () {
+          if (mounted && _highlightedMessage == request.message) {
+            setState(() => _highlightedMessage = null);
+          }
+        });
+        return;
+      }
+      if (!_scroll.hasClients) {
+        await WidgetsBinding.instance.endOfFrame;
+        continue;
+      }
+      final state = ref.read(mobileControllerProvider);
+      final targetIndex = state.messages.indexWhere(
+        (message) => message.ref == request.message,
+      );
+      if (targetIndex < 0) return;
+      final targetItem = messageListItemIndex(
+        messageCount: state.messages.length,
+        messageIndex: targetIndex,
+        pendingCount: state.pendingMessages.length,
+      );
+      final builtItems = <int>[];
+      for (var index = 0; index < state.messages.length; index++) {
+        final message = state.messages[index];
+        if (_messageKeys[message.ref.wire]?.currentContext != null) {
+          builtItems.add(messageListItemIndex(
+            messageCount: state.messages.length,
+            messageIndex: index,
+            pendingCount: state.pendingMessages.length,
+          ));
+        }
+      }
+      final position = _scroll.position;
+      double next;
+      if (builtItems.isEmpty || attempt == 0) {
+        final totalItems = state.messages.length + state.pendingMessages.length;
+        next = totalItems <= 1
+            ? position.minScrollExtent
+            : position.maxScrollExtent * targetItem / (totalItems - 1);
+      } else if (targetItem > builtItems.reduce((a, b) => a > b ? a : b)) {
+        next = position.pixels + position.viewportDimension * .8;
+      } else {
+        next = position.pixels - position.viewportDimension * .8;
+      }
+      _scroll.jumpTo(
+        next
+            .clamp(position.minScrollExtent, position.maxScrollExtent)
+            .toDouble(),
+      );
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted ||
+          !messageJumpRevealIsCurrent(
+            request: request,
+            renderedChannel: _renderedChannel,
+            handledGeneration: _handledJumpGeneration,
+          )) {
+        return;
+      }
+    }
+  }
+
+  Future<void> _showComposerActions(KaedeChannel channel) async {
+    if (_sending || _composerChannel != channel.ref) return;
+    final canAttach = channel.type == ChannelType.dm ||
+        channel.allows(Permission.attachFiles);
+    _composerFocus.unfocus();
+    final action = await showComposerActionPicker(
+      context,
+      canAttach: canAttach,
+      gifsAllowed: composerAllowsGifs(channel),
+    );
+    if (!mounted ||
+        action == null ||
+        ref.read(mobileControllerProvider).activeChannel?.ref != channel.ref) {
+      return;
+    }
+    switch (action) {
+      case ComposerAction.attach:
+        await _pickFiles();
+        break;
+      case ComposerAction.emoji:
+        final state = ref.read(mobileControllerProvider);
+        final recent = await _recentReactions(state.user?.ref);
+        if (!mounted ||
+            ref.read(mobileControllerProvider).activeChannel?.ref !=
+                channel.ref) {
+          return;
+        }
+        final emoji = await showComposerEmojiPicker(
+          context,
+          repository: ref.read(mobileControllerProvider.notifier).repository,
+          channel: channel,
+          categories: _reactionEmojiCategories,
+          recent: recent,
+        );
+        if (!mounted || emoji == null) return;
+        if (ref.read(mobileControllerProvider).activeChannel?.ref !=
+            channel.ref) {
+          return;
+        }
+        _insertComposerText(emoji);
+        break;
+      case ComposerAction.gif:
+        if (!composerAllowsGifs(channel)) {
+          _showGifUnavailable();
+          return;
+        }
+        final gif = await showComposerGifPicker(
+          context,
+          repository: ref.read(mobileControllerProvider.notifier).repository,
+        );
+        if (!mounted || gif == null) return;
+        await _sendGif(channel, gif);
+        break;
+    }
+  }
+
+  void _insertComposerText(String insertion) {
+    final next = insertComposerText(_composer.value, insertion);
+    if (next == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Messages can contain at most 4,000 characters.'),
+      ));
+      return;
+    }
+    _composer.value = next;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _composerFocus.requestFocus();
+    });
+  }
+
+  void _showGifUnavailable() {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text(
+        'GIF search is unavailable in end-to-end encrypted conversations.',
+      ),
+    ));
+  }
+
+  Future<void> _sendGif(KaedeChannel channel, ComposerGif gif) async {
+    final active = ref.read(mobileControllerProvider).activeChannel;
+    if (_sending ||
+        active?.ref != channel.ref ||
+        _composerChannel != channel.ref) {
+      return;
+    }
+    if (!composerAllowsGifs(active!)) {
+      _showGifUnavailable();
+      return;
+    }
+    final remaining = _slowModeRemaining(channel.ref);
+    if (remaining > Duration.zero) {
+      final seconds = (remaining.inMilliseconds / 1000).ceil();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Slow mode is active. Try again in $seconds seconds.'),
+      ));
+      return;
+    }
+    setState(() => _sending = true);
+    try {
+      await ref
+          .read(mobileControllerProvider.notifier)
+          .send(channel.ref, gif.url.toString());
+      if (channel.slowModeSeconds > 0) {
+        _startSlowMode(
+          channel.ref,
+          Duration(seconds: channel.slowModeSeconds),
+        );
+      }
+      await WidgetsBinding.instance.endOfFrame;
+      if (_composerChannel == channel.ref && _scroll.hasClients) {
+        await _scroll.animateTo(
+          _scroll.position.minScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    } on Object catch (error) {
+      if (error is KaedeException && error.retryAfter != null) {
+        _startSlowMode(channel.ref, error.retryAfter!);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(userFacingError(
+            error,
+            summary: 'Could not send that GIF',
+          )),
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _sending = false);
     }
   }
 
@@ -1171,11 +1676,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           );
           break;
         case 'pin':
-          if (message.pinned) {
-            await controller.repository.unpin(message.channelRef, message.ref);
-          } else {
-            await controller.repository.pin(message.channelRef, message.ref);
-          }
+          await controller.setMessagePinned(message, !message.pinned);
           break;
         case 'edit':
           final edited = await _editDialog(message.content ?? '');
@@ -2019,7 +2520,9 @@ final class _MessageTile extends StatelessWidget {
                                 child: Text(
                                     referenced == null
                                         ? 'Tap to load message'
-                                        : referenced!.content ?? 'Attachment',
+                                        : spoilerSafeReplyPreview(
+                                            referenced!.content ?? 'Attachment',
+                                          ),
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
@@ -2061,52 +2564,10 @@ final class _MessageTile extends StatelessWidget {
                     )
                   else if (message.content case final content?
                       when content.isNotEmpty)
-                    MarkdownBody(
-                      data: renderMentionLabels(
-                        mediaPreview == null
-                            ? content
-                            : content.replaceFirst(mediaPreview.toString(), ''),
-                        state,
-                      ).trim(),
-                      builders: <String, MarkdownElementBuilder>{
-                        'a': _MentionBuilder(),
-                      },
-                      selectable: true,
-                      styleSheet: MarkdownStyleSheet(
-                        p: const TextStyle(
-                          color: KaedeColors.text,
-                          fontSize: 16,
-                          height: 1.24,
-                        ),
-                        pPadding: EdgeInsets.zero,
-                        code: const TextStyle(
-                          color: KaedeColors.text,
-                          backgroundColor: KaedeColors.rail,
-                          fontSize: 14,
-                        ),
-                        codeblockDecoration: BoxDecoration(
-                          color: KaedeColors.rail,
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: KaedeColors.border),
-                        ),
-                        blockquoteDecoration: const BoxDecoration(
-                          border: Border(
-                            left: BorderSide(
-                              color: KaedeColors.muted,
-                              width: 3,
-                            ),
-                          ),
-                        ),
-                      ),
-                      onTapLink: (_, href, __) async {
-                        final uri = Uri.tryParse(href ?? '');
-                        if (uri?.scheme == 'kaede-mention') return;
-                        if (uri != null &&
-                            (uri.scheme == 'https' || uri.scheme == 'http')) {
-                          await launchUrl(uri,
-                              mode: LaunchMode.externalApplication);
-                        }
-                      },
+                    KaedeMessageMarkdown(
+                      content: content,
+                      state: state,
+                      omitMediaUrl: mediaPreview,
                     ),
                   if (!deleted && mediaPreview != null)
                     _RemoteMediaPreview(uri: mediaPreview),
@@ -2489,7 +2950,71 @@ String stableMediaCacheKey(Uri uri) {
   return hash.toRadixString(16);
 }
 
-final class _MentionBuilder extends MarkdownElementBuilder {
+final class _SpoilerBuilder extends MarkdownElementBuilder {
+  @override
+  Widget? visitElementAfterWithContext(
+    BuildContext context,
+    md.Element element,
+    TextStyle? preferredStyle,
+    TextStyle? parentStyle,
+  ) =>
+      _SpoilerText(
+        text: element.textContent,
+        style: parentStyle ?? preferredStyle ?? const TextStyle(),
+      );
+}
+
+final class _SpoilerText extends StatefulWidget {
+  const _SpoilerText({required this.text, required this.style});
+
+  final String text;
+  final TextStyle style;
+
+  @override
+  State<_SpoilerText> createState() => _SpoilerTextState();
+}
+
+final class _SpoilerTextState extends State<_SpoilerText> {
+  var _revealed = false;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        label: _revealed
+            ? 'Spoiler: ${widget.text}. Hide spoiler'
+            : 'Reveal spoiler',
+        child: ExcludeSemantics(
+          child: InkWell(
+            key: ValueKey('message-spoiler-${widget.text}'),
+            onTap: () => setState(() => _revealed = !_revealed),
+            borderRadius: BorderRadius.circular(4),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+              decoration: BoxDecoration(
+                color: _revealed ? KaedeColors.raised : KaedeColors.text,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                widget.text,
+                style: widget.style.copyWith(
+                  color: _revealed ? KaedeColors.text : Colors.transparent,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
+enum _MessageTokenKind { user, role, channel, emoji }
+
+final class _MessageTokenBuilder extends MarkdownElementBuilder {
+  _MessageTokenBuilder({required this.state, required this.kind});
+
+  final MobileState state;
+  final _MessageTokenKind kind;
+
   @override
   Widget? visitElementAfterWithContext(
     BuildContext context,
@@ -2497,18 +3022,74 @@ final class _MentionBuilder extends MarkdownElementBuilder {
     TextStyle? preferredStyle,
     TextStyle? parentStyle,
   ) {
-    final href = element.attributes['href'];
-    if (href == null || !href.startsWith('kaede-mention://')) return null;
+    final token = element.attributes['token'] ?? element.textContent;
+    final style = parentStyle ?? preferredStyle ?? const TextStyle();
+    if (kind == _MessageTokenKind.emoji) {
+      final match = _customEmojiToken.firstMatch(token);
+      if (match == null) return Text(token, style: style);
+      final label = ':${match.group(2)}:';
+      late final Uri uri;
+      try {
+        final emoji = Snowflake(match.group(3)!);
+        final domain = Domain(match.group(4)!);
+        uri = Uri.https(
+          domain.value,
+          '/media/emojis/${emoji.value}/thumbnail_128',
+        );
+      } on FormatException {
+        return Text(label, style: style);
+      }
+      return Semantics(
+        image: true,
+        label: label,
+        child: CachedNetworkImage(
+          imageUrl: uri.toString(),
+          width: 22,
+          height: 22,
+          fit: BoxFit.contain,
+          placeholder: (_, __) => const SizedBox.square(
+            dimension: 22,
+            child: Padding(
+              padding: EdgeInsets.all(4),
+              child: CircularProgressIndicator(strokeWidth: 1.5),
+            ),
+          ),
+          errorWidget: (_, __, ___) => Text(label, style: style),
+        ),
+      );
+    }
+
+    var label = token;
+    var foreground = KaedeColors.coral;
+    var background = KaedeColors.coral.withValues(alpha: .14);
+    if (kind == _MessageTokenKind.user) {
+      final user = _mentionTokenUser(token, state);
+      label = user == null
+          ? token.startsWith('@') && !token.startsWith('<@')
+              ? '@${token.substring(1)}'
+              : '@unknown-user'
+          : '@${user.name}';
+    } else if (kind == _MessageTokenKind.role) {
+      final role = _mentionTokenRole(token, state);
+      label = role == null ? '@unknown-role' : '@${role.name}';
+      if (role != null && role.color != 0) {
+        foreground = Color(0xff000000 | role.color);
+        background = foreground.withValues(alpha: .16);
+      }
+    } else if (kind == _MessageTokenKind.channel) {
+      foreground = KaedeColors.text;
+      background = KaedeColors.selected;
+    }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
       decoration: BoxDecoration(
-        color: KaedeColors.coral.withValues(alpha: .14),
+        color: background,
         borderRadius: BorderRadius.circular(4),
       ),
       child: Text(
-        element.textContent,
-        style: (parentStyle ?? preferredStyle ?? const TextStyle()).copyWith(
-          color: KaedeColors.coral,
+        label,
+        style: style.copyWith(
+          color: foreground,
           fontWeight: FontWeight.w700,
         ),
       ),
@@ -3143,28 +3724,28 @@ final class _MentionSuggestions extends StatelessWidget {
 final class _Composer extends StatelessWidget {
   const _Composer(
       {required this.controller,
+      required this.focusNode,
       required this.reply,
       required this.notifyReply,
       required this.uploads,
       required this.sending,
-      required this.canAttach,
       required this.slowModeRemaining,
       required this.onNotifyChanged,
       required this.onCancelReply,
       required this.onRemoveUpload,
-      required this.onAttach,
+      required this.onAdd,
       required this.onSend});
   final TextEditingController controller;
+  final FocusNode focusNode;
   final KaedeMessage? reply;
   final bool notifyReply;
   final List<_PendingUpload> uploads;
   final bool sending;
-  final bool canAttach;
   final Duration slowModeRemaining;
   final ValueChanged<bool> onNotifyChanged;
   final VoidCallback onCancelReply;
   final ValueChanged<_PendingUpload> onRemoveUpload;
-  final VoidCallback onAttach;
+  final VoidCallback onAdd;
   final VoidCallback onSend;
 
   @override
@@ -3233,14 +3814,14 @@ final class _Composer extends StatelessWidget {
                       constraints:
                           const BoxConstraints.tightFor(width: 38, height: 38),
                       padding: EdgeInsets.zero,
-                      onPressed: sending || coolingDown || !canAttach
-                          ? null
-                          : onAttach,
+                      tooltip: 'Add files, emoji, or GIF',
+                      onPressed: sending ? null : onAdd,
                       icon: const Icon(Icons.add_rounded, size: 23)),
                 ),
                 Expanded(
                   child: TextField(
                     controller: controller,
+                    focusNode: focusNode,
                     minLines: 1,
                     maxLines: 5,
                     maxLength: 4000,

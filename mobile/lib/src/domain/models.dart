@@ -418,6 +418,7 @@ final class KaedeGuild {
     this.bannerHash,
     this.channels = const <KaedeChannel>[],
     this.roles = const <KaedeRole>[],
+    this.federatedHistoryPolicy = 'disabled',
     this.actorHighestRoleId,
     this.syncStatus,
     this.syncErrorCode,
@@ -443,6 +444,8 @@ final class KaedeGuild {
       unavailable: _boolean(json['unavailable']),
       channels: _objects(json['channels']).map(KaedeChannel.fromJson).toList(),
       roles: _objects(json['roles']).map(KaedeRole.fromJson).toList(),
+      federatedHistoryPolicy:
+          _string(json['federated_history_policy']) ?? 'disabled',
       actorHighestRoleId: _string(json['actor_highest_role_id']),
       syncStatus: _string(json['sync_status']),
       syncErrorCode: _string(json['sync_error_code']),
@@ -465,6 +468,7 @@ final class KaedeGuild {
   final bool unavailable;
   final List<KaedeChannel> channels;
   final List<KaedeRole> roles;
+  final String federatedHistoryPolicy;
   final String? actorHighestRoleId;
   final String? syncStatus;
   final String? syncErrorCode;
@@ -489,6 +493,7 @@ final class KaedeGuild {
         'unavailable': unavailable,
         'channels': channels.map((channel) => channel.toJson()).toList(),
         'roles': roles.map((role) => role.toJson()).toList(),
+        'federated_history_policy': federatedHistoryPolicy,
         'actor_highest_role_id': actorHighestRoleId,
         'sync_status': syncStatus,
         'sync_error_code': syncErrorCode,

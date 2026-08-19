@@ -3,7 +3,9 @@ import 'dart:convert';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
@@ -13,6 +15,8 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
+import 'package:kaede_mobile/src/features/chat/message_search_screen.dart';
+import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
 import 'package:kaede_mobile/src/features/voice/voice_room.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
@@ -20,8 +24,236 @@ import 'package:kaede_mobile/src/platform/notification_policy.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
+import 'package:markdown/markdown.dart' as md;
 
 void main() {
+  group('conversation parity navigation', () {
+    final guild = EntityRef.parse('20@home.example');
+
+    test('guild headers use the channel name and topic', () {
+      final channel = KaedeChannel(
+        ref: EntityRef.parse('10@home.example'),
+        guildRef: guild,
+        type: ChannelType.text,
+        name: 'general',
+        topic: 'News and useful updates',
+        position: 0,
+        permissions: BigInt.zero,
+      );
+
+      expect(conversationHeaderTitle(channel), '#general');
+      expect(
+        conversationHeaderSubtitle(channel),
+        'News and useful updates',
+      );
+      expect(supportsPinnedMessages(channel), isTrue);
+    });
+
+    test('pin support excludes voice rooms', () {
+      final voice = KaedeChannel(
+        ref: EntityRef.parse('11@home.example'),
+        guildRef: guild,
+        type: ChannelType.voice,
+        name: 'Lounge',
+        position: 0,
+        permissions: BigInt.zero,
+      );
+
+      expect(conversationHeaderTitle(voice), '#Lounge');
+      expect(supportsPinnedMessages(voice), isFalse);
+    });
+
+    testWidgets('guild create action visibly says what it adds',
+        (tester) async {
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      var pressed = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topCenter,
+            child: GuildChannelsHeader(
+              onAddChannel: () => pressed = true,
+            ),
+          ),
+        ),
+      ));
+
+      expect(find.text('Channels'), findsOneWidget);
+      expect(find.text('Add channel'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byKey(
+        const ValueKey('guild-add-channel-button'),
+      ));
+      expect(pressed, isTrue);
+    });
+
+    test('around-page indices account for reversed messages and outbox rows',
+        () {
+      expect(
+        messageListItemIndex(
+          messageCount: 50,
+          messageIndex: 25,
+          pendingCount: 2,
+        ),
+        26,
+      );
+      expect(
+        messageListItemIndex(messageCount: 50, messageIndex: 49),
+        0,
+      );
+    });
+
+    test('consumed message jumps are one-shot', () {
+      final request = MessageJumpRequest(
+        channel: EntityRef.parse('10@home.example'),
+        message: EntityRef.parse('99@home.example'),
+        generation: 3,
+      );
+
+      expect(MobileState(messageJump: request).messageJump, same(request));
+      expect(
+        MobileState(messageJump: request)
+            .copyWith(clearMessageJump: true)
+            .messageJump,
+        isNull,
+      );
+    });
+
+    test('only the latest jump generation may reveal in its channel', () {
+      final channel = EntityRef.parse('10@home.example');
+      final request = MessageJumpRequest(
+        channel: channel,
+        message: EntityRef.parse('99@home.example'),
+        generation: 3,
+      );
+
+      expect(
+        messageJumpRevealIsCurrent(
+          request: request,
+          renderedChannel: channel,
+          handledGeneration: 3,
+        ),
+        isTrue,
+      );
+      expect(
+        messageJumpRevealIsCurrent(
+          request: request,
+          renderedChannel: channel,
+          handledGeneration: 4,
+        ),
+        isFalse,
+      );
+      expect(
+        messageJumpRevealIsCurrent(
+          request: request,
+          renderedChannel: EntityRef.parse('11@home.example'),
+          handledGeneration: 3,
+        ),
+        isFalse,
+      );
+    });
+
+    test('selection epochs reject an old A to B to A callback', () {
+      final channelA = EntityRef.parse('10@home.example');
+
+      expect(
+        messageJumpSelectionIsCurrent(
+          expectedGeneration: 1,
+          currentGeneration: 3,
+          expectedChannel: channelA,
+          activeChannel: channelA,
+        ),
+        isFalse,
+      );
+      expect(
+        messageJumpSelectionIsCurrent(
+          expectedGeneration: 3,
+          currentGeneration: 3,
+          expectedChannel: channelA,
+          activeChannel: channelA,
+        ),
+        isTrue,
+      );
+    });
+
+    testWidgets('a dismissed search route cannot pop its successor',
+        (tester) async {
+      late BuildContext searchContext;
+      await tester.pumpWidget(MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => Navigator.of(context).push<void>(
+              MaterialPageRoute<void>(
+                builder: (context) {
+                  searchContext = context;
+                  return const Scaffold(body: Text('Search route'));
+                },
+              ),
+            ),
+            child: const Text('Open search'),
+          ),
+        ),
+      ));
+
+      await tester.tap(find.text('Open search'));
+      await tester.pumpAndSettle();
+      expect(messageSearchRouteCanDismiss(searchContext), isTrue);
+
+      Navigator.of(searchContext).pop();
+      await tester.pumpAndSettle();
+      expect(messageSearchRouteCanDismiss(searchContext), isFalse);
+      expect(find.text('Open search'), findsOneWidget);
+    });
+
+    testWidgets('320dp direct-message header keeps usable title space',
+        (tester) async {
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      expect(conversationCallUsesOverflow(320), isTrue);
+      expect(conversationCallUsesOverflow(361), isFalse);
+
+      const title = 'A very long direct message title';
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ConversationCompactHeader(
+              leading: IconButton(
+                onPressed: () {},
+                icon: const Icon(Icons.arrow_back_rounded),
+              ),
+              avatar: const CircleAvatar(child: Text('M')),
+              title: title,
+              subtitle: 'Encrypted · identities unverified',
+              actions: [
+                IconButton(
+                  onPressed: () {},
+                  icon: const Icon(Icons.push_pin_outlined),
+                ),
+                IconButton(
+                  onPressed: () {},
+                  icon: const Icon(Icons.search_rounded),
+                ),
+                PopupMenuButton<void>(
+                  itemBuilder: (_) => const <PopupMenuEntry<void>>[],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(tester.getSize(find.text(title)).width, greaterThanOrEqualTo(60));
+    });
+  });
+
   group('E2EE reset recovery authorization', () {
     const accountRef = '17@alpha.example';
     final authorization = 'ker_${List<String>.filled(43, 'a').join()}';
@@ -196,6 +428,477 @@ void main() {
       expect(page.localCoverage, 'cached');
       expect(page.encryptedChannelRefs, <EntityRef>[channel.ref]);
       expect(page.indexing, isTrue);
+    });
+  });
+
+  group('mobile message search', () {
+    final maple = KaedeUser(
+      ref: EntityRef.parse('42@remote.example'),
+      username: 'maple',
+      handle: 'maple@remote.example',
+      displayName: 'Maple',
+    );
+
+    test('recognizes and replaces desktop-compatible query operators', () {
+      final match = messageSearchOperator('release notes from:map');
+
+      expect(match?.operator, MessageSearchOperator.from);
+      expect(match?.needle, 'map');
+      expect(match?.start, 13);
+      expect(
+        beginMessageSearchOperator(
+            'release notes', MessageSearchOperator.mentions),
+        'release notes mentions:',
+      );
+      expect(
+        replaceMessageSearchOperator('release notes from:map'),
+        'release notes',
+      );
+      expect(messageSearchOperator('from:map older words'), isNull);
+    });
+
+    test('keeps federated member identities and searches name or handle', () {
+      final sameName = KaedeUser(
+        ref: EntityRef.parse('42@another.example'),
+        username: 'maple',
+        handle: 'maple@another.example',
+        displayName: 'Maple',
+      );
+      final candidates = messageSearchUserCandidates(
+        <KaedeUser?>[maple, maple, sameName, null],
+      );
+
+      expect(candidates, hasLength(2));
+      expect(
+          filterMessageSearchUsers(candidates, 'remote'), <KaedeUser>[maple]);
+      expect(filterMessageSearchUsers(candidates, 'MAPLE'), hasLength(2));
+    });
+
+    test('binds pages and responses to the exact request criteria', () {
+      final first = MessageSearchCriteria(
+        query: '  release notes  ',
+        scope: 'guild',
+        scopeRef: EntityRef.parse('7@home.example'),
+        sort: 'newest',
+        has: const <String>['link', 'image'],
+        pinned: true,
+        authorType: 'user',
+        author: maple.ref,
+        mention: null,
+        after: null,
+        before: null,
+      );
+      final equivalent = MessageSearchCriteria(
+        query: 'release notes',
+        scope: 'guild',
+        scopeRef: EntityRef.parse('7@home.example'),
+        sort: 'newest',
+        has: const <String>['image', 'link'],
+        pinned: true,
+        authorType: 'user',
+        author: maple.ref,
+        mention: null,
+        after: null,
+        before: null,
+      );
+      final changed = MessageSearchCriteria(
+        query: 'different query',
+        scope: 'guild',
+        scopeRef: EntityRef.parse('7@home.example'),
+        sort: 'newest',
+        has: const <String>['image', 'link'],
+        pinned: true,
+        authorType: 'user',
+        author: maple.ref,
+        mention: null,
+        after: null,
+        before: null,
+      );
+
+      expect(first.signature, equivalent.signature);
+      expect(first.signature, isNot(changed.signature));
+      expect(
+        messageSearchResponseIsCurrent(
+          requestGeneration: 4,
+          currentGeneration: 4,
+          requestSignature: first.signature,
+          currentSignature: equivalent.signature,
+        ),
+        isTrue,
+      );
+      expect(
+        messageSearchResponseIsCurrent(
+          requestGeneration: 3,
+          currentGeneration: 4,
+          requestSignature: first.signature,
+          currentSignature: first.signature,
+        ),
+        isFalse,
+      );
+      expect(
+        messageSearchResponseIsCurrent(
+          requestGeneration: 4,
+          currentGeneration: 4,
+          requestSignature: first.signature,
+          currentSignature: changed.signature,
+        ),
+        isFalse,
+      );
+      expect(
+        messageSearchCanLoadMore(
+          pageSignature: first.signature,
+          currentSignature: equivalent.signature,
+          nextCursor: 'next-page',
+        ),
+        isTrue,
+      );
+      expect(
+        messageSearchCanLoadMore(
+          pageSignature: first.signature,
+          currentSignature: changed.signature,
+          nextCursor: 'next-page',
+        ),
+        isFalse,
+      );
+    });
+
+    test('selected Before date includes the entire local calendar day', () {
+      final cutoff = messageSearchBeforeCutoff(DateTime(2026, 8, 19, 14, 30));
+
+      expect(cutoff, DateTime(2026, 8, 20));
+      expect(cutoff.isUtc, isFalse);
+    });
+
+    test('search snippets never expose complete or truncated spoilers', () {
+      expect(
+        messageSearchSafeSnippet('Before ||classified|| after'),
+        'Before Spoiler after',
+      );
+      expect(
+        messageSearchSafeSnippet('Before ||a truncated secret…'),
+        'Before Spoiler',
+      );
+    });
+
+    testWidgets('conversation recipients populate From and Mentions pickers',
+        (tester) async {
+      final repository = KaedeRepository(
+        KaedeApiClient(vault: const SessionVault()),
+      );
+      final channel = KaedeChannel(
+        ref: EntityRef.parse('7@home.example'),
+        type: ChannelType.dm,
+        position: 0,
+        permissions: BigInt.zero,
+        recipients: <KaedeUser>[maple],
+      );
+      await tester.pumpWidget(MaterialApp(
+        home: MessageSearchScreen(
+          repository: repository,
+          scope: 'channel',
+          scopeRef: channel.ref,
+          channel: channel,
+          accountRef: null,
+          onJump: (_) async {},
+        ),
+      ));
+
+      await tester.tap(find.byKey(const ValueKey('search-author')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Maple'), findsOneWidget);
+      expect(find.text('maple@remote.example'), findsOneWidget);
+    });
+
+    testWidgets('member picker scrolls in compact keyboard space',
+        (tester) async {
+      tester.view.physicalSize = const Size(640, 360);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetViewInsets);
+      final repository = KaedeRepository(
+        KaedeApiClient(vault: const SessionVault()),
+      );
+      final channel = KaedeChannel(
+        ref: EntityRef.parse('7@home.example'),
+        type: ChannelType.dm,
+        position: 0,
+        permissions: BigInt.zero,
+        recipients: <KaedeUser>[maple],
+      );
+      await tester.pumpWidget(MaterialApp(
+        home: MessageSearchScreen(
+          repository: repository,
+          scope: 'channel',
+          scopeRef: channel.ref,
+          channel: channel,
+          accountRef: null,
+          onJump: (_) async {},
+        ),
+      ));
+
+      final author = find.byKey(const ValueKey('search-author'));
+      await tester.ensureVisible(author);
+      await tester.tap(author);
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 240);
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(
+        find.byKey(const ValueKey('message-search-member-picker')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-search-member-query')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('search filters remain scrollable above the keyboard',
+        (tester) async {
+      tester.view.physicalSize = const Size(430, 760);
+      tester.view.devicePixelRatio = 1;
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetViewInsets);
+      final repository = KaedeRepository(
+        KaedeApiClient(vault: const SessionVault()),
+      );
+      final channel = KaedeChannel(
+        ref: EntityRef.parse('7@home.example'),
+        type: ChannelType.dm,
+        position: 0,
+        permissions: BigInt.zero,
+        recipients: <KaedeUser>[maple],
+      );
+      await tester.pumpWidget(MaterialApp(
+        home: MessageSearchScreen(
+          repository: repository,
+          scope: 'channel',
+          scopeRef: channel.ref,
+          channel: channel,
+          accountRef: null,
+          onJump: (_) async {},
+        ),
+      ));
+      await tester.tap(find.byKey(const ValueKey('message-search-query')));
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(ListView), findsWidgets);
+    });
+
+    testWidgets('from operator offers matching conversation members',
+        (tester) async {
+      final repository = KaedeRepository(
+        KaedeApiClient(vault: const SessionVault()),
+      );
+      final channel = KaedeChannel(
+        ref: EntityRef.parse('7@home.example'),
+        type: ChannelType.dm,
+        position: 0,
+        permissions: BigInt.zero,
+        recipients: <KaedeUser>[maple],
+      );
+      await tester.pumpWidget(MaterialApp(
+        home: MessageSearchScreen(
+          repository: repository,
+          scope: 'channel',
+          scopeRef: channel.ref,
+          channel: channel,
+          accountRef: null,
+          onJump: (_) async {},
+        ),
+      ));
+
+      await tester.enterText(
+          find.byKey(const ValueKey('message-search-query')), 'from:map');
+      await tester.pump();
+
+      expect(find.text('Maple'), findsOneWidget);
+      expect(find.text('maple@remote.example'), findsOneWidget);
+    });
+  });
+
+  group('mobile message markdown', () {
+    final self = KaedeUser(
+      ref: EntityRef.parse('1@home.example'),
+      username: 'self',
+      handle: 'self@home.example',
+    );
+    final remoteGuildRef = EntityRef.parse('7@remote.example');
+
+    KaedeGuild remoteGuild({List<KaedeRole> roles = const <KaedeRole>[]}) =>
+        KaedeGuild(
+          ref: remoteGuildRef,
+          name: 'Remote guild',
+          ownerRef: EntityRef.parse('2@remote.example'),
+          permissions: BigInt.zero,
+          unavailable: false,
+          roles: roles,
+        );
+
+    test('parses practical web tokens as dedicated inline elements', () {
+      final document = md.Document(
+        inlineSyntaxes: <md.InlineSyntax>[MessageTokenSyntax()],
+        extensionSet: md.ExtensionSet.gitHubFlavored,
+      );
+      final tags = document
+          .parseInline(
+            '<@42@remote.example> <@&8@home.example> #general <:wave:9@home.example>',
+          )
+          .whereType<md.Element>()
+          .map((element) => element.tag);
+
+      expect(
+        tags,
+        <String>[
+          'kaede-user-mention',
+          'kaede-role-mention',
+          'kaede-channel-token',
+          'kaede-custom-emoji',
+        ],
+      );
+    });
+
+    test('media previews ignore URLs concealed by spoilers', () {
+      expect(
+        previewMediaUrl(
+          'Keep ||[this](https://cdn.example/private.png) concealed|| please',
+        ),
+        isNull,
+      );
+      expect(
+        previewMediaUrl(
+          '||https://cdn.example/private.png hidden|| '
+          'https://cdn.example/public.webp',
+        ),
+        Uri.parse('https://cdn.example/public.webp'),
+      );
+    });
+
+    test('reply previews redact all spoiler contents', () {
+      final preview = spoilerSafeReplyPreview(
+        'Before ||classified|| and ||second\nsecret|| after',
+      );
+
+      expect(preview, 'Before Spoiler and Spoiler after');
+      expect(preview, isNot(contains('classified')));
+      expect(preview, isNot(contains('secret')));
+    });
+
+    testWidgets('refreshes user and role tokens when identity data resolves',
+        (tester) async {
+      const content =
+          '<@42@remote.example> <@&8@remote.example> deployment complete';
+      final initial = MobileState(
+        user: self,
+        guilds: <KaedeGuild>[remoteGuild()],
+        selectedGuild: remoteGuildRef,
+      );
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: KaedeMessageMarkdown(content: content, state: initial),
+        ),
+      ));
+
+      expect(find.text('@unknown-user'), findsOneWidget);
+      expect(find.text('@unknown-role'), findsOneWidget);
+
+      final maple = KaedeUser(
+        ref: EntityRef.parse('42@remote.example'),
+        username: 'maple',
+        handle: 'maple@remote.example',
+        displayName: 'Maple',
+      );
+      final moderators = KaedeRole(
+        ref: EntityRef.parse('8@remote.example'),
+        guildRef: remoteGuildRef,
+        name: 'Moderators',
+        color: 0x45aaff,
+        permissions: BigInt.zero,
+        position: 1,
+        hoist: true,
+        mentionable: true,
+      );
+      final resolved = MobileState(
+        user: self,
+        guilds: <KaedeGuild>[
+          remoteGuild(roles: <KaedeRole>[moderators]),
+        ],
+        selectedGuild: remoteGuildRef,
+        userProfiles: <EntityRef, KaedeUser>{maple.ref: maple},
+      );
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: KaedeMessageMarkdown(content: content, state: resolved),
+        ),
+      ));
+      await tester.pump();
+
+      expect(find.text('@unknown-user'), findsNothing);
+      expect(find.text('@unknown-role'), findsNothing);
+      expect(find.text('@Maple'), findsOneWidget);
+      expect(find.text('@Moderators'), findsOneWidget);
+    });
+
+    testWidgets('resolves legacy bare mentions against the account domain',
+        (tester) async {
+      final local = KaedeUser(
+        ref: EntityRef.parse('42@home.example'),
+        username: 'local-maple',
+        handle: 'local-maple@home.example',
+        displayName: 'Local Maple',
+      );
+      final remoteCollision = KaedeUser(
+        ref: EntityRef.parse('42@remote.example'),
+        username: 'remote-maple',
+        handle: 'remote-maple@remote.example',
+        displayName: 'Remote Maple',
+      );
+      final state = MobileState(
+        user: self,
+        guilds: <KaedeGuild>[remoteGuild()],
+        selectedGuild: remoteGuildRef,
+        userProfiles: <EntityRef, KaedeUser>{
+          local.ref: local,
+          remoteCollision.ref: remoteCollision,
+        },
+      );
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: KaedeMessageMarkdown(content: '<@42>', state: state),
+        ),
+      ));
+
+      expect(find.text('@Local Maple'), findsOneWidget);
+      expect(find.text('@Remote Maple'), findsNothing);
+    });
+
+    testWidgets('spoilers stay concealed until explicitly revealed',
+        (tester) async {
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(
+          body: KaedeMessageMarkdown(
+            content: 'Before ||secret plans|| after',
+            state: MobileState(),
+          ),
+        ),
+      ));
+
+      expect(find.bySemanticsLabel('Reveal spoiler'), findsOneWidget);
+      await tester.tap(find.bySemanticsLabel('Reveal spoiler'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.bySemanticsLabel(RegExp(r'^Spoiler: secret plans\.')),
+        findsOneWidget,
+      );
+      semantics.dispose();
     });
   });
 

@@ -6,6 +6,8 @@ import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+typedef GatewaySocketConnector = WebSocketChannel Function(Uri uri);
+
 final class GatewayEvent {
   const GatewayEvent(this.name, this.data, this.sequence);
   final String name;
@@ -209,14 +211,26 @@ GatewaySequenceDecision classifyGatewaySequence(int? previous, int next) {
 }
 
 final class GatewayClient {
-  GatewayClient({required this.tokens});
+  GatewayClient({
+    required this.tokens,
+    GatewaySocketConnector? socketConnector,
+    this.transportReadyTimeout = const Duration(seconds: 12),
+    this.sessionReadyTimeout = const Duration(seconds: 15),
+    this.transportCloseTimeout = const Duration(seconds: 1),
+  }) : _socketConnector =
+            socketConnector ?? ((uri) => WebSocketChannel.connect(uri));
 
   final Future<SessionTokens?> Function() tokens;
+  final GatewaySocketConnector _socketConnector;
+  final Duration transportReadyTimeout;
+  final Duration sessionReadyTimeout;
+  final Duration transportCloseTimeout;
   final _events = StreamController<GatewayEvent>.broadcast();
   final _healthEvents = StreamController<GatewayHealth>.broadcast(sync: true);
   WebSocketChannel? _socket;
   StreamSubscription<Object?>? _subscription;
   Timer? _heartbeat;
+  Timer? _sessionReadyWatchdog;
   SessionTokens? _tokens;
   String? _sessionId;
   int? _sequence;
@@ -241,6 +255,7 @@ final class GatewayClient {
   Future<void> connect(SessionTokens tokens) async {
     _tokens = tokens;
     _closed = false;
+    final generation = ++_generation;
     _setHealth(
       const GatewayHealth(
         GatewayConnectionPhase.connecting,
@@ -248,15 +263,15 @@ final class GatewayClient {
       ),
     );
     try {
-      await _openTransport(tokens);
+      await _openTransport(tokens, generation);
     } on Object {
-      if (!_closed) {
+      if (!_closed && generation == _generation) {
         _setHealth(const GatewayHealth(
           GatewayConnectionPhase.reconnecting,
           message: 'Could not connect realtime updates. Retrying…',
         ));
         unawaited(_reconnect(
-          _generation,
+          generation,
           reason: 'Could not connect realtime updates. Retrying…',
         ));
       }
@@ -294,14 +309,23 @@ final class GatewayClient {
     // actually identified/resumed. WebSocketChannel.ready only means the HTTP
     // upgrade succeeded; treating it as completion lets a second lifecycle
     // callback tear the socket down before HELLO/READY arrives.
-    await health
-        .firstWhere((health) => health.isConnected)
-        .timeout(const Duration(seconds: 15));
+    try {
+      await health
+          .firstWhere((health) => health.isConnected)
+          .timeout(sessionReadyTimeout + const Duration(seconds: 1));
+    } on TimeoutException {
+      if (!_closed && !_health.isConnected) {
+        unawaited(_reconnect(
+          _generation,
+          reason: 'Realtime updates did not respond. Retrying…',
+        ));
+      }
+    }
   }
 
-  Future<void> _openTransport(SessionTokens tokens) async {
-    final generation = ++_generation;
+  Future<void> _openTransport(SessionTokens tokens, int generation) async {
     await _disconnectTransport();
+    if (_closed || generation != _generation) return;
     final uri = Uri(
       scheme: 'wss',
       host: tokens.instance.value,
@@ -311,9 +335,14 @@ final class GatewayClient {
         'encoding': 'json'
       },
     );
-    final socket = WebSocketChannel.connect(uri);
+    final socket = _socketConnector(uri);
     _socket = socket;
-    await socket.ready;
+    try {
+      await socket.ready.timeout(transportReadyTimeout);
+    } on Object {
+      if (generation == _generation) await _disconnectTransport();
+      rethrow;
+    }
     if (generation != _generation) {
       await socket.sink.close();
       return;
@@ -340,6 +369,14 @@ final class GatewayClient {
           reason: 'Could not reach realtime updates. Retrying…')),
       cancelOnError: true,
     );
+    _sessionReadyWatchdog?.cancel();
+    _sessionReadyWatchdog = Timer(sessionReadyTimeout, () {
+      if (_closed || generation != _generation || _health.isConnected) return;
+      unawaited(_reconnect(
+        generation,
+        reason: 'Realtime updates did not respond. Retrying…',
+      ));
+    });
   }
 
   void updatePresence(String status) =>
@@ -491,9 +528,13 @@ final class GatewayClient {
     if (name == 'READY') {
       _sessionId = data['session_id']! as String;
       _reconnectAttempts = 0;
+      _sessionReadyWatchdog?.cancel();
+      _sessionReadyWatchdog = null;
       _setHealth(const GatewayHealth(GatewayConnectionPhase.connected));
     } else if (name == 'RESUMED') {
       _reconnectAttempts = 0;
+      _sessionReadyWatchdog?.cancel();
+      _sessionReadyWatchdog = null;
       _setHealth(const GatewayHealth(GatewayConnectionPhase.connected));
     }
     _events.add(GatewayEvent(name, data, sequence));
@@ -594,18 +635,22 @@ final class GatewayClient {
           GatewayConnectionPhase.reconnecting,
           message: 'Reconnecting realtime updates…',
         ));
-        await _openTransport(current);
+        expectedGeneration = ++_generation;
+        await _openTransport(current, expectedGeneration);
         return;
       } on Object {
         // A failed DNS/TLS/WebSocket handshake has no stream callback to
         // schedule another attempt. Keep this single supervisor alive and
         // carry forward the generation created by the failed transport.
+        if (_closed || expectedGeneration != _generation) return;
         expectedGeneration = _generation;
       }
     }
   }
 
   Future<void> _disconnectTransport() async {
+    _sessionReadyWatchdog?.cancel();
+    _sessionReadyWatchdog = null;
     _heartbeat?.cancel();
     _heartbeat = null;
     _awaitingHeartbeatAck = false;
@@ -618,7 +663,7 @@ final class GatewayClient {
     _socket = null;
     if (subscription != null) {
       try {
-        await subscription.cancel().timeout(const Duration(seconds: 1));
+        await subscription.cancel().timeout(transportCloseTimeout);
       } on Object {
         // The generation fence already makes callbacks from this abandoned
         // transport inert. Foreground recovery must not wait on its teardown.
@@ -626,7 +671,7 @@ final class GatewayClient {
     }
     if (socket != null) {
       try {
-        await socket.sink.close().timeout(const Duration(seconds: 1));
+        await socket.sink.close().timeout(transportCloseTimeout);
       } on Object {
         // The OS/network stack may never finish closing a suspended socket.
       }

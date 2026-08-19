@@ -65,8 +65,9 @@ final class VoiceRoom extends ConsumerWidget {
     final thisRoom =
         session.channel?.ref == channel.ref && session.callRef == callRef;
     final connected = thisRoom && session.connected;
-    final participants =
-        connected ? session.participants : const <Participant>[];
+    final joined = thisRoom && session.joined;
+    final reconnecting = thisRoom && session.reconnecting;
+    final participants = joined ? session.participants : const <Participant>[];
     if (thisRoom && callRef == null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         session.reconcilePermissions(channel);
@@ -96,13 +97,15 @@ final class VoiceRoom extends ConsumerWidget {
                       Text(
                         connected
                             ? '${participants.length} connected'
-                            : 'Join to talk, listen, and share video',
+                            : reconnecting
+                                ? 'Reconnecting… your place in the call is being kept'
+                                : 'Join to talk, listen, and share video',
                         style: const TextStyle(color: KaedeColors.muted),
                       ),
                     ],
                   ),
                 ),
-                if (!connected)
+                if (!joined)
                   FilledButton.icon(
                     onPressed: canConnect && !session.connecting
                         ? () => session.connect(channel, callRef: callRef)
@@ -129,31 +132,42 @@ final class VoiceRoom extends ConsumerWidget {
             if (session.error case final error?)
               _VoiceNotice(icon: Icons.error_outline_rounded, text: error),
           Expanded(
-            child: !connected
+            child: !joined
                 ? _VoiceEmpty(canConnect: canConnect)
-                : GridView.builder(
-                    padding: const EdgeInsets.all(12),
-                    gridDelegate:
-                        const SliverGridDelegateWithMaxCrossAxisExtent(
-                      maxCrossAxisExtent: 420,
-                      childAspectRatio: 16 / 10,
-                      crossAxisSpacing: 10,
-                      mainAxisSpacing: 10,
-                    ),
-                    itemCount: participants.length,
-                    itemBuilder: (context, index) => _ParticipantTile(
-                      participant: participants[index],
-                      knownName: _knownVoiceParticipantName(
-                        mobile,
-                        participants[index].identity,
+                : reconnecting
+                    ? const Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircularProgressIndicator(),
+                            SizedBox(height: 14),
+                            Text('Restoring voice connection…'),
+                          ],
+                        ),
+                      )
+                    : GridView.builder(
+                        padding: const EdgeInsets.all(12),
+                        gridDelegate:
+                            const SliverGridDelegateWithMaxCrossAxisExtent(
+                          maxCrossAxisExtent: 420,
+                          childAspectRatio: 16 / 10,
+                          crossAxisSpacing: 10,
+                          mainAxisSpacing: 10,
+                        ),
+                        itemCount: participants.length,
+                        itemBuilder: (context, index) => _ParticipantTile(
+                          participant: participants[index],
+                          knownName: _knownVoiceParticipantName(
+                            mobile,
+                            participants[index].identity,
+                          ),
+                          session: session,
+                          guild: guild,
+                          channel: channel,
+                        ),
                       ),
-                      session: session,
-                      guild: guild,
-                      channel: channel,
-                    ),
-                  ),
           ),
-          if (connected) _controls(context, session),
+          if (joined) _controls(context, session),
         ],
       ),
     );
