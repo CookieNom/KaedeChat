@@ -1922,68 +1922,49 @@
   />
   <aside
     bind:this={mobileNavigationDrawer}
-    class:mobile-open={mobileNavigationOpen}
-    class="channel-sidebar"
+    class:open={mobileNavigationOpen}
+    class="home-sidebar"
     id="direct-message-navigation"
     role={mobileNavigationOpen ? 'dialog' : undefined}
     aria-modal={mobileNavigationOpen ? 'true' : undefined}
-    aria-label="Direct-message navigation"
+    aria-label="Home navigation"
   >
-    <header>
-      <div class="sidebar-heading">
-        <div>
-          <p>Messages</p>
-          <h2>Direct threads</h2>
-        </div>
-        <div class="mobile-sidebar-tools">
-          <a
-            class="sidebar-settings"
-            href={resolve('/settings')}
-            aria-label="User settings"
-            title="User settings"
-            onclick={() => closeMobileNavigation(false)}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8 3.5-.1-1.2 2-1.5-2-3.4-2.4 1a8.8 8.8 0 0 0-2.1-1.2L15 3h-4l-.4 2.7c-.8.3-1.5.7-2.1 1.2l-2.4-1-2 3.4 2 1.5A9.7 9.7 0 0 0 6 12l.1 1.2-2 1.5 2 3.4 2.4-1c.6.5 1.3.9 2.1 1.2L11 21h4l.4-2.7c.8-.3 1.5-.7 2.1-1.2l2.4 1 2-3.4-2-1.5.1-1.2Z"
-              />
-            </svg>
-          </a>
-          <button
-            bind:this={mobileNavigationClose}
-            class="mobile-sidebar-close"
-            type="button"
-            aria-label="Close direct-message navigation"
-            onclick={() => closeMobileNavigation()}
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              aria-hidden="true"
-            >
-              <path d="m6 6 12 12M18 6 6 18" />
-            </svg>
-          </button>
-        </div>
-      </div>
-    </header>
-    <div class="sidebar-section-heading">
-      <p class="sidebar-section-label">Conversations</p>
+    <header class="home-brand">
+      <span class="brand-mark">K</span>
+      <span
+        ><strong>Kaede</strong><small>{currentUser?.origin_domain ?? 'Your instance'}</small></span
+      >
       <button
-        class="sidebar-create-link"
+        bind:this={mobileNavigationClose}
+        class="mobile-sidebar-close"
+        type="button"
+        aria-label="Close home navigation"
+        onclick={() => closeMobileNavigation()}
+      >
+        ×
+      </button>
+    </header>
+    <nav class="home-nav" aria-label="Home">
+      <a href={resolve('/home')} onclick={() => closeMobileNavigation(false)}
+        ><Icon name="home" size={18} />Overview</a
+      >
+      <a href={resolve('/home/friends')} onclick={() => closeMobileNavigation(false)}
+        ><Icon name="users" size={18} />Friends & requests</a
+      >
+    </nav>
+    <div class="home-sidebar-heading">
+      <span>Direct messages</span>
+      <button
         type="button"
         aria-label="New message"
         title="New message"
         onclick={() => {
           closeMobileNavigation(false);
           newMessageOpen = true;
-        }}>+</button
+        }}><Icon name="plus" size={17} /></button
       >
     </div>
-    <nav aria-label="Direct messages">
+    <nav class="home-dm-list" aria-label="Direct messages">
       {#each directMessages as item (entityKey(item))}
         {@const itemRecipient = item.recipients?.[0]}
         <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- dmPath calls resolve before substituting the typed parameter -->
@@ -2007,13 +1988,13 @@
                 : (itemRecipient?.username.slice(0, 1).toUpperCase() ?? '?')}
             {/if}
           </span>
-          <span>
-            {dmTitle(item)}
-          </span>
+          <strong>{dmTitle(item)}</strong>
           {#if unreadFor(item)?.unread}<small class="unread-badge"
               >{Math.max(1, unreadFor(item)?.mention_count ?? 0)}</small
             >{/if}
         </a>
+      {:else}
+        <p>No conversations yet.</p>
       {/each}
     </nav>
     <div class="sidebar-user-dock">
