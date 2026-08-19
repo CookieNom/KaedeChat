@@ -31,8 +31,21 @@
   let turnstileToken = $state<string | null>(null);
   let turnstileWidget = $state<TurnstileWidget | null>(null);
   let codeInput = $state<HTMLInputElement | null>(null);
+  let verificationEmailInput = $state<HTMLInputElement | null>(null);
   let instanceField = $state<NativeInstanceField | null>(null);
+  let verificationResendAvailable = $state(false);
+  let verificationEmail = $state('');
+  let verificationResendBusy = $state(false);
+  let verificationResendStatus = $state('');
   let preparedVaultKey: CryptoKey | null = null;
+
+  function emailCandidate(value: string): string {
+    const candidate = value.trim().toLowerCase();
+    if (candidate.length > 320 || /\s/.test(candidate)) return '';
+    const separator = candidate.lastIndexOf('@');
+    const domain = candidate.slice(separator + 1);
+    return separator > 0 && domain.includes('.') ? candidate : '';
+  }
 
   onMount(() => {
     const controller = new AbortController();
@@ -55,6 +68,8 @@
     if (busy) return;
     busy = true;
     error = '';
+    verificationResendAvailable = false;
+    verificationResendStatus = '';
     try {
       if (!(await instanceField?.apply())) return;
       if (ticket) {
@@ -100,6 +115,12 @@
       if (!ticket) preparedVaultKey = null;
       if (caught instanceof ApiError) {
         error = caught.message;
+        if (!ticket && caught.code === 'EMAIL_NOT_VERIFIED') {
+          verificationResendAvailable = true;
+          verificationEmail ||= emailCandidate(identifier);
+          await tick();
+          if (!verificationEmail) verificationEmailInput?.focus();
+        }
         const needsChallenge =
           turnstileEnabled &&
           (caught.detail.turnstile_required === true ||
@@ -117,6 +138,28 @@
       }
     } finally {
       busy = false;
+    }
+  }
+
+  async function resendVerification() {
+    if (verificationResendBusy) return;
+    if (!verificationEmailInput?.reportValidity()) return;
+    verificationResendBusy = true;
+    verificationResendStatus = '';
+    try {
+      await api('/auth/verify-email/resend', {
+        method: 'POST',
+        body: JSON.stringify({ email: verificationEmail.trim() })
+      });
+      verificationResendStatus =
+        'If that address belongs to an unverified account, a new verification email is on its way.';
+    } catch (caught) {
+      verificationResendStatus = userErrorMessage(
+        caught,
+        'The verification email could not be requested. Try again shortly.'
+      );
+    } finally {
+      verificationResendBusy = false;
     }
   }
 </script>
@@ -184,6 +227,34 @@
     >{busy ? 'One moment…' : ticket ? 'Verify' : 'Sign in'}</button
   >
 </form>
+{#if verificationResendAvailable}
+  <div class="verification-resend-panel">
+    <p class="field-note">
+      Didn’t receive the message? Confirm the email address used to create this account.
+    </p>
+    <label
+      >Verification email <input
+        bind:this={verificationEmailInput}
+        bind:value={verificationEmail}
+        type="email"
+        autocomplete="email"
+        maxlength="320"
+        required
+        disabled={verificationResendBusy}
+      /></label
+    >
+    <button
+      type="button"
+      class="secondary-button"
+      disabled={verificationResendBusy}
+      onclick={resendVerification}
+      >{verificationResendBusy ? 'Sending…' : 'Resend verification email'}</button
+    >
+    {#if verificationResendStatus}
+      <p class="field-note" role="status" aria-live="polite">{verificationResendStatus}</p>
+    {/if}
+  </div>
+{/if}
 <p class="form-foot">
   {#if recoveryEnabled === true}<a href={resolve('/forgot-password')}>Forgot password?</a> ·
   {/if}New here?

@@ -25,6 +25,7 @@ const PUBLIC_AUTH_PATHS = new Set([
   '/auth/register',
   '/auth/refresh',
   '/auth/verify-email',
+  '/auth/verify-email/resend',
   '/auth/email/change/confirm',
   '/auth/password/forgot',
   '/auth/password/reset'
