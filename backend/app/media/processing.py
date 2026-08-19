@@ -187,7 +187,21 @@ def _flatten_alpha(image: pyvips.Image) -> pyvips.Image:
     return image
 
 
-def image_derivatives(data: bytes) -> tuple[list[Derivative], str, str, int, int]:
+IMAGE_DERIVATIVE_SIZES = (128, 512, 1024)
+COMPACT_IMAGE_PURPOSES = frozenset({"avatar", "guild_icon", "webhook_avatar"})
+
+
+def image_derivative_sizes(purpose: str) -> tuple[int, ...]:
+    """Return the variants needed by each media presentation surface."""
+
+    return (128,) if purpose in COMPACT_IMAGE_PURPOSES else IMAGE_DERIVATIVE_SIZES
+
+
+def image_derivatives(
+    data: bytes,
+    *,
+    sizes: tuple[int, ...] = IMAGE_DERIVATIVE_SIZES,
+) -> tuple[list[Derivative], str, str, int, int]:
     try:
         image = pyvips.Image.new_from_buffer(data, "", access="random", fail_on="error", n=-1)
     except pyvips.Error as exc:
@@ -205,7 +219,8 @@ def image_derivatives(data: bytes) -> tuple[list[Derivative], str, str, int, int
         raise MediaValidationError("image dimensions exceed the processing limit")
     image = image.autorot()
     derivatives: list[Derivative] = []
-    for size in (128, 512, 1024):
+    encoded_outputs: dict[tuple[int, int], bytes] = {}
+    for size in sizes:
         scale = min(1.0, size / max(width, height))
         resized = image.resize(scale) if scale < 1 else image
         resized_page_height = max(1, round(page_height * scale))
@@ -214,13 +229,22 @@ def image_derivatives(data: bytes) -> tuple[list[Derivative], str, str, int, int
             # scales those pixels but leaves page-height unchanged, causing the
             # encoded thumbnail to render as a tall strip instead of frames.
             resized.set_type(pyvips.GValue.gint_type, "page-height", resized_page_height)
-        output = resized.write_to_buffer(".webp", Q=82, keep="none", effort=4)
+        output_dimensions = (int(resized.width), resized_page_height)
+        output = encoded_outputs.get(output_dimensions)
+        if output is None:
+            # Animated WebP effort 4 spends substantial CPU for a modest size
+            # improvement while users wait on the scan gate. Keep visual
+            # quality constant and use the faster encoder path for animations.
+            output = resized.write_to_buffer(
+                ".webp", Q=82, keep="none", effort=2 if pages > 1 else 4
+            )
+            encoded_outputs[output_dimensions] = output
         derivatives.append(
             Derivative(
                 name=f"thumbnail_{size}",
                 content=output,
                 content_type="image/webp",
-                width=int(resized.width),
+                width=output_dimensions[0],
                 height=resized_page_height,
             )
         )

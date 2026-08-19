@@ -19,6 +19,7 @@ from app.media.jobs import image_derivatives_are_current
 from app.media.processing import (
     IMAGE_PIPELINE_VERSION,
     MediaValidationError,
+    image_derivative_sizes,
     image_derivatives,
     normalize_declared_type,
     sanitize_filename,
@@ -473,6 +474,31 @@ def test_legacy_animated_image_derivatives_are_marked_for_repair() -> None:
     assert image_derivatives_are_current(attachment)
 
 
+def test_compact_profile_assets_require_only_their_display_variant() -> None:
+    attachment = Attachment(
+        id=32,
+        origin_domain="alpha.localhost",
+        uploader_id=20,
+        uploader_domain="alpha.localhost",
+        filename="avatar.gif",
+        content_type="image/gif",
+        detected_content_type="image/gif",
+        size=128,
+        object_key="alpha.localhost/32/clean/original",
+        variants={
+            "thumbnail_128": {
+                "object_key": "alpha.localhost/32/thumbnail_128.webp",
+                "processing_version": IMAGE_PIPELINE_VERSION,
+            }
+        },
+        scan_status="clean",
+        purpose="avatar",
+    )
+
+    assert image_derivative_sizes("avatar") == (128,)
+    assert image_derivatives_are_current(attachment)
+
+
 def test_webhook_tokens_are_prefixed_random_and_only_stored_as_digests() -> None:
     first = new_webhook_token()
     second = new_webhook_token()
@@ -514,3 +540,6 @@ def test_image_pipeline_emits_safe_metadata_and_preserves_animation() -> None:
             rendered.seek(1)
             second_frame = rendered.convert("RGB").getpixel((0, 0))
             assert first_frame != second_frame
+    # Variants that resolve to the same dimensions reuse one expensive
+    # animated WebP encode while retaining both public variant names.
+    assert derivatives[1].content is derivatives[2].content

@@ -58,6 +58,11 @@ def edge_hash() -> PhotoDNAHash:
     return PhotoDNAHash("PreHashV2", base64.b64encode(b"x" * 924).decode("ascii"))
 
 
+def distinct_edge_hash(index: int) -> PhotoDNAHash:
+    body = index.to_bytes(2, "big") + b"x" * 922
+    return PhotoDNAHash("PreHashV2", base64.b64encode(body).decode("ascii"))
+
+
 def test_edge_hash_requires_exact_sdk_v2_shape() -> None:
     assert len(edge_hash().value) == 1232
     with pytest.raises(PhotoDNAError, match="length"):
@@ -541,7 +546,7 @@ async def test_hash_generator_spawn_failure_is_fail_closed(
 async def test_scan_image_matches_all_frames_in_bounded_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    hashes = [edge_hash() for _ in range(7)]
+    hashes = [distinct_edge_hash(index) for index in range(7)]
     finding = PhotoDNAFinding(
         tracking_id="tracking",
         flags=(PhotoDNAMatchFlag("Test", ("A1",), 0, "match"),),
@@ -551,8 +556,17 @@ async def test_scan_image_matches_all_frames_in_bounded_batches(
     async def generate(_data: bytes, _settings: Settings) -> list[PhotoDNAHash]:
         return hashes
 
-    async def match(batch: list[PhotoDNAHash], _settings: Settings) -> list[PhotoDNAFinding | None]:
+    clients: list[httpx.AsyncClient] = []
+
+    async def match(
+        batch: list[PhotoDNAHash],
+        _settings: Settings,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> list[PhotoDNAFinding | None]:
         batch_sizes.append(len(batch))
+        assert client is not None
+        clients.append(client)
         return [None] * (len(batch) - 1) + ([finding] if len(batch_sizes) == 2 else [None])
 
     monkeypatch.setattr(photodna_module, "generate_edge_hashes", generate)
@@ -567,12 +581,54 @@ async def test_scan_image_matches_all_frames_in_bounded_batches(
 
     assert await scan_image(rendered.getvalue(), configured) == finding
     assert batch_sizes == [5, 2]
+    assert clients[0] is clients[1]
+
+
+async def test_scan_image_deduplicates_hashes_and_bounds_batch_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hashes = [distinct_edge_hash(index) for index in range(25)] + [distinct_edge_hash(0)] * 5
+    active = 0
+    peak = 0
+    batch_sizes: list[int] = []
+
+    async def generate(_data: bytes, _settings: Settings) -> list[PhotoDNAHash]:
+        return hashes
+
+    async def match(
+        batch: list[PhotoDNAHash],
+        _settings: Settings,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> list[PhotoDNAFinding | None]:
+        nonlocal active, peak
+        assert client is not None
+        active += 1
+        peak = max(peak, active)
+        batch_sizes.append(len(batch))
+        await asyncio.sleep(0.01)
+        active -= 1
+        return [None] * len(batch)
+
+    monkeypatch.setattr(photodna_module, "generate_edge_hashes", generate)
+    monkeypatch.setattr(photodna_module, "match_hashes", match)
+    rendered = io.BytesIO()
+    Image.new("RGB", (160, 160), "teal").save(rendered, format="PNG")
+    configured = settings(
+        photodna_enabled=True,
+        photodna_subscription_key="p" * 32,
+        photodna_sdk_root="/opt/photodna",
+    )
+
+    assert await scan_image(rendered.getvalue(), configured) is None
+    assert batch_sizes == [5, 5, 5, 5, 5]
+    assert peak == photodna_module.MAX_CONCURRENT_MATCH_BATCHES
 
 
 async def test_later_batch_match_wins_over_earlier_non_image_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    hashes = [edge_hash() for _ in range(7)]
+    hashes = [distinct_edge_hash(index) for index in range(7)]
     finding = PhotoDNAFinding(
         tracking_id="matched-later-frame",
         flags=(PhotoDNAMatchFlag("Test", ("A1",), 0, "match"),),
@@ -582,7 +638,13 @@ async def test_later_batch_match_wins_over_earlier_non_image_result(
     async def generate(_data: bytes, _settings: Settings) -> list[PhotoDNAHash]:
         return hashes
 
-    async def match(batch: list[PhotoDNAHash], _settings: Settings) -> list[PhotoDNAFinding | None]:
+    async def match(
+        batch: list[PhotoDNAHash],
+        _settings: Settings,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> list[PhotoDNAFinding | None]:
+        assert client is not None
         batch_sizes.append(len(batch))
         if len(batch_sizes) == 1:
             raise PhotoDNAInputRejected("one frame was not verifiable")

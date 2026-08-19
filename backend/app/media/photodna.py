@@ -26,6 +26,7 @@ from app.media.photodna_dimensions import (
 from app.media.processing import MediaValidationError
 
 MAX_BATCH_SIZE = 5
+MAX_CONCURRENT_MATCH_BATCHES = 4
 MAX_HASH_LENGTH = 16_384
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_MATCH_FLAGS = 32
@@ -377,35 +378,36 @@ async def generate_edge_hash(data: bytes, settings: Settings) -> PhotoDNAHash:
 
 
 async def match_hashes(
-    hashes: list[PhotoDNAHash], settings: Settings
+    hashes: list[PhotoDNAHash],
+    settings: Settings,
+    *,
+    client: httpx.AsyncClient | None = None,
 ) -> list[PhotoDNAFinding | None]:
     if not 1 <= len(hashes) <= MAX_BATCH_SIZE:
         raise ValueError("PhotoDNA MatchHash batches must contain between one and five hashes")
     if settings.photodna_subscription_key is None:
         raise PhotoDNAConfigurationError("the PhotoDNA subscription key is not configured")
     request = [{"DataRepresentation": item.representation, "Value": item.value} for item in hashes]
-    timeout = httpx.Timeout(settings.photodna_match_timeout_seconds, connect=5)
+    if client is None:
+        timeout = httpx.Timeout(settings.photodna_match_timeout_seconds, connect=5)
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=False,
+            trust_env=False,
+        ) as owned_client:
+            return await match_hashes(hashes, settings, client=owned_client)
     try:
-        async with (
-            httpx.AsyncClient(
-                timeout=timeout,
-                follow_redirects=False,
-                trust_env=False,
-            ) as client,
-            client.stream(
-                "POST",
-                settings.photodna_match_url,
-                params={"enhance": "false"},
-                headers={
-                    "Content-Type": "application/json",
-                    "Cache-Control": "no-cache",
-                    "Ocp-Apim-Subscription-Key": (
-                        settings.photodna_subscription_key.get_secret_value()
-                    ),
-                },
-                json=request,
-            ) as response,
-        ):
+        async with client.stream(
+            "POST",
+            settings.photodna_match_url,
+            params={"enhance": "false"},
+            headers={
+                "Content-Type": "application/json",
+                "Cache-Control": "no-cache",
+                "Ocp-Apim-Subscription-Key": settings.photodna_subscription_key.get_secret_value(),
+            },
+            json=request,
+        ) as response:
             if response.status_code != 200:
                 raise PhotoDNAUnavailable(
                     f"PhotoDNA MatchHash returned HTTP {response.status_code}"
@@ -460,19 +462,47 @@ async def scan_image(data: bytes, settings: Settings) -> PhotoDNAFinding | None:
         # provider statuses 3206/3208.
         raise PhotoDNAInputRejected("PhotoDNA cannot verify this image size")
     generated = await generate_edge_hashes(data, settings)
+    # Repeated animation frames produce the same immutable Edge Hash. Checking
+    # one copy retains complete distinct-frame coverage while avoiding redundant
+    # provider requests.
+    generated = list(dict.fromkeys(generated))
+    timeout = httpx.Timeout(settings.photodna_match_timeout_seconds, connect=5)
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=False,
+        trust_env=False,
+    ) as client:
+        limiter = asyncio.Semaphore(MAX_CONCURRENT_MATCH_BATCHES)
+
+        async def check_batch(
+            batch: list[PhotoDNAHash],
+        ) -> list[PhotoDNAFinding | None] | PhotoDNAInputRejected:
+            async with limiter:
+                try:
+                    return await match_hashes(batch, settings, client=client)
+                except PhotoDNAInputRejected as exc:
+                    return exc
+
+        batch_results = await asyncio.gather(
+            *(
+                check_batch(generated[offset : offset + MAX_BATCH_SIZE])
+                for offset in range(0, len(generated), MAX_BATCH_SIZE)
+            ),
+            return_exceptions=True,
+        )
+    # Positive results take precedence even if another animation batch was
+    # rejected or encountered a provider error.
+    for result in batch_results:
+        if isinstance(result, list):
+            finding = next((item for item in result if item is not None), None)
+            if finding is not None:
+                return finding
     input_rejected = False
-    for offset in range(0, len(generated), MAX_BATCH_SIZE):
-        try:
-            findings = await match_hashes(generated[offset : offset + MAX_BATCH_SIZE], settings)
-        except PhotoDNAInputRejected:
-            # Do not let one unverified animation frame suppress a known-CSAM
-            # match in a later batch. Positive matches always take precedence;
-            # reject only after every submitted frame has been checked.
+    for result in batch_results:
+        if isinstance(result, PhotoDNAInputRejected):
             input_rejected = True
-            continue
-        finding = next((item for item in findings if item is not None), None)
-        if finding is not None:
-            return finding
+        elif isinstance(result, BaseException):
+            raise result
     if input_rejected:
         raise PhotoDNAInputRejected("PhotoDNA could not verify the submitted file as an image")
     return None

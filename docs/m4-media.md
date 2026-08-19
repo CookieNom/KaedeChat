@@ -52,6 +52,11 @@ is normative in [kaede-fed-v1.md](kaede-fed-v1.md).
 - pyvips emits animated-preserving WebP variants at 128, 512, and 1024 pixels
   plus blurhash and perceptual hash metadata. FFmpeg produces bounded WebP
   posters for supported videos.
+  Avatar and compact icon surfaces emit only their required 128-pixel variant;
+  other images retain the full variant set. Identical output dimensions share
+  one encode, animated WebP uses a latency-oriented encoder effort, and
+  PhotoDNA checks distinct frame hashes in bounded parallel batches through one
+  pinned HTTPS client without skipping distinct frames.
 - Avatar, banner, guild icon/banner, and emoji ticket/commit paths use the same
   scan gate. Public assets are content-addressed, but remain revocable after a
   late terminal verdict: the object capability lasts five minutes and its

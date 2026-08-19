@@ -58,6 +58,7 @@
   let busy = $state(false);
   let savedTheme = $state<UserSettings['theme']>('system');
   let assetProgress = $state(0);
+  let assetStage = $state<'uploading' | 'processing' | null>(null);
   let lifecycle = 0;
   let routeController: AbortController | null = null;
   let displayName = $state('');
@@ -519,6 +520,7 @@
     const generation = lifecycle;
     beginAction();
     assetProgress = 0;
+    assetStage = 'uploading';
     notice = `Uploading ${kind}…`;
     try {
       const ticket = await api<UploadTicket>(`/users/@me/assets/${kind}`, {
@@ -534,6 +536,9 @@
         },
         controller.signal
       );
+      assetProgress = 100;
+      assetStage = 'processing';
+      notice = `Scanning and optimizing ${kind}…`;
       await api(`/users/@me/assets/${kind}`, {
         method: 'PUT',
         signal: controller.signal,
@@ -574,6 +579,7 @@
       if (generation === lifecycle) {
         busy = false;
         assetProgress = 0;
+        assetStage = null;
       }
     }
   }
@@ -723,7 +729,7 @@
           <div class="profile-field-footer">
             <span>{bio.length}/500</span>
             <button class="primary-button" disabled={busy}>
-              {busy ? 'Saving…' : 'Save profile'}
+              {busy ? (assetStage ? 'Processing image…' : 'Saving…') : 'Save profile'}
             </button>
           </div>
         </form>
@@ -765,14 +771,19 @@
               </label>
             </div>
           </div>
-          {#if busy && assetProgress}
-            <div class="upload-progress">
-              <progress
-                max="100"
-                value={assetProgress}
-                aria-label={`Profile image upload: ${assetProgress}%`}
-              ></progress>
-              <span>{assetProgress}%</span>
+          {#if busy && assetStage}
+            <div class="upload-progress" aria-live="polite">
+              {#if assetStage === 'uploading'}
+                <progress
+                  max="100"
+                  value={assetProgress}
+                  aria-label={`Profile image upload: ${assetProgress}%`}
+                ></progress>
+                <span>{assetProgress}%</span>
+              {:else}
+                <progress aria-label="Scanning and optimizing profile image"></progress>
+                <span>Processing…</span>
+              {/if}
             </div>
           {/if}
         </div>

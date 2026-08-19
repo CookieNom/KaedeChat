@@ -35,6 +35,7 @@ from app.media.processing import (
     MediaValidationError,
     clamav_scan,
     content_digest,
+    image_derivative_sizes,
     image_derivatives,
     sniff_content_type,
     validate_detected_type,
@@ -121,7 +122,8 @@ def attachment_photodna_report(attachment: Attachment, finding: PhotoDNAFinding)
 def image_derivatives_are_current(attachment: Attachment) -> bool:
     if attachment.detected_content_type not in IMAGE_TYPES:
         return True
-    for name in ("thumbnail_128", "thumbnail_512", "thumbnail_1024"):
+    for size in image_derivative_sizes(attachment.purpose):
+        name = f"thumbnail_{size}"
         raw = attachment.variants.get(name)
         if not isinstance(raw, dict) or raw.get("processing_version") != IMAGE_PIPELINE_VERSION:
             return False
@@ -354,7 +356,7 @@ async def process_attachment_record(
         derivatives: list[Derivative] = []
         if detected in IMAGE_TYPES:
             derivatives, attachment.blurhash, attachment.perceptual_hash, width, height = (
-                image_derivatives(data)
+                image_derivatives(data, sizes=image_derivative_sizes(attachment.purpose))
             )
             attachment.width = width
             attachment.height = height
