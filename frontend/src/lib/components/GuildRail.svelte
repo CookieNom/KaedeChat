@@ -15,6 +15,8 @@
   } from '$lib/guild-navigation';
   import { assetUrl } from '$lib/media/assets';
   import { guildNavigation } from '$lib/stores/guild-navigation.svelte';
+  import CreateGuildDialog from './CreateGuildDialog.svelte';
+  import Icon from './Icon.svelte';
 
   let {
     guilds,
@@ -41,6 +43,7 @@
   let editingGroup = $state<GuildNavigationGroupItem | null>(null);
   let editingName = $state('');
   let railDropActive = $state(false);
+  let createGuildOpen = $state(false);
 
   function compactBadge(count: number): string {
     return count > 99 ? '99+' : String(count);
@@ -313,6 +316,16 @@
     {/if}
   {/each}
 
+  <button
+    class="spine-create"
+    type="button"
+    aria-label="Create a guild"
+    title="Create a guild"
+    onclick={() => (createGuildOpen = true)}
+  >
+    <Icon name="plus" size={23} strokeWidth={2.2} />
+  </button>
+
   {#if guildNavigation.error}
     <button
       class="guild-navigation-error"
@@ -323,6 +336,8 @@
     >
   {/if}
 </nav>
+
+<CreateGuildDialog bind:open={createGuildOpen} />
 
 {#if editingGroup}
   <dialog
@@ -371,6 +386,43 @@
 
   .guild-spine.rail-drop-active {
     box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent);
+  }
+
+  .spine-create {
+    display: grid;
+    width: 48px;
+    height: 48px;
+    min-width: 48px;
+    min-height: 48px;
+    flex: 0 0 auto;
+    place-items: center;
+    padding: 0;
+    color: var(--accent-text);
+    border: 0;
+    border-radius: 17px;
+    background: var(--rail-hover);
+    cursor: pointer;
+    transition:
+      border-radius 150ms ease,
+      color 150ms ease,
+      background-color 150ms ease,
+      transform 150ms ease;
+  }
+
+  .spine-create:hover {
+    color: var(--on-accent);
+    border-radius: 13px;
+    background: var(--accent);
+    transform: translateY(-1px);
+  }
+
+  .spine-create:focus-visible {
+    outline: 2px solid var(--rail-text);
+    outline-offset: 2px;
+  }
+
+  .spine-create :global(svg) {
+    fill: none;
   }
 
   .guild-folder.active {
