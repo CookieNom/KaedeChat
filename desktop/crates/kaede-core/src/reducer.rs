@@ -237,7 +237,8 @@ impl AppState {
         };
         match event {
             "READY" => self.ready(envelope.d),
-            "RESUMED" | "VOICE_TOKEN" | "FEDERATION_PEER_STATUS" => Ok(Reduction {
+            "RESUMED" => self.resumed(envelope.d),
+            "VOICE_TOKEN" | "FEDERATION_PEER_STATUS" => Ok(Reduction {
                 changed: true,
                 ..Reduction::default()
             }),
@@ -318,6 +319,8 @@ impl AppState {
             #[serde(default)]
             dm_channels: Vec<Channel>,
             #[serde(default)]
+            presences: Vec<Presence>,
+            #[serde(default)]
             read_states: Vec<ReadState>,
         }
         let ready: Ready = decode(value)?;
@@ -328,11 +331,39 @@ impl AppState {
         for channel in ready.dm_channels {
             self.channels.insert(channel.key(), channel);
         }
+        self.presences.clear();
+        for presence in ready.presences {
+            self.presences.insert(
+                EntityRef::new(presence.user_id, presence.user_domain.clone()),
+                presence,
+            );
+        }
         for read_state in ready.read_states {
             self.read_states.insert(
                 EntityRef::new(read_state.channel_id, read_state.channel_domain.clone()),
                 read_state,
             );
+        }
+        Ok(Reduction {
+            changed: true,
+            ..Reduction::default()
+        })
+    }
+
+    fn resumed(&mut self, value: Value) -> Result<Reduction, ReduceError> {
+        #[derive(serde::Deserialize)]
+        struct Resumed {
+            #[serde(default)]
+            presences: Option<Vec<Presence>>,
+        }
+        let resumed: Resumed = decode(value)?;
+        if let Some(presences) = resumed.presences {
+            for presence in presences {
+                self.presences.insert(
+                    EntityRef::new(presence.user_id, presence.user_domain.clone()),
+                    presence,
+                );
+            }
         }
         Ok(Reduction {
             changed: true,
@@ -1099,6 +1130,53 @@ mod tests {
             .expect("legacy user payload");
         assert!(parsed.profile_resolved);
         assert_eq!(parsed.label(), "maple");
+    }
+
+    #[test]
+    fn ready_hydrates_the_dm_presence_snapshot() {
+        let mut state = AppState::default();
+        state
+            .reduce(dispatch(
+                "READY",
+                0,
+                json!({
+                    "session_id": "session-1",
+                    "user": user("7", "home.example", "cookie"),
+                    "guilds": [],
+                    "dm_channels": [],
+                    "presences": [{
+                        "user_id": "9",
+                        "user_domain": "remote.example",
+                        "status": "idle",
+                        "custom_status": null
+                    }],
+                    "read_states": []
+                }),
+            ))
+            .expect("ready payload");
+
+        let peer: EntityRef = "9@remote.example".parse().expect("peer reference");
+        assert_eq!(state.presences[&peer].status, crate::PresenceStatus::Idle);
+
+        state
+            .reduce(dispatch(
+                "RESUMED",
+                1,
+                json!({
+                    "session_id": "session-1",
+                    "presences": [{
+                        "user_id": "9",
+                        "user_domain": "remote.example",
+                        "status": "offline",
+                        "custom_status": null
+                    }]
+                }),
+            ))
+            .expect("resumed payload");
+        assert_eq!(
+            state.presences[&peer].status,
+            crate::PresenceStatus::Offline
+        );
     }
 
     #[test]

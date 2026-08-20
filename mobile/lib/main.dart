@@ -1,13 +1,22 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
 import 'package:kaede_mobile/src/storage/local_database.dart';
+import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(
+      const <String>['Inter'],
+      await rootBundle.loadString('assets/fonts/LICENSE-Inter.txt'),
+    );
+  });
   try {
     final database = await LocalDatabase.open();
     final pushService = await PushService.create();
@@ -40,7 +49,7 @@ final class _BootstrapFailure extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         debugShowCheckedModeBanner: false,
-        theme: ThemeData.dark(useMaterial3: true),
+        theme: kaedeTheme(),
         home: Scaffold(
           body: SafeArea(
             child: Center(
@@ -70,7 +79,7 @@ final class _BootstrapFailure extends StatelessWidget {
                       SelectableText(
                         userFacingError(error),
                         textAlign: TextAlign.center,
-                        style: const TextStyle(color: Colors.white70),
+                        style: const TextStyle(color: KaedeColors.muted),
                       ),
                     ],
                   ),

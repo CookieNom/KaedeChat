@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
@@ -270,134 +271,71 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
     final activeChannel = state.activeChannel;
     final voice = ref.watch(voiceSessionProvider);
     final body = SafeArea(
-        child: Column(
-      children: [
-        if (state.offline)
-          Material(
-            color: KaedeColors.coralDark,
-            child: SafeArea(
-              top: false,
-              child: ListTile(
-                dense: true,
-                leading: const Icon(Icons.cloud_off_rounded),
-                title: const Text('Offline · showing saved conversations'),
-                trailing: TextButton(
-                  onPressed: () => ref
-                      .read(mobileControllerProvider.notifier)
-                      .refreshNavigation(),
-                  child: const Text('Retry'),
-                ),
-              ),
+      bottom: false,
+      child: Column(
+        children: [
+          if (state.offline)
+            _StatusBanner(
+              icon: Icons.cloud_off_rounded,
+              background: KaedeColors.coralSoft,
+              foreground: KaedeColors.coralText,
+              title: 'Offline · showing saved conversations',
+              actionLabel: 'Retry',
+              onAction: () => ref
+                  .read(mobileControllerProvider.notifier)
+                  .refreshNavigation(),
             ),
-          ),
-        if (state.phase == SessionPhase.ready &&
-            !state.gatewayHealth.isConnected)
-          Material(
-            color: const Color(0xFF4A391B),
-            child: ListTile(
-              dense: true,
-              leading: Icon(
-                state.gatewayHealth.phase == GatewayConnectionPhase.offline
-                    ? Icons.sync_problem_rounded
-                    : Icons.sync_rounded,
-                color: KaedeColors.warning,
-              ),
-              title: Text(
-                state.gatewayHealth.message ??
-                    'Realtime updates are temporarily unavailable.',
-              ),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (state.gatewayHealth.phase !=
-                      GatewayConnectionPhase.offline) ...[
-                    const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                    const SizedBox(width: 4),
-                  ],
-                  TextButton(
-                    key: const ValueKey('retry-realtime-button'),
-                    onPressed: () => ref
-                        .read(mobileControllerProvider.notifier)
-                        .retryRealtime(),
-                    child: const Text('Retry'),
-                  ),
-                ],
-              ),
+          if (state.phase == SessionPhase.ready &&
+              !state.gatewayHealth.isConnected)
+            _StatusBanner(
+              icon: state.gatewayHealth.phase == GatewayConnectionPhase.offline
+                  ? Icons.sync_problem_rounded
+                  : Icons.sync_rounded,
+              background: KaedeColors.warningSoft,
+              foreground: KaedeColors.warning,
+              busy: state.gatewayHealth.phase != GatewayConnectionPhase.offline,
+              title: state.gatewayHealth.message ??
+                  'Realtime updates are temporarily unavailable.',
+              actionLabel: 'Retry',
+              actionKey: const ValueKey('retry-realtime-button'),
+              onAction: () =>
+                  ref.read(mobileControllerProvider.notifier).retryRealtime(),
             ),
-          ),
-        if (state.gatewayProtocolWarning case final warning?)
-          Material(
-            color: const Color(0xFF4A391B),
-            child: ListTile(
-              dense: true,
-              leading: const Icon(
-                Icons.warning_amber_rounded,
-                color: KaedeColors.warning,
-              ),
-              title: Text(warning),
+          if (state.gatewayProtocolWarning case final warning?)
+            _StatusBanner(
+              icon: Icons.warning_amber_rounded,
+              background: KaedeColors.warningSoft,
+              foreground: KaedeColors.warning,
+              title: warning,
             ),
-          ),
-        if (state.degradedWarnings.isNotEmpty)
-          Material(
-            color: const Color(0xFF4A391B),
-            child: ListTile(
-              dense: true,
-              leading: const Icon(
-                Icons.cloud_sync_outlined,
-                color: KaedeColors.warning,
-              ),
-              title: Text(state.degradedWarnings.values.first),
+          if (state.degradedWarnings.isNotEmpty)
+            _StatusBanner(
+              icon: Icons.cloud_sync_outlined,
+              background: KaedeColors.warningSoft,
+              foreground: KaedeColors.warning,
+              title: state.degradedWarnings.values.first,
               subtitle: state.degradedWarnings.length > 1
-                  ? Text(
-                      '${state.degradedWarnings.length} account areas need to resync.',
-                    )
+                  ? '${state.degradedWarnings.length} account areas need to '
+                      'resync.'
                   : null,
-              trailing: TextButton(
-                onPressed: () => ref
-                    .read(mobileControllerProvider.notifier)
-                    .retryDegradedData(),
-                child: const Text('Retry'),
-              ),
+              actionLabel: 'Retry',
+              onAction: () => ref
+                  .read(mobileControllerProvider.notifier)
+                  .retryDegradedData(),
             ),
-          ),
-        if (state.pushWarning case final warning?)
-          Material(
-            color: const Color(0xFF4A391B),
-            child: ListTile(
-              dense: true,
-              leading: const Icon(
-                Icons.notifications_off_outlined,
-                color: KaedeColors.warning,
-              ),
-              title: Text(warning),
-              trailing: TextButton(
-                onPressed: () => _showSection(_ShellSection.settings),
-                child: const Text('Settings'),
-              ),
+          if (state.pushWarning case final warning?)
+            _StatusBanner(
+              icon: Icons.notifications_off_outlined,
+              background: KaedeColors.warningSoft,
+              foreground: KaedeColors.warning,
+              title: warning,
+              actionLabel: 'Settings',
+              onAction: () => _showSection(_ShellSection.settings),
             ),
-          ),
-        if (voice.joined && voice.channel?.ref != activeChannel?.ref)
-          Material(
-            color: const Color(0xFF174C3E),
-            child: ListTile(
-              dense: true,
-              leading: voice.reconnecting
-                  ? const SizedBox.square(
-                      dimension: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.graphic_eq_rounded),
-              title: Text(
-                '${voice.reconnecting ? 'Voice reconnecting' : 'Voice connected'} · '
-                '${voice.channel?.name ?? 'Room'}',
-              ),
-              subtitle: Text(voice.reconnecting
-                  ? 'Keeping your place in the call…'
-                  : '${voice.participants.length} connected'),
-              onTap: () async {
+          if (voice.joined && voice.channel?.ref != activeChannel?.ref)
+            _VoiceStatusBar(
+              voice: voice,
+              onOpen: () async {
                 final channel = voice.channel;
                 if (channel == null) return;
                 await ref
@@ -410,86 +348,72 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
                   });
                 }
               },
-              trailing: Wrap(
-                spacing: 2,
-                children: [
-                  IconButton(
-                    tooltip: voice.muted ? 'Unmute' : 'Mute',
-                    onPressed: voice.canSpeak
-                        ? () => _runVisibleAction(
-                              context,
-                              'Could not change the microphone state',
-                              voice.toggleMute,
-                            )
-                        : null,
-                    icon: Icon(voice.muted
-                        ? Icons.mic_off_rounded
-                        : Icons.mic_rounded),
-                  ),
-                  IconButton(
-                    tooltip: 'Leave voice',
-                    onPressed: () => _runVisibleAction(
-                      context,
-                      'Could not leave voice',
-                      voice.leave,
-                    ),
-                    icon: const Icon(Icons.call_end_rounded),
-                  ),
-                ],
+              onToggleMute: voice.canSpeak
+                  ? () => _runVisibleAction(
+                        context,
+                        'Could not change the microphone state',
+                        voice.toggleMute,
+                      )
+                  : null,
+              onLeave: () => _runVisibleAction(
+                context,
+                'Could not leave voice',
+                voice.leave,
               ),
             ),
-          ),
-        Expanded(
-          child: switch (_section) {
-            _ShellSection.messages => PageView(
-                controller: _pages,
-                onPageChanged: (page) {
-                  setState(() => _messagePage = page);
-                  ref
-                      .read(mobileControllerProvider.notifier)
-                      .setConversationPaneVisible(page == 1);
-                },
-                children: [
-                  _ChatBrowser(
-                    onOpenChannel: _openConversation,
-                    onOpenFriends: () => _showSection(_ShellSection.friends),
-                    onOpenSettings: () => _showSection(_ShellSection.settings),
-                  ),
-                  activeChannel == null
-                      ? const Center(child: Text('Choose a conversation.'))
-                      : _ConversationScreen(
-                          channel: activeChannel,
-                          visible: _messagePage == 1,
-                          onBack: _openNavigation,
-                          onMembers: activeChannel.guildRef == null
-                              ? null
-                              : _openMembers,
-                        ),
-                  if (activeChannel?.guildRef != null &&
-                      state.activeGuild != null)
-                    _GuildMemberPane(
-                      guild: state.activeGuild!,
-                      onBack: _openConversation,
+          Expanded(
+            child: switch (_section) {
+              _ShellSection.messages => PageView(
+                  controller: _pages,
+                  onPageChanged: (page) {
+                    setState(() => _messagePage = page);
+                    ref
+                        .read(mobileControllerProvider.notifier)
+                        .setConversationPaneVisible(page == 1);
+                  },
+                  children: [
+                    _ChatBrowser(
+                      onOpenChannel: _openConversation,
+                      onOpenFriends: () => _showSection(_ShellSection.friends),
+                      onOpenSettings: () =>
+                          _showSection(_ShellSection.settings),
                     ),
-                ],
-              ),
-            _ShellSection.friends => _SectionScreen(
-                title: 'Friends',
-                onBack: () => _showSection(_ShellSection.messages),
-                child: _FriendsPage(onOpenChat: () {
-                  _showSection(_ShellSection.messages);
-                  _openConversation();
-                }),
-              ),
-            _ShellSection.settings => _SectionScreen(
-                title: 'You',
-                onBack: () => _showSection(_ShellSection.messages),
-                child: const SettingsScreen(),
-              ),
-          },
-        ),
-      ],
-    ));
+                    activeChannel == null
+                        ? const _NoConversationSelected()
+                        : _ConversationScreen(
+                            channel: activeChannel,
+                            visible: _messagePage == 1,
+                            onBack: _openNavigation,
+                            onMembers: activeChannel.guildRef == null
+                                ? null
+                                : _openMembers,
+                          ),
+                    if (activeChannel?.guildRef != null &&
+                        state.activeGuild != null)
+                      _GuildMemberPane(
+                        guild: state.activeGuild!,
+                        onBack: _openConversation,
+                      ),
+                  ],
+                ),
+              _ShellSection.friends => _SectionScreen(
+                  title: 'Friends',
+                  onBack: () => _showSection(_ShellSection.messages),
+                  child: _FriendsPage(onOpenChat: () {
+                    _showSection(_ShellSection.messages);
+                    _openConversation();
+                  }),
+                ),
+              _ShellSection.settings => _SectionScreen(
+                  title: 'Settings',
+                  onBack: () => _showSection(_ShellSection.messages),
+                  child: const SettingsScreen(),
+                ),
+            },
+          ),
+        ],
+      ),
+    );
     return PopScope(
       canPop: _section == _ShellSection.messages && _messagePage == 0,
       onPopInvokedWithResult: (didPop, _) {
@@ -551,17 +475,20 @@ final class _SectionScreen extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => Column(
-        children: [
-          ConversationCompactHeader(
-            leading: IconButton(
-              onPressed: onBack,
-              icon: const Icon(Icons.arrow_back_rounded),
+  Widget build(BuildContext context) => ColoredBox(
+        color: KaedeColors.sidebar,
+        child: Column(
+          children: [
+            ConversationCompactHeader(
+              leading: IconButton(
+                onPressed: onBack,
+                icon: const Icon(Icons.arrow_back_rounded),
+              ),
+              title: title,
             ),
-            title: title,
-          ),
-          Expanded(child: child),
-        ],
+            Expanded(child: SafeArea(top: false, child: child)),
+          ],
+        ),
       );
 }
 
@@ -757,25 +684,6 @@ final class _ConversationScreenState
     );
   }
 
-  Future<void> _showEncryptionSettings() async {
-    var channel = widget.channel;
-    for (final candidate in ref.read(mobileControllerProvider).dms) {
-      if (candidate.ref == widget.channel.ref) {
-        channel = candidate;
-        break;
-      }
-    }
-    final current = ref.read(mobileControllerProvider).user;
-    final canManage = channel.conversationType != 'group' ||
-        (current != null && current.ref == channel.ownerRef);
-    await _showE2eeRoomSettings(
-      context,
-      ref,
-      channel,
-      canManage: canManage,
-    );
-  }
-
   Future<void> _showPinnedMessages() => showModalBottomSheet<void>(
         context: context,
         isScrollControlled: true,
@@ -816,38 +724,100 @@ final class _ConversationScreenState
         ),
       );
 
+  /// Encryption is a one-way decision for a room, so it lives inside the
+  /// channel or conversation settings sheet rather than the header.
+  Future<void> _showChannelSettings() async {
+    if (widget.channel.guildRef != null) {
+      final state = ref.read(mobileControllerProvider);
+      final guild = state.activeGuild;
+      final controller = ref.read(mobileControllerProvider.notifier);
+      final localGuild =
+          controller.api.tokens?.instance == widget.channel.guildRef!.domain;
+      final canManage = guild != null &&
+          localGuild &&
+          (state.user?.ref == guild.ownerRef ||
+              guild.allows(Permission.manageChannels));
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        showDragHandle: true,
+        builder: (_) => _ChannelDetailsSheet(
+          channel: widget.channel,
+          guild: guild,
+          canManageChannels: canManage,
+        ),
+      );
+      return;
+    }
+    if (_isGroup) {
+      await _showGroupSettings();
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (_) => _DirectMessageDetailsSheet(channel: widget.channel),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final activationEnabled = ref.watch(
-      mobileControllerProvider.select((state) => state.e2eeActivationEnabled),
-    );
     final recipient = widget.channel.recipients.isEmpty
         ? null
         : widget.channel.recipients.first;
-    final compactHeader = MediaQuery.sizeOf(context).width <= 400;
-    final callUsesOverflow = conversationCallUsesOverflow(
-      MediaQuery.sizeOf(context).width,
-    );
-    final showEncryption =
-        widget.channel.encryptionMode == 'e2ee' || activationEnabled;
+    final width = MediaQuery.sizeOf(context).width;
+    final compactHeader = width <= 400;
+    final callUsesOverflow = conversationCallUsesOverflow(width);
+    final isDm = widget.channel.type == ChannelType.dm;
     final overflowItems = <PopupMenuEntry<String>>[
-      if (showEncryption)
-        PopupMenuItem(
-          value: 'encryption',
-          child: Text(widget.channel.encryptionMode == 'e2ee'
-              ? 'Encryption settings'
-              : 'Enable encryption'),
+      if (supportsPinnedMessages(widget.channel))
+        const PopupMenuItem(
+          value: 'pins',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.push_pin_outlined),
+            title: Text('Pinned messages'),
+          ),
         ),
-      if (_isGroup)
-        const PopupMenuItem(value: 'group', child: Text('Group settings')),
-      if (widget.channel.type == ChannelType.dm && callUsesOverflow)
+      if (isDm && callUsesOverflow)
         PopupMenuItem(
           value: 'call',
           enabled: !_callBusy,
-          child: Text(_activeCall == null ? 'Start call' : 'Join call'),
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+                _activeCall == null ? Icons.call_outlined : Icons.call_rounded),
+            title: Text(_activeCall == null ? 'Start call' : 'Join call'),
+          ),
         ),
-      if (widget.onMembers != null)
-        const PopupMenuItem(value: 'members', child: Text('Member list')),
+      if (widget.onMembers != null && compactHeader)
+        const PopupMenuItem(
+          value: 'members',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.people_alt_outlined),
+            title: Text('Member list'),
+          ),
+        ),
+      PopupMenuItem(
+        value: 'settings',
+        child: ListTile(
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.settings_outlined),
+          title: Text(widget.channel.guildRef != null
+              ? 'Channel settings'
+              : _isGroup
+                  ? 'Group settings'
+                  : 'Conversation settings'),
+        ),
+      ),
     ];
     return Column(
       children: [
@@ -862,30 +832,24 @@ final class _ConversationScreenState
                   onTap: () => showUserProfile(
                     context,
                     recipient,
-                    recipient.presence,
+                    ref
+                        .read(mobileControllerProvider.notifier)
+                        .presenceFor(recipient),
                   ),
-                  child: UserAvatar(user: recipient),
+                  child: UserAvatar(
+                    user: recipient,
+                    radius: 17,
+                    presence: ref
+                            .watch(mobileControllerProvider)
+                            .presenceByUser[recipient.ref] ??
+                        recipient.presence,
+                    ringColor: KaedeColors.canvas,
+                  ),
                 ),
           title: _title,
           subtitle: _subtitle,
           actions: [
-            if (showEncryption && !compactHeader)
-              IconButton(
-                tooltip: widget.channel.encryptionMode == 'e2ee'
-                    ? 'End-to-end encrypted · view safety number'
-                    : 'Enable end-to-end encryption',
-                onPressed: _showEncryptionSettings,
-                icon: Icon(widget.channel.encryptionMode == 'e2ee'
-                    ? Icons.lock_rounded
-                    : Icons.lock_open_rounded),
-              ),
-            if (_isGroup && !compactHeader)
-              IconButton(
-                tooltip: 'Group settings',
-                onPressed: _showGroupSettings,
-                icon: const Icon(Icons.group_outlined),
-              ),
-            if (widget.channel.type == ChannelType.dm && !callUsesOverflow)
+            if (isDm && !callUsesOverflow)
               IconButton(
                 tooltip: _activeCall == null ? 'Start call' : 'Join call',
                 onPressed: _callBusy ? null : _startOrJoinCall,
@@ -893,14 +857,8 @@ final class _ConversationScreenState
                     ? Icons.call_outlined
                     : Icons.call_rounded),
               ),
-            if (supportsPinnedMessages(widget.channel))
-              IconButton(
-                tooltip: 'Pinned messages',
-                onPressed: _showPinnedMessages,
-                icon: const Icon(Icons.push_pin_outlined),
-              ),
             IconButton(
-              tooltip: 'Search',
+              tooltip: 'Search this conversation',
               onPressed: _showMessageSearch,
               icon: const Icon(Icons.search_rounded),
             ),
@@ -910,33 +868,354 @@ final class _ConversationScreenState
                 onPressed: widget.onMembers,
                 icon: const Icon(Icons.people_alt_outlined),
               ),
-            if (compactHeader && overflowItems.isNotEmpty)
-              PopupMenuButton<String>(
-                tooltip: 'More conversation actions',
-                onSelected: (action) {
-                  switch (action) {
-                    case 'encryption':
-                      unawaited(_showEncryptionSettings());
-                      return;
-                    case 'group':
-                      unawaited(_showGroupSettings());
-                      return;
-                    case 'members':
-                      widget.onMembers?.call();
-                      return;
-                    case 'call':
-                      unawaited(_startOrJoinCall());
-                      return;
-                  }
-                },
-                itemBuilder: (_) => overflowItems,
-              ),
+            PopupMenuButton<String>(
+              tooltip: 'More options',
+              position: PopupMenuPosition.under,
+              icon: const Icon(Icons.more_vert_rounded),
+              onSelected: (action) {
+                switch (action) {
+                  case 'pins':
+                    unawaited(_showPinnedMessages());
+                    return;
+                  case 'settings':
+                    unawaited(_showChannelSettings());
+                    return;
+                  case 'members':
+                    widget.onMembers?.call();
+                    return;
+                  case 'call':
+                    unawaited(_startOrJoinCall());
+                    return;
+                }
+              },
+              itemBuilder: (_) => overflowItems,
+            ),
           ],
         ),
         const Expanded(child: ChannelView()),
       ],
     );
   }
+}
+
+/// Guild channel details: what the channel is, plus the decisions that belong
+/// one level away from the transcript.
+final class _ChannelDetailsSheet extends ConsumerStatefulWidget {
+  const _ChannelDetailsSheet({
+    required this.channel,
+    required this.guild,
+    required this.canManageChannels,
+  });
+
+  final KaedeChannel channel;
+  final KaedeGuild? guild;
+  final bool canManageChannels;
+
+  @override
+  ConsumerState<_ChannelDetailsSheet> createState() =>
+      _ChannelDetailsSheetState();
+}
+
+final class _ChannelDetailsSheetState
+    extends ConsumerState<_ChannelDetailsSheet> {
+  var _busy = false;
+
+  KaedeChannel get _channel {
+    for (final guild in ref.read(mobileControllerProvider).guilds) {
+      for (final candidate in guild.channels) {
+        if (candidate.ref == widget.channel.ref) return candidate;
+      }
+    }
+    return widget.channel;
+  }
+
+  Future<void> _edit() async {
+    final guild = widget.guild;
+    if (guild == null) return;
+    final channel = _channel;
+    final draft = await showGuildChannelEditorSheet(
+      context,
+      channel: channel,
+      channels: guild.channels,
+    );
+    if (draft == null || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final controller = ref.read(mobileControllerProvider.notifier);
+      await controller.repository.updateChannel(
+        guild.ref,
+        channel.ref,
+        channel.version ?? '*',
+        draft.json,
+      );
+      await controller.refreshNavigation();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Channel saved')),
+        );
+      }
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(userFacingError(
+            error,
+            summary: 'Could not save the channel',
+          )),
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final channel = _channel;
+    final state = ref.watch(mobileControllerProvider);
+    final showEncryption =
+        channel.encryptionMode == 'e2ee' || state.e2eeActivationEnabled;
+    final topic = channel.topic?.trim();
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  channel.type == ChannelType.voice
+                      ? Icons.volume_up_rounded
+                      : channel.type == ChannelType.announcement
+                          ? Icons.campaign_rounded
+                          : Icons.tag_rounded,
+                  color: KaedeColors.muted,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    channel.name ?? 'channel',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                ),
+              ],
+            ),
+            if (topic?.isNotEmpty == true) ...[
+              const SizedBox(height: 8),
+              Text(
+                topic!,
+                style: const TextStyle(color: KaedeColors.muted, height: 1.4),
+              ),
+            ],
+            const SizedBox(height: 18),
+            if (widget.canManageChannels)
+              _SettingsRow(
+                icon: Icons.edit_outlined,
+                title: 'Edit channel',
+                subtitle: 'Name, category, topic and slow mode',
+                onTap: _busy ? null : _edit,
+              ),
+            if (showEncryption)
+              _SettingsRow(
+                icon: channel.encryptionMode == 'e2ee'
+                    ? Icons.lock_rounded
+                    : Icons.lock_open_rounded,
+                iconColor: channel.encryptionMode == 'e2ee'
+                    ? KaedeColors.mint
+                    : KaedeColors.muted,
+                title: 'End-to-end encryption',
+                subtitle: channel.encryptionMode == 'e2ee'
+                    ? channel.encryptionState == 'active'
+                        ? 'Active · verify the safety number'
+                        : 'Paused until a member rotates the keys'
+                    : 'Off · permanent once enabled',
+                onTap: _busy
+                    ? null
+                    : () => _showE2eeRoomSettings(
+                          context,
+                          ref,
+                          channel,
+                          canManage: widget.canManageChannels,
+                        ),
+              ),
+            if (!widget.canManageChannels && !showEncryption)
+              const Text(
+                'You do not have permission to change this channel.',
+                style: TextStyle(color: KaedeColors.muted, fontSize: 13),
+              ),
+            if (widget.guild != null && widget.canManageChannels)
+              _SettingsRow(
+                icon: Icons.tune_rounded,
+                title: 'Guild settings',
+                subtitle: 'Roles, members and every channel',
+                onTap: _busy
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) =>
+                                GuildManagementScreen(guild: widget.guild!),
+                          ),
+                        );
+                      },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One-to-one conversation details, including the encryption decision.
+final class _DirectMessageDetailsSheet extends ConsumerWidget {
+  const _DirectMessageDetailsSheet({required this.channel});
+
+  final KaedeChannel channel;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(mobileControllerProvider);
+    var current = channel;
+    for (final candidate in state.dms) {
+      if (candidate.ref == channel.ref) {
+        current = candidate;
+        break;
+      }
+    }
+    final recipient = current.recipients.isEmpty
+        ? null
+        : current.recipients.firstWhere(
+            (user) => user.ref != state.user?.ref,
+            orElse: () => current.recipients.first,
+          );
+    final showEncryption =
+        current.encryptionMode == 'e2ee' || state.e2eeActivationEnabled;
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Conversation settings',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 16),
+            if (recipient != null)
+              _SettingsRow(
+                icon: Icons.person_outline_rounded,
+                title: recipient.name,
+                subtitle: recipient.handle,
+                onTap: () => showUserProfile(
+                  context,
+                  recipient,
+                  ref
+                      .read(mobileControllerProvider.notifier)
+                      .presenceFor(recipient),
+                ),
+              ),
+            if (showEncryption)
+              _SettingsRow(
+                icon: current.encryptionMode == 'e2ee'
+                    ? Icons.lock_rounded
+                    : Icons.lock_open_rounded,
+                iconColor: current.encryptionMode == 'e2ee'
+                    ? KaedeColors.mint
+                    : KaedeColors.muted,
+                title: 'End-to-end encryption',
+                subtitle: current.encryptionMode == 'e2ee'
+                    ? current.encryptionState == 'active'
+                        ? 'Active · verify the safety number'
+                        : 'Paused until keys rotate'
+                    : 'Off · permanent once enabled',
+                onTap: () => _showE2eeRoomSettings(
+                  context,
+                  ref,
+                  current,
+                  canManage: true,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Row used by the settings sheets: icon, title, supporting line, chevron.
+final class _SettingsRow extends StatelessWidget {
+  const _SettingsRow({
+    required this.icon,
+    required this.title,
+    required this.onTap,
+    this.subtitle,
+    this.iconColor,
+  });
+
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final VoidCallback? onTap;
+  final Color? iconColor;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Material(
+          color: KaedeColors.raised,
+          borderRadius: BorderRadius.circular(KaedeRadius.medium),
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(KaedeRadius.medium),
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                border: Border.all(color: KaedeColors.border),
+              ),
+              child: Row(
+                children: [
+                  Icon(icon, size: 19, color: iconColor ?? KaedeColors.muted),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14.5,
+                          ),
+                        ),
+                        if (subtitle case final detail?)
+                          Text(
+                            detail,
+                            maxLines: 2,
+                            style: const TextStyle(
+                              color: KaedeColors.muted,
+                              fontSize: 12,
+                              height: 1.3,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const Icon(Icons.chevron_right_rounded,
+                      color: KaedeColors.muted),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
 }
 
 final class _PinnedMessagesSheet extends ConsumerStatefulWidget {
@@ -1190,26 +1469,36 @@ final class _DmCallRoom extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) => Scaffold(
         appBar: AppBar(
-          title: Text(channel.name ?? 'Conversation call'),
+          title: Text(channel.name ??
+              (channel.recipients.isEmpty
+                  ? 'Conversation call'
+                  : channel.recipients.first.name)),
           actions: [
-            TextButton(
-              onPressed: () async {
-                try {
-                  await ref
-                      .read(mobileControllerProvider.notifier)
-                      .repository
-                      .callAction(callRef, 'end');
-                  await ref.read(voiceSessionProvider).leave();
-                  if (context.mounted) Navigator.of(context).pop();
-                } on Object catch (error) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text(userFacingError(error))),
-                    );
+            Padding(
+              padding: const EdgeInsets.only(right: 10),
+              child: TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: KaedeColors.danger,
+                ),
+                icon: const Icon(Icons.call_end_rounded, size: 18),
+                onPressed: () async {
+                  try {
+                    await ref
+                        .read(mobileControllerProvider.notifier)
+                        .repository
+                        .callAction(callRef, 'end');
+                    await ref.read(voiceSessionProvider).leave();
+                    if (context.mounted) Navigator.of(context).pop();
+                  } on Object catch (error) {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(userFacingError(error))),
+                      );
+                    }
                   }
-                }
-              },
-              child: const Text('End call'),
+                },
+                label: const Text('End call'),
+              ),
             ),
           ],
         ),
@@ -1277,7 +1566,7 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           20,
-          18,
+          6,
           20,
           MediaQuery.viewInsetsOf(context).bottom + 20,
         ),
@@ -1286,29 +1575,47 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text('Group settings',
-                  style: Theme.of(context).textTheme.headlineSmall),
-              const SizedBox(height: 16),
+              Text(
+                'Group settings',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '${channel.recipients.length + 1} members · anyone can add a '
+                'friend',
+                style: const TextStyle(
+                  color: KaedeColors.muted,
+                  fontSize: 12.5,
+                ),
+              ),
+              const SizedBox(height: 20),
               TextField(
                 controller: _name,
                 maxLength: 100,
-                decoration: const InputDecoration(labelText: 'Group name'),
+                decoration: const InputDecoration(
+                  labelText: 'Group name',
+                  counterText: '',
+                ),
               ),
-              FilledButton.tonal(
-                onPressed: _busy
-                    ? null
-                    : () => _run(() async {
-                          await ref
-                              .read(mobileControllerProvider.notifier)
-                              .repository
-                              .renameGroupDm(
-                                channel.ref,
-                                _name.text.trim().isEmpty
-                                    ? null
-                                    : _name.text.trim(),
-                              );
-                        }),
-                child: const Text('Save name'),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton.tonal(
+                  onPressed: _busy
+                      ? null
+                      : () => _run(() async {
+                            await ref
+                                .read(mobileControllerProvider.notifier)
+                                .repository
+                                .renameGroupDm(
+                                  channel.ref,
+                                  _name.text.trim().isEmpty
+                                      ? null
+                                      : _name.text.trim(),
+                                );
+                          }),
+                  child: const Text('Save name'),
+                ),
               ),
               const SizedBox(height: 18),
               TextField(
@@ -1317,38 +1624,34 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                 decoration: const InputDecoration(
                   labelText: 'Add a friend',
                   hintText: '@friend@example.net',
-                  helperText: 'Any member can invite an existing friend.',
                 ),
               ),
-              FilledButton.tonal(
-                onPressed: _busy || _invite.text.trim().isEmpty
-                    ? null
-                    : () => _run(() async {
-                          await ref
-                              .read(mobileControllerProvider.notifier)
-                              .repository
-                              .addGroupDmMember(
-                                  channel.ref, _invite.text.trim());
-                          _invite.clear();
-                        }),
-                child: const Text('Add member'),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton.tonalIcon(
+                  onPressed: _busy || _invite.text.trim().isEmpty
+                      ? null
+                      : () => _run(() async {
+                            await ref
+                                .read(mobileControllerProvider.notifier)
+                                .repository
+                                .addGroupDmMember(
+                                    channel.ref, _invite.text.trim());
+                            _invite.clear();
+                          }),
+                  icon: const Icon(Icons.person_add_alt_1_rounded, size: 18),
+                  label: const Text('Add member'),
+                ),
               ),
-              const SizedBox(height: 18),
               if (channel.encryptionMode == 'e2ee' ||
                   mobile.e2eeActivationEnabled) ...[
-                Card(
-                  margin: EdgeInsets.zero,
-                  child: ListTile(
-                    leading: Icon(channel.encryptionMode == 'e2ee'
-                        ? Icons.lock_rounded
-                        : Icons.lock_open_rounded),
-                    title: const Text('End-to-end encryption'),
-                    subtitle: Text(channel.encryptionMode == 'e2ee'
-                        ? channel.encryptionState == 'active'
-                            ? 'Active'
-                            : 'Encrypted activity is paused until keys rotate'
-                        : 'Optional · review feature tradeoffs before enabling'),
-                    trailing: const Icon(Icons.chevron_right_rounded),
+                const SizedBox(height: 18),
+                Material(
+                  color: KaedeColors.raised,
+                  borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(KaedeRadius.medium),
                     onTap: _busy
                         ? null
                         : () => _showE2eeRoomSettings(
@@ -1357,15 +1660,77 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                               channel,
                               canManage: isOwner,
                             ),
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                        border: Border.all(color: KaedeColors.border),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            channel.encryptionMode == 'e2ee'
+                                ? Icons.lock_rounded
+                                : Icons.lock_open_rounded,
+                            size: 19,
+                            color: channel.encryptionMode == 'e2ee'
+                                ? KaedeColors.mint
+                                : KaedeColors.muted,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'End-to-end encryption',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 14.5,
+                                  ),
+                                ),
+                                Text(
+                                  channel.encryptionMode == 'e2ee'
+                                      ? channel.encryptionState == 'active'
+                                          ? 'Active'
+                                          : 'Paused until keys rotate'
+                                      : 'Optional · review the tradeoffs '
+                                          'before enabling',
+                                  style: const TextStyle(
+                                    color: KaedeColors.muted,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Icon(Icons.chevron_right_rounded,
+                              color: KaedeColors.muted),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
-                const SizedBox(height: 18),
               ],
-              Text('Members', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 20),
+              const Text(
+                'MEMBERS',
+                style: TextStyle(
+                  color: KaedeColors.muted,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: .9,
+                ),
+              ),
+              const SizedBox(height: 4),
               if (current != null)
                 ListTile(
                   contentPadding: EdgeInsets.zero,
-                  leading: UserAvatar(user: current),
+                  leading: UserAvatar(
+                    user: current,
+                    radius: 18,
+                    ringColor: KaedeColors.panel,
+                  ),
                   title: Text(current.name),
                   subtitle: const Text('You'),
                   trailing: current.ref == channel.ownerRef
@@ -1375,9 +1740,20 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
               for (final member in channel.recipients)
                 ListTile(
                   contentPadding: EdgeInsets.zero,
-                  leading: UserAvatar(user: member),
+                  leading: UserAvatar(
+                    user: member,
+                    radius: 18,
+                    presence:
+                        mobile.presenceByUser[member.ref] ?? member.presence,
+                    ringColor: KaedeColors.panel,
+                  ),
                   title: Text(member.name),
                   subtitle: Text(member.handle),
+                  onTap: () => showUserProfile(
+                    context,
+                    member,
+                    mobile.presenceByUser[member.ref] ?? member.presence,
+                  ),
                   trailing: member.ref == channel.ownerRef
                       ? const Chip(label: Text('Owner'))
                       : isOwner
@@ -1398,12 +1774,28 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                 ),
               if (_error case final error?)
                 Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(error,
-                      style: const TextStyle(color: KaedeColors.coral)),
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: KaedeColors.dangerSoft,
+                      borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                    ),
+                    child: Text(
+                      error,
+                      style: const TextStyle(
+                        color: KaedeColors.danger,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
                 ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
               OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: KaedeColors.danger,
+                  side: const BorderSide(color: KaedeColors.dangerSoft),
+                ),
                 onPressed: _busy
                     ? null
                     : () => _run(() async {
@@ -1441,6 +1833,7 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane>
   List<GuildMember>? _members;
   String? _error;
   var _partial = false;
+  EntityRef? _rosterRequestedFor;
 
   @override
   bool get wantKeepAlive => true;
@@ -1458,17 +1851,17 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane>
       _members = null;
       _error = null;
       _partial = false;
+      _rosterRequestedFor = null;
       _load();
     }
   }
 
   Future<void> _load() async {
     final requestedGuild = widget.guild;
+    final controller = ref.read(mobileControllerProvider.notifier);
+    _requestRoster(controller, requestedGuild.ref);
     try {
-      final members = await ref
-          .read(mobileControllerProvider.notifier)
-          .repository
-          .members(requestedGuild.ref);
+      final members = await controller.repository.members(requestedGuild.ref);
       if (mounted && widget.guild.ref == requestedGuild.ref) {
         setState(() {
           _members = members;
@@ -1507,70 +1900,352 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane>
     }
   }
 
+  /// The REST roster carries no presence; the gateway's member chunk does, so
+  /// the pane asks for one as soon as realtime is available.
+  void _requestRoster(MobileController controller, EntityRef guild) {
+    if (!ref.read(mobileControllerProvider).gatewayHealth.isConnected) return;
+    if (_rosterRequestedFor == guild) return;
+    _rosterRequestedFor = guild;
+    controller.requestGuildMembers(guild);
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
     final mobile = ref.watch(mobileControllerProvider);
-    return Column(
-      children: [
-        ConversationCompactHeader(
-          leading: IconButton(
-            onPressed: widget.onBack,
-            icon: const Icon(Icons.arrow_back_rounded),
+    if (mobile.gatewayHealth.isConnected &&
+        _rosterRequestedFor != widget.guild.ref) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _requestRoster(
+            ref.read(mobileControllerProvider.notifier),
+            widget.guild.ref,
+          );
+        }
+      });
+    }
+    final members = _members;
+    final controller = ref.read(mobileControllerProvider.notifier);
+    final groups = members == null
+        ? const <MemberListSection>[]
+        : groupGuildMembers(
+            members: <GuildMember>[
+              for (final member in members)
+                GuildMember(
+                  user: mobile.userProfiles[member.user.ref] ?? member.user,
+                  roleIds: member.roleIds,
+                  nickname: member.nickname,
+                  timeoutUntil: member.timeoutUntil,
+                ),
+            ],
+            roles: widget.guild.roles,
+            presenceFor: controller.presenceFor,
+          );
+    final total = members?.length ?? 0;
+    return ColoredBox(
+      color: KaedeColors.sidebar,
+      child: Column(
+        children: [
+          ConversationCompactHeader(
+            leading: IconButton(
+              onPressed: widget.onBack,
+              icon: const Icon(Icons.arrow_back_rounded),
+            ),
+            title: 'Members',
+            subtitle: members == null
+                ? widget.guild.name
+                : '$total in ${widget.guild.name}',
           ),
-          title: 'Members',
-          subtitle: widget.guild.name,
-        ),
-        Expanded(
-          child: _error != null
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(28),
-                    child: Text(_error!, textAlign: TextAlign.center),
-                  ),
-                )
-              : _members == null
-                  ? const Center(child: CircularProgressIndicator())
-                  : RefreshIndicator(
-                      onRefresh: _load,
-                      child: ListView.builder(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        itemCount: _members!.length + (_partial ? 1 : 0),
-                        itemBuilder: (context, index) {
-                          if (_partial && index == 0) {
-                            return const ListTile(
-                              leading: Icon(
-                                Icons.info_outline_rounded,
-                                color: KaedeColors.warning,
+          Expanded(
+            child: SafeArea(
+              top: false,
+              child: _error != null && members == null
+                  ? _MemberListError(message: _error!, onRetry: _load)
+                  : members == null
+                      ? const Center(child: CircularProgressIndicator())
+                      : RefreshIndicator(
+                          onRefresh: _load,
+                          child: CustomScrollView(
+                            slivers: [
+                              if (_partial)
+                                const SliverToBoxAdapter(
+                                  child: _StatusBanner(
+                                    icon: Icons.info_outline_rounded,
+                                    background: KaedeColors.warningSoft,
+                                    foreground: KaedeColors.warning,
+                                    title: 'Partial member list',
+                                    subtitle:
+                                        'Only members seen in cached messages '
+                                        'are shown. Pull down to retry.',
+                                  ),
+                                ),
+                              for (final section in groups) ...[
+                                SliverToBoxAdapter(
+                                  child: _SidebarSectionHeader(
+                                    title: '${section.title} — '
+                                        '${section.members.length}',
+                                  ),
+                                ),
+                                SliverList.builder(
+                                  itemCount: section.members.length,
+                                  itemBuilder: (context, index) {
+                                    final member = section.members[index];
+                                    final user = member.user;
+                                    return _MemberRow(
+                                      user: user,
+                                      presence: controller.presenceFor(user),
+                                      nickname: member.nickname,
+                                      nameColor: memberRoleColor(
+                                        widget.guild,
+                                        member,
+                                      ),
+                                      dimmed: section.offline,
+                                      onTap: () => showUserProfile(
+                                        context,
+                                        user,
+                                        controller.presenceFor(user),
+                                        memberOf: widget.guild.name,
+                                        actions: <Widget>[
+                                          if (user.profileResolved &&
+                                              user.ref != mobile.user?.ref)
+                                            FilledButton.icon(
+                                              onPressed: () {
+                                                Navigator.pop(context);
+                                                _openDm(
+                                                  context,
+                                                  ref,
+                                                  user,
+                                                  widget.onBack,
+                                                );
+                                              },
+                                              icon: const Icon(Icons
+                                                  .chat_bubble_outline_rounded),
+                                              label: const Text('Message'),
+                                            ),
+                                        ],
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ],
+                              const SliverToBoxAdapter(
+                                child: SizedBox(height: 16),
                               ),
-                              title: Text('Partial member list'),
-                              subtitle: Text(
-                                'Kaede could not load the full roster. These are only members seen in cached messages. Pull down to retry.',
-                              ),
-                            );
-                          }
-                          final member = _members![index - (_partial ? 1 : 0)];
-                          final user = mobile.userProfiles[member.user.ref] ??
-                              member.user;
-                          final presence =
-                              mobile.presenceByUser[user.ref] ?? user.presence;
-                          return ListTile(
-                            leading: UserAvatar(user: user),
-                            title: Text(member.nickname ?? user.name),
-                            subtitle: Text(_presenceLabel(presence)),
-                            onTap: () => showUserProfile(
-                              context,
-                              user,
-                              presence,
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-        ),
-      ],
+                            ],
+                          ),
+                        ),
+            ),
+          ),
+        ],
+      ),
     );
   }
+}
+
+/// One heading plus its members in the roster.
+final class MemberListSection {
+  const MemberListSection({
+    required this.title,
+    required this.members,
+    required this.offline,
+  });
+
+  final String title;
+  final List<GuildMember> members;
+  final bool offline;
+}
+
+/// Groups a roster the way the web and desktop clients do: hoisted roles
+/// highest-first, then everyone else who is around, then offline members.
+List<MemberListSection> groupGuildMembers({
+  required List<GuildMember> members,
+  required List<KaedeRole> roles,
+  required PresenceStatus Function(KaedeUser user) presenceFor,
+}) {
+  int rank(PresenceStatus status) => switch (status) {
+        PresenceStatus.online => 0,
+        PresenceStatus.idle => 1,
+        PresenceStatus.dnd => 2,
+        PresenceStatus.invisible || PresenceStatus.offline => 3,
+      };
+  bool isOffline(GuildMember member) {
+    final presence = presenceFor(member.user);
+    return presence == PresenceStatus.offline ||
+        presence == PresenceStatus.invisible;
+  }
+
+  String label(GuildMember member) =>
+      (member.nickname ?? member.user.name).toLowerCase();
+
+  final sorted = [...members]..sort((left, right) {
+      final difference =
+          rank(presenceFor(left.user)) - rank(presenceFor(right.user));
+      if (difference != 0) return difference;
+      return label(left).compareTo(label(right));
+    });
+  final around = sorted.where((member) => !isOffline(member)).toList();
+  final offline = sorted.where(isOffline).toList();
+  final hoisted = [
+    for (final role in roles)
+      if (role.hoist && role.position > 0) role,
+  ]..sort((left, right) => right.position.compareTo(left.position));
+
+  final sections = <MemberListSection>[];
+  final claimed = <EntityRef>{};
+  for (final role in hoisted) {
+    final group = <GuildMember>[];
+    for (final member in around) {
+      if (claimed.contains(member.user.ref)) continue;
+      if (!member.roleIds.contains(role.ref.id.value)) continue;
+      // A member only appears under their highest hoisted role.
+      final highest = hoisted.firstWhere(
+        (candidate) => member.roleIds.contains(candidate.ref.id.value),
+        orElse: () => role,
+      );
+      if (highest.ref != role.ref) continue;
+      group.add(member);
+      claimed.add(member.user.ref);
+    }
+    if (group.isNotEmpty) {
+      sections.add(MemberListSection(
+        title: role.name,
+        members: group,
+        offline: false,
+      ));
+    }
+  }
+  final remaining =
+      around.where((member) => !claimed.contains(member.user.ref)).toList();
+  if (remaining.isNotEmpty) {
+    sections.add(MemberListSection(
+      title: 'Online',
+      members: remaining,
+      offline: false,
+    ));
+  }
+  if (offline.isNotEmpty) {
+    sections.add(MemberListSection(
+      title: 'Offline',
+      members: offline,
+      offline: true,
+    ));
+  }
+  return sections;
+}
+
+/// Colour of a member's highest coloured role, the way names are tinted on
+/// web and desktop.
+Color? memberRoleColor(KaedeGuild guild, GuildMember member) {
+  KaedeRole? best;
+  for (final role in guild.roles) {
+    if (role.color == 0) continue;
+    if (!member.roleIds.contains(role.ref.id.value)) continue;
+    if (best == null || role.position > best.position) best = role;
+  }
+  return best == null ? null : Color(0xFF000000 | best.color);
+}
+
+final class _MemberRow extends StatelessWidget {
+  const _MemberRow({
+    required this.user,
+    required this.presence,
+    required this.nickname,
+    required this.dimmed,
+    required this.onTap,
+    this.nameColor,
+  });
+
+  final KaedeUser user;
+  final PresenceStatus presence;
+  final String? nickname;
+  final bool dimmed;
+  final VoidCallback onTap;
+  final Color? nameColor;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(KaedeRadius.medium),
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(KaedeRadius.medium),
+            child: Opacity(
+              opacity: dimmed ? .55 : 1,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(8, 7, 10, 7),
+                child: Row(
+                  children: [
+                    UserAvatar(user: user, radius: 17, presence: presence),
+                    const SizedBox(width: 11),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            nickname ?? user.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14.5,
+                              color: nameColor,
+                            ),
+                          ),
+                          if (user.customStatus?.trim().isNotEmpty == true)
+                            Text(
+                              user.customStatus!.trim(),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: KaedeColors.muted,
+                                fontSize: 12,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
+final class _MemberListError extends StatelessWidget {
+  const _MemberListError({required this.message, required this.onRetry});
+
+  final String message;
+  final Future<void> Function() onRetry;
+
+  @override
+  Widget build(BuildContext context) => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.people_outline_rounded,
+                  size: 34, color: KaedeColors.muted),
+              const SizedBox(height: 12),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: KaedeColors.muted),
+              ),
+              const SizedBox(height: 14),
+              OutlinedButton.icon(
+                onPressed: onRetry,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Try again'),
+              ),
+            ],
+          ),
+        ),
+      );
 }
 
 final class _ChatBrowser extends ConsumerWidget {
@@ -1597,7 +2272,6 @@ final class _ChatBrowser extends ConsumerWidget {
               ref.read(mobileControllerProvider.notifier).selectGuild(guild),
           onAddGuild: () => _showGuildActions(context, ref),
         ),
-        const VerticalDivider(width: 1),
         Expanded(
           child: state.activeGuild == null
               ? _DirectMessageBrowser(
@@ -1644,31 +2318,44 @@ final class _ServerRail extends ConsumerWidget {
         color: KaedeColors.rail,
         child: SafeArea(
           right: false,
+          bottom: false,
           child: Column(
             children: [
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               _RailButton(
-                label: 'Messages',
+                label: 'Direct messages',
                 active: state.selectedGuild == null,
                 onTap: onOpenHome,
                 badge: state.dms.fold(
                   0,
-                  (total, dm) => total + (state.unreadCounts[dm.ref] ?? 0),
+                  (total, dm) => total + (state.mentionCounts[dm.ref] ?? 0),
                 ),
                 unread: state.dms.any(
                   (dm) => (state.unreadCounts[dm.ref] ?? 0) > 0,
                 ),
-                child: const Icon(Icons.chat_bubble_rounded, size: 26),
+                activeColor: KaedeColors.coral,
+                child: Icon(
+                  Icons.chat_bubble_rounded,
+                  size: 23,
+                  color: state.selectedGuild == null
+                      ? KaedeColors.onCoral
+                      : KaedeColors.textSoft,
+                ),
               ),
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 14),
-                child: Divider(height: 12),
+              Container(
+                margin: const EdgeInsets.fromLTRB(18, 2, 18, 8),
+                height: 1,
+                color: KaedeColors.border,
               ),
               Expanded(
                 child: ReorderableListView.builder(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                  padding: EdgeInsets.zero,
+                  buildDefaultDragHandles: false,
                   itemCount: navigation.items.length,
+                  proxyDecorator: (child, index, animation) => Material(
+                    color: Colors.transparent,
+                    child: Opacity(opacity: .85, child: child),
+                  ),
                   onReorder: (oldIndex, newIndex) => ref
                       .read(mobileControllerProvider.notifier)
                       .saveGuildNavigation(
@@ -1677,41 +2364,65 @@ final class _ServerRail extends ConsumerWidget {
                   itemBuilder: (context, index) {
                     final item = navigation.items[index];
                     return switch (item) {
-                      GuildNavigationGuildItem() => Builder(
+                      GuildNavigationGuildItem() =>
+                        ReorderableDelayedDragStartListener(
                           key: ValueKey('guild:${item.guild.wire}'),
-                          builder: (context) {
-                            final guild = guildByRef[item.guild];
-                            return guild == null
-                                ? const SizedBox.shrink()
-                                : _RailButton(
-                                    label: guild.name,
-                                    active: guild.ref == state.selectedGuild,
-                                    onTap: () => onOpenGuild(guild),
-                                    badge: _guildMentions(state, guild),
-                                    unread: _guildUnread(state, guild),
-                                    child: GuildIcon(guild: guild, size: 54),
-                                  );
-                          },
+                          index: index,
+                          child: Builder(
+                            builder: (context) {
+                              final guild = guildByRef[item.guild];
+                              return guild == null
+                                  ? const SizedBox.shrink()
+                                  : _RailButton(
+                                      label: guild.name,
+                                      active: guild.ref == state.selectedGuild,
+                                      onTap: () => onOpenGuild(guild),
+                                      badge: _guildMentions(state, guild),
+                                      unread: _guildUnread(state, guild),
+                                      child: GuildIcon(
+                                        guild: guild,
+                                        size: 48,
+                                        borderRadius:
+                                            guild.ref == state.selectedGuild
+                                                ? 15
+                                                : 24,
+                                      ),
+                                    );
+                            },
+                          ),
                         ),
-                      GuildNavigationGroupItem() => _GuildRailFolder(
+                      GuildNavigationGroupItem() =>
+                        ReorderableDelayedDragStartListener(
                           key: ValueKey('group:${item.id}'),
-                          state: state,
-                          group: item,
-                          guildByRef: guildByRef,
-                          onOpenGuild: onOpenGuild,
-                          onToggle: () => ref
-                              .read(mobileControllerProvider.notifier)
-                              .saveGuildNavigation(
-                                updateGuildNavigationGroup(
-                                  navigation,
-                                  item.id,
-                                  collapsed: !item.collapsed,
+                          index: index,
+                          child: _GuildRailFolder(
+                            state: state,
+                            group: item,
+                            guildByRef: guildByRef,
+                            onOpenGuild: onOpenGuild,
+                            onToggle: () => ref
+                                .read(mobileControllerProvider.notifier)
+                                .saveGuildNavigation(
+                                  updateGuildNavigationGroup(
+                                    navigation,
+                                    item.id,
+                                    collapsed: !item.collapsed,
+                                  ),
                                 ),
-                              ),
+                          ),
                         ),
                     };
                   },
                 ),
+              ),
+              _RailButton(
+                label: 'Add a guild',
+                active: false,
+                onTap: onAddGuild,
+                idleColor: KaedeColors.rail,
+                border: true,
+                child: const Icon(Icons.add_rounded,
+                    color: KaedeColors.mint, size: 26),
               ),
               _RailButton(
                 label: 'Organize guilds',
@@ -1725,16 +2436,12 @@ final class _ServerRail extends ConsumerWidget {
                     guilds: state.guilds,
                   ),
                 ),
-                child: const Icon(Icons.create_new_folder_outlined, size: 24),
+                idleColor: KaedeColors.rail,
+                border: true,
+                child: const Icon(Icons.create_new_folder_outlined,
+                    size: 21, color: KaedeColors.muted),
               ),
-              _RailButton(
-                label: 'Add a guild',
-                active: false,
-                onTap: onAddGuild,
-                child: const Icon(Icons.add_rounded,
-                    color: KaedeColors.mint, size: 28),
-              ),
-              const SizedBox(height: 2),
+              const SizedBox(height: 4),
             ],
           ),
         ),
@@ -1745,7 +2452,6 @@ final class _ServerRail extends ConsumerWidget {
 
 final class _GuildRailFolder extends StatelessWidget {
   const _GuildRailFolder({
-    super.key,
     required this.state,
     required this.group,
     required this.guildByRef,
@@ -1767,11 +2473,15 @@ final class _GuildRailFolder extends StatelessWidget {
         .toList();
     final mentions =
         guilds.fold(0, (total, guild) => total + _guildMentions(state, guild));
+    final holdsSelection =
+        guilds.any((guild) => guild.ref == state.selectedGuild);
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(4),
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      padding: const EdgeInsets.symmetric(vertical: 3),
       decoration: BoxDecoration(
-        color: KaedeColors.raised.withValues(alpha: .72),
+        color: group.collapsed
+            ? Colors.transparent
+            : KaedeColors.panel.withValues(alpha: .72),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Column(
@@ -1779,16 +2489,17 @@ final class _GuildRailFolder extends StatelessWidget {
         children: [
           _RailButton(
             label: group.name,
-            active: guilds.any((guild) => guild.ref == state.selectedGuild),
+            active: holdsSelection && group.collapsed,
             onTap: onToggle,
-            badge: mentions,
-            unread: guilds.any((guild) => _guildUnread(state, guild)),
+            badge: group.collapsed ? mentions : 0,
+            unread: group.collapsed &&
+                guilds.any((guild) => _guildUnread(state, guild)),
             child: Icon(
               group.collapsed
                   ? Icons.folder_rounded
                   : Icons.folder_open_rounded,
-              color: KaedeColors.coral,
-              size: 29,
+              color: KaedeColors.coralText,
+              size: 25,
             ),
           ),
           if (!group.collapsed)
@@ -1799,7 +2510,12 @@ final class _GuildRailFolder extends StatelessWidget {
                 onTap: () => onOpenGuild(guild),
                 badge: _guildMentions(state, guild),
                 unread: _guildUnread(state, guild),
-                child: GuildIcon(guild: guild, size: 54),
+                size: 42,
+                child: GuildIcon(
+                  guild: guild,
+                  size: 42,
+                  borderRadius: guild.ref == state.selectedGuild ? 13 : 21,
+                ),
               ),
         ],
       ),
@@ -2044,156 +2760,240 @@ final class _DirectMessageBrowser extends ConsumerWidget {
   final VoidCallback onOpenFriends;
   final VoidCallback onOpenSettings;
 
+  void _openSearch(BuildContext context, WidgetRef ref) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (searchContext) => MessageSearchScreen(
+          repository: ref.read(mobileControllerProvider.notifier).repository,
+          scope: 'dms',
+          scopeRef: null,
+          channel: null,
+          accountRef:
+              ref.read(mobileControllerProvider.notifier).api.tokens?.userRef,
+          users: messageSearchUserCandidates(<KaedeUser?>[
+            state.user,
+            ...state.userProfiles.values,
+            for (final channel in state.dms) ...channel.recipients,
+          ]),
+          onJump: (result) async {
+            final controller = ref.read(mobileControllerProvider.notifier);
+            final opened = await controller.selectAndJumpToMessage(
+              result.channel,
+              result.message.ref,
+              shouldContinue: () => messageSearchRouteCanDismiss(searchContext),
+            );
+            if (!searchContext.mounted ||
+                !opened ||
+                !messageSearchRouteCanDismiss(searchContext)) {
+              return;
+            }
+            Navigator.of(searchContext).pop();
+            onOpenChannel();
+          },
+        ),
+      ),
+    );
+  }
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) => ColoredBox(
-        color: KaedeColors.canvas,
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 17, 12, 10),
-              child: Row(
-                children: [
-                  const Expanded(
-                    child: Text('Messages',
-                        style: TextStyle(
-                            fontSize: 28,
-                            fontWeight: FontWeight.w900,
-                            fontStyle: FontStyle.italic)),
+  Widget build(BuildContext context, WidgetRef ref) {
+    final pendingRequests = state.relationships
+        .where((item) => '${item['type']}' == 'pending_in')
+        .length;
+    return ColoredBox(
+      color: KaedeColors.sidebar,
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 10, 4),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Messages',
+                    style: Theme.of(context).textTheme.headlineMedium,
                   ),
-                  _SquareAction(
-                    tooltip: 'Search',
-                    icon: Icons.search_rounded,
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (searchContext) => MessageSearchScreen(
-                          repository: ref
-                              .read(mobileControllerProvider.notifier)
-                              .repository,
-                          scope: 'dms',
-                          scopeRef: null,
-                          channel: null,
-                          accountRef: ref
-                              .read(mobileControllerProvider.notifier)
-                              .api
-                              .tokens
-                              ?.userRef,
-                          users: messageSearchUserCandidates(<KaedeUser?>[
-                            state.user,
-                            ...state.userProfiles.values,
-                            for (final channel in state.dms)
-                              ...channel.recipients,
-                          ]),
-                          onJump: (result) async {
-                            final controller =
-                                ref.read(mobileControllerProvider.notifier);
-                            final opened =
-                                await controller.selectAndJumpToMessage(
-                              result.channel,
-                              result.message.ref,
-                              shouldContinue: () =>
-                                  messageSearchRouteCanDismiss(searchContext),
-                            );
-                            if (!searchContext.mounted ||
-                                !opened ||
-                                !messageSearchRouteCanDismiss(searchContext)) {
-                              return;
-                            }
-                            Navigator.of(searchContext).pop();
-                            onOpenChannel();
-                          },
+                ),
+                _SquareAction(
+                  tooltip: 'New conversation',
+                  icon: Icons.edit_square,
+                  filled: true,
+                  onTap: () => _newConversationAction(
+                    context,
+                    ref,
+                    state,
+                    onOpenChannel,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+            child: _SearchField(
+              hint: 'Search messages',
+              onTap: () => _openSearch(context, ref),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 2),
+            child: _NavRow(
+              icon: Icons.people_alt_rounded,
+              title: 'Friends',
+              subtitle: pendingRequests > 0
+                  ? '$pendingRequests waiting on you'
+                  : null,
+              badge: pendingRequests,
+              onTap: onOpenFriends,
+            ),
+          ),
+          _SidebarSectionHeader(
+            title: 'Direct messages',
+            trailing: IconButton(
+              tooltip: 'New conversation',
+              visualDensity: VisualDensity.compact,
+              onPressed: () => _newConversationAction(
+                context,
+                ref,
+                state,
+                onOpenChannel,
+              ),
+              icon: const Icon(Icons.add_rounded, size: 18),
+            ),
+          ),
+          Expanded(
+            child: state.dms.isEmpty
+                ? const _EmptyNavigation(
+                    icon: Icons.chat_bubble_outline_rounded,
+                    title: 'No conversations yet',
+                    body: 'Start a message with a friend to see it here.',
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+                    itemCount: state.dms.length,
+                    itemBuilder: (context, index) {
+                      final dm = state.dms[index];
+                      final users = dm.recipients
+                          .where((user) => user.ref != state.user?.ref)
+                          .toList();
+                      final group = dm.conversationType == 'group';
+                      final title = users.isEmpty
+                          ? 'Conversation'
+                          : group
+                              ? (dm.name?.trim().isNotEmpty == true
+                                  ? dm.name!.trim()
+                                  : users
+                                      .map((user) => user.name)
+                                      .take(3)
+                                      .join(', '))
+                              : users.first.name;
+                      final person = users.isEmpty ? null : users.first;
+                      final presence = person == null
+                          ? null
+                          : state.presenceByUser[person.ref] ?? person.presence;
+                      return _ConversationRow(
+                        avatar: _DmAvatar(
+                          channel: dm,
+                          self: state.user,
+                          presence: presence,
                         ),
-                      ),
-                    ),
+                        title: title,
+                        subtitle: group
+                            ? '${dm.recipients.length + 1} members'
+                            : person?.customStatus?.trim().isNotEmpty == true
+                                ? person!.customStatus!.trim()
+                                : presence == null
+                                    ? 'Direct message'
+                                    : presenceLabel(presence),
+                        active: dm.ref == state.selectedChannel,
+                        unread: state.unreadCounts[dm.ref] ?? 0,
+                        mentions: state.mentionCounts[dm.ref] ?? 0,
+                        onTap: () {
+                          onOpenChannel();
+                          unawaited(ref
+                              .read(mobileControllerProvider.notifier)
+                              .selectDm(dm));
+                        },
+                      );
+                    },
                   ),
-                  const SizedBox(width: 8),
-                  _SquareAction(
-                    tooltip: 'New message',
-                    icon: Icons.add_rounded,
-                    filled: true,
-                    onTap: () => _newConversationAction(
-                      context,
-                      ref,
-                      state,
-                      onOpenChannel,
-                    ),
+          ),
+          _AccountBar(
+            user: state.user,
+            presence: state.presencePreference,
+            onTap: onOpenSettings,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Tappable search affordance that looks like a field but opens the full
+/// search screen, avoiding a second focusable input in the sidebar.
+final class _SearchField extends StatelessWidget {
+  const _SearchField({required this.hint, required this.onTap});
+
+  final String hint;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: KaedeColors.canvas,
+        borderRadius: BorderRadius.circular(KaedeRadius.small),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(KaedeRadius.small),
+          child: Container(
+            height: 38,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(KaedeRadius.small),
+              border: Border.all(color: KaedeColors.border),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.search_rounded,
+                    size: 17, color: KaedeColors.muted),
+                const SizedBox(width: 8),
+                Text(
+                  hint,
+                  style: const TextStyle(
+                    color: KaedeColors.muted,
+                    fontSize: 13.5,
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: _NavRow(
-                icon: Icons.people_alt_rounded,
-                title: 'Friends & requests',
-                badge: state.relationships
-                    .where((item) => '${item['type']}' == 'pending_in')
-                    .length,
-                onTap: onOpenFriends,
-              ),
-            ),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(18, 18, 18, 6),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text('DIRECT MESSAGES',
-                    style: TextStyle(
-                        color: KaedeColors.muted,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 1.1)),
-              ),
-            ),
+          ),
+        ),
+      );
+}
+
+/// Uppercase group label used above sidebar lists.
+final class _SidebarSectionHeader extends StatelessWidget {
+  const _SidebarSectionHeader({required this.title, this.trailing});
+
+  final String title;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: EdgeInsets.fromLTRB(18, 14, trailing == null ? 18 : 8, 2),
+        child: Row(
+          children: [
             Expanded(
-              child: state.dms.isEmpty
-                  ? const _EmptyNavigation(
-                      icon: Icons.chat_bubble_outline_rounded,
-                      title: 'No conversations yet',
-                      body: 'Start a message with a friend to see it here.',
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
-                      itemCount: state.dms.length,
-                      itemBuilder: (context, index) {
-                        final dm = state.dms[index];
-                        final users = dm.recipients
-                            .where((user) => user.ref != state.user?.ref)
-                            .toList();
-                        final title = users.isEmpty
-                            ? 'Conversation'
-                            : dm.conversationType == 'group'
-                                ? (dm.name?.trim().isNotEmpty == true
-                                    ? dm.name!.trim()
-                                    : users
-                                        .map((user) => user.name)
-                                        .take(3)
-                                        .join(', '))
-                                : users.first.name;
-                        final person = users.isEmpty ? null : users.first;
-                        return _ConversationRow(
-                          avatar: _DmAvatar(channel: dm, self: state.user),
-                          title: title,
-                          subtitle: person?.customStatus ??
-                              (person == null
-                                  ? 'Direct message'
-                                  : _presenceLabel(person.presence)),
-                          active: dm.ref == state.selectedChannel,
-                          unread: state.unreadCounts[dm.ref] ?? 0,
-                          mentions: state.mentionCounts[dm.ref] ?? 0,
-                          onTap: () {
-                            onOpenChannel();
-                            unawaited(ref
-                                .read(mobileControllerProvider.notifier)
-                                .selectDm(dm));
-                          },
-                        );
-                      },
-                    ),
+              child: Text(
+                title.toUpperCase(),
+                style: const TextStyle(
+                  color: KaedeColors.muted,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: .9,
+                ),
+              ),
             ),
-            _AccountBar(
-              user: state.user,
-              presence: state.presencePreference,
-              onTap: onOpenSettings,
-            ),
+            if (trailing case final action?) action,
           ],
         ),
       );
@@ -2233,89 +3033,27 @@ final class _GuildBrowser extends ConsumerWidget {
       }
     }
     return ColoredBox(
-      color: KaedeColors.canvas,
+      color: KaedeColors.sidebar,
       child: Column(
         children: [
-          SizedBox(
-            height: 142,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                if (banner != null)
-                  CachedNetworkImage(
-                    imageUrl: '$banner',
-                    fit: BoxFit.cover,
-                    errorWidget: (_, __, ___) => const SizedBox.shrink(),
-                  )
-                else
-                  const DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [Color(0xFF243B36), Color(0xFF17181B)],
+          _GuildHeader(
+            guild: guild,
+            banner: banner,
+            onSettings: localGuild
+                ? () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => GuildManagementScreen(guild: guild),
                       ),
-                    ),
-                  ),
-                const DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Colors.transparent, Color(0xE608090B)],
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: 16,
-                  right: 10,
-                  bottom: 12,
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(guild.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                    fontSize: 23, fontWeight: FontWeight.w900)),
-                            Text(guild.description ?? guild.ref.domain.value,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                    color: KaedeColors.muted, fontSize: 12)),
-                          ],
-                        ),
-                      ),
-                      if (localGuild)
-                        IconButton.filledTonal(
-                          tooltip: 'Guild settings',
-                          onPressed: () => Navigator.of(context).push(
-                            MaterialPageRoute<void>(
-                              builder: (_) =>
-                                  GuildManagementScreen(guild: guild),
-                            ),
-                          ),
-                          icon: const Icon(Icons.settings_rounded, size: 20),
-                        ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+                    )
+                : null,
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
             child: Row(
               children: [
                 Expanded(
-                  child: _NavRow(
-                    icon: Icons.search_rounded,
-                    title: 'Search',
+                  child: _SearchField(
+                    hint: 'Search ${guild.name}',
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute<void>(
                         builder: (searchContext) => MessageSearchScreen(
@@ -2354,13 +3092,15 @@ final class _GuildBrowser extends ConsumerWidget {
                   _SquareAction(
                     tooltip: 'Invite people',
                     icon: Icons.person_add_alt_1_rounded,
+                    size: 38,
                     onTap: () async {
                       final targets = guildTextChannelTargets(channels);
                       if (targets.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
                             content: Text(
-                              'Create a text or announcement channel before creating an invite.',
+                              'Create a text or announcement channel before '
+                              'creating an invite.',
                             ),
                           ),
                         );
@@ -2391,7 +3131,7 @@ final class _GuildBrowser extends ConsumerWidget {
           ),
           Expanded(
             child: ListView(
-              padding: const EdgeInsets.fromLTRB(8, 2, 8, 14),
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 14),
               children: [
                 for (final channel in channels)
                   if (channel.parentRef == null)
@@ -2425,6 +3165,107 @@ final class _GuildBrowser extends ConsumerWidget {
   }
 }
 
+/// Guild banner with the name overlaid, collapsing to a flat header when the
+/// guild has no banner set.
+final class _GuildHeader extends StatelessWidget {
+  const _GuildHeader({
+    required this.guild,
+    required this.banner,
+    required this.onSettings,
+  });
+
+  final KaedeGuild guild;
+  final Uri? banner;
+  final VoidCallback? onSettings;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+        height: banner == null ? 66 : 128,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (banner != null)
+              CachedNetworkImage(
+                imageUrl: '$banner',
+                fit: BoxFit.cover,
+                errorWidget: (_, __, ___) => const SizedBox.shrink(),
+              ),
+            if (banner != null)
+              const DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Color(0x33000000), Color(0xF01D1B19)],
+                  ),
+                ),
+              ),
+            Positioned(
+              left: 16,
+              right: 8,
+              bottom: 0,
+              top: banner == null ? 0 : null,
+              child: Row(
+                children: [
+                  if (banner == null) ...[
+                    GuildIcon(guild: guild, size: 34, borderRadius: 11),
+                    const SizedBox(width: 10),
+                  ],
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          guild.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: banner == null ? 17 : 21,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -.3,
+                          ),
+                        ),
+                        Text(
+                          guild.description?.trim().isNotEmpty == true
+                              ? guild.description!.trim()
+                              : guild.ref.domain.value,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: KaedeColors.muted,
+                            fontSize: 11.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (onSettings != null)
+                    IconButton(
+                      tooltip: 'Guild settings',
+                      onPressed: onSettings,
+                      style: IconButton.styleFrom(
+                        backgroundColor: banner == null
+                            ? Colors.transparent
+                            : Colors.black26,
+                      ),
+                      icon: const Icon(Icons.settings_rounded, size: 19),
+                    ),
+                ],
+              ),
+            ),
+            if (banner != null)
+              const Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Divider(height: 1, color: KaedeColors.border),
+              ),
+          ],
+        ),
+      );
+}
+
 final class GuildChannelsHeader extends StatelessWidget {
   const GuildChannelsHeader({
     this.onAddChannel,
@@ -2435,17 +3276,17 @@ final class GuildChannelsHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 2, 8, 0),
+        padding: EdgeInsets.fromLTRB(18, 12, onAddChannel == null ? 18 : 8, 0),
         child: Row(
           children: [
-            Expanded(
+            const Expanded(
               child: Text(
                 'Channels',
                 style: TextStyle(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  fontSize: 12,
+                  color: KaedeColors.muted,
+                  fontSize: 11,
                   fontWeight: FontWeight.w800,
-                  letterSpacing: .45,
+                  letterSpacing: .9,
                 ),
               ),
             ),
@@ -2453,16 +3294,17 @@ final class GuildChannelsHeader extends StatelessWidget {
               TextButton.icon(
                 key: const ValueKey('guild-add-channel-button'),
                 style: TextButton.styleFrom(
-                  minimumSize: const Size(0, 44),
+                  minimumSize: const Size(0, 36),
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                   visualDensity: VisualDensity.compact,
+                  foregroundColor: KaedeColors.muted,
                   textStyle: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
                 onPressed: onAddChannel,
-                icon: const Icon(Icons.add_rounded, size: 18),
+                icon: const Icon(Icons.add_rounded, size: 16),
                 label: const Text('Add channel'),
               ),
           ],
@@ -2528,46 +3370,60 @@ final class _CategoryGroup extends StatefulWidget {
 final class _CategoryGroupState extends State<_CategoryGroup> {
   var expanded = true;
 
+  /// Channels with activity stay visible even while the category is closed,
+  /// so collapsing never hides something unread.
+  bool _keepVisible(KaedeChannel channel) =>
+      channel.ref == widget.state.selectedChannel ||
+      (widget.state.unreadCounts[channel.ref] ?? 0) > 0 ||
+      (widget.state.mentionCounts[channel.ref] ?? 0) > 0;
+
   @override
-  Widget build(BuildContext context) => Column(
-        children: [
-          InkWell(
-            borderRadius: BorderRadius.circular(8),
-            onTap: () => setState(() => expanded = !expanded),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(10, 13, 8, 6),
-              child: Row(
-                children: [
-                  Icon(
-                      expanded
-                          ? Icons.keyboard_arrow_down_rounded
-                          : Icons.keyboard_arrow_right_rounded,
-                      size: 18),
-                  const SizedBox(width: 3),
-                  Expanded(
-                    child: Text(
-                      (widget.category.name ?? 'Category').toUpperCase(),
-                      style: const TextStyle(
-                        color: KaedeColors.muted,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: .8,
-                      ),
+  Widget build(BuildContext context) {
+    final visible = expanded
+        ? widget.children
+        : widget.children.where(_keepVisible).toList(growable: false);
+    return Column(
+      children: [
+        InkWell(
+          borderRadius: BorderRadius.circular(KaedeRadius.small),
+          onTap: () => setState(() => expanded = !expanded),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 14, 8, 4),
+            child: Row(
+              children: [
+                AnimatedRotation(
+                  turns: expanded ? 0 : -.25,
+                  duration: const Duration(milliseconds: 150),
+                  child: const Icon(Icons.keyboard_arrow_down_rounded,
+                      size: 16, color: KaedeColors.muted),
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    (widget.category.name ?? 'Category').toUpperCase(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: KaedeColors.muted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: .9,
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
-          if (expanded)
-            for (final channel in widget.children)
-              _ChannelRow(
-                channel: channel,
-                state: widget.state,
-                onTap: () => widget.onOpen(channel),
-              ),
-        ],
-      );
+        ),
+        for (final channel in visible)
+          _ChannelRow(
+            channel: channel,
+            state: widget.state,
+            onTap: () => widget.onOpen(channel),
+          ),
+      ],
+    );
+  }
 }
 
 final class _ChannelRow extends StatelessWidget {
@@ -2588,41 +3444,51 @@ final class _ChannelRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 1),
       child: Material(
         color: active ? KaedeColors.selected : Colors.transparent,
-        borderRadius: BorderRadius.circular(9),
+        borderRadius: BorderRadius.circular(KaedeRadius.small),
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(9),
+          borderRadius: BorderRadius.circular(KaedeRadius.small),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            padding: const EdgeInsets.fromLTRB(6, 9, 10, 9),
             child: Row(
               children: [
-                _UnreadMarker(visible: highlighted),
-                const SizedBox(width: 7),
+                _UnreadMarker(visible: highlighted && !active),
+                const SizedBox(width: 6),
                 Icon(
                   channel.type == ChannelType.voice
                       ? Icons.volume_up_rounded
                       : channel.type == ChannelType.announcement
                           ? Icons.campaign_rounded
                           : Icons.tag_rounded,
-                  size: 21,
+                  size: 19,
                   color: highlighted || active
                       ? KaedeColors.text
                       : KaedeColors.muted,
                 ),
-                const SizedBox(width: 9),
+                const SizedBox(width: 8),
                 Expanded(
-                  child: Text(channel.name ?? 'channel',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: highlighted || active
-                            ? KaedeColors.text
-                            : KaedeColors.muted,
-                        fontWeight: highlighted || active
-                            ? FontWeight.w700
-                            : FontWeight.w500,
-                      )),
+                  child: Text(
+                    channel.name ?? 'channel',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14.5,
+                      color: active
+                          ? KaedeColors.text
+                          : highlighted
+                              ? KaedeColors.text
+                              : KaedeColors.muted,
+                      fontWeight: highlighted || active
+                          ? FontWeight.w600
+                          : FontWeight.w500,
+                    ),
+                  ),
                 ),
+                if (channel.encryptionMode == 'e2ee') ...[
+                  const Icon(Icons.lock_rounded,
+                      size: 13, color: KaedeColors.muted),
+                  const SizedBox(width: 4),
+                ],
                 _ChannelUnread(unread: unread, mentions: mentions),
               ],
             ),
@@ -2653,49 +3519,60 @@ final class _ConversationRow extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        child: Material(
-          color: active ? KaedeColors.selected : Colors.transparent,
-          borderRadius: BorderRadius.circular(12),
-          child: InkWell(
-            onTap: onTap,
-            borderRadius: BorderRadius.circular(12),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-              child: Row(
-                children: [
-                  SizedBox.square(dimension: 44, child: avatar),
-                  const SizedBox(width: 11),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontWeight: unread > 0 || mentions > 0
-                                  ? FontWeight.w800
-                                  : FontWeight.w600,
-                              fontSize: 16,
-                            )),
-                        const SizedBox(height: 2),
-                        Text(subtitle,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                color: KaedeColors.muted, fontSize: 13)),
-                      ],
-                    ),
+  Widget build(BuildContext context) {
+    final highlighted = unread > 0 || mentions > 0;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1),
+      child: Material(
+        color: active ? KaedeColors.selected : Colors.transparent,
+        borderRadius: BorderRadius.circular(KaedeRadius.medium),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(KaedeRadius.medium),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 8, 10, 8),
+            child: Row(
+              children: [
+                SizedBox.square(dimension: 40, child: avatar),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontWeight:
+                              highlighted ? FontWeight.w700 : FontWeight.w600,
+                          fontSize: 15,
+                          color: highlighted || active
+                              ? KaedeColors.text
+                              : KaedeColors.textSoft,
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: KaedeColors.muted,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    ],
                   ),
-                  _DmUnread(unread: unread, mentions: mentions),
-                ],
-              ),
+                ),
+                _DmUnread(unread: unread, mentions: mentions),
+              ],
             ),
           ),
         ),
-      );
+      ),
+    );
+  }
 }
 
 final class _NavRow extends StatelessWidget {
@@ -2703,30 +3580,54 @@ final class _NavRow extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.onTap,
+    this.subtitle,
     this.badge = 0,
   });
 
   final IconData icon;
   final String title;
+  final String? subtitle;
   final VoidCallback onTap;
   final int badge;
 
   @override
   Widget build(BuildContext context) => Material(
-        color: KaedeColors.raised,
-        borderRadius: BorderRadius.circular(11),
+        color: KaedeColors.panel,
+        borderRadius: BorderRadius.circular(KaedeRadius.medium),
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(11),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
+          borderRadius: BorderRadius.circular(KaedeRadius.medium),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(KaedeRadius.medium),
+              border: Border.all(color: KaedeColors.border),
+            ),
             child: Row(
               children: [
-                Icon(icon, color: KaedeColors.muted, size: 22),
+                Icon(icon, color: KaedeColors.muted, size: 20),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(title,
-                      style: const TextStyle(fontWeight: FontWeight.w700)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14.5,
+                        ),
+                      ),
+                      if (subtitle case final detail?)
+                        Text(
+                          detail,
+                          style: const TextStyle(
+                            color: KaedeColors.coralText,
+                            fontSize: 11.5,
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
                 if (badge > 0)
                   Badge(label: Text(badge > 99 ? '99+' : '$badge')),
@@ -2743,25 +3644,36 @@ final class _SquareAction extends StatelessWidget {
     required this.icon,
     required this.onTap,
     this.filled = false,
+    this.size = 40,
   });
 
   final String tooltip;
   final IconData icon;
   final VoidCallback onTap;
   final bool filled;
+  final double size;
 
   @override
   Widget build(BuildContext context) => Tooltip(
         message: tooltip,
         child: Material(
-          color: filled ? KaedeColors.coral : KaedeColors.raised,
-          borderRadius: BorderRadius.circular(11),
+          color: filled ? KaedeColors.coral : KaedeColors.panel,
+          borderRadius: BorderRadius.circular(KaedeRadius.medium),
           child: InkWell(
             onTap: onTap,
-            borderRadius: BorderRadius.circular(11),
-            child: SizedBox.square(
-              dimension: 44,
-              child: Icon(icon, color: filled ? Colors.black : null),
+            borderRadius: BorderRadius.circular(KaedeRadius.medium),
+            child: Container(
+              width: size,
+              height: size,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                border: filled ? null : Border.all(color: KaedeColors.border),
+              ),
+              child: Icon(
+                icon,
+                size: 19,
+                color: filled ? KaedeColors.onCoral : KaedeColors.textSoft,
+              ),
             ),
           ),
         ),
@@ -2777,41 +3689,100 @@ final class _AccountBar extends ConsumerWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) => SafeArea(
-        top: false,
-        child: Material(
-          color: KaedeColors.panel,
-          child: InkWell(
-            onTap: () => _showPresenceMenu(context, ref),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 9, 8, 9),
-              child: Row(
-                children: [
-                  if (user != null) UserAvatar(user: user!, radius: 20),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(user?.name ?? 'Account',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style:
-                                const TextStyle(fontWeight: FontWeight.w800)),
-                        Text(_presenceLabel(presence),
-                            style: const TextStyle(
-                                color: KaedeColors.muted, fontSize: 11)),
-                      ],
-                    ),
+  Widget build(BuildContext context, WidgetRef ref) {
+    final voice = ref.watch(voiceSessionProvider);
+    return SafeArea(
+      top: false,
+      child: DecoratedBox(
+        decoration: const BoxDecoration(
+          color: KaedeColors.canvas,
+          border: Border(top: BorderSide(color: KaedeColors.border)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: InkWell(
+                onTap: () => _showPresenceMenu(context, ref),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+                  child: Row(
+                    children: [
+                      if (user != null)
+                        UserAvatar(
+                          user: user!,
+                          radius: 17,
+                          presence: presence,
+                          ringColor: KaedeColors.canvas,
+                        )
+                      else
+                        const CircleAvatar(
+                          radius: 17,
+                          backgroundColor: KaedeColors.raised,
+                          child: Icon(Icons.person_rounded, size: 18),
+                        ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              user?.name ?? 'Account',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13.5,
+                              ),
+                            ),
+                            Text(
+                              presenceLabel(presence),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: KaedeColors.muted,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                  const Icon(Icons.keyboard_arrow_up_rounded,
-                      color: KaedeColors.muted),
-                ],
+                ),
               ),
             ),
-          ),
+            if (voice.joined)
+              IconButton(
+                tooltip: voice.muted ? 'Unmute' : 'Mute',
+                visualDensity: VisualDensity.compact,
+                onPressed: voice.canSpeak
+                    ? () => _runVisibleAction(
+                          context,
+                          'Could not change the microphone state',
+                          voice.toggleMute,
+                        )
+                    : null,
+                style: IconButton.styleFrom(
+                  foregroundColor:
+                      voice.muted ? KaedeColors.danger : KaedeColors.textSoft,
+                ),
+                icon: Icon(
+                  voice.muted ? Icons.mic_off_rounded : Icons.mic_rounded,
+                  size: 19,
+                ),
+              ),
+            IconButton(
+              tooltip: 'Settings',
+              visualDensity: VisualDensity.compact,
+              onPressed: onTap,
+              icon: const Icon(Icons.settings_rounded, size: 19),
+            ),
+            const SizedBox(width: 2),
+          ],
         ),
-      );
+      ),
+    );
+  }
 
   Future<void> _showPresenceMenu(BuildContext context, WidgetRef ref) async {
     await showModalBottomSheet<void>(
@@ -2820,7 +3791,49 @@ final class _AccountBar extends ConsumerWidget {
       builder: (sheetContext) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (user case final account?)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                child: Row(
+                  children: [
+                    UserAvatar(
+                      user: account,
+                      radius: 21,
+                      presence: presence,
+                      ringColor: KaedeColors.panel,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            account.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 15,
+                            ),
+                          ),
+                          Text(
+                            account.handle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: KaedeColors.muted,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const Divider(),
             for (final status in const <PresenceStatus>[
               PresenceStatus.online,
               PresenceStatus.idle,
@@ -2829,22 +3842,16 @@ final class _AccountBar extends ConsumerWidget {
             ])
               ListTile(
                 leading: Icon(
-                  status == PresenceStatus.dnd
-                      ? Icons.do_not_disturb_on_rounded
-                      : status == PresenceStatus.idle
-                          ? Icons.nightlight_round
-                          : status == PresenceStatus.invisible
-                              ? Icons.radio_button_unchecked_rounded
-                              : Icons.circle,
-                  color: status == PresenceStatus.online
-                      ? KaedeColors.mint
-                      : status == PresenceStatus.dnd
-                          ? KaedeColors.danger
-                          : KaedeColors.muted,
+                  presenceIcon(status),
+                  size: 18,
+                  color: presenceColor(status),
                 ),
-                title: Text(status == PresenceStatus.invisible
-                    ? 'Invisible'
-                    : _presenceLabel(status)),
+                title: Text(presenceLabel(status)),
+                subtitle: status == PresenceStatus.dnd
+                    ? const Text('Notifications stay silent')
+                    : status == PresenceStatus.invisible
+                        ? const Text('Appear offline to everyone')
+                        : null,
                 trailing:
                     status == presence ? const Icon(Icons.check_rounded) : null,
                 onTap: () {
@@ -2870,6 +3877,216 @@ final class _AccountBar extends ConsumerWidget {
   }
 }
 
+/// A one line notice pinned above the shell: offline, realtime, push and
+/// federation states all share this treatment.
+final class _StatusBanner extends StatelessWidget {
+  const _StatusBanner({
+    required this.icon,
+    required this.title,
+    required this.background,
+    required this.foreground,
+    this.subtitle,
+    this.actionLabel,
+    this.onAction,
+    this.actionKey,
+    this.busy = false,
+  });
+
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final Color background;
+  final Color foreground;
+  final String? actionLabel;
+  final VoidCallback? onAction;
+  final Key? actionKey;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: background,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(14, 8, onAction == null ? 14 : 4, 8),
+          child: Row(
+            children: [
+              if (busy)
+                SizedBox.square(
+                  dimension: 15,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: foreground,
+                  ),
+                )
+              else
+                Icon(icon, size: 17, color: foreground),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: foreground,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        height: 1.3,
+                      ),
+                    ),
+                    if (subtitle case final detail?)
+                      Text(
+                        detail,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: KaedeColors.textSoft,
+                          fontSize: 11.5,
+                          height: 1.3,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (actionLabel != null && onAction != null)
+                TextButton(
+                  key: actionKey,
+                  onPressed: onAction,
+                  style: TextButton.styleFrom(
+                    minimumSize: const Size(0, 34),
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    foregroundColor: foreground,
+                  ),
+                  child: Text(actionLabel!),
+                ),
+            ],
+          ),
+        ),
+      );
+}
+
+/// Persistent call bar shown while a voice room is connected in the
+/// background, with the controls people reach for most.
+final class _VoiceStatusBar extends StatelessWidget {
+  const _VoiceStatusBar({
+    required this.voice,
+    required this.onOpen,
+    required this.onToggleMute,
+    required this.onLeave,
+  });
+
+  final VoiceSession voice;
+  final VoidCallback onOpen;
+  final VoidCallback? onToggleMute;
+  final VoidCallback onLeave;
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: KaedeColors.mintSoft,
+        child: InkWell(
+          onTap: onOpen,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 7, 6, 7),
+            child: Row(
+              children: [
+                if (voice.reconnecting)
+                  const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: KaedeColors.mint,
+                    ),
+                  )
+                else
+                  const Icon(Icons.graphic_eq_rounded,
+                      size: 18, color: KaedeColors.mint),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        voice.channel?.name ?? 'Voice room',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: KaedeColors.mint,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                        ),
+                      ),
+                      Text(
+                        voice.reconnecting
+                            ? 'Reconnecting · keeping your place'
+                            : '${voice.participants.length} connected',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: KaedeColors.textSoft,
+                          fontSize: 11.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  tooltip: voice.muted ? 'Unmute' : 'Mute',
+                  onPressed: onToggleMute,
+                  visualDensity: VisualDensity.compact,
+                  style: IconButton.styleFrom(
+                    foregroundColor:
+                        voice.muted ? KaedeColors.danger : KaedeColors.text,
+                  ),
+                  icon: Icon(
+                    voice.muted ? Icons.mic_off_rounded : Icons.mic_rounded,
+                    size: 20,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Leave voice',
+                  onPressed: onLeave,
+                  visualDensity: VisualDensity.compact,
+                  style: IconButton.styleFrom(
+                    foregroundColor: KaedeColors.danger,
+                  ),
+                  icon: const Icon(Icons.call_end_rounded, size: 20),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+}
+
+final class _NoConversationSelected extends StatelessWidget {
+  const _NoConversationSelected();
+
+  @override
+  Widget build(BuildContext context) => const Center(
+        child: Padding(
+          padding: EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.forum_outlined, size: 38, color: KaedeColors.muted),
+              SizedBox(height: 14),
+              Text(
+                'No conversation open',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+              ),
+              SizedBox(height: 4),
+              Text(
+                'Pick a channel or direct message to start reading.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: KaedeColors.muted),
+              ),
+            ],
+          ),
+        ),
+      );
+}
+
 final class _EmptyNavigation extends StatelessWidget {
   const _EmptyNavigation(
       {required this.icon, required this.title, required this.body});
@@ -2880,47 +4097,67 @@ final class _EmptyNavigation extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Center(
         child: Padding(
-          padding: const EdgeInsets.all(26),
+          padding: const EdgeInsets.all(28),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 36, color: KaedeColors.muted),
-              const SizedBox(height: 12),
-              Text(title,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontWeight: FontWeight.w800)),
-              const SizedBox(height: 5),
-              Text(body,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: KaedeColors.muted)),
+              Container(
+                width: 54,
+                height: 54,
+                decoration: BoxDecoration(
+                  color: KaedeColors.panel,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: KaedeColors.border),
+                ),
+                child: Icon(icon, size: 24, color: KaedeColors.muted),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14.5,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                body,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: KaedeColors.muted,
+                  fontSize: 13,
+                  height: 1.35,
+                ),
+              ),
             ],
           ),
         ),
       );
 }
 
-String _presenceLabel(PresenceStatus status) => switch (status) {
-      PresenceStatus.online => 'Online',
-      PresenceStatus.idle => 'Idle',
-      PresenceStatus.dnd => 'Do not disturb',
-      PresenceStatus.invisible || PresenceStatus.offline => 'Offline',
-    };
-
 Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
   await showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
-    backgroundColor: KaedeColors.panel,
     builder: (sheetContext) => SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 22),
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('Add a community',
-                style: TextStyle(fontSize: 21, fontWeight: FontWeight.w900)),
-            const SizedBox(height: 14),
+            Text(
+              'Add a guild',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Guilds are communities. Create your own or join one with an '
+              'invite from any Kaede server.',
+              style: TextStyle(color: KaedeColors.muted, fontSize: 13),
+            ),
+            const SizedBox(height: 18),
             FilledButton.icon(
               onPressed: () {
                 Navigator.pop(sheetContext);
@@ -2938,7 +4175,7 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
               icon: const Icon(Icons.add_rounded),
               label: const Text('Create a guild'),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             OutlinedButton.icon(
               onPressed: () {
                 Navigator.pop(sheetContext);
@@ -2957,7 +4194,7 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
                 });
               },
               icon: const Icon(Icons.public_rounded),
-              label: const Text('Join a guild'),
+              label: const Text('Join with an invite'),
             ),
           ],
         ),
@@ -2974,15 +4211,59 @@ Future<void> _createAndShowInvite(BuildContext context,
     });
     if (!context.mounted) return;
     final code = '${result['code'] ?? ''}';
+    final instance = controller.api.tokens?.instance.value;
+    final link = code.isEmpty || instance == null
+        ? null
+        : 'https://$instance/invite/$code';
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.person_add_alt_1_rounded),
         title: const Text('Invite people'),
-        content: SelectableText(code.isEmpty ? 'Invite created.' : code),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+                'Anyone with this link can join #${channel.name ?? 'channel'}.'),
+            const SizedBox(height: 14),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              decoration: BoxDecoration(
+                color: KaedeColors.raised,
+                borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                border: Border.all(color: KaedeColors.border),
+              ),
+              child: SelectableText(
+                link ?? (code.isEmpty ? 'Invite created.' : code),
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ],
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Done')),
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Done'),
+          ),
+          if (link != null || code.isNotEmpty)
+            FilledButton.icon(
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: link ?? code));
+                if (dialogContext.mounted) Navigator.pop(dialogContext);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Invite link copied.')),
+                  );
+                }
+              },
+              icon: const Icon(Icons.copy_rounded),
+              label: const Text('Copy link'),
+            ),
         ],
       ),
     );
@@ -3021,30 +4302,42 @@ final class ConversationCompactHeader extends StatelessWidget {
           border: Border(bottom: BorderSide(color: KaedeColors.border)),
         ),
         child: SizedBox(
-          height: 62,
+          height: 58,
           child: Row(
             children: [
               if (leading != null) leading!,
               if (avatar != null) ...[
-                SizedBox.square(dimension: 36, child: avatar),
+                if (leading == null) const SizedBox(width: 14),
+                SizedBox.square(dimension: 34, child: avatar),
                 const SizedBox(width: 10),
-              ],
+              ] else if (leading == null)
+                const SizedBox(width: 16),
               Expanded(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title,
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -.2,
+                      ),
+                    ),
+                    if (subtitle?.isNotEmpty == true)
+                      Text(
+                        subtitle!,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                            fontSize: 18, fontWeight: FontWeight.w800)),
-                    if (subtitle?.isNotEmpty == true)
-                      Text(subtitle!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              color: KaedeColors.muted, fontSize: 12)),
+                          color: KaedeColors.muted,
+                          fontSize: 11.5,
+                          height: 1.25,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -3056,65 +4349,100 @@ final class ConversationCompactHeader extends StatelessWidget {
       );
 }
 
+/// Rail entry with the selection pill and unread dot conventions people know
+/// from every other guild list. The pill is painted at the rail's left edge
+/// while the icon stays centred, so nothing shifts when selection changes.
 final class _RailButton extends StatelessWidget {
-  const _RailButton(
-      {required this.label,
-      required this.active,
-      required this.onTap,
-      this.badge = 0,
-      this.unread = false,
-      this.child});
+  const _RailButton({
+    required this.label,
+    required this.active,
+    required this.onTap,
+    this.badge = 0,
+    this.unread = false,
+    this.child,
+    this.size = 48,
+    this.activeColor,
+    this.idleColor,
+    this.border = false,
+  });
+
   final String label;
   final bool active;
   final VoidCallback onTap;
   final int badge;
   final bool unread;
   final Widget? child;
+  final double size;
+
+  /// Fill used while selected. Guild icons paint themselves, so they leave it
+  /// unset and rely on the pill plus the squared corners instead.
+  final Color? activeColor;
+  final Color? idleColor;
+  final bool border;
+
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 10),
-        child: Badge(
-          isLabelVisible: badge > 0,
-          backgroundColor: KaedeColors.danger,
-          textColor: Colors.white,
-          label: Text(badge > 99 ? '99+' : '$badge'),
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Material(
-                color: active ? KaedeColors.coral : KaedeColors.raised,
-                borderRadius: BorderRadius.circular(active ? 16 : 24),
+  Widget build(BuildContext context) {
+    final radius = BorderRadius.circular(active ? size * .31 : size * .5);
+    return SizedBox(
+      height: size + 8,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              width: 4,
+              height: active ? size * .6 : (unread || badge > 0 ? 8.0 : 0.0),
+              decoration: const BoxDecoration(
+                color: KaedeColors.text,
+                borderRadius: BorderRadius.horizontal(
+                  right: Radius.circular(4),
+                ),
+              ),
+            ),
+          ),
+          Tooltip(
+            message: label,
+            child: Badge(
+              isLabelVisible: badge > 0,
+              offset: const Offset(-2, 2),
+              alignment: Alignment.bottomRight,
+              label: Text(badge > 99 ? '99+' : '$badge'),
+              child: Material(
+                color: active
+                    ? activeColor ?? KaedeColors.selected
+                    : idleColor ?? KaedeColors.panel,
                 clipBehavior: Clip.antiAlias,
+                shape: RoundedRectangleBorder(
+                  borderRadius: radius,
+                  side: border
+                      ? const BorderSide(color: KaedeColors.border)
+                      : BorderSide.none,
+                ),
                 child: InkWell(
                   onTap: onTap,
                   child: SizedBox.square(
-                    dimension: 54,
+                    dimension: size,
                     child: child ??
                         Center(
-                          child: Text(label,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w800)),
+                          child: Text(
+                            label,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
                         ),
                   ),
                 ),
               ),
-              if (unread && badge == 0)
-                Positioned(
-                  left: -8,
-                  top: 23,
-                  child: Container(
-                    width: 6,
-                    height: 9,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
-                ),
-            ],
+            ),
           ),
-        ),
-      );
+        ],
+      ),
+    );
+  }
 }
 
 final class _ChannelUnread extends StatelessWidget {
@@ -3203,10 +4531,11 @@ final class _FriendsPage extends ConsumerWidget {
     for (final relationship in state.relationships) {
       sections['${relationship['type']}']?.add(relationship);
     }
+    final empty = sections.values.every((items) => items.isEmpty);
     return RefreshIndicator(
       onRefresh: ref.read(mobileControllerProvider.notifier).refreshNavigation,
       child: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 32),
         children: [
           FilledButton.icon(
             onPressed: () => _textAction(
@@ -3222,7 +4551,24 @@ final class _FriendsPage extends ConsumerWidget {
             icon: const Icon(Icons.person_add_alt_1_rounded),
             label: const Text('Add friend'),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 6),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 4),
+            child: Text(
+              'Friends live on their own home server. Use their full address, '
+              'like @maple@kaede.chat.',
+              style: TextStyle(color: KaedeColors.muted, fontSize: 12.5),
+            ),
+          ),
+          if (empty)
+            const Padding(
+              padding: EdgeInsets.only(top: 40),
+              child: _EmptyNavigation(
+                icon: Icons.people_outline_rounded,
+                title: 'No friends yet',
+                body: 'Send a request to start a conversation.',
+              ),
+            ),
           if (sections['pending_in']!.isNotEmpty)
             _RelationshipSection(
               title: 'Incoming requests',
@@ -3235,12 +4581,12 @@ final class _FriendsPage extends ConsumerWidget {
               relationships: sections['pending_out']!,
               onOpenChat: onOpenChat,
             ),
-          _RelationshipSection(
-            title: 'Friends',
-            emptyMessage: 'Friends you accept appear here.',
-            relationships: sections['friend']!,
-            onOpenChat: onOpenChat,
-          ),
+          if (sections['friend']!.isNotEmpty)
+            _RelationshipSection(
+              title: 'Friends — ${sections['friend']!.length}',
+              relationships: sections['friend']!,
+              onOpenChat: onOpenChat,
+            ),
           if (sections['blocked']!.isNotEmpty)
             _RelationshipSection(
               title: 'Blocked',
@@ -3258,34 +4604,28 @@ final class _RelationshipSection extends ConsumerWidget {
     required this.title,
     required this.relationships,
     required this.onOpenChat,
-    this.emptyMessage,
   });
 
   final String title;
   final List<Map<String, Object?>> relationships;
   final VoidCallback onOpenChat;
-  final String? emptyMessage;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(4, 14, 4, 8),
-            child: Text(title.toUpperCase(),
-                style: const TextStyle(
-                    color: KaedeColors.muted,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 1.1)),
-          ),
-          if (relationships.isEmpty && emptyMessage != null)
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(18),
-                child: Text(emptyMessage!,
-                    style: const TextStyle(color: KaedeColors.muted)),
+            padding: const EdgeInsets.fromLTRB(4, 20, 4, 6),
+            child: Text(
+              title.toUpperCase(),
+              style: const TextStyle(
+                color: KaedeColors.muted,
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                letterSpacing: .9,
               ),
             ),
+          ),
           for (final relationship in relationships)
             _RelationshipTile(
                 relationship: relationship, onOpenChat: onOpenChat),
@@ -3304,76 +4644,125 @@ final class _RelationshipTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final snapshot = _relationshipUser(relationship);
     if (snapshot == null) return const SizedBox.shrink();
-    final user =
-        ref.watch(mobileControllerProvider).userProfiles[snapshot.ref] ??
-            snapshot;
+    final state = ref.watch(mobileControllerProvider);
+    final user = state.userProfiles[snapshot.ref] ?? snapshot;
+    final presence =
+        ref.read(mobileControllerProvider.notifier).presenceFor(user);
     final type = '${relationship['type']}';
-    return Card(
-      child: ListTile(
-        contentPadding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
-        leading: UserAvatar(user: user),
-        title: Text(user.name),
-        subtitle: Text(user.profileResolved
-            ? user.handle
-            : 'Profile unavailable · refreshes automatically'),
-        onTap: () => _showProfile(context, ref, user, type, onOpenChat),
-        trailing: switch (type) {
-          'pending_in' => Wrap(
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Material(
+        color: KaedeColors.panel,
+        borderRadius: BorderRadius.circular(KaedeRadius.medium),
+        child: InkWell(
+          onTap: () => _showProfile(context, ref, user, type, onOpenChat),
+          borderRadius: BorderRadius.circular(KaedeRadius.medium),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(12, 9, 6, 9),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(KaedeRadius.medium),
+              border: Border.all(color: KaedeColors.border),
+            ),
+            child: Row(
               children: [
-                IconButton(
-                  tooltip: 'Accept',
-                  onPressed: () => _relationshipAction(
-                      context,
-                      ref,
-                      () => ref
-                          .read(mobileControllerProvider.notifier)
-                          .repository
-                          .acceptFriend(user.ref)),
-                  icon: const Icon(Icons.check_circle_outline_rounded,
-                      color: KaedeColors.mint),
+                UserAvatar(
+                  user: user,
+                  radius: 19,
+                  presence: presence,
+                  ringColor: KaedeColors.panel,
                 ),
-                IconButton(
-                  tooltip: 'Decline',
-                  onPressed: () => _relationshipAction(
-                      context,
-                      ref,
-                      () => ref
-                          .read(mobileControllerProvider.notifier)
-                          .repository
-                          .removeRelationship(user.ref)),
-                  icon: const Icon(Icons.cancel_outlined),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        user.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14.5,
+                        ),
+                      ),
+                      Text(
+                        user.profileResolved
+                            ? user.handle
+                            : 'Profile unavailable · refreshes automatically',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: KaedeColors.muted,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
+                switch (type) {
+                  'pending_in' => Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Accept',
+                          style: IconButton.styleFrom(
+                            foregroundColor: KaedeColors.mint,
+                          ),
+                          onPressed: () => _relationshipAction(
+                              context,
+                              ref,
+                              () => ref
+                                  .read(mobileControllerProvider.notifier)
+                                  .repository
+                                  .acceptFriend(user.ref)),
+                          icon: const Icon(Icons.check_circle_rounded),
+                        ),
+                        IconButton(
+                          tooltip: 'Decline',
+                          onPressed: () => _relationshipAction(
+                              context,
+                              ref,
+                              () => ref
+                                  .read(mobileControllerProvider.notifier)
+                                  .repository
+                                  .removeRelationship(user.ref)),
+                          icon: const Icon(Icons.cancel_outlined),
+                        ),
+                      ],
+                    ),
+                  'friend' => IconButton(
+                      tooltip: 'Message',
+                      onPressed: user.profileResolved
+                          ? () => _openDm(context, ref, user, onOpenChat)
+                          : null,
+                      icon: const Icon(Icons.chat_bubble_outline_rounded),
+                    ),
+                  'blocked' => TextButton(
+                      onPressed: () => _relationshipAction(
+                          context,
+                          ref,
+                          () => ref
+                              .read(mobileControllerProvider.notifier)
+                              .repository
+                              .unblock(user.ref)),
+                      child: const Text('Unblock'),
+                    ),
+                  _ => IconButton(
+                      tooltip: 'Cancel request',
+                      onPressed: () => _relationshipAction(
+                          context,
+                          ref,
+                          () => ref
+                              .read(mobileControllerProvider.notifier)
+                              .repository
+                              .removeRelationship(user.ref)),
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                },
               ],
             ),
-          'friend' => IconButton(
-              tooltip: 'Message',
-              onPressed: user.profileResolved
-                  ? () => _openDm(context, ref, user, onOpenChat)
-                  : null,
-              icon: const Icon(Icons.chat_bubble_outline_rounded),
-            ),
-          'blocked' => TextButton(
-              onPressed: () => _relationshipAction(
-                  context,
-                  ref,
-                  () => ref
-                      .read(mobileControllerProvider.notifier)
-                      .repository
-                      .unblock(user.ref)),
-              child: const Text('Unblock'),
-            ),
-          _ => IconButton(
-              tooltip: 'Cancel request',
-              onPressed: () => _relationshipAction(
-                  context,
-                  ref,
-                  () => ref
-                      .read(mobileControllerProvider.notifier)
-                      .repository
-                      .removeRelationship(user.ref)),
-              icon: const Icon(Icons.close_rounded),
-            ),
-        },
+          ),
+        ),
       ),
     );
   }
@@ -3431,7 +4820,7 @@ Future<void> _openDm(BuildContext context, WidgetRef ref, KaedeUser user,
 
 Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
     String relationshipType, VoidCallback onOpenChat) async {
-  KaedeUser resolved = user;
+  var resolved = user;
   if (user.profileResolved) {
     try {
       resolved = await ref
@@ -3444,137 +4833,139 @@ Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
     }
   }
   if (!context.mounted) return;
-  await showModalBottomSheet<void>(
-    context: context,
-    useSafeArea: true,
-    isScrollControlled: true,
-    backgroundColor: KaedeColors.panel,
-    builder: (sheetContext) {
-      final banner = publicAssetUri(resolved.ref.domain, resolved.bannerHash,
-          variant: 'thumbnail_1024');
-      return FractionallySizedBox(
-        heightFactor: .76,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+  final presence =
+      ref.read(mobileControllerProvider.notifier).presenceFor(resolved);
+  final profile = resolved;
+  await showUserProfile(
+    context,
+    profile,
+    presence,
+    actions: <Widget>[
+      if (profile.profileResolved)
+        FilledButton.icon(
+          onPressed: () {
+            Navigator.pop(context);
+            _openDm(context, ref, profile, onOpenChat);
+          },
+          icon: const Icon(Icons.chat_bubble_outline_rounded),
+          label: const Text('Message'),
+        ),
+      if (profile.profileResolved &&
+          relationshipType != 'friend' &&
+          relationshipType != 'pending_out' &&
+          relationshipType != 'blocked')
+        OutlinedButton.icon(
+          onPressed: () {
+            Navigator.pop(context);
+            _relationshipAction(
+                context,
+                ref,
+                () => ref
+                    .read(mobileControllerProvider.notifier)
+                    .repository
+                    .requestFriend(profile.handle));
+          },
+          icon: const Icon(Icons.person_add_alt_1_rounded),
+          label: const Text('Send friend request'),
+        ),
+      if (relationshipType == 'friend')
+        OutlinedButton.icon(
+          onPressed: () {
+            Navigator.pop(context);
+            _relationshipAction(
+                context,
+                ref,
+                () => ref
+                    .read(mobileControllerProvider.notifier)
+                    .repository
+                    .removeRelationship(profile.ref));
+          },
+          style: OutlinedButton.styleFrom(
+            foregroundColor: KaedeColors.danger,
+            side: const BorderSide(color: KaedeColors.dangerSoft),
+          ),
+          icon: const Icon(Icons.person_remove_alt_1_rounded),
+          label: const Text('Remove friend'),
+        ),
+      if (relationshipType == 'blocked')
+        OutlinedButton.icon(
+          onPressed: () {
+            Navigator.pop(context);
+            _relationshipAction(
+                context,
+                ref,
+                () => ref
+                    .read(mobileControllerProvider.notifier)
+                    .repository
+                    .unblock(profile.ref));
+          },
+          icon: const Icon(Icons.lock_open_rounded),
+          label: const Text('Unblock'),
+        ),
+    ],
+  );
+}
+
+final class _DmAvatar extends StatelessWidget {
+  const _DmAvatar({required this.channel, required this.self, this.presence});
+
+  final KaedeChannel channel;
+  final KaedeUser? self;
+  final PresenceStatus? presence;
+
+  @override
+  Widget build(BuildContext context) {
+    final recipients = channel.recipients
+        .where((user) => self == null || user.ref != self!.ref)
+        .toList();
+    if (channel.conversationType == 'group') {
+      if (recipients.length < 2) {
+        return const CircleAvatar(
+          radius: 20,
+          backgroundColor: KaedeColors.raised,
+          foregroundColor: KaedeColors.textSoft,
+          child: Icon(Icons.group_rounded, size: 20),
+        );
+      }
+      // Two overlapping avatars read as a group at a glance.
+      return SizedBox.square(
+        dimension: 40,
+        child: Stack(
           children: [
-            SizedBox(
-              height: 150,
-              child: banner == null
-                  ? const DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(colors: [
-                          KaedeColors.mint,
-                          KaedeColors.coral,
-                        ]),
-                      ),
-                    )
-                  : CachedNetworkImage(imageUrl: '$banner', fit: BoxFit.cover),
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: UserAvatar(user: recipients[1], radius: 13),
             ),
-            Transform.translate(
-              offset: const Offset(0, -38),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: UserAvatar(user: resolved, radius: 48)),
-              ),
-            ),
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-                children: [
-                  Text(resolved.name,
-                      style: Theme.of(context).textTheme.headlineMedium),
-                  Text(
-                    resolved.profileResolved
-                        ? resolved.handle
-                        : 'Profile unavailable · refreshes automatically',
-                    style: const TextStyle(color: KaedeColors.muted),
-                  ),
-                  if (resolved.customStatus?.isNotEmpty == true) ...[
-                    const SizedBox(height: 12),
-                    Chip(label: Text(resolved.customStatus!)),
-                  ],
-                  if (resolved.bio?.isNotEmpty == true) ...[
-                    const SizedBox(height: 18),
-                    const Text('ABOUT ME',
-                        style: TextStyle(
-                            color: KaedeColors.muted,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 1.1)),
-                    const SizedBox(height: 6),
-                    Text(resolved.bio!),
-                  ],
-                  const SizedBox(height: 22),
-                  if (resolved.profileResolved) ...[
-                    FilledButton.icon(
-                      onPressed: () {
-                        Navigator.pop(sheetContext);
-                        _openDm(context, ref, resolved, onOpenChat);
-                      },
-                      icon: const Icon(Icons.chat_bubble_outline_rounded),
-                      label: const Text('Message'),
-                    ),
-                    const SizedBox(height: 8),
-                  ],
-                  if (resolved.profileResolved &&
-                      relationshipType != 'friend' &&
-                      relationshipType != 'pending_out' &&
-                      relationshipType != 'blocked')
-                    OutlinedButton.icon(
-                      onPressed: () {
-                        Navigator.pop(sheetContext);
-                        _relationshipAction(
-                            context,
-                            ref,
-                            () => ref
-                                .read(mobileControllerProvider.notifier)
-                                .repository
-                                .requestFriend(resolved.handle));
-                      },
-                      icon: const Icon(Icons.person_add_alt_1_rounded),
-                      label: const Text('Send friend request'),
-                    ),
-                  if (relationshipType == 'friend')
-                    OutlinedButton(
-                      onPressed: () {
-                        Navigator.pop(sheetContext);
-                        _relationshipAction(
-                            context,
-                            ref,
-                            () => ref
-                                .read(mobileControllerProvider.notifier)
-                                .repository
-                                .removeRelationship(resolved.ref));
-                      },
-                      child: const Text('Remove friend'),
-                    ),
-                ],
+            Positioned(
+              left: 0,
+              top: 0,
+              child: Container(
+                padding: const EdgeInsets.all(1.5),
+                decoration: const BoxDecoration(
+                  color: KaedeColors.sidebar,
+                  shape: BoxShape.circle,
+                ),
+                child: UserAvatar(user: recipients.first, radius: 13),
               ),
             ),
           ],
         ),
       );
-    },
-  );
-}
-
-final class _DmAvatar extends StatelessWidget {
-  const _DmAvatar({required this.channel, required this.self});
-
-  final KaedeChannel channel;
-  final KaedeUser? self;
-
-  @override
-  Widget build(BuildContext context) {
-    if (channel.conversationType == 'group') {
-      return const CircleAvatar(child: Icon(Icons.group_rounded));
     }
-    final recipients = channel.recipients
-        .where((user) => self == null || user.ref != self!.ref)
-        .toList();
-    if (recipients.isNotEmpty) return UserAvatar(user: recipients.first);
-    return const CircleAvatar(child: Icon(Icons.group_rounded));
+    if (recipients.isNotEmpty) {
+      return UserAvatar(
+        user: recipients.first,
+        radius: 20,
+        presence: presence,
+      );
+    }
+    return const CircleAvatar(
+      radius: 20,
+      backgroundColor: KaedeColors.raised,
+      foregroundColor: KaedeColors.textSoft,
+      child: Icon(Icons.group_rounded, size: 20),
+    );
   }
 }
 

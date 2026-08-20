@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
@@ -82,9 +84,11 @@ final class _GuildManagementScreenState
         _guild.allows(Permission.moderateMembers) ||
         _guild.allows(Permission.manageNicknames) ||
         canManageRoles;
-    final sections = <({String label, IconData icon, Widget page})>[
+    final sections =
+        <({String label, String description, IconData icon, Widget page})>[
       (
         label: 'Overview',
+        description: 'Name, icon, banner and guild-wide defaults.',
         icon: Icons.home_outlined,
         page: _OverviewTab(
           guild: _guild,
@@ -97,6 +101,7 @@ final class _GuildManagementScreenState
       if (canManageChannels || canManageRoles)
         (
           label: 'Channels',
+          description: 'Create channels, reorder them and set permissions.',
           icon: Icons.tag_rounded,
           page: _ChannelsTab(
             guild: _guild,
@@ -111,6 +116,7 @@ final class _GuildManagementScreenState
       if (canManageRoles)
         (
           label: 'Roles',
+          description: 'Role colours, permissions and ordering.',
           icon: Icons.badge_outlined,
           page: _RolesTab(
               guild: _guild,
@@ -121,6 +127,7 @@ final class _GuildManagementScreenState
       if (canManageMembers)
         (
           label: 'Members',
+          description: 'Nicknames, roles, timeouts, kicks and bans.',
           icon: Icons.people_outline_rounded,
           page: _MembersTab(
               guild: _guild,
@@ -134,6 +141,7 @@ final class _GuildManagementScreenState
           _guild.allows(Permission.banInstances))
         (
           label: 'Bans',
+          description: 'Banned accounts and blocked instances.',
           icon: Icons.gavel_outlined,
           page: _BansTab(
             guild: _guild,
@@ -145,6 +153,7 @@ final class _GuildManagementScreenState
       if (isOwner || _guild.allows(Permission.createInvite) || canManageGuild)
         (
           label: 'Invites',
+          description: 'Active invite links and who created them.',
           icon: Icons.person_add_alt_1_rounded,
           page: _InvitesTab(
             guild: _guild,
@@ -156,6 +165,7 @@ final class _GuildManagementScreenState
       if (isOwner || _guild.allows(Permission.manageEmojis))
         (
           label: 'Emoji',
+          description: 'Custom emoji available in this guild.',
           icon: Icons.emoji_emotions_outlined,
           page: _EmojiTab(
             guild: _guild,
@@ -166,6 +176,7 @@ final class _GuildManagementScreenState
       if (isOwner || _guild.allows(Permission.manageWebhooks))
         (
           label: 'Webhooks',
+          description: 'Outgoing integrations that post here.',
           icon: Icons.webhook_rounded,
           page: _WebhooksTab(
             guild: _guild,
@@ -176,6 +187,7 @@ final class _GuildManagementScreenState
       if (isOwner || _guild.allows(Permission.viewAuditLog))
         (
           label: 'Audit',
+          description: 'Recent administrative actions.',
           icon: Icons.receipt_long_outlined,
           page: _AuditTab(
             guild: _guild,
@@ -225,19 +237,41 @@ final class _GuildManagementScreenState
         appBar: AppBar(title: title),
         body: _loading
             ? const Center(child: CircularProgressIndicator())
-            : ListView.separated(
-                padding: const EdgeInsets.fromLTRB(12, 10, 12, 30),
-                itemCount: sections.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 6),
-                itemBuilder: (context, index) {
-                  final section = sections[index];
-                  return Card(
-                    margin: EdgeInsets.zero,
-                    child: ListTile(
-                      leading: Icon(section.icon, color: KaedeColors.coral),
-                      title: Text(section.label,
-                          style: const TextStyle(fontWeight: FontWeight.w800)),
-                      trailing: const Icon(Icons.chevron_right_rounded),
+            : ListView(
+                padding: const EdgeInsets.fromLTRB(14, 8, 14, 30),
+                children: [
+                  Row(
+                    children: [
+                      GuildIcon(guild: _guild, size: 52, borderRadius: 17),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _guild.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.headlineSmall,
+                            ),
+                            Text(
+                              _guild.ref.domain.value,
+                              style: const TextStyle(
+                                color: KaedeColors.muted,
+                                fontSize: 12.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  for (final section in sections)
+                    _SectionRow(
+                      label: section.label,
+                      description: section.description,
+                      icon: section.icon,
                       onTap: () => Navigator.of(context).push<void>(
                         MaterialPageRoute<void>(
                           builder: (context) => Scaffold(
@@ -247,8 +281,7 @@ final class _GuildManagementScreenState
                         ),
                       ),
                     ),
-                  );
-                },
+                ],
               ),
       );
     });
@@ -274,6 +307,334 @@ final class _GuildManagementScreenState
           backgroundColor: KaedeColors.danger));
     }
   }
+}
+
+/// One tappable settings area in the compact guild settings list.
+final class _SectionRow extends StatelessWidget {
+  const _SectionRow({
+    required this.label,
+    required this.description,
+    required this.icon,
+    required this.onTap,
+  });
+
+  final String label;
+  final String description;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Material(
+          color: KaedeColors.panel,
+          borderRadius: BorderRadius.circular(KaedeRadius.large),
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(KaedeRadius.large),
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(14, 13, 10, 13),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(KaedeRadius.large),
+                border: Border.all(color: KaedeColors.border),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: KaedeColors.raised,
+                      borderRadius: BorderRadius.circular(KaedeRadius.small),
+                    ),
+                    child: Icon(icon, size: 18, color: KaedeColors.coralText),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          label,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 15,
+                          ),
+                        ),
+                        const SizedBox(height: 1),
+                        Text(
+                          description,
+                          style: const TextStyle(
+                            color: KaedeColors.muted,
+                            fontSize: 12,
+                            height: 1.3,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Icon(Icons.chevron_right_rounded,
+                      color: KaedeColors.muted),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
+/// The emoji image itself, so the list shows what it is looking at.
+final class _EmojiThumbnail extends StatelessWidget {
+  const _EmojiThumbnail({required this.emoji, required this.fallbackDomain});
+
+  final Map<String, Object?> emoji;
+  final Domain fallbackDomain;
+
+  @override
+  Widget build(BuildContext context) {
+    final id = '${emoji['id'] ?? ''}';
+    final domain = '${emoji['origin_domain'] ?? fallbackDomain.value}';
+    if (id.isEmpty || domain.isEmpty) {
+      return const Icon(Icons.emoji_emotions_outlined,
+          size: 19, color: KaedeColors.muted);
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(6),
+      child: CachedNetworkImage(
+        imageUrl:
+            Uri.https(domain, '/media/emojis/$id/thumbnail_128').toString(),
+        width: 26,
+        height: 26,
+        fit: BoxFit.contain,
+        placeholder: (_, __) => const SizedBox.square(dimension: 26),
+        errorWidget: (_, __, ___) => const Icon(
+          Icons.emoji_emotions_outlined,
+          size: 19,
+          color: KaedeColors.muted,
+        ),
+      ),
+    );
+  }
+}
+
+/// What an invite allows, in one line.
+String inviteSummaryLine(Map<String, Object?> invite) {
+  final uses = invite['uses'] ?? 0;
+  final maximum = invite['max_uses'];
+  final expires = invite['expires_at'];
+  final parts = <String>[
+    maximum is num && maximum > 0 ? '$uses of $maximum uses' : '$uses uses',
+  ];
+  if (expires is String && expires.isNotEmpty) {
+    final at = DateTime.tryParse(expires);
+    parts.add(at == null ? 'expires' : 'expires ${_shortDate(at.toLocal())}');
+  } else {
+    parts.add('never expires');
+  }
+  return parts.join(' · ');
+}
+
+String _shortDate(DateTime value) =>
+    '${value.year}-${value.month.toString().padLeft(2, '0')}-'
+    '${value.day.toString().padLeft(2, '0')}';
+
+/// Empty state inside a management list.
+final class _TabEmpty extends StatelessWidget {
+  const _TabEmpty({
+    required this.icon,
+    required this.title,
+    required this.body,
+  });
+
+  final IconData icon;
+  final String title;
+  final String body;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 40),
+        child: Column(
+          children: [
+            Icon(icon, size: 30, color: KaedeColors.muted),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              style: const TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 14.5,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              body,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: KaedeColors.muted, fontSize: 13),
+            ),
+          ],
+        ),
+      );
+}
+
+/// Short guidance above a management list.
+final class _TabHint extends StatelessWidget {
+  const _TabHint(this.message);
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.fromLTRB(2, 2, 2, 14),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.only(top: 1, right: 9),
+              child: Icon(Icons.info_outline_rounded,
+                  size: 15, color: KaedeColors.muted),
+            ),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(
+                  color: KaedeColors.muted,
+                  fontSize: 12.5,
+                  height: 1.35,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+}
+
+/// Row shared by the reorderable management lists so channels, roles and
+/// members line up with each other.
+final class _ManagementRow extends StatelessWidget {
+  const _ManagementRow({
+    required this.leading,
+    required this.title,
+    required this.subtitle,
+    this.trailing,
+    this.badge,
+    this.onTap,
+    this.indented = false,
+  });
+
+  final Widget leading;
+  final String title;
+  final String subtitle;
+  final Widget? trailing;
+  final Widget? badge;
+  final VoidCallback? onTap;
+  final bool indented;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: EdgeInsets.fromLTRB(indented ? 18 : 0, 0, 0, 7),
+        child: Material(
+          color: KaedeColors.panel,
+          borderRadius: BorderRadius.circular(KaedeRadius.medium),
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(KaedeRadius.medium),
+            child: Container(
+              padding: EdgeInsets.fromLTRB(12, 8, trailing == null ? 12 : 2, 8),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                border: Border.all(color: KaedeColors.border),
+              ),
+              child: Row(
+                children: [
+                  SizedBox.square(dimension: 30, child: Center(child: leading)),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 14.5,
+                                ),
+                              ),
+                            ),
+                            if (badge case final indicator?) ...[
+                              const SizedBox(width: 6),
+                              indicator,
+                            ],
+                          ],
+                        ),
+                        Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: KaedeColors.muted,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (trailing case final actions?) actions,
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
+/// Human summary of what a role does, instead of its raw position number.
+String roleSummaryLine(KaedeRole role) {
+  final parts = <String>[];
+  if (role.permissions & BigInt.from(Permission.administrator) != BigInt.zero) {
+    parts.add('Administrator');
+  } else {
+    final granted = countGrantedPermissions(role.permissions);
+    parts.add(granted == 0
+        ? 'No extra permissions'
+        : '$granted permission${granted == 1 ? '' : 's'}');
+  }
+  if (role.hoist) parts.add('shown separately');
+  if (role.mentionable) parts.add('mentionable');
+  return parts.join(' · ');
+}
+
+/// How many permission bits a role grants.
+int countGrantedPermissions(BigInt permissions) {
+  var granted = 0;
+  for (final permission in permissionMetadata) {
+    if (permissions & BigInt.from(permission.bit) != BigInt.zero) granted += 1;
+  }
+  return granted;
+}
+
+/// Type and placement of a channel, for management rows.
+String channelSummaryLine(KaedeChannel channel, KaedeChannel? parent) {
+  final type = switch (channel.type) {
+    ChannelType.category => 'Category',
+    ChannelType.voice => 'Voice channel',
+    ChannelType.announcement => 'Announcement channel',
+    _ => 'Text channel',
+  };
+  final placement = channel.type == ChannelType.category
+      ? null
+      : parent?.name?.trim().isNotEmpty == true
+          ? 'in ${parent!.name!.trim()}'
+          : 'no category';
+  final topic = channel.topic?.trim();
+  return <String>[
+    type,
+    if (placement != null) placement,
+    if (topic?.isNotEmpty == true) topic!,
+  ].join(' · ');
 }
 
 final class _OverviewTab extends StatefulWidget {
@@ -363,25 +724,46 @@ final class _OverviewTabState extends State<_OverviewTab> {
               'Identity and presentation are federated to every joined instance.',
           child: Column(children: [
             Row(children: [
-              GuildIcon(guild: _guild, size: 68),
-              const SizedBox(width: 12),
+              GuildIcon(guild: _guild, size: 62, borderRadius: 20),
+              const SizedBox(width: 14),
               Expanded(
-                  child: OutlinedButton.icon(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    OutlinedButton.icon(
                       onPressed: _busy || !widget.canManage
                           ? null
                           : () => _asset('icon'),
-                      icon: const Icon(Icons.image_outlined),
-                      label: const Text('Change icon'))),
-              const SizedBox(width: 8),
-              Expanded(
-                  child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(0, 38),
+                        textStyle: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      icon: const Icon(Icons.image_outlined, size: 16),
+                      label: const Text('Change icon'),
+                    ),
+                    const SizedBox(height: 6),
+                    OutlinedButton.icon(
                       onPressed: _busy || !widget.canManage
                           ? null
                           : () => _asset('banner'),
-                      icon: const Icon(Icons.panorama_outlined),
-                      label: const Text('Change banner'))),
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(0, 38),
+                        textStyle: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      icon: const Icon(Icons.panorama_outlined, size: 16),
+                      label: const Text('Change banner'),
+                    ),
+                  ],
+                ),
+              ),
             ]),
-            const SizedBox(height: 14),
+            const SizedBox(height: 18),
             TextField(
                 controller: _name,
                 enabled: widget.canManage,
@@ -393,15 +775,21 @@ final class _OverviewTabState extends State<_OverviewTab> {
                 maxLines: 6,
                 maxLength: 500,
                 enabled: widget.canManage,
-                decoration: const InputDecoration(labelText: 'Description')),
+                decoration: const InputDecoration(
+                  labelText: 'Description',
+                  alignLabelWithHint: true,
+                )),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
               key: ValueKey(
                 'guild-history-${_guild.ref.wire}-${_guild.version}-$_history',
               ),
               initialValue: _history,
-              decoration:
-                  const InputDecoration(labelText: 'Federated message history'),
+              decoration: const InputDecoration(
+                labelText: 'Federated message history',
+                helperText: 'Whether instances that join later may fetch older '
+                    'messages.',
+              ),
               items: const [
                 DropdownMenuItem(
                     value: 'disabled',
@@ -425,6 +813,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
         ),
         _Panel(
           title: 'Notifications',
+          subtitle: 'What this guild is allowed to notify you about.',
           child: Column(children: [
             if (_notificationError case final warning?) ...[
               ListTile(
@@ -470,20 +859,29 @@ final class _OverviewTabState extends State<_OverviewTab> {
           title: 'Ownership',
           subtitle:
               'Remote instances keep untrusted replicas. Deletion and cache purges are best effort once data has federated.',
-          child: Wrap(spacing: 10, runSpacing: 10, children: [
-            OutlinedButton.icon(
-                onPressed: widget.isOwner ? _transfer : null,
-                icon: const Icon(Icons.swap_horiz_rounded),
-                label: const Text('Transfer ownership')),
-            OutlinedButton.icon(
-                onPressed: _leave,
-                icon: const Icon(Icons.logout_rounded),
-                label: const Text('Leave guild')),
-            FilledButton.tonalIcon(
-                onPressed: widget.isOwner ? _delete : null,
-                icon: const Icon(Icons.delete_forever_outlined),
-                label: const Text('Delete guild')),
-          ]),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              OutlinedButton.icon(
+                  onPressed: widget.isOwner ? _transfer : null,
+                  icon: const Icon(Icons.swap_horiz_rounded, size: 18),
+                  label: const Text('Transfer ownership')),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                  onPressed: _leave,
+                  icon: const Icon(Icons.logout_rounded, size: 18),
+                  label: const Text('Leave guild')),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                  onPressed: widget.isOwner ? _delete : null,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: KaedeColors.danger,
+                    side: const BorderSide(color: KaedeColors.dangerSoft),
+                  ),
+                  icon: const Icon(Icons.delete_forever_outlined, size: 18),
+                  label: const Text('Delete guild')),
+            ],
+          ),
         ),
       ]);
 
@@ -650,26 +1048,43 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
         body: ReorderableListView.builder(
           buildDefaultDragHandles: false,
           padding: const EdgeInsets.all(14),
-          header: const Padding(
-              padding: EdgeInsets.fromLTRB(4, 4, 4, 14),
-              child: Text(
-                  'Drag channels and categories to reorder them. Category children retain their parent.')),
+          header: const _TabHint(
+            'Press and hold a row to reorder. Channels keep the category they '
+            'belong to.',
+          ),
           itemCount: _channels.length,
           onReorder: widget.canManageChannels ? _reorder : (_, __) {},
           itemBuilder: (context, index) {
             final channel = _channels[index];
-            return Card(
+            final parent = channel.parentRef == null
+                ? null
+                : _channels
+                    .where((item) => item.ref == channel.parentRef)
+                    .firstOrNull;
+            return ReorderableDelayedDragStartListener(
               key: ValueKey(channel.ref.wire),
-              child: ListTile(
-                leading: Icon(switch (channel.type) {
-                  ChannelType.category => Icons.folder_outlined,
-                  ChannelType.voice => Icons.volume_up_outlined,
-                  _ => Icons.tag_rounded
-                }),
-                title: Text(channel.name ?? 'channel'),
-                subtitle: Text(channel.type.name),
-                trailing: _channelActions(channel, index),
+              index: index,
+              enabled: widget.canManageChannels,
+              child: _ManagementRow(
+                indented: channel.parentRef != null,
                 onTap: widget.canManageChannels ? () => _edit(channel) : null,
+                leading: Icon(
+                  switch (channel.type) {
+                    ChannelType.category => Icons.folder_outlined,
+                    ChannelType.voice => Icons.volume_up_rounded,
+                    ChannelType.announcement => Icons.campaign_rounded,
+                    _ => Icons.tag_rounded
+                  },
+                  size: 20,
+                  color: KaedeColors.muted,
+                ),
+                title: channel.name ?? 'channel',
+                subtitle: channelSummaryLine(channel, parent),
+                badge: channel.encryptionMode == 'e2ee'
+                    ? const Icon(Icons.lock_rounded,
+                        size: 13, color: KaedeColors.mint)
+                    : null,
+                trailing: _channelActions(channel, index),
               ),
             );
           },
@@ -677,12 +1092,16 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
         floatingActionButton: FloatingActionButton.extended(
             onPressed: widget.canManageChannels ? _create : null,
             icon: const Icon(Icons.add_rounded),
-            label: const Text('Channel')),
+            label: const Text('Create channel')),
       );
 
   Widget _channelActions(KaedeChannel channel, int index) {
     if (!widget.canManageChannels && !widget.canManagePermissions) {
-      return const Icon(Icons.lock_outline_rounded);
+      return const SizedBox.square(
+        dimension: 44,
+        child: Icon(Icons.lock_outline_rounded,
+            size: 18, color: KaedeColors.muted),
+      );
     }
     return Row(mainAxisSize: MainAxisSize.min, children: [
       PopupMenuButton<String>(
@@ -719,9 +1138,12 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
       if (widget.canManageChannels)
         ReorderableDragStartListener(
           index: index,
-          child: const Padding(
-            padding: EdgeInsets.all(12),
-            child: Icon(Icons.drag_handle_rounded),
+          child: const Tooltip(
+            message: 'Drag to reorder',
+            child: SizedBox.square(
+              dimension: 44,
+              child: Icon(Icons.drag_handle_rounded, color: KaedeColors.muted),
+            ),
           ),
         ),
     ]);
@@ -1032,10 +1454,11 @@ final class _RolesTabState extends State<_RolesTab> {
         body: ReorderableListView.builder(
           buildDefaultDragHandles: false,
           padding: const EdgeInsets.all(14),
-          header: const Padding(
-              padding: EdgeInsets.all(4),
-              child: Text(
-                  'Higher roles can manage only roles and members below them. Drag to reorder; changes save immediately.')),
+          header: const _TabHint(
+            'Roles are ranked. A member can only manage roles below their own '
+            'highest role. Press and hold a row to reorder; changes save '
+            'immediately.',
+          ),
           itemCount: _roles.length,
           onReorder: (oldIndex, newIndex) async {
             if (!_canMove(_roles[oldIndex])) return;
@@ -1082,31 +1505,59 @@ final class _RolesTabState extends State<_RolesTab> {
           },
           itemBuilder: (_, index) {
             final role = _roles[index];
-            return Card(
-                key: ValueKey(role.ref.wire),
-                child: ListTile(
-                  leading: CircleAvatar(
-                      radius: 10,
-                      backgroundColor: role.color == 0
-                          ? KaedeColors.muted
-                          : Color(0xFF000000 | role.color)),
-                  title: Text(role.name),
-                  subtitle: Text(
-                      '${role.position} · ${role.hoist ? 'Displayed separately' : 'Standard'}'),
-                  trailing: _canMove(role)
-                      ? ReorderableDragStartListener(
-                          index: index,
-                          child: const Padding(
-                            padding: EdgeInsets.all(12),
-                            child: Icon(Icons.drag_handle_rounded),
+            return ReorderableDelayedDragStartListener(
+              key: ValueKey(role.ref.wire),
+              index: index,
+              enabled: _canMove(role),
+              child: _ManagementRow(
+                onTap: _canMove(role) ? () => _edit(role) : null,
+                leading: Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: (role.color == 0
+                            ? KaedeColors.muted
+                            : Color(0xFF000000 | role.color))
+                        .withValues(alpha: .18),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Center(
+                    child: Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: role.color == 0
+                            ? KaedeColors.muted
+                            : Color(0xFF000000 | role.color),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+                ),
+                title: role.name,
+                subtitle: roleSummaryLine(role),
+                trailing: _canMove(role)
+                    ? ReorderableDragStartListener(
+                        index: index,
+                        child: const Tooltip(
+                          message: 'Drag to reorder',
+                          child: SizedBox.square(
+                            dimension: 44,
+                            child: Icon(Icons.drag_handle_rounded,
+                                color: KaedeColors.muted),
                           ),
-                        )
-                      : const Tooltip(
-                          message: 'This role is above your role ceiling',
-                          child: Icon(Icons.lock_outline_rounded),
                         ),
-                  onTap: _canMove(role) ? () => _edit(role) : null,
-                ));
+                      )
+                    : const Tooltip(
+                        message: 'This role is above your role ceiling',
+                        child: SizedBox.square(
+                          dimension: 44,
+                          child: Icon(Icons.lock_outline_rounded,
+                              size: 18, color: KaedeColors.muted),
+                        ),
+                      ),
+              ),
+            );
           },
         ),
         floatingActionButton: FloatingActionButton.extended(
@@ -1115,7 +1566,7 @@ final class _RolesTabState extends State<_RolesTab> {
                 ? () => _edit(null)
                 : null,
             icon: const Icon(Icons.add_rounded),
-            label: const Text('Role')),
+            label: const Text('Create role')),
       );
 
   bool _canMove(KaedeRole role) {
@@ -1321,19 +1772,29 @@ final class _MembersTabState extends State<_MembersTab> {
   @override
   Widget build(BuildContext context) => Column(children: [
         Padding(
-            padding: const EdgeInsets.all(14),
-            child: SearchBar(
-                controller: _search,
-                hintText: 'Search members',
-                leading: const Icon(Icons.search_rounded),
-                trailing: [
-                  if (_search.text.isNotEmpty)
-                    IconButton(
-                        tooltip: 'Clear search',
-                        onPressed: _search.clear,
-                        icon: const Icon(Icons.close_rounded))
-                ],
-                onSubmitted: (_) => _load(reset: true))),
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+          child: TextField(
+            controller: _search,
+            textInputAction: TextInputAction.search,
+            decoration: InputDecoration(
+              hintText: 'Search members',
+              prefixIcon: const Icon(Icons.search_rounded, size: 19),
+              suffixIcon: _search.text.isEmpty
+                  ? null
+                  : IconButton(
+                      tooltip: 'Clear search',
+                      onPressed: () {
+                        _search.clear();
+                        _load(reset: true);
+                      },
+                      icon: const Icon(Icons.close_rounded, size: 18),
+                    ),
+              isDense: true,
+            ),
+            onChanged: (_) => setState(() {}),
+            onSubmitted: (_) => _load(reset: true),
+          ),
+        ),
         Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
@@ -1355,22 +1816,40 @@ final class _MembersTabState extends State<_MembersTab> {
                           widget.userProfiles,
                         );
                         final actions = _actionsFor(member);
-                        return ListTile(
-                          leading: UserAvatar(user: member.user),
-                          title: Text(member.nickname ?? member.user.name),
-                          subtitle: Text(member.user.profileResolved
-                              ? member.user.handle
-                              : 'Profile unavailable · refreshes automatically'),
-                          trailing: actions.isEmpty
-                              ? null
-                              : PopupMenuButton<String>(
-                                  tooltip: 'Member actions',
-                                  onSelected: (value) => _action(member, value),
-                                  itemBuilder: (_) => actions,
-                                ),
-                          onTap: _canAssignRoles(member)
-                              ? () => _action(member, 'roles')
-                              : null,
+                        final roleCount = member.roleIds.length;
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
+                          child: _ManagementRow(
+                            leading: UserAvatar(user: member.user, radius: 15),
+                            title: member.nickname ?? member.user.name,
+                            subtitle: member.user.profileResolved
+                                ? <String>[
+                                    member.user.handle,
+                                    if (roleCount > 0)
+                                      '$roleCount role'
+                                          '${roleCount == 1 ? '' : 's'}',
+                                    if (member.timeoutUntil != null)
+                                      'timed out',
+                                  ].join(' · ')
+                                : 'Profile unavailable · refreshes '
+                                    'automatically',
+                            badge: member.user.ref == widget.guild.ownerRef
+                                ? const Icon(Icons.workspace_premium_rounded,
+                                    size: 13, color: KaedeColors.warning)
+                                : null,
+                            trailing: actions.isEmpty
+                                ? null
+                                : PopupMenuButton<String>(
+                                    tooltip: 'Member actions',
+                                    position: PopupMenuPosition.under,
+                                    onSelected: (value) =>
+                                        _action(member, value),
+                                    itemBuilder: (_) => actions,
+                                  ),
+                            onTap: _canAssignRoles(member)
+                                ? () => _action(member, 'roles')
+                                : null,
+                          ),
                         );
                       },
                     ))),
@@ -1732,43 +2211,90 @@ final class _InvitesTabState extends State<_InvitesTab> {
       backgroundColor: Colors.transparent,
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : ListView(padding: const EdgeInsets.all(14), children: [
-              const Text(
-                  'Invite links can be restricted by age and use count. Treat private invites like passwords.'),
-              const SizedBox(height: 12),
-              if (!widget.canManage)
-                const ListTile(
-                  leading: Icon(Icons.lock_outline_rounded),
-                  title: Text(
-                      'Manage Guild is required to list or revoke invites'),
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 90),
+              children: [
+                const _TabHint(
+                  'Anyone with an invite link can join. Treat private invites '
+                  'like passwords.',
                 ),
-              for (final item in _items)
-                Card(
-                    child: ListTile(
-                        leading: const Icon(Icons.link_rounded),
-                        title: Text('${item['code']}'),
-                        subtitle: Text('${item['uses'] ?? 0} uses'),
-                        trailing: IconButton(
-                            onPressed: widget.canManage
-                                ? () async {
-                                    try {
-                                      await widget.repository
-                                          .revokeInvite('${item['code']}');
-                                      await _load();
-                                    } on Object catch (error) {
-                                      if (mounted) {
-                                        _tabError(this.context,
-                                            'Could not revoke invite', error);
-                                      }
+                if (!widget.canManage)
+                  const _TabHint(
+                    'Manage Guild is required to list or revoke invites.',
+                  ),
+                if (widget.canManage && _items.isEmpty)
+                  const _TabEmpty(
+                    icon: Icons.link_off_rounded,
+                    title: 'No active invites',
+                    body: 'Create one to bring people in.',
+                  ),
+                for (final item in _items)
+                  _ManagementRow(
+                    leading: const Icon(Icons.link_rounded,
+                        size: 19, color: KaedeColors.muted),
+                    title: '${item['code']}',
+                    subtitle: inviteSummaryLine(item),
+                    onTap: widget.canManage
+                        ? () => _copyInvite('${item['code']}')
+                        : null,
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Copy invite link',
+                          onPressed: () => _copyInvite('${item['code']}'),
+                          icon: const Icon(Icons.copy_rounded, size: 18),
+                        ),
+                        IconButton(
+                          tooltip: 'Revoke invite',
+                          style: IconButton.styleFrom(
+                            foregroundColor: KaedeColors.danger,
+                          ),
+                          onPressed: widget.canManage
+                              ? () async {
+                                  if (!await _confirm(
+                                    context,
+                                    'Revoke ${item['code']}?',
+                                    'Anyone still holding this link will no '
+                                        'longer be able to join.',
+                                    destructive: true,
+                                  )) {
+                                    return;
+                                  }
+                                  try {
+                                    await widget.repository
+                                        .revokeInvite('${item['code']}');
+                                    await _load();
+                                  } on Object catch (error) {
+                                    if (mounted) {
+                                      _tabError(this.context,
+                                          'Could not revoke invite', error);
                                     }
                                   }
-                                : null,
-                            icon: const Icon(Icons.delete_outline_rounded)))),
-            ]),
+                                }
+                              : null,
+                          icon: const Icon(Icons.delete_outline_rounded,
+                              size: 18),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
       floatingActionButton: FloatingActionButton.extended(
           onPressed: widget.canCreate ? _create : null,
           icon: const Icon(Icons.person_add_alt_1),
-          label: const Text('Invite')));
+          label: const Text('Create invite')));
+
+  Future<void> _copyInvite(String code) async {
+    final host = widget.guild.ref.domain.value;
+    await Clipboard.setData(ClipboardData(text: 'https://$host/invite/$code'));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Invite link copied.')),
+    );
+  }
+
   Future<void> _create() async {
     final channels = guildTextChannelTargets(widget.guild.channels);
     if (channels.isEmpty) {
@@ -1858,39 +2384,66 @@ final class _EmojiTabState extends State<_EmojiTab> {
       backgroundColor: Colors.transparent,
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : ListView(padding: const EdgeInsets.all(14), children: [
-              const Text(
-                  'Custom emoji can be used across guilds when the user has permission. Federated tokens retain the emoji’s origin.'),
-              const SizedBox(height: 12),
-              for (final item in _items)
-                Card(
-                    child: ListTile(
-                        leading: const Icon(Icons.emoji_emotions_outlined),
-                        title: Text(':${item['name']}:'),
-                        subtitle: Text('${item['origin_domain']}'),
-                        trailing: IconButton(
-                            onPressed: widget.canManage
-                                ? () async {
-                                    try {
-                                      await widget.repository.deleteEmoji(
-                                          widget.guild.ref,
-                                          _mapRef(
-                                              item, widget.guild.ref.domain));
-                                      await _load();
-                                    } on Object catch (error) {
-                                      if (mounted) {
-                                        _tabError(this.context,
-                                            'Could not delete emoji', error);
-                                      }
-                                    }
-                                  }
-                                : null,
-                            icon: const Icon(Icons.delete_outline_rounded)))),
-            ]),
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 90),
+              children: [
+                const _TabHint(
+                  'Custom emoji work in other guilds for members who are '
+                  'allowed to use external emoji. Federated tokens keep the '
+                  'emoji\u2019s origin.',
+                ),
+                if (_items.isEmpty)
+                  const _TabEmpty(
+                    icon: Icons.emoji_emotions_outlined,
+                    title: 'No custom emoji yet',
+                    body: 'Upload a PNG, GIF or WebP up to 256 KB.',
+                  ),
+                for (final item in _items)
+                  _ManagementRow(
+                    leading: _EmojiThumbnail(
+                      emoji: item,
+                      fallbackDomain: widget.guild.ref.domain,
+                    ),
+                    title: ':${item['name']}:',
+                    subtitle: '${item['origin_domain']}',
+                    trailing: IconButton(
+                      tooltip: 'Delete emoji',
+                      style: IconButton.styleFrom(
+                        foregroundColor: KaedeColors.danger,
+                      ),
+                      onPressed: widget.canManage
+                          ? () async {
+                              if (!await _confirm(
+                                context,
+                                'Delete :${item['name']}:?',
+                                'Messages that already use it will show the '
+                                    'name instead.',
+                                destructive: true,
+                              )) {
+                                return;
+                              }
+                              try {
+                                await widget.repository.deleteEmoji(
+                                    widget.guild.ref,
+                                    _mapRef(item, widget.guild.ref.domain));
+                                await _load();
+                              } on Object catch (error) {
+                                if (mounted) {
+                                  _tabError(this.context,
+                                      'Could not delete emoji', error);
+                                }
+                              }
+                            }
+                          : null,
+                      icon: const Icon(Icons.delete_outline_rounded, size: 18),
+                    ),
+                  ),
+              ],
+            ),
       floatingActionButton: FloatingActionButton.extended(
           onPressed: widget.canManage ? _upload : null,
           icon: const Icon(Icons.upload_rounded),
-          label: const Text('Upload')));
+          label: const Text('Upload emoji')));
   Future<void> _upload() async {
     final name = await _prompt(context, 'Emoji name', 'lowercase_name');
     if (name == null) return;
@@ -3064,47 +3617,83 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                         autofocus: widget.channel == null,
                         maxLength: 100,
                         textInputAction: TextInputAction.next,
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           labelText: 'Channel name',
-                          hintText: 'new-channel',
-                          prefixIcon: Icon(Icons.tag_rounded),
+                          hintText: _type == ChannelType.category
+                              ? 'New category'
+                              : 'new-channel',
+                          prefixIcon: Icon(switch (_type) {
+                            ChannelType.category => Icons.folder_outlined,
+                            ChannelType.voice => Icons.volume_up_rounded,
+                            ChannelType.announcement => Icons.campaign_rounded,
+                            _ => Icons.tag_rounded,
+                          }),
                         ),
                         validator: (value) => value?.trim().isEmpty == true
                             ? 'Enter a channel name'
                             : null,
                       ),
-                      const SizedBox(height: 8),
-                      Text('Channel type',
-                          style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 9),
-                      GridView.count(
-                        crossAxisCount: 2,
-                        mainAxisSpacing: 8,
-                        crossAxisSpacing: 8,
-                        childAspectRatio: 2.55,
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        children: [
-                          for (final option in _types)
-                            _ChannelTypeTile(
-                              type: option.$1,
-                              label: option.$2,
-                              icon: option.$3,
-                              selected: _type == option.$1,
-                              enabled: widget.channel == null,
-                              onTap: () => setState(() {
-                                _type = option.$1;
-                                if (_type == ChannelType.category) _parent = '';
-                              }),
+                      if (widget.channel == null) ...[
+                        const SizedBox(height: 8),
+                        Text('Channel type',
+                            style: Theme.of(context).textTheme.titleMedium),
+                        const SizedBox(height: 9),
+                        GridView.count(
+                          crossAxisCount: 2,
+                          mainAxisSpacing: 8,
+                          crossAxisSpacing: 8,
+                          childAspectRatio: 2.55,
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          children: [
+                            for (final option in _types)
+                              _ChannelTypeTile(
+                                type: option.$1,
+                                label: option.$2,
+                                icon: option.$3,
+                                selected: _type == option.$1,
+                                enabled: true,
+                                onTap: () => setState(() {
+                                  _type = option.$1;
+                                  if (_type == ChannelType.category) {
+                                    _parent = '';
+                                  }
+                                }),
+                              ),
+                          ],
+                        ),
+                      ] else ...[
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Icon(
+                              switch (_type) {
+                                ChannelType.category => Icons.folder_outlined,
+                                ChannelType.voice => Icons.volume_up_rounded,
+                                ChannelType.announcement =>
+                                  Icons.campaign_rounded,
+                                _ => Icons.tag_rounded,
+                              },
+                              size: 15,
+                              color: KaedeColors.muted,
                             ),
-                        ],
-                      ),
-                      if (widget.channel != null) ...[
-                        const SizedBox(height: 7),
-                        const Text(
-                          'Channel type cannot be changed after creation.',
-                          style:
-                              TextStyle(color: KaedeColors.muted, fontSize: 12),
+                            const SizedBox(width: 7),
+                            Expanded(
+                              child: Text(
+                                '${switch (_type) {
+                                  ChannelType.category => 'Category',
+                                  ChannelType.voice => 'Voice channel',
+                                  ChannelType.announcement =>
+                                    'Announcement channel',
+                                  _ => 'Text channel',
+                                }} · the type cannot change after creation',
+                                style: const TextStyle(
+                                  color: KaedeColors.muted,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                       if (_type != ChannelType.category) ...[
@@ -3139,27 +3728,33 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                           minLines: 2,
                           maxLines: 3,
                           textCapitalization: TextCapitalization.sentences,
-                          decoration: const InputDecoration(
-                            labelText: 'Topic (optional)',
+                          decoration: InputDecoration(
+                            labelText: _type == ChannelType.voice
+                                ? 'Description (optional)'
+                                : 'Topic (optional)',
                             alignLabelWithHint: true,
                           ),
                         ),
-                        const SizedBox(height: 4),
-                        DropdownButtonFormField<int>(
-                          initialValue: _slow,
-                          isExpanded: true,
-                          decoration: const InputDecoration(
-                            labelText: 'Slow mode',
-                            prefixIcon: Icon(Icons.timer_outlined),
+                        if (_type != ChannelType.voice) ...[
+                          const SizedBox(height: 4),
+                          DropdownButtonFormField<int>(
+                            initialValue: _slow,
+                            isExpanded: true,
+                            decoration: const InputDecoration(
+                              labelText: 'Slow mode',
+                              helperText:
+                                  'How long members wait between messages.',
+                              prefixIcon: Icon(Icons.timer_outlined),
+                            ),
+                            items: [
+                              for (final entry in slowModes.entries)
+                                DropdownMenuItem(
+                                    value: entry.key, child: Text(entry.value)),
+                            ],
+                            onChanged: (value) =>
+                                setState(() => _slow = value ?? 0),
                           ),
-                          items: [
-                            for (final entry in slowModes.entries)
-                              DropdownMenuItem(
-                                  value: entry.key, child: Text(entry.value)),
-                          ],
-                          onChanged: (value) =>
-                              setState(() => _slow = value ?? 0),
-                        ),
+                        ],
                       ],
                       if (compactKeyboardLayout) saveButton,
                     ],
@@ -3186,7 +3781,10 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
         name: _name.text.trim(),
         topic: _topic.text.trim(),
         type: _type,
-        slowModeSeconds: _type == ChannelType.category ? 0 : _slow,
+        slowModeSeconds:
+            _type == ChannelType.category || _type == ChannelType.voice
+                ? 0
+                : _slow,
         parentRef: _type == ChannelType.category ? null : parent,
       ),
     );
@@ -3317,12 +3915,17 @@ final class _RoleEditorState extends State<_RoleEditor> {
   @override
   void initState() {
     super.initState();
+    // The save action is disabled until the role has a name, so the field has
+    // to drive rebuilds.
+    _name.addListener(_permissionsChanged);
     _permissionSearch.addListener(_permissionsChanged);
   }
 
   @override
   void dispose() {
-    _name.dispose();
+    _name
+      ..removeListener(_permissionsChanged)
+      ..dispose();
     _permissionSearch
       ..removeListener(_permissionsChanged)
       ..dispose();
@@ -3344,8 +3947,11 @@ final class _RoleEditorState extends State<_RoleEditor> {
             actions: [
               if (widget.role != null)
                 IconButton(
-                    onPressed: () => Navigator.pop(
-                        context, _RoleDraft(const {}, delete: true)),
+                    tooltip: 'Delete role',
+                    style: IconButton.styleFrom(
+                      foregroundColor: KaedeColors.danger,
+                    ),
+                    onPressed: _confirmDelete,
                     icon: const Icon(Icons.delete_outline_rounded))
             ]),
         body: ListView(padding: const EdgeInsets.all(16), children: [
@@ -3353,61 +3959,95 @@ final class _RoleEditorState extends State<_RoleEditor> {
               controller: _name,
               decoration: const InputDecoration(labelText: 'Role name')),
           const SizedBox(height: 18),
-          Text('Role color', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 10),
+          Text('Role colour', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          const Text(
+            'Members show their highest coloured role.',
+            style: TextStyle(color: KaedeColors.muted, fontSize: 12.5),
+          ),
+          const SizedBox(height: 12),
           Wrap(spacing: 10, runSpacing: 10, children: [
             for (final color in _colors)
-              InkWell(
+              Tooltip(
+                message: color == 0 ? 'No colour' : 'Custom colour',
+                child: InkWell(
                   onTap: () => setState(() => _color = color),
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(KaedeRadius.medium),
                   child: Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                          color: color == 0
-                              ? KaedeColors.muted
-                              : Color(0xFF000000 | color),
-                          borderRadius: BorderRadius.circular(14),
-                          border: _color == color
-                              ? Border.all(color: KaedeColors.text, width: 3)
-                              : null),
-                      child: _color == color ? const Icon(Icons.check) : null))
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: color == 0
+                          ? KaedeColors.raised
+                          : Color(0xFF000000 | color),
+                      borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                      border: Border.all(
+                        color: _color == color
+                            ? KaedeColors.text
+                            : KaedeColors.border,
+                        width: _color == color ? 2.5 : 1,
+                      ),
+                    ),
+                    child: color == 0
+                        ? const Icon(Icons.format_color_reset_rounded,
+                            size: 17, color: KaedeColors.muted)
+                        : _color == color
+                            ? const Icon(Icons.check_rounded,
+                                size: 20, color: Colors.black87)
+                            : null,
+                  ),
+                ),
+              ),
           ]),
-          const SizedBox(height: 12),
-          SwitchListTile(
-              title: const Text('Display separately'),
-              value: _hoist,
-              onChanged: (value) => setState(() => _hoist = value)),
-          SwitchListTile(
-              title: const Text('Allow anyone to mention this role'),
-              value: _mentionable,
-              onChanged: (value) => setState(() => _mentionable = value)),
-          const Divider(height: 30),
-          Text('Permissions', style: Theme.of(context).textTheme.headlineSmall),
-          const SizedBox(height: 5),
+          const SizedBox(height: 18),
+          _Panel(
+            title: 'Display',
+            child: Column(
+              children: [
+                SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Show separately in the member list'),
+                    subtitle: const Text(
+                      'Members with this role get their own section.',
+                    ),
+                    value: _hoist,
+                    onChanged: (value) => setState(() => _hoist = value)),
+                SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Allow anyone to mention this role'),
+                    value: _mentionable,
+                    onChanged: (value) => setState(() => _mentionable = value)),
+              ],
+            ),
+          ),
+          Text('Permissions', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
           const Text(
-            'Guild permissions and default text or voice channel abilities are granted by roles. Channel overrides can refine them later.',
-            style: TextStyle(color: KaedeColors.muted),
+            'Roles grant guild-wide abilities and channel defaults. Channel '
+            'overrides can refine them later.',
+            style: TextStyle(color: KaedeColors.muted, fontSize: 12.5),
           ),
           const SizedBox(height: 14),
-          SearchBar(
+          TextField(
             controller: _permissionSearch,
-            hintText: 'Search permissions',
-            leading: const Icon(Icons.search_rounded),
-            trailing: [
-              if (_permissionSearch.text.isNotEmpty)
-                IconButton(
-                  tooltip: 'Clear search',
-                  onPressed: _permissionSearch.clear,
-                  icon: const Icon(Icons.close_rounded),
-                ),
-            ],
+            decoration: InputDecoration(
+              hintText: 'Search permissions',
+              isDense: true,
+              prefixIcon: const Icon(Icons.search_rounded, size: 19),
+              suffixIcon: _permissionSearch.text.isEmpty
+                  ? null
+                  : IconButton(
+                      tooltip: 'Clear search',
+                      onPressed: _permissionSearch.clear,
+                      icon: const Icon(Icons.close_rounded, size: 18),
+                    ),
+            ),
           ),
           const SizedBox(height: 14),
           if (_permissions & BigInt.from(Permission.administrator) !=
               BigInt.zero)
             const Card(
-              color: Color(0xFF3A2722),
+              color: KaedeColors.warningSoft,
               child: ListTile(
                 leading: Icon(Icons.warning_amber_rounded,
                     color: KaedeColors.warning),
@@ -3429,9 +4069,9 @@ final class _RoleEditorState extends State<_RoleEditor> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 5),
+                      padding: const EdgeInsets.fromLTRB(16, 13, 16, 2),
                       child: Text(group,
-                          style: Theme.of(context).textTheme.titleLarge),
+                          style: Theme.of(context).textTheme.titleMedium),
                     ),
                     for (final permission in permissions)
                       SwitchListTile(
@@ -3450,20 +4090,41 @@ final class _RoleEditorState extends State<_RoleEditor> {
                   ],
                 ),
               ),
-          FilledButton.icon(
-              onPressed: () => Navigator.pop(
-                  context,
-                  _RoleDraft({
-                    'name': _name.text.trim(),
-                    'color': _color,
-                    'permissions': '$_permissions',
-                    'hoist': _hoist,
-                    'mentionable': _mentionable
-                  })),
-              icon: const Icon(Icons.save_outlined),
-              label: const Text('Save role')),
-          const SizedBox(height: 12),
-        ]));
+          const SizedBox(height: 90),
+        ]),
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: _name.text.trim().isEmpty
+              ? null
+              : () => Navigator.pop(
+                    context,
+                    _RoleDraft({
+                      'name': _name.text.trim(),
+                      'color': _color,
+                      'permissions': '$_permissions',
+                      'hoist': _hoist,
+                      'mentionable': _mentionable
+                    }),
+                  ),
+          icon: Icon(
+              widget.role == null ? Icons.add_rounded : Icons.save_outlined),
+          label: Text(widget.role == null ? 'Create role' : 'Save role'),
+        ));
+  }
+
+  Future<void> _confirmDelete() async {
+    final role = widget.role;
+    if (role == null) return;
+    if (!await _confirm(
+      context,
+      'Delete ${role.name}?',
+      'Members keep their other roles. Permissions this role granted are '
+          'removed everywhere in the guild.',
+      destructive: true,
+    )) {
+      return;
+    }
+    if (!mounted) return;
+    Navigator.pop(context, _RoleDraft(const {}, delete: true));
   }
 }
 
@@ -3524,19 +4185,33 @@ final class _Panel extends StatelessWidget {
   final Widget child;
   @override
   Widget build(BuildContext context) => Card(
-      margin: const EdgeInsets.only(bottom: 14),
-      child: Padding(
-          padding: const EdgeInsets.all(16),
-          child:
-              Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            Text(title, style: Theme.of(context).textTheme.titleLarge),
-            if (subtitle != null) ...[
-              const SizedBox(height: 4),
-              Text(subtitle!, style: const TextStyle(color: KaedeColors.muted))
+        margin: const EdgeInsets.only(bottom: 12),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(title, style: Theme.of(context).textTheme.titleMedium),
+              if (subtitle != null) ...[
+                const SizedBox(height: 3),
+                Text(
+                  subtitle!,
+                  style: const TextStyle(
+                    color: KaedeColors.muted,
+                    fontSize: 12.5,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Divider(height: 1),
+              ),
+              child,
             ],
-            const SizedBox(height: 14),
-            child
-          ])));
+          ),
+        ),
+      );
 }
 
 Future<String?> _prompt(BuildContext context, String title, String label,

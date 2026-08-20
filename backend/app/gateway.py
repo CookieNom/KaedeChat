@@ -154,6 +154,73 @@ async def current_presence_preference(
     return "online"
 
 
+async def dm_presence_snapshot(
+    redis: Redis, dm_channels: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """Return the current visible presence for every user in the DM list.
+
+    Presence remains an ephemeral Redis projection, but a fresh gateway
+    session needs one bounded snapshot after its pub/sub barrier has been
+    established. Otherwise a client that connects after a peer's last
+    PRESENCE_UPDATE incorrectly renders that peer offline until the next
+    update. Only recipients already exposed by READY are sampled.
+    """
+
+    refs: set[tuple[str, str]] = set()
+    for channel in dm_channels:
+        recipients = channel.get("recipients")
+        if not isinstance(recipients, list):
+            continue
+        for recipient in recipients:
+            if not isinstance(recipient, dict):
+                continue
+            user_id = recipient.get("id")
+            user_domain = recipient.get("origin_domain")
+            if (
+                isinstance(user_id, str)
+                and user_id
+                and isinstance(user_domain, str)
+                and user_domain
+            ):
+                refs.add((user_id, user_domain))
+    ordered_refs = sorted(refs, key=lambda ref: (ref[1], ref[0]))
+    if not ordered_refs:
+        return []
+    try:
+        values = await redis.mget(
+            *(f"presence:{user_domain}:{user_id}" for user_id, user_domain in ordered_refs)
+        )
+    except Exception as exc:
+        # Presence is optional, ephemeral state. A cache outage must not make
+        # an otherwise valid account unable to establish a gateway session.
+        log.warning(
+            "ready_dm_presence_snapshot_failed",
+            recipient_count=len(ordered_refs),
+            error_type=type(exc).__name__,
+        )
+        values = [None] * len(ordered_refs)
+
+    snapshot: list[dict[str, object]] = []
+    for (user_id, user_domain), raw in zip(ordered_refs, values, strict=True):
+        status = "offline"
+        if raw is not None:
+            try:
+                state = json.loads(raw)
+                candidate = state.get("status") if isinstance(state, dict) else None
+                if candidate in {"online", "idle", "dnd"}:
+                    status = str(candidate)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        snapshot.append(
+            {
+                "user_id": user_id,
+                "user_domain": user_domain,
+                "status": status,
+            }
+        )
+    return snapshot
+
+
 IDENTIFY_LIMIT_SCRIPT = """
 if redis.call('GET', KEYS[3]) ~= 'ready' then return {0, 1000, 0} end
 local now_parts = redis.call('TIME')
@@ -945,6 +1012,7 @@ def ready_payload(
     gateway_session_id: str,
     presence_preference: str,
     history_statuses: dict[tuple[int, str], dict[str, object]] | None = None,
+    presences: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     return {
         "v": PROTOCOL_VERSION,
@@ -959,6 +1027,7 @@ def ready_payload(
             for guild in guilds
         ],
         "dm_channels": dm_channels,
+        "presences": presences or [],
         "read_states": [
             {
                 "channel_id": str(state.channel_id),
@@ -986,6 +1055,7 @@ async def hydrated_ready_payload(
     """Build READY with optional projections that must not break login."""
     presence_preference = await current_presence_preference(sessionmaker, redis, user)
     history_statuses = await guild_history_sync_statuses(redis, user, guilds)
+    presences = await dm_presence_snapshot(redis, dm_channels)
     return ready_payload(
         user,
         guilds,
@@ -994,6 +1064,7 @@ async def hydrated_ready_payload(
         gateway_session_id,
         presence_preference,
         history_statuses,
+        presences,
     )
 
 
@@ -2224,6 +2295,7 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                 )
             sequence += 1
             presence_preference = await current_presence_preference(sessionmaker, redis, user)
+            presences = await dm_presence_snapshot(redis, dm_channels)
             await websocket.send_json(
                 {
                     "op": GatewayOp.DISPATCH,
@@ -2233,6 +2305,7 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                         "session_id": gateway_session_id,
                         "replayed": sequence - start_sequence - 1,
                         "presence_preference": presence_preference,
+                        "presences": presences,
                     },
                 }
             )

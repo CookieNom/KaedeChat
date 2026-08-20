@@ -2430,6 +2430,7 @@ final class MobileController extends StateNotifier<MobileState> {
         state = state.copyWith(clearGatewayProtocolWarning: true);
         _malformedGatewayEvents = 0;
         _validGatewayEventsAfterWarning = 0;
+        _applyPresenceSnapshot(event.data['presences']);
         final counts = Map<EntityRef, int>.of(state.mentionCounts);
         final unread = Map<EntityRef, int>.of(state.unreadCounts);
         final rawStates = event.data['read_states'];
@@ -2472,6 +2473,9 @@ final class MobileController extends StateNotifier<MobileState> {
           );
           _scheduleMetadataCache();
         }
+        break;
+      case 'RESUMED':
+        _applyPresenceSnapshot(event.data['presences']);
         break;
       case 'MESSAGE_CREATE':
         final raw =
@@ -2682,8 +2686,6 @@ final class MobileController extends StateNotifier<MobileState> {
             'GUILD_ROLE_DELETE' ||
             'GUILD_MEMBER_ADD' ||
             'GUILD_MEMBER_REMOVE' ||
-            'GUILD_MEMBERS_CHUNK' ||
-            'GUILD_MEMBER_LIST_UPDATE' ||
             'GUILD_AVAILABILITY_UPDATE' ||
             'GUILD_EMOJI_CREATE' ||
             'GUILD_EMOJI_DELETE' ||
@@ -2731,6 +2733,21 @@ final class MobileController extends StateNotifier<MobileState> {
             grantCorrelation == correlation;
         if (localMove || correlatedMove) {
           _scheduleNavigationRefresh();
+        }
+        break;
+      case 'GUILD_MEMBERS_CHUNK':
+        _applyMemberRoster(event.data['members']);
+        break;
+      case 'GUILD_MEMBER_LIST_UPDATE':
+        final operations = event.data['ops'];
+        if (operations is List) {
+          for (final operation in operations) {
+            if (operation is Map) {
+              _applyMemberRoster(
+                Map<String, Object?>.from(operation)['items'],
+              );
+            }
+          }
         }
         break;
       case 'PRESENCE_UPDATE':
@@ -2933,6 +2950,76 @@ final class MobileController extends StateNotifier<MobileState> {
 
   EntityRef? _channelRef(Map<String, Object?> data) =>
       _entityRef(data['channel_id'], data['channel_domain']);
+
+  void _applyPresenceSnapshot(Object? raw) {
+    if (raw is! List) return;
+    final presenceByUser = Map<EntityRef, PresenceStatus>.of(
+      state.presenceByUser,
+    );
+    for (final entry in raw.whereType<Map<Object?, Object?>>()) {
+      final presence = Map<String, Object?>.from(entry);
+      final user = _userRef(presence);
+      if (user != null) {
+        presenceByUser[user] = _presence(presence['status']);
+      }
+    }
+    state = state.copyWith(
+      presenceByUser: Map.unmodifiable(presenceByUser),
+    );
+  }
+
+  /// Applies a `GUILD_MEMBERS_CHUNK` or member-list range payload. Only the
+  /// gateway knows presence: the REST roster deliberately omits it, so this is
+  /// what keeps the member list's status dots honest.
+  void _applyMemberRoster(Object? raw) {
+    if (raw is! List) return;
+    final presenceByUser = Map<EntityRef, PresenceStatus>.of(
+      state.presenceByUser,
+    );
+    final profiles = Map<EntityRef, KaedeUser>.of(state.userProfiles);
+    var changed = false;
+    for (final entry in raw.whereType<Map<Object?, Object?>>()) {
+      final member = entry.map((key, value) => MapEntry('$key', value));
+      final rawUser = member['user'];
+      if (rawUser is! Map) continue;
+      final KaedeUser user;
+      try {
+        user = KaedeUser.fromJson(
+          rawUser.map((key, value) => MapEntry('$key', value)),
+        );
+      } on Object {
+        continue;
+      }
+      if (profiles[user.ref] != user) {
+        profiles[user.ref] = user;
+        changed = true;
+      }
+      if (member.containsKey('presence')) {
+        final presence = _presence(member['presence']);
+        if (presenceByUser[user.ref] != presence) {
+          presenceByUser[user.ref] = presence;
+          changed = true;
+        }
+      }
+    }
+    if (!changed) return;
+    state = state.copyWith(
+      presenceByUser: Map.unmodifiable(presenceByUser),
+      userProfiles: Map.unmodifiable(profiles),
+    );
+  }
+
+  /// Asks the gateway for a guild's member list so presence arrives with it.
+  void requestGuildMembers(EntityRef guild, {String query = ''}) {
+    if (!state.gatewayHealth.isConnected) return;
+    gateway.requestMembers(guild.wire, query: query);
+  }
+
+  /// The account's own presence is authoritative locally: the gateway does not
+  /// echo a PRESENCE_UPDATE back to the client that set it.
+  PresenceStatus presenceFor(KaedeUser user) => user.ref == state.user?.ref
+      ? state.presencePreference
+      : state.presenceByUser[user.ref] ?? user.presence;
 
   EntityRef? _userRef(Map<String, Object?> data) => _entityRef(
         data['user_id'] ?? data['id'],

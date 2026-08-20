@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
@@ -119,6 +120,10 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
       theme: kaedeTheme(),
       restorationScopeId: 'kaede-mobile',
       routerConfig: _router,
+      builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
+        value: kaedeSystemOverlay,
+        child: child ?? const SizedBox.shrink(),
+      ),
     );
   }
 }
@@ -179,53 +184,70 @@ final class _LockScreen extends ConsumerWidget {
     return Scaffold(
       body: SafeArea(
         child: Center(
-          child: Padding(
+          child: SingleChildScrollView(
             padding: const EdgeInsets.all(28),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 420),
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.lock_rounded,
-                          color: KaedeColors.coral, size: 52),
-                      const SizedBox(height: 16),
-                      Text('Kaede is locked',
-                          style: Theme.of(context).textTheme.headlineSmall),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Use your biometrics or device passcode to continue.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: KaedeColors.muted),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 64,
+                      height: 64,
+                      decoration: BoxDecoration(
+                        color: KaedeColors.coralSoft,
+                        borderRadius: BorderRadius.circular(KaedeRadius.large),
                       ),
-                      if (state.error != null) ...[
-                        const SizedBox(height: 12),
-                        Text(state.error!,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(color: KaedeColors.danger)),
-                      ],
-                      const SizedBox(height: 22),
-                      SizedBox(
-                        width: double.infinity,
-                        child: FilledButton.icon(
-                          onPressed: () => ref
-                              .read(mobileControllerProvider.notifier)
-                              .unlock(),
-                          icon: const Icon(Icons.fingerprint_rounded),
-                          label: const Text('Unlock'),
+                      child: const Icon(Icons.lock_rounded,
+                          color: KaedeColors.coralText, size: 30),
+                    ),
+                  ),
+                  const SizedBox(height: 22),
+                  Text(
+                    'Kaede is locked',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.headlineMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Use your biometrics or device passcode to continue.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: KaedeColors.muted, height: 1.4),
+                  ),
+                  if (state.error != null) ...[
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: KaedeColors.dangerSoft,
+                        borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                      ),
+                      child: Text(
+                        state.error!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: KaedeColors.danger,
+                          fontSize: 13,
                         ),
                       ),
-                      TextButton(
-                        onPressed: () => ref
-                            .read(mobileControllerProvider.notifier)
-                            .logout(),
-                        child: const Text('Sign out instead'),
-                      ),
-                    ],
+                    ),
+                  ],
+                  const SizedBox(height: 26),
+                  FilledButton.icon(
+                    onPressed: () =>
+                        ref.read(mobileControllerProvider.notifier).unlock(),
+                    icon: const Icon(Icons.fingerprint_rounded),
+                    label: const Text('Unlock'),
                   ),
-                ),
+                  const SizedBox(height: 6),
+                  TextButton(
+                    onPressed: () =>
+                        ref.read(mobileControllerProvider.notifier).logout(),
+                    child: const Text('Sign out instead'),
+                  ),
+                ],
               ),
             ),
           ),
@@ -244,14 +266,45 @@ final class _LaunchScreen extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.forum_rounded, color: KaedeColors.coral, size: 58),
+              _BrandMark(),
               SizedBox(height: 18),
-              Text('Kaede',
-                  style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800)),
-              SizedBox(height: 24),
-              CircularProgressIndicator(),
+              Text(
+                'Kaede',
+                style: TextStyle(
+                  fontSize: 26,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -.5,
+                ),
+              ),
+              SizedBox(height: 28),
+              SizedBox.square(
+                dimension: 20,
+                child: CircularProgressIndicator(strokeWidth: 2.4),
+              ),
             ],
           ),
+        ),
+      );
+}
+
+/// Coral app mark reused by the launch screen and the sign-in header.
+final class _BrandMark extends StatelessWidget {
+  const _BrandMark();
+
+  static const size = 62.0;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: KaedeColors.coral,
+          borderRadius: BorderRadius.circular(size * .32),
+        ),
+        child: Icon(
+          Icons.forum_rounded,
+          color: KaedeColors.onCoral,
+          size: size * .48,
         ),
       );
 }

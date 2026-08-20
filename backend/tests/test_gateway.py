@@ -176,12 +176,18 @@ async def test_fresh_ready_hydrates_history_statuses(
     async def statuses(*_args: object) -> dict[tuple[int, str], dict[str, object]]:
         return expected_statuses
 
+    expected_presences = [{"user_id": "9", "user_domain": "remote.test", "status": "idle"}]
+
+    async def presences(*_args: object) -> list[dict[str, object]]:
+        return expected_presences
+
     def payload(*args: object) -> dict[str, object]:
         captured["args"] = args
         return {"ready": True}
 
     monkeypatch.setattr(gateway, "current_presence_preference", presence)
     monkeypatch.setattr(gateway, "guild_history_sync_statuses", statuses)
+    monkeypatch.setattr(gateway, "dm_presence_snapshot", presences)
     monkeypatch.setattr(gateway, "ready_payload", payload)
 
     result = await gateway.hydrated_ready_payload(
@@ -203,7 +209,59 @@ async def test_fresh_ready_hydrates_history_statuses(
         "fresh-session",
         "idle",
         expected_statuses,
+        expected_presences,
     )
+
+
+@pytest.mark.asyncio
+async def test_dm_presence_snapshot_is_scoped_deduplicated_and_visible() -> None:
+    class PresenceRedis:
+        async def mget(self, *keys: str) -> list[bytes | None]:
+            assert keys == (
+                "presence:alpha.test:7",
+                "presence:remote.test:8",
+                "presence:remote.test:9",
+            )
+            return [
+                b'{"status":"online"}',
+                b'{"status":"invisible"}',
+                b'{"status":"idle"}',
+            ]
+
+    channels: list[dict[str, object]] = [
+        {
+            "recipients": [
+                {"id": "9", "origin_domain": "remote.test"},
+                {"id": "8", "origin_domain": "remote.test"},
+            ]
+        },
+        {
+            "recipients": [
+                {"id": "9", "origin_domain": "remote.test"},
+                {"id": "7", "origin_domain": "alpha.test"},
+            ]
+        },
+    ]
+
+    assert await gateway.dm_presence_snapshot(  # type: ignore[arg-type]
+        PresenceRedis(), channels
+    ) == [
+        {"user_id": "7", "user_domain": "alpha.test", "status": "online"},
+        {"user_id": "8", "user_domain": "remote.test", "status": "offline"},
+        {"user_id": "9", "user_domain": "remote.test", "status": "idle"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dm_presence_snapshot_cache_failure_defaults_offline() -> None:
+    class UnavailablePresenceRedis:
+        async def mget(self, *_keys: str) -> list[bytes | None]:
+            raise ConnectionError("cache unavailable")
+
+    assert await gateway.dm_presence_snapshot(  # type: ignore[arg-type]
+        UnavailablePresenceRedis(),
+        [{"recipients": [{"id": "8", "origin_domain": "remote.test"}]}],
+    ) == [{"user_id": "8", "user_domain": "remote.test", "status": "offline"}]
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,8 @@ import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/shared/remote_media.dart';
+import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 enum MessageSearchOperator { from, mentions, has }
@@ -1050,29 +1052,102 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
     final contextLabel = result.guild == null
         ? (recipients.isEmpty ? 'Direct message' : recipients)
         : '${result.guild!.name} · #${result.channel.name ?? 'channel'}';
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      title: Text(result.message.author?.name ?? 'Unknown sender'),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            contextLabel,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.labelMedium,
+    final author = result.message.author;
+    final localTime = result.message.createdAt.toLocal();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: KaedeColors.panel,
+        borderRadius: BorderRadius.circular(KaedeRadius.medium),
+        child: InkWell(
+          onTap: _jumping ? null : () => _jumpToResult(result),
+          borderRadius: BorderRadius.circular(KaedeRadius.medium),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(12, 11, 12, 12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(KaedeRadius.medium),
+              border: Border.all(color: KaedeColors.border),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      contextLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: KaedeColors.muted,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (author != null) ...[
+                      UserAvatar(
+                        user: author,
+                        radius: 15,
+                        ringColor: KaedeColors.panel,
+                      ),
+                      const SizedBox(width: 10),
+                    ],
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.baseline,
+                            textBaseline: TextBaseline.alphabetic,
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  author?.name ?? 'Unknown sender',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                '${MaterialLocalizations.of(context).formatShortDate(localTime)} '
+                                '${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(localTime))}',
+                                style: const TextStyle(
+                                  color: KaedeColors.muted,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            messageSearchSafeSnippet(result.snippet),
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 13.5,
+                              height: 1.35,
+                              color: KaedeColors.textSoft,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
-          Text(
-            messageSearchSafeSnippet(result.snippet),
-            maxLines: 3,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ],
+        ),
       ),
-      trailing: Text(MaterialLocalizations.of(context).formatTimeOfDay(
-        TimeOfDay.fromDateTime(result.message.createdAt.toLocal()),
-      )),
-      onTap: _jumping ? null : () => _jumpToResult(result),
     );
   }
 

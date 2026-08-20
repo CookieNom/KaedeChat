@@ -118,6 +118,14 @@ describe('normalized entity collections', () => {
     expect(store.presenceFor(user)).toBe('idle');
     store.setPresence(user, 'online');
     expect(store.presenceFor(user)).toBe('online');
+    store.ingestPresences([
+      {
+        user_id: user.id,
+        user_domain: user.origin_domain,
+        status: 'dnd'
+      }
+    ]);
+    expect(store.presenceFor(user)).toBe('dnd');
     expect(store.users.get('7@alpha.test')).toEqual(user);
   });
 

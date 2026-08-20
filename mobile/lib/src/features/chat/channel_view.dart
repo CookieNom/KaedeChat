@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -35,6 +36,22 @@ const _messageTokenPattern =
     r'(<a?:[A-Za-z0-9_]{2,32}:[1-9][0-9]{0,18}@[A-Za-z0-9.-]{1,253}>|<@&[1-9][0-9]{0,18}@[A-Za-z0-9.-]+>|<@[1-9][0-9]{0,18}(?:@[A-Za-z0-9.-]+)?>|@[A-Za-z0-9_.-]{1,64}@[A-Za-z0-9.-]+|#[A-Za-z0-9_-]{1,100})';
 final _messageSpoilerRegExp = RegExp(_messageSpoilerPattern);
 final _messageTokenRegExp = RegExp(_messageTokenPattern);
+
+/// Deep link to a message that the web and desktop clients can open. Guild
+/// channels live under `/g/<guild>/<channel>` and conversations under
+/// `/home/<channel>`, both selecting a message with `?around=`.
+String messageLink({
+  required String instance,
+  required KaedeChannel channel,
+  required EntityRef message,
+}) {
+  final guild = channel.guildRef;
+  final route = guild == null
+      ? '/home/${Uri.encodeComponent(channel.ref.wire)}'
+      : '/g/${Uri.encodeComponent(guild.wire)}/'
+          '${Uri.encodeComponent(channel.ref.wire)}';
+  return 'https://$instance$route?around=${Uri.encodeComponent(message.wire)}';
+}
 
 int messageListItemIndex({
   required int messageCount,
@@ -515,6 +532,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   final _composer = TextEditingController();
   final _composerFocus = FocusNode();
   final _scroll = ScrollController();
+  var _showJumpToPresent = false;
   final _messageKeys = <String, GlobalKey>{};
   final _uploads = <_PendingUpload>[];
   EntityRef? _renderedChannel;
@@ -598,6 +616,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     _renderedChannel = channel.ref;
     if (channelChanged) {
       _highlightedMessage = null;
+      _showJumpToPresent = false;
       _initialScrollPending = !_savedOffsets.containsKey(channel.ref);
       _scheduleRestore(channel.ref);
     } else if (_initialScrollPending &&
@@ -668,120 +687,181 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                     : ref.read(mobileControllerProvider.notifier).loadMessages,
           ),
         Expanded(
-          child: messages.isEmpty &&
-                  pending.isEmpty &&
-                  !state.loadingMessages &&
-                  !channel.historyTruncated
-              ? _ConversationStart(channel: channel)
-              : ListView.builder(
-                  controller: _scroll,
-                  reverse: true,
-                  padding: const EdgeInsets.fromLTRB(4, 4, 4, 14),
-                  itemCount: messages.length +
-                      pending.length +
-                      (state.channelsWithOlderMessages.contains(channel.ref) ||
-                              (channel.historyTruncated && messages.isEmpty) ||
-                              (channel.historyTruncated &&
-                                  !channel.historyRemoteAvailable)
-                          ? 1
-                          : 0),
-                  itemBuilder: (context, index) {
-                    if (index < pending.length) {
-                      final item = pending[pending.length - index - 1];
-                      return _PendingMessageTile(
-                        item: item,
-                        onRetry: () => ref
-                            .read(mobileControllerProvider.notifier)
-                            .retrySend(item.nonce),
-                        onDiscard: () => ref
-                            .read(mobileControllerProvider.notifier)
-                            .discardSend(item.nonce),
-                      );
-                    }
-                    final messageIndex =
-                        messages.length - (index - pending.length) - 1;
-                    if (messageIndex < 0) {
-                      if (!state.channelsWithOlderMessages
-                          .contains(channel.ref)) {
-                        return _HistoryBoundary(
-                          complete: messages.isEmpty
-                              ? channel.historyRemoteAvailable &&
-                                  !state.loadingMessages &&
-                                  state.error == null
-                              : messages.first.historyPageComplete,
-                        );
-                      }
-                      return Padding(
-                        padding: const EdgeInsets.fromLTRB(44, 4, 44, 10),
-                        child: OutlinedButton.icon(
-                          onPressed:
-                              state.loadingMessages ? null : _loadEarlier,
-                          icon: state.loadingMessages
-                              ? const SizedBox.square(
-                                  dimension: 16,
-                                  child:
-                                      CircularProgressIndicator(strokeWidth: 2))
-                              : const Icon(Icons.history_rounded),
-                          label: const Text('Load earlier messages'),
-                        ),
-                      );
-                    }
-                    final message = messages[messageIndex];
-                    final previous =
-                        messageIndex > 0 ? messages[messageIndex - 1] : null;
-                    final compact = previous != null &&
-                        previous.authorRef == message.authorRef &&
-                        message.createdAt
-                                .difference(previous.createdAt)
-                                .inMinutes <
-                            7;
-                    final key = _messageKeys.putIfAbsent(
-                        message.ref.wire, GlobalKey.new);
-                    return KeyedSubtree(
-                      key: key,
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 220),
-                        color: _highlightedMessage == message.ref
-                            ? Theme.of(context)
-                                .colorScheme
-                                .primary
-                                .withValues(alpha: .16)
-                            : Colors.transparent,
-                        child: _MessageTile(
-                          state: state,
-                          message: message,
-                          compact: compact,
-                          referenced: message.reference == null
-                              ? null
-                              : messages
-                                  .where((candidate) =>
-                                      candidate.ref == message.reference)
-                                  .firstOrNull,
-                          onReply: () => setState(() {
-                            _reply = message;
-                            _notifyReply =
-                                message.authorRef != state.user?.ref &&
-                                    channel.type != ChannelType.dm;
-                          }),
-                          onJump: message.reference == null
-                              ? null
-                              : () => _jumpTo(message.reference!),
-                          onMenu: () => _showMessageActions(message),
-                          onReaction: (emoji) =>
-                              _toggleReaction(message, emoji),
-                          onAuthorTap: message.author == null
-                              ? null
-                              : () => showUserProfile(
-                                    context,
-                                    message.author!,
-                                    state.presenceByUser[message.author!.ref] ??
-                                        message.author!.presence,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: messages.isEmpty &&
+                        pending.isEmpty &&
+                        !state.loadingMessages &&
+                        !channel.historyTruncated
+                    ? _ConversationStart(channel: channel)
+                    : ListView.builder(
+                        controller: _scroll,
+                        reverse: true,
+                        padding: const EdgeInsets.fromLTRB(0, 6, 0, 12),
+                        itemCount: messages.length +
+                            pending.length +
+                            (state.channelsWithOlderMessages
+                                        .contains(channel.ref) ||
+                                    (channel.historyTruncated &&
+                                        messages.isEmpty) ||
+                                    (channel.historyTruncated &&
+                                        !channel.historyRemoteAvailable)
+                                ? 1
+                                : 0),
+                        itemBuilder: (context, index) {
+                          if (index < pending.length) {
+                            final item = pending[pending.length - index - 1];
+                            return _PendingMessageTile(
+                              item: item,
+                              onRetry: () => ref
+                                  .read(mobileControllerProvider.notifier)
+                                  .retrySend(item.nonce),
+                              onDiscard: () => ref
+                                  .read(mobileControllerProvider.notifier)
+                                  .discardSend(item.nonce),
+                            );
+                          }
+                          final messageIndex =
+                              messages.length - (index - pending.length) - 1;
+                          if (messageIndex < 0) {
+                            if (!state.channelsWithOlderMessages
+                                .contains(channel.ref)) {
+                              return _HistoryBoundary(
+                                complete: messages.isEmpty
+                                    ? channel.historyRemoteAvailable &&
+                                        !state.loadingMessages &&
+                                        state.error == null
+                                    : messages.first.historyPageComplete,
+                              );
+                            }
+                            return Padding(
+                              padding:
+                                  const EdgeInsets.fromLTRB(52, 12, 52, 10),
+                              child: OutlinedButton.icon(
+                                style: OutlinedButton.styleFrom(
+                                  minimumSize: const Size(0, 40),
+                                  foregroundColor: KaedeColors.textSoft,
+                                  side: const BorderSide(
+                                      color: KaedeColors.border),
+                                  backgroundColor: KaedeColors.panel,
+                                  textStyle: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
                                   ),
-                        ),
+                                ),
+                                onPressed:
+                                    state.loadingMessages ? null : _loadEarlier,
+                                icon: state.loadingMessages
+                                    ? const SizedBox.square(
+                                        dimension: 15,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2))
+                                    : const Icon(Icons.history_rounded,
+                                        size: 17),
+                                label: Text(state.loadingMessages
+                                    ? 'Loading earlier messages…'
+                                    : 'Load earlier messages'),
+                              ),
+                            );
+                          }
+                          final message = messages[messageIndex];
+                          final previous = messageIndex > 0
+                              ? messages[messageIndex - 1]
+                              : null;
+                          final startsNewDay = previous == null ||
+                              !sameCalendarDay(
+                                previous.createdAt,
+                                message.createdAt,
+                              );
+                          final compact = previous != null &&
+                              !startsNewDay &&
+                              previous.authorRef == message.authorRef &&
+                              previous.reference == null &&
+                              message.reference == null &&
+                              message.createdAt
+                                      .difference(previous.createdAt)
+                                      .inMinutes <
+                                  7;
+                          final key = _messageKeys.putIfAbsent(
+                              message.ref.wire, GlobalKey.new);
+                          void reply() => setState(() {
+                                _reply = message;
+                                _notifyReply =
+                                    message.authorRef != state.user?.ref &&
+                                        channel.type != ChannelType.dm;
+                              });
+                          final tile = _MessageTile(
+                            state: state,
+                            message: message,
+                            compact: compact,
+                            referenced: message.reference == null
+                                ? null
+                                : messages
+                                    .where((candidate) =>
+                                        candidate.ref == message.reference)
+                                    .firstOrNull,
+                            onReply: reply,
+                            onJump: message.reference == null
+                                ? null
+                                : () => _jumpTo(message.reference!),
+                            onMenu: () => _showMessageActions(message),
+                            onReaction: (emoji) =>
+                                _toggleReaction(message, emoji),
+                            onAddReaction: message.reactionCounts.isEmpty
+                                ? null
+                                : () => _addReactionFromPicker(message),
+                            onAuthorTap: message.author == null
+                                ? null
+                                : () => showUserProfile(
+                                      context,
+                                      message.author!,
+                                      ref
+                                          .read(
+                                              mobileControllerProvider.notifier)
+                                          .presenceFor(message.author!),
+                                    ),
+                          );
+                          return KeyedSubtree(
+                            key: key,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                if (startsNewDay)
+                                  _DayDivider(day: message.createdAt),
+                                AnimatedContainer(
+                                  duration: const Duration(milliseconds: 240),
+                                  curve: Curves.easeOut,
+                                  color: _highlightedMessage == message.ref
+                                      ? KaedeColors.coral.withValues(alpha: .13)
+                                      : Colors.transparent,
+                                  child: _SwipeToReply(
+                                    enabled:
+                                        canSend && message.deletedAt == null,
+                                    onReply: reply,
+                                    child: tile,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
                       ),
-                    );
+              ),
+              Positioned(
+                right: 12,
+                bottom: 10,
+                child: _JumpToPresentButton(
+                  visible: _showJumpToPresent,
+                  unread: state.unreadCounts[channel.ref] ?? 0,
+                  onTap: () {
+                    setState(() => _showJumpToPresent = false);
+                    _scheduleScrollToBottom(animated: true);
                   },
                 ),
+              ),
+            ],
+          ),
         ),
         if (state.typingByChannel[channel.ref] case final typing?
             when typing.isNotEmpty)
@@ -805,18 +885,27 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             child: _Composer(
               controller: _composer,
               focusNode: _composerFocus,
+              hint: composerHint(channel),
               reply: _reply,
               notifyReply: _notifyReply,
               uploads: _uploads,
               sending: _sending,
               slowModeRemaining: _slowModeRemaining(channel.ref),
+              compact: MediaQuery.sizeOf(context).width <= 360,
+              canAttach: channel.type == ChannelType.dm ||
+                  channel.allows(Permission.attachFiles),
+              gifsAllowed: composerAllowsGifs(channel),
               onNotifyChanged: (value) => setState(() => _notifyReply = value),
               onCancelReply: () => setState(() => _reply = null),
               onRemoveUpload: (item) {
                 setState(() => _uploads.remove(item));
                 unawaited(item.deleteIfTemporary());
               },
-              onAdd: () => _showComposerActions(channel),
+              onMore: () => _showComposerActions(channel),
+              onAttach: () =>
+                  _runComposerAction(channel, ComposerAction.attach),
+              onEmoji: () => _runComposerAction(channel, ComposerAction.emoji),
+              onGif: () => _runComposerAction(channel, ComposerAction.gif),
               onSend: _send,
             ),
           ),
@@ -947,6 +1036,13 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   void _handleScroll() {
     _rememberOffset();
     _maybeAutomaticallyLoadEarlier();
+    // The reversed list starts at the newest message, so being scrolled away
+    // from the minimum extent means older history is on screen.
+    final scrolledBack = _scroll.hasClients &&
+        _scroll.offset - _scroll.position.minScrollExtent > 420;
+    if (scrolledBack != _showJumpToPresent && mounted) {
+      setState(() => _showJumpToPresent = scrolledBack);
+    }
   }
 
   void _scheduleAutomaticHistoryCheck() {
@@ -1128,13 +1224,27 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       canAttach: canAttach,
       gifsAllowed: composerAllowsGifs(channel),
     );
-    if (!mounted ||
-        action == null ||
-        ref.read(mobileControllerProvider).activeChannel?.ref != channel.ref) {
+    if (!mounted || action == null) return;
+    await _runComposerAction(channel, action);
+  }
+
+  Future<void> _runComposerAction(
+    KaedeChannel channel,
+    ComposerAction action,
+  ) async {
+    if (_sending || _composerChannel != channel.ref) return;
+    if (ref.read(mobileControllerProvider).activeChannel?.ref != channel.ref) {
       return;
     }
     switch (action) {
       case ComposerAction.attach:
+        if (channel.type != ChannelType.dm &&
+            !channel.allows(Permission.attachFiles)) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('You cannot attach files in this channel.'),
+          ));
+          return;
+        }
         await _pickFiles();
         break;
       case ComposerAction.emoji:
@@ -1293,6 +1403,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     final channel = state.activeChannel;
     if (channel == null || _composerChannel != channel.ref) return;
     if (_slowModeRemaining(channel.ref) > Duration.zero) return;
+    unawaited(HapticFeedback.lightImpact());
     final content = _composer.text;
     final reply = _reply;
     final notifyReply = _notifyReply;
@@ -1427,6 +1538,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     final canAdd = channel.type == ChannelType.dm ||
         channel.allows(Permission.addReactions);
     if (!removing && !canAdd) return;
+    unawaited(HapticFeedback.selectionClick());
     final controller = ref.read(mobileControllerProvider.notifier);
     try {
       if (removing) {
@@ -1444,6 +1556,13 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             userFacingError(error, summary: 'Could not update that reaction')),
       ));
     }
+  }
+
+  Future<void> _addReactionFromPicker(KaedeMessage message) async {
+    final emoji =
+        await _showReactionPicker(ref.read(mobileControllerProvider).user?.ref);
+    if (!mounted || emoji == null) return;
+    await _toggleReaction(message, emoji);
   }
 
   Future<String?> _showReactionPicker(EntityRef? user) async {
@@ -1546,86 +1665,113 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       context: context,
       showDragHandle: true,
       builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (canReact) ...[
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-                child: Row(
-                  children: [
-                    for (final emoji in recent)
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 3),
-                          child: FilledButton.tonal(
-                            onPressed: () =>
-                                Navigator.pop(context, 'reaction:$emoji'),
-                            style: FilledButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(vertical: 12),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _MessageActionsHeader(message: message),
+              if (canReact && recent.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                  child: Row(
+                    children: [
+                      for (final emoji in recent)
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 3),
+                            child: Material(
+                              color: KaedeColors.raised,
+                              borderRadius:
+                                  BorderRadius.circular(KaedeRadius.medium),
+                              child: InkWell(
+                                borderRadius:
+                                    BorderRadius.circular(KaedeRadius.medium),
+                                onTap: () =>
+                                    Navigator.pop(context, 'reaction:$emoji'),
+                                child: Container(
+                                  height: 46,
+                                  alignment: Alignment.center,
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(
+                                        KaedeRadius.medium),
+                                    border:
+                                        Border.all(color: KaedeColors.border),
+                                  ),
+                                  child: Text(emoji,
+                                      style: const TextStyle(fontSize: 22)),
+                                ),
+                              ),
                             ),
-                            child: Text(emoji,
-                                style: const TextStyle(fontSize: 23)),
                           ),
                         ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 3),
+                        child: IconButton(
+                          tooltip: 'More emoji',
+                          onPressed: () =>
+                              Navigator.pop(context, 'react-picker'),
+                          icon: const Icon(Icons.add_reaction_outlined),
+                        ),
                       ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
+              ListTile(
+                  leading: const Icon(Icons.reply_rounded),
+                  title: const Text('Reply'),
+                  onTap: () => Navigator.pop(context, 'reply')),
+              if (message.content?.isNotEmpty == true)
+                ListTile(
+                    leading: const Icon(Icons.copy_rounded),
+                    title: const Text('Copy text'),
+                    onTap: () => Navigator.pop(context, 'copy')),
+              ListTile(
+                  leading: const Icon(Icons.link_rounded),
+                  title: const Text('Copy message link'),
+                  onTap: () => Navigator.pop(context, 'copy-link')),
+              if (canReact)
+                ListTile(
+                    leading: const Icon(Icons.add_reaction_outlined),
+                    title: const Text('Add reaction'),
+                    trailing: const Icon(Icons.chevron_right_rounded),
+                    onTap: () => Navigator.pop(context, 'react-picker')),
+              if (message.reactionCounts.isNotEmpty)
+                ListTile(
+                    leading: const Icon(Icons.people_outline_rounded),
+                    title: const Text('View reactions'),
+                    trailing: const Icon(Icons.chevron_right_rounded),
+                    onTap: () => Navigator.pop(context, 'view-reactions')),
+              if (canManage)
+                ListTile(
+                    leading: Icon(message.pinned
+                        ? Icons.push_pin_rounded
+                        : Icons.push_pin_outlined),
+                    title:
+                        Text(message.pinned ? 'Unpin message' : 'Pin message'),
+                    onTap: () => Navigator.pop(context, 'pin')),
+              if (message.authorRef == me &&
+                  (message.e2ee == null || message.content != null))
+                ListTile(
+                    leading: const Icon(Icons.edit_outlined),
+                    title: const Text('Edit message'),
+                    onTap: () => Navigator.pop(context, 'edit')),
+              if (message.authorRef != me)
+                ListTile(
+                  leading: const Icon(Icons.flag_outlined),
+                  title: const Text('Report message'),
+                  onTap: () => Navigator.pop(context, 'report'),
+                ),
+              if (message.authorRef == me || canManage)
+                ListTile(
+                  leading: const Icon(Icons.delete_outline_rounded,
+                      color: KaedeColors.danger),
+                  title: const Text('Delete message',
+                      style: TextStyle(color: KaedeColors.danger)),
+                  onTap: () => Navigator.pop(context, 'delete'),
+                ),
+              const SizedBox(height: 6),
             ],
-            ListTile(
-                leading: const Icon(Icons.reply_rounded),
-                title: const Text('Reply'),
-                onTap: () => Navigator.pop(context, 'reply')),
-            if (message.content?.isNotEmpty == true)
-              ListTile(
-                  leading: const Icon(Icons.copy_rounded),
-                  title: const Text('Copy text'),
-                  onTap: () => Navigator.pop(context, 'copy')),
-            ListTile(
-                leading: const Icon(Icons.link_rounded),
-                title: const Text('Copy message link'),
-                onTap: () => Navigator.pop(context, 'copy-link')),
-            if (canReact)
-              ListTile(
-                  leading: const Icon(Icons.add_reaction_outlined),
-                  title: const Text('Add reaction'),
-                  trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.pop(context, 'react-picker')),
-            if (message.reactionCounts.isNotEmpty)
-              ListTile(
-                  leading: const Icon(Icons.people_outline_rounded),
-                  title: const Text('View reactions'),
-                  trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.pop(context, 'view-reactions')),
-            if (canManage)
-              ListTile(
-                  leading: Icon(message.pinned
-                      ? Icons.push_pin_rounded
-                      : Icons.push_pin_outlined),
-                  title: Text(message.pinned ? 'Unpin message' : 'Pin message'),
-                  onTap: () => Navigator.pop(context, 'pin')),
-            if (message.authorRef == me &&
-                (message.e2ee == null || message.content != null))
-              ListTile(
-                  leading: const Icon(Icons.edit_outlined),
-                  title: const Text('Edit message'),
-                  onTap: () => Navigator.pop(context, 'edit')),
-            if (message.authorRef != me)
-              ListTile(
-                leading: const Icon(Icons.flag_outlined),
-                title: const Text('Report message'),
-                onTap: () => Navigator.pop(context, 'report'),
-              ),
-            if (message.authorRef == me || canManage)
-              ListTile(
-                leading: const Icon(Icons.delete_outline_rounded,
-                    color: KaedeColors.danger),
-                title: const Text('Delete message',
-                    style: TextStyle(color: KaedeColors.danger)),
-                onTap: () => Navigator.pop(context, 'delete'),
-              ),
-          ],
+          ),
         ),
       ),
     );
@@ -1650,14 +1796,18 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         case 'copy-link':
           final instance = controller.api.tokens?.instance.value;
           if (instance != null) {
-            final guild = ref.read(mobileControllerProvider).activeGuild;
-            final route = guild == null
-                ? '/home/${Uri.encodeComponent(channel.ref.wire)}'
-                : '/channels/${Uri.encodeComponent(guild.ref.wire)}/'
-                    '${Uri.encodeComponent(channel.ref.wire)}';
             await Clipboard.setData(ClipboardData(
-              text: 'https://$instance$route#message-${message.ref.wire}',
+              text: messageLink(
+                instance: instance,
+                channel: channel,
+                message: message.ref,
+              ),
             ));
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Message link copied.')),
+              );
+            }
           }
           break;
         case 'react-picker':
@@ -1899,6 +2049,326 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   );
 }
 
+/// Whether two instants fall on the same local calendar day.
+bool sameCalendarDay(DateTime left, DateTime right) {
+  final first = left.toLocal();
+  final second = right.toLocal();
+  return first.year == second.year &&
+      first.month == second.month &&
+      first.day == second.day;
+}
+
+/// "Today", "Yesterday", a weekday for the past week, then a full date.
+String transcriptDayLabel(DateTime value, {DateTime? now}) {
+  final today = now?.toLocal() ?? DateTime.now();
+  final start = DateTime(today.year, today.month, today.day);
+  final local = value.toLocal();
+  final day = DateTime(local.year, local.month, local.day);
+  final elapsed = start.difference(day).inDays;
+  if (elapsed == 0) return 'Today';
+  if (elapsed == 1) return 'Yesterday';
+  if (elapsed > 1 && elapsed < 7) return DateFormat.EEEE().format(day);
+  return day.year == start.year
+      ? DateFormat.MMMMd().format(day)
+      : DateFormat.yMMMMd().format(day);
+}
+
+/// Day boundary between messages, matching the separator on web.
+final class _DayDivider extends StatelessWidget {
+  const _DayDivider({required this.day});
+
+  final DateTime day;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.fromLTRB(14, 20, 14, 8),
+        child: Row(
+          children: [
+            const Expanded(child: Divider(color: KaedeColors.border)),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: Text(
+                transcriptDayLabel(day).toUpperCase(),
+                style: const TextStyle(
+                  color: KaedeColors.muted,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: .7,
+                ),
+              ),
+            ),
+            const Expanded(child: Divider(color: KaedeColors.border)),
+          ],
+        ),
+      );
+}
+
+/// Drag a message to the right to reply to it, the way every other mobile
+/// chat client behaves.
+///
+/// Drags that begin within [_edgeWidth] of the screen's left edge are left
+/// alone so the shell's page swipe can still take the reader back to the
+/// channel list, matching the edge-drawer convention on other clients.
+final class _SwipeToReply extends StatefulWidget {
+  const _SwipeToReply({
+    required this.enabled,
+    required this.onReply,
+    required this.child,
+  });
+
+  final bool enabled;
+  final VoidCallback onReply;
+  final Widget child;
+
+  @override
+  State<_SwipeToReply> createState() => _SwipeToReplyState();
+}
+
+final class _SwipeToReplyState extends State<_SwipeToReply>
+    with SingleTickerProviderStateMixin {
+  static const _trigger = 58.0;
+  static const _limit = 84.0;
+  static const _edgeWidth = 32.0;
+
+  late final AnimationController _settleController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 190),
+  );
+  Animation<double>? _settle;
+  var _offset = 0.0;
+  var _armed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _settleController.addListener(() {
+      final value = _settle?.value;
+      if (value != null && mounted) setState(() => _offset = value);
+    });
+  }
+
+  @override
+  void dispose() {
+    _settleController.dispose();
+    super.dispose();
+  }
+
+  void _start() {
+    _settleController.stop();
+    _settle = null;
+  }
+
+  void _update(DragUpdateDetails details) {
+    // Resistance past the trigger keeps the gesture from feeling loose.
+    final raw = _offset + details.delta.dx;
+    final next = raw <= _trigger
+        ? raw.clamp(0.0, _trigger)
+        : (_trigger + (raw - _trigger) * .35).clamp(0.0, _limit);
+    final armed = next >= _trigger;
+    if (armed && !_armed) HapticFeedback.selectionClick();
+    _armed = armed;
+    setState(() => _offset = next);
+  }
+
+  void _release() {
+    final fire = _armed;
+    _armed = false;
+    if (fire) widget.onReply();
+    if (_offset == 0) return;
+    _settle = Tween<double>(begin: _offset, end: 0).animate(
+      CurvedAnimation(parent: _settleController, curve: Curves.easeOutCubic),
+    );
+    _settleController
+      ..value = 0
+      ..forward();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.enabled) return widget.child;
+    final progress = (_offset / _trigger).clamp(0.0, 1.0);
+    return RawGestureDetector(
+      gestures: <Type, GestureRecognizerFactory>{
+        _MessageDragRecognizer:
+            GestureRecognizerFactoryWithHandlers<_MessageDragRecognizer>(
+          () => _MessageDragRecognizer(edgeWidth: _edgeWidth),
+          (recognizer) {
+            recognizer.onStart = (_) => _start();
+            recognizer.onUpdate = _update;
+            recognizer.onEnd = (_) => _release();
+            recognizer.onCancel = _release;
+          },
+        ),
+      },
+      child: Stack(
+        children: [
+          if (_offset > 0)
+            Positioned.fill(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 18),
+                  child: Opacity(
+                    opacity: progress,
+                    child: Transform.scale(
+                      scale: .72 + .28 * progress,
+                      child: Icon(
+                        Icons.reply_rounded,
+                        size: 21,
+                        color: progress == 1
+                            ? KaedeColors.coralText
+                            : KaedeColors.muted,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          Transform.translate(
+            offset: Offset(_offset, 0),
+            child: widget.child,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Horizontal drag recognizer that declines pointers starting at the screen's
+/// left edge, so the surrounding page view keeps its back swipe.
+final class _MessageDragRecognizer extends HorizontalDragGestureRecognizer {
+  _MessageDragRecognizer({required this.edgeWidth});
+
+  final double edgeWidth;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    if (event.position.dx <= edgeWidth) return;
+    super.addAllowedPointer(event);
+  }
+}
+
+/// Compact reminder of which message an action sheet applies to.
+final class _MessageActionsHeader extends StatelessWidget {
+  const _MessageActionsHeader({required this.message});
+
+  final KaedeMessage message;
+
+  @override
+  Widget build(BuildContext context) {
+    final author = message.author;
+    final content = message.content?.trim();
+    final preview = content?.isNotEmpty == true
+        ? spoilerSafeReplyPreview(content!)
+        : message.attachments.isNotEmpty
+            ? '${message.attachments.length} attachment'
+                '${message.attachments.length == 1 ? '' : 's'}'
+            : 'Message';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+      child: Row(
+        children: [
+          if (author != null) ...[
+            UserAvatar(user: author, radius: 15, ringColor: KaedeColors.panel),
+            const SizedBox(width: 10),
+          ],
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  author?.name ?? 'Unknown author',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                  ),
+                ),
+                Text(
+                  preview,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: KaedeColors.muted,
+                    fontSize: 12.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            DateFormat.jm().format(message.createdAt.toLocal()),
+            style: const TextStyle(color: KaedeColors.muted, fontSize: 11.5),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Floating shortcut back to the newest message, shown once the reader has
+/// scrolled a screenful or more into history.
+final class _JumpToPresentButton extends StatelessWidget {
+  const _JumpToPresentButton({
+    required this.visible,
+    required this.unread,
+    required this.onTap,
+  });
+
+  final bool visible;
+  final int unread;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+        ignoring: !visible,
+        child: AnimatedOpacity(
+          opacity: visible ? 1 : 0,
+          duration: const Duration(milliseconds: 160),
+          child: AnimatedSlide(
+            offset: Offset(0, visible ? 0 : .35),
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            child: Material(
+              color: KaedeColors.raised,
+              borderRadius: BorderRadius.circular(KaedeRadius.pill),
+              elevation: 4,
+              shadowColor: Colors.black45,
+              child: InkWell(
+                onTap: onTap,
+                borderRadius: BorderRadius.circular(KaedeRadius.pill),
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 14, 8),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(KaedeRadius.pill),
+                    border: Border.all(color: KaedeColors.border),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.arrow_downward_rounded,
+                          size: 16, color: KaedeColors.coralText),
+                      const SizedBox(width: 7),
+                      Text(
+                        unread > 0
+                            ? '$unread new message${unread == 1 ? '' : 's'}'
+                            : 'Jump to present',
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
 final class _FederationStatusStrip extends StatelessWidget {
   const _FederationStatusStrip({
     required this.title,
@@ -1911,18 +2381,43 @@ final class _FederationStatusStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Container(
         width: double.infinity,
-        padding: const EdgeInsets.fromLTRB(14, 9, 14, 10),
-        color: KaedeColors.coral.withValues(alpha: .12),
-        child: Column(
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 11),
+        decoration: const BoxDecoration(
+          color: KaedeColors.warningSoft,
+          border: Border(bottom: BorderSide(color: KaedeColors.border)),
+        ),
+        child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(title,
-                style: const TextStyle(
-                    color: KaedeColors.coral, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 2),
-            Text(message,
-                style: const TextStyle(
-                    color: KaedeColors.muted, fontSize: 12, height: 1.3)),
+            const Padding(
+              padding: EdgeInsets.only(top: 1, right: 10),
+              child: Icon(Icons.info_outline_rounded,
+                  size: 17, color: KaedeColors.warning),
+            ),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      color: KaedeColors.warning,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    message,
+                    style: const TextStyle(
+                      color: KaedeColors.textSoft,
+                      fontSize: 12,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       );
@@ -1935,22 +2430,40 @@ final class _HistoryBoundary extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(28, 8, 28, 14),
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
         child: Column(
           children: [
-            Text(
-                complete
-                    ? 'Beginning of conversation'
-                    : 'Recent history starts here',
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontWeight: FontWeight.w800)),
-            const SizedBox(height: 3),
+            Icon(
+              complete ? Icons.flag_outlined : Icons.cloud_download_outlined,
+              size: 20,
+              color: KaedeColors.muted,
+            ),
+            const SizedBox(height: 8),
             Text(
               complete
-                  ? 'You have reached the oldest message available from the conversation home.'
-                  : 'This instance keeps a rolling cache of this remote conversation. Older messages load on demand from its home instance; retry if that instance is temporarily unavailable.',
+                  ? 'Beginning of conversation'
+                  : 'Recent history starts here',
               textAlign: TextAlign.center,
-              style: const TextStyle(color: KaedeColors.muted, fontSize: 12),
+              style: const TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 13.5,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              complete
+                  ? 'You have reached the oldest message available from the '
+                      'conversation home.'
+                  : 'This instance keeps a rolling cache of this remote '
+                      'conversation. Older messages load on demand from its '
+                      'home instance; retry if that instance is temporarily '
+                      'unavailable.',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: KaedeColors.muted,
+                fontSize: 12,
+                height: 1.35,
+              ),
             ),
           ],
         ),
@@ -1972,22 +2485,32 @@ final class _PendingMessageTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final failed = item.state == 'failed';
     final content = '${item.payload['content'] ?? ''}'.trim();
-    return Opacity(
-      opacity: failed ? 1 : .58,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(62, 8, 8, 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (content.isNotEmpty) Text(content),
-            Row(
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(_messageGutter, 4, 12, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (content.isNotEmpty)
+            Opacity(
+              opacity: failed ? .85 : .55,
+              child: Text(content, style: const TextStyle(fontSize: 15.5)),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Row(
               children: [
-                Icon(
-                  failed ? Icons.error_outline_rounded : Icons.schedule_rounded,
-                  size: 16,
-                  color: failed ? KaedeColors.danger : KaedeColors.muted,
-                ),
-                const SizedBox(width: 6),
+                if (failed)
+                  const Icon(Icons.error_outline_rounded,
+                      size: 14, color: KaedeColors.danger)
+                else
+                  const SizedBox.square(
+                    dimension: 11,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.6,
+                      color: KaedeColors.muted,
+                    ),
+                  ),
+                const SizedBox(width: 7),
                 Expanded(
                   child: Text(
                     failed
@@ -1998,21 +2521,30 @@ final class _PendingMessageTile extends StatelessWidget {
                     style: TextStyle(
                       color: failed ? KaedeColors.danger : KaedeColors.muted,
                       fontSize: 12,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
                 if (failed) ...[
-                  TextButton(onPressed: onRetry, child: const Text('Retry')),
+                  TextButton(
+                    onPressed: onRetry,
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 32),
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                    ),
+                    child: const Text('Retry'),
+                  ),
                   IconButton(
                     onPressed: onDiscard,
                     tooltip: 'Discard message',
-                    icon: const Icon(Icons.close_rounded, size: 18),
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.close_rounded, size: 17),
                   ),
                 ],
               ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -2025,28 +2557,39 @@ final class _ChatErrorStrip extends StatelessWidget {
   final VoidCallback onRetry;
 
   @override
-  Widget build(BuildContext context) => ColoredBox(
-        color: KaedeColors.danger.withValues(alpha: .16),
+  Widget build(BuildContext context) => DecoratedBox(
+        decoration: const BoxDecoration(
+          color: KaedeColors.dangerSoft,
+          border: Border(bottom: BorderSide(color: KaedeColors.border)),
+        ),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
+          padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
           child: Row(
             children: [
               const Icon(Icons.error_outline_rounded,
-                  size: 18, color: KaedeColors.danger),
-              const SizedBox(width: 9),
+                  size: 17, color: KaedeColors.danger),
+              const SizedBox(width: 10),
               Expanded(
                 child: Text(
                   message,
-                  maxLines: 2,
+                  maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: KaedeColors.danger,
-                    fontSize: 13,
+                    fontSize: 12.5,
                     fontWeight: FontWeight.w600,
+                    height: 1.3,
                   ),
                 ),
               ),
-              TextButton(onPressed: onRetry, child: const Text('Retry')),
+              TextButton(
+                onPressed: onRetry,
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(0, 34),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                ),
+                child: const Text('Retry'),
+              ),
             ],
           ),
         ),
@@ -2241,103 +2784,214 @@ final class _ReactionChip extends StatelessWidget {
   const _ReactionChip({
     required this.emoji,
     required this.count,
+    required this.mine,
     required this.onTap,
   });
 
   final String emoji;
   final int count;
+  final bool mine;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(9),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: KaedeColors.selected,
-            borderRadius: BorderRadius.circular(9),
-            border: Border.all(color: KaedeColors.border),
-          ),
-          child: Text(
-            '$emoji  $count',
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+  Widget build(BuildContext context) => Material(
+        color: mine ? KaedeColors.coralSoft : KaedeColors.raised,
+        borderRadius: BorderRadius.circular(KaedeRadius.small),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(KaedeRadius.small),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(KaedeRadius.small),
+              border: Border.all(
+                color: mine ? KaedeColors.coral : KaedeColors.border,
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(emoji, style: const TextStyle(fontSize: 14)),
+                const SizedBox(width: 5),
+                Text(
+                  '$count',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: mine ? KaedeColors.coralText : KaedeColors.textSoft,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       );
 }
 
-final class _TypingDots extends StatelessWidget {
+final class _AddReactionChip extends StatelessWidget {
+  const _AddReactionChip({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Tooltip(
+        message: 'Add reaction',
+        child: Material(
+          color: KaedeColors.raised,
+          borderRadius: BorderRadius.circular(KaedeRadius.small),
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(KaedeRadius.small),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(KaedeRadius.small),
+                border: Border.all(color: KaedeColors.border),
+              ),
+              child: const Icon(Icons.add_reaction_outlined,
+                  size: 15, color: KaedeColors.muted),
+            ),
+          ),
+        ),
+      );
+}
+
+final class _TypingDots extends StatefulWidget {
   const _TypingDots();
 
   @override
-  Widget build(BuildContext context) => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (var index = 0; index < 3; index++) ...[
-            if (index > 0) const SizedBox(width: 3),
-            Container(
-              width: 4,
-              height: 4,
-              decoration: const BoxDecoration(
-                color: KaedeColors.muted,
-                shape: BoxShape.circle,
+  State<_TypingDots> createState() => _TypingDotsState();
+}
+
+final class _TypingDotsState extends State<_TypingDots>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var index = 0; index < 3; index++) ...[
+              if (index > 0) const SizedBox(width: 3),
+              Opacity(
+                opacity: .35 +
+                    .65 *
+                        (1 -
+                            ((_controller.value * 3 - index) % 3)
+                                .clamp(0.0, 1.0)),
+                child: Container(
+                  width: 5,
+                  height: 5,
+                  decoration: const BoxDecoration(
+                    color: KaedeColors.muted,
+                    shape: BoxShape.circle,
+                  ),
+                ),
               ),
-            ),
+            ],
           ],
-        ],
+        ),
       );
 }
 
 final class _ReplyingBar extends StatelessWidget {
   const _ReplyingBar({
     required this.author,
+    required this.preview,
     required this.notify,
     required this.onNotifyChanged,
     required this.onClose,
   });
 
   final String author;
+  final String preview;
   final bool notify;
   final ValueChanged<bool> onNotifyChanged;
   final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.fromLTRB(13, 7, 5, 7),
+        padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
         decoration: const BoxDecoration(
           border: Border(bottom: BorderSide(color: KaedeColors.border)),
         ),
         child: Row(
           children: [
+            const Icon(Icons.reply_rounded, size: 15, color: KaedeColors.muted),
+            const SizedBox(width: 8),
             Expanded(
-              child: Text.rich(
-                TextSpan(
-                  text: 'Replying to ',
-                  style: const TextStyle(color: KaedeColors.muted),
-                  children: [
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text.rich(
                     TextSpan(
-                      text: author,
+                      text: 'Replying to ',
                       style: const TextStyle(
-                        color: KaedeColors.text,
-                        fontWeight: FontWeight.w700,
+                        color: KaedeColors.muted,
+                        fontSize: 12.5,
+                      ),
+                      children: [
+                        TextSpan(
+                          text: author,
+                          style: const TextStyle(
+                            color: KaedeColors.text,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (preview.trim().isNotEmpty)
+                    Text(
+                      preview,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: KaedeColors.muted,
+                        fontSize: 11.5,
                       ),
                     ),
-                  ],
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+                ],
               ),
             ),
-            TextButton.icon(
-              onPressed: () => onNotifyChanged(!notify),
-              icon: Icon(
-                  notify ? Icons.alternate_email : Icons.notifications_off,
-                  size: 15),
-              label: Text(notify ? 'ON' : 'OFF'),
-              style: TextButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(horizontal: 6),
+            Tooltip(
+              message: notify
+                  ? 'The author will be notified'
+                  : 'Reply without notifying the author',
+              child: TextButton.icon(
+                onPressed: () => onNotifyChanged(!notify),
+                icon: Icon(
+                  notify
+                      ? Icons.alternate_email_rounded
+                      : Icons.notifications_off_rounded,
+                  size: 15,
+                ),
+                label: Text(notify ? 'ON' : 'OFF'),
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(0, 34),
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  foregroundColor:
+                      notify ? KaedeColors.coralText : KaedeColors.muted,
+                  textStyle: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: .6,
+                  ),
+                ),
               ),
             ),
             IconButton(
@@ -2358,38 +3012,99 @@ final class _UploadChip extends StatelessWidget {
   final VoidCallback onRemove;
 
   @override
-  Widget build(BuildContext context) => Container(
-        width: 176,
-        padding: const EdgeInsets.fromLTRB(10, 5, 3, 5),
-        decoration: BoxDecoration(
-          color: KaedeColors.selected,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: KaedeColors.border),
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.attach_file_rounded,
-                size: 18, color: KaedeColors.muted),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                item.name,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style:
-                    const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+  Widget build(BuildContext context) {
+    final isImage = item.contentType.startsWith('image/');
+    return Container(
+      width: isImage ? 64 : 172,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: KaedeColors.panel,
+        borderRadius: BorderRadius.circular(KaedeRadius.medium),
+        border: Border.all(color: KaedeColors.border),
+      ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (isImage)
+            Image.file(
+              item.file,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => const ColoredBox(
+                color: KaedeColors.raised,
+                child: Icon(Icons.image_outlined,
+                    size: 20, color: KaedeColors.muted),
+              ),
+            )
+          else
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 30, 8),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        item.contentType.startsWith('video/')
+                            ? Icons.movie_outlined
+                            : item.contentType.startsWith('audio/')
+                                ? Icons.audiotrack_rounded
+                                : Icons.description_outlined,
+                        size: 16,
+                        color: KaedeColors.muted,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          item.name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            height: 1.25,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    formatAttachmentSize(item.size),
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: KaedeColors.muted,
+                    ),
+                  ),
+                ],
               ),
             ),
-            IconButton(
-              onPressed: onRemove,
-              tooltip: 'Remove attachment',
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.close_rounded, size: 17),
+          Positioned(
+            top: 2,
+            right: 2,
+            child: Material(
+              color: Colors.black54,
+              shape: const CircleBorder(),
+              child: InkWell(
+                onTap: onRemove,
+                customBorder: const CircleBorder(),
+                child: const Padding(
+                  padding: EdgeInsets.all(4),
+                  child:
+                      Icon(Icons.close_rounded, size: 14, color: Colors.white),
+                ),
+              ),
             ),
-          ],
-        ),
-      );
+          ),
+        ],
+      ),
+    );
+  }
 }
+
+/// Left inset shared by message content, system rows and pending messages so
+/// every line in the transcript starts on the same vertical rule.
+const double _messageGutter = 60;
 
 final class _MessageTile extends StatelessWidget {
   const _MessageTile(
@@ -2399,6 +3114,7 @@ final class _MessageTile extends StatelessWidget {
       required this.onReply,
       required this.onMenu,
       required this.onReaction,
+      this.onAddReaction,
       this.onAuthorTap,
       this.referenced,
       this.onJump});
@@ -2409,55 +3125,29 @@ final class _MessageTile extends StatelessWidget {
   final VoidCallback onReply;
   final VoidCallback onMenu;
   final ValueChanged<String> onReaction;
+  final VoidCallback? onAddReaction;
   final VoidCallback? onAuthorTap;
   final VoidCallback? onJump;
+
+  void _openMenu() {
+    HapticFeedback.mediumImpact();
+    onMenu();
+  }
 
   @override
   Widget build(BuildContext context) {
     if (message.messageType >= 3 && message.messageType <= 5) {
-      final icon = switch (message.messageType) {
-        3 => Icons.person_add_alt_1_rounded,
-        4 => Icons.logout_rounded,
-        _ => Icons.person_remove_alt_1_rounded,
-      };
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(14, 5, 14, 5),
-        child: Row(
-          children: [
-            Container(
-              width: 25,
-              height: 25,
-              decoration: const BoxDecoration(
-                shape: BoxShape.circle,
-                color: Color(0xFF4B302A),
-              ),
-              child: Icon(icon, size: 14, color: KaedeColors.coral),
-            ),
-            const SizedBox(width: 9),
-            Expanded(
-              child: Text(
-                message.content ?? 'Group membership changed.',
-                style: const TextStyle(color: KaedeColors.muted, fontSize: 13),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              DateFormat.jm().format(message.createdAt.toLocal()),
-              style: const TextStyle(color: KaedeColors.muted, fontSize: 11),
-            ),
-          ],
-        ),
-      );
+      return _SystemMessageRow(message: message);
     }
     final author = message.author;
     final deleted = message.deletedAt != null;
     final mediaPreview = previewMediaUrl(message.content ?? '');
+    final failed = message.deliveryStatus == 'failed';
     return InkWell(
-      onLongPress: onMenu,
+      onLongPress: _openMenu,
       onDoubleTap: deleted ? null : onReply,
-      borderRadius: BorderRadius.circular(6),
       child: Padding(
-        padding: EdgeInsets.fromLTRB(8, compact ? 1 : 9, 8, 2),
+        padding: EdgeInsets.fromLTRB(12, compact ? 1 : 8, 12, 1),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -2467,12 +3157,15 @@ final class _MessageTile extends StatelessWidget {
                   ? null
                   : author == null
                       ? const CircleAvatar(
+                          radius: 20,
                           backgroundColor: KaedeColors.raised,
-                          child: Text('?'),
+                          foregroundColor: KaedeColors.muted,
+                          child: Text('?',
+                              style: TextStyle(fontWeight: FontWeight.w700)),
                         )
                       : GestureDetector(
                           onTap: onAuthorTap,
-                          child: UserAvatar(user: author),
+                          child: UserAvatar(user: author, radius: 20),
                         ),
             ),
             const SizedBox(width: 8),
@@ -2480,56 +3173,59 @@ final class _MessageTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (message.reference != null)
+                    _ReplyReference(
+                      referenced: referenced,
+                      onTap: onJump,
+                    ),
                   if (!compact)
-                    Row(
-                      children: [
-                        Flexible(
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 2),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
+                        children: [
+                          Flexible(
                             child: GestureDetector(
-                          onTap: onAuthorTap,
-                          child: Text(author?.name ?? 'Unknown author',
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w800, fontSize: 15)),
-                        )),
-                        const SizedBox(width: 7),
-                        Text(
+                              onTap: onAuthorTap,
+                              child: Text(
+                                author?.name ?? 'Unknown author',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 15,
+                                  height: 1.2,
+                                  letterSpacing: -.1,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
                             DateFormat.jm().format(message.createdAt.toLocal()),
                             style: const TextStyle(
-                                color: KaedeColors.muted, fontSize: 12)),
-                        if (message.editedAt != null)
-                          const Text('  (edited)',
-                              style: TextStyle(
-                                  color: KaedeColors.muted, fontSize: 11)),
-                      ],
-                    ),
-                  if (message.reference != null)
-                    InkWell(
-                      onTap: onJump,
-                      borderRadius: BorderRadius.circular(6),
-                      child: Padding(
-                        padding: const EdgeInsets.only(top: 3, bottom: 2),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.reply_rounded,
-                                size: 14, color: KaedeColors.muted),
-                            const SizedBox(width: 5),
-                            Text(referenced?.author?.name ?? 'Original message',
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w700, fontSize: 13)),
+                              color: KaedeColors.muted,
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          if (message.editedAt != null) ...[
                             const SizedBox(width: 6),
-                            Expanded(
-                                child: Text(
-                                    referenced == null
-                                        ? 'Tap to load message'
-                                        : spoilerSafeReplyPreview(
-                                            referenced!.content ?? 'Attachment',
-                                          ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        color: KaedeColors.muted,
-                                        fontSize: 13))),
+                            const Text(
+                              '(edited)',
+                              style: TextStyle(
+                                color: KaedeColors.muted,
+                                fontSize: 11,
+                              ),
+                            ),
                           ],
-                        ),
+                          if (message.pinned) ...[
+                            const SizedBox(width: 6),
+                            const Icon(Icons.push_pin_rounded,
+                                size: 11, color: KaedeColors.muted),
+                          ],
+                        ],
                       ),
                     ),
                   if (deleted)
@@ -2541,27 +3237,7 @@ final class _MessageTile extends StatelessWidget {
                       ),
                     )
                   else if (message.e2ee != null && message.content == null)
-                    const Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(
-                          Icons.lock_outline_rounded,
-                          size: 17,
-                          color: KaedeColors.muted,
-                        ),
-                        SizedBox(width: 7),
-                        Expanded(
-                          child: Text(
-                            'Can’t decrypt this message on this device. Verify, recover, or update this device’s encryption support.',
-                            style: TextStyle(
-                              color: KaedeColors.muted,
-                              fontSize: 14,
-                              height: 1.25,
-                            ),
-                          ),
-                        ),
-                      ],
-                    )
+                    const _UndecryptableNotice()
                   else if (message.content case final content?
                       when content.isNotEmpty)
                     KaedeMessageMarkdown(
@@ -2581,32 +3257,56 @@ final class _MessageTile extends StatelessWidget {
                     ),
                   if (!deleted && message.reactionCounts.isNotEmpty)
                     Padding(
-                      padding: const EdgeInsets.only(top: 6),
+                      padding: const EdgeInsets.only(top: 6, bottom: 2),
                       child: Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
+                        spacing: 5,
+                        runSpacing: 5,
                         children: [
                           for (final reaction in message.reactionCounts.entries)
                             _ReactionChip(
                               emoji: reaction.key,
                               count: reaction.value,
+                              mine: message.reactedEmoji.contains(reaction.key),
                               onTap: () => onReaction(reaction.key),
                             ),
+                          if (onAddReaction != null)
+                            _AddReactionChip(onTap: onAddReaction!),
                         ],
                       ),
                     ),
-                  if (message.deliveryStatus == 'failed')
-                    Text(message.failureReason ?? 'Message not delivered.',
-                        style: const TextStyle(
-                            color: KaedeColors.danger,
-                            fontWeight: FontWeight.w700)),
-                  if (message.deliveryStatus == 'retrying')
-                    Text(
-                      message.failureReason ??
-                          'The receiving instance is temporarily at capacity. Kaede is retrying automatically.',
-                      style: const TextStyle(
-                        color: KaedeColors.muted,
-                        fontWeight: FontWeight.w600,
+                  if (failed || message.deliveryStatus == 'retrying')
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            failed
+                                ? Icons.error_outline_rounded
+                                : Icons.sync_rounded,
+                            size: 14,
+                            color:
+                                failed ? KaedeColors.danger : KaedeColors.muted,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              failed
+                                  ? message.failureReason ??
+                                      'Message not delivered.'
+                                  : message.failureReason ??
+                                      'The receiving instance is temporarily at '
+                                          'capacity. Kaede is retrying automatically.',
+                              style: TextStyle(
+                                color: failed
+                                    ? KaedeColors.danger
+                                    : KaedeColors.muted,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                 ],
@@ -2617,6 +3317,146 @@ final class _MessageTile extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Join, leave and removal notices, kept visually quieter than real messages.
+final class _SystemMessageRow extends StatelessWidget {
+  const _SystemMessageRow({required this.message});
+
+  final KaedeMessage message;
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = switch (message.messageType) {
+      3 => Icons.person_add_alt_1_rounded,
+      4 => Icons.logout_rounded,
+      _ => Icons.person_remove_alt_1_rounded,
+    };
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 14, 6),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 40,
+            child: Center(
+              child: Container(
+                width: 26,
+                height: 26,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: KaedeColors.coralSoft,
+                ),
+                child: Icon(icon, size: 14, color: KaedeColors.coralText),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message.content ?? 'Group membership changed.',
+              style: const TextStyle(color: KaedeColors.muted, fontSize: 13),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            DateFormat.jm().format(message.createdAt.toLocal()),
+            style: const TextStyle(color: KaedeColors.muted, fontSize: 11),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The quoted message above a reply.
+final class _ReplyReference extends StatelessWidget {
+  const _ReplyReference({required this.referenced, required this.onTap});
+
+  final KaedeMessage? referenced;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final author = referenced?.author;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(KaedeRadius.small),
+      child: Padding(
+        padding: const EdgeInsets.only(top: 2, bottom: 3, right: 4),
+        child: Row(
+          children: [
+            const Padding(
+              padding: EdgeInsets.only(right: 6),
+              child:
+                  Icon(Icons.reply_rounded, size: 13, color: KaedeColors.muted),
+            ),
+            if (author != null) ...[
+              UserAvatar(user: author, radius: 8),
+              const SizedBox(width: 5),
+            ],
+            Text(
+              author?.name ?? 'Original message',
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+                fontSize: 12.5,
+                color: KaedeColors.textSoft,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                referenced == null
+                    ? 'Tap to load message'
+                    : spoilerSafeReplyPreview(
+                        referenced!.content ?? 'Attachment',
+                      ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: KaedeColors.muted,
+                  fontSize: 12.5,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _UndecryptableNotice extends StatelessWidget {
+  const _UndecryptableNotice();
+
+  @override
+  Widget build(BuildContext context) => Container(
+        margin: const EdgeInsets.only(top: 2, bottom: 2),
+        padding: const EdgeInsets.fromLTRB(10, 9, 12, 9),
+        decoration: BoxDecoration(
+          color: KaedeColors.raised,
+          borderRadius: BorderRadius.circular(KaedeRadius.medium),
+          border: Border.all(color: KaedeColors.border),
+        ),
+        child: const Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.lock_outline_rounded,
+                size: 16, color: KaedeColors.muted),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Can\u2019t decrypt this message on this device. Verify, recover, or '
+                'update this device\u2019s encryption support.',
+                style: TextStyle(
+                  color: KaedeColors.muted,
+                  fontSize: 13,
+                  height: 1.3,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
 }
 
 Map<String, Object?>? _encryptedManifestFor(
@@ -2990,10 +3830,17 @@ final class _SpoilerTextState extends State<_SpoilerText> {
             borderRadius: BorderRadius.circular(4),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 120),
-              padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
               decoration: BoxDecoration(
-                color: _revealed ? KaedeColors.raised : KaedeColors.text,
+                // Covered spoilers are a dark block, not a bright slab: a
+                // light fill reads as a broken image in a dark transcript.
+                color: _revealed ? KaedeColors.raised : KaedeColors.hover,
                 borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                  color: _revealed
+                      ? KaedeColors.border
+                      : KaedeColors.borderStrong,
+                ),
               ),
               child: Text(
                 widget.text,
@@ -3314,7 +4161,7 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
               title: Text(widget.attachment.filename),
               subtitle: Text(
                 '${widget.attachment.contentType} · '
-                '${(widget.attachment.size / 1024).ceil()} KB',
+                '${formatAttachmentSize(widget.attachment.size)}',
               ),
             ),
           ],
@@ -3504,7 +4351,7 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.insert_drive_file_outlined),
           title: Text(attachment.filename),
-          subtitle: Text('${(attachment.size / 1024).ceil()} KB'),
+          subtitle: Text(formatAttachmentSize(attachment.size)),
         );
       },
     );
@@ -3529,7 +4376,7 @@ final class _TypingIndicator extends StatelessWidget {
       liveRegion: true,
       label: label,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 2, 18, 0),
+        padding: const EdgeInsets.fromLTRB(_messageGutter, 3, 16, 3),
         child: Row(
           children: [
             const _TypingDots(),
@@ -3725,27 +4572,44 @@ final class _Composer extends StatelessWidget {
   const _Composer(
       {required this.controller,
       required this.focusNode,
+      required this.hint,
       required this.reply,
       required this.notifyReply,
       required this.uploads,
       required this.sending,
       required this.slowModeRemaining,
+      required this.compact,
+      required this.canAttach,
+      required this.gifsAllowed,
       required this.onNotifyChanged,
       required this.onCancelReply,
       required this.onRemoveUpload,
-      required this.onAdd,
+      required this.onMore,
+      required this.onAttach,
+      required this.onEmoji,
+      required this.onGif,
       required this.onSend});
   final TextEditingController controller;
   final FocusNode focusNode;
+  final String hint;
   final KaedeMessage? reply;
   final bool notifyReply;
   final List<_PendingUpload> uploads;
   final bool sending;
   final Duration slowModeRemaining;
+
+  /// Narrow phones collapse the attachment, emoji and GIF entry points into a
+  /// single sheet so the text field keeps a usable width.
+  final bool compact;
+  final bool canAttach;
+  final bool gifsAllowed;
   final ValueChanged<bool> onNotifyChanged;
   final VoidCallback onCancelReply;
   final ValueChanged<_PendingUpload> onRemoveUpload;
-  final VoidCallback onAdd;
+  final VoidCallback onMore;
+  final VoidCallback onAttach;
+  final VoidCallback onEmoji;
+  final VoidCallback onGif;
   final VoidCallback onSend;
 
   @override
@@ -3754,108 +4618,247 @@ final class _Composer extends StatelessWidget {
     final seconds = (slowModeRemaining.inMilliseconds / 1000).ceil();
     return SafeArea(
       top: false,
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(8, 3, 8, 7),
-        decoration: BoxDecoration(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
             color: KaedeColors.raised,
-            borderRadius: BorderRadius.circular(23),
-            border: Border.all(color: KaedeColors.border)),
-        child: Column(
-          children: [
-            if (reply case final message?)
-              _ReplyingBar(
-                author: message.author?.name ?? 'Unknown author',
-                notify: notifyReply,
-                onNotifyChanged: onNotifyChanged,
-                onClose: onCancelReply,
-              ),
-            if (uploads.isNotEmpty)
-              SizedBox(
-                height: 68,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.all(8),
-                  separatorBuilder: (_, __) => const SizedBox(width: 8),
-                  itemCount: uploads.length,
-                  itemBuilder: (_, index) {
-                    final item = uploads[index];
-                    return _UploadChip(
-                      item: item,
-                      onRemove: () => onRemoveUpload(item),
-                    );
-                  },
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: KaedeColors.border),
+          ),
+          child: Column(
+            children: [
+              if (reply case final message?)
+                _ReplyingBar(
+                  author: message.author?.name ?? 'Unknown author',
+                  preview: spoilerSafeReplyPreview(
+                    message.content ?? 'Attachment',
+                  ),
+                  notify: notifyReply,
+                  onNotifyChanged: onNotifyChanged,
+                  onClose: onCancelReply,
                 ),
-              ),
-            if (coolingDown)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 7, 14, 0),
-                child: Row(
-                  children: [
-                    const Icon(Icons.timer_outlined,
-                        size: 16, color: KaedeColors.muted),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Slow mode · ${seconds}s remaining',
-                      style: const TextStyle(
-                        color: KaedeColors.muted,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
+              if (uploads.isNotEmpty)
+                SizedBox(
+                  height: 78,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.fromLTRB(10, 10, 10, 4),
+                    separatorBuilder: (_, __) => const SizedBox(width: 8),
+                    itemCount: uploads.length,
+                    itemBuilder: (_, index) {
+                      final item = uploads[index];
+                      return _UploadChip(
+                        item: item,
+                        onRemove: () => onRemoveUpload(item),
+                      );
+                    },
+                  ),
+                ),
+              if (coolingDown)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.timer_outlined,
+                          size: 15, color: KaedeColors.muted),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Slow mode · ${seconds}s remaining',
+                        style: const TextStyle(
+                          color: KaedeColors.muted,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  _ComposerButton(
+                    icon: Icons.add_rounded,
+                    tooltip: compact
+                        ? 'Add files, emoji, or GIF'
+                        : canAttach
+                            ? 'Attach files'
+                            : 'Attachments are not allowed here',
+                    size: 22,
+                    onPressed: sending || (!compact && !canAttach)
+                        ? null
+                        : compact
+                            ? onMore
+                            : onAttach,
+                  ),
+                  Expanded(
+                    child: TextField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      minLines: 1,
+                      maxLines: 5,
+                      maxLength: 4000,
+                      textCapitalization: TextCapitalization.sentences,
+                      keyboardType: TextInputType.multiline,
+                      textInputAction: TextInputAction.newline,
+                      style: const TextStyle(fontSize: 15.5, height: 1.35),
+                      decoration: InputDecoration(
+                        hintText: hint,
+                        isCollapsed: true,
+                        filled: false,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 15,
+                        ),
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        counterText: '',
                       ),
                     ),
-                  ],
-                ),
-              ),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(left: 5, bottom: 3),
-                  child: IconButton.filledTonal(
-                      constraints:
-                          const BoxConstraints.tightFor(width: 38, height: 38),
-                      padding: EdgeInsets.zero,
-                      tooltip: 'Add files, emoji, or GIF',
-                      onPressed: sending ? null : onAdd,
-                      icon: const Icon(Icons.add_rounded, size: 23)),
-                ),
-                Expanded(
-                  child: TextField(
+                  ),
+                  if (!compact)
+                    _ComposerButton(
+                      icon: Icons.emoji_emotions_outlined,
+                      tooltip: 'Emoji',
+                      onPressed: sending ? null : onEmoji,
+                    ),
+                  if (!compact)
+                    _ComposerButton(
+                      icon: Icons.gif_box_outlined,
+                      tooltip: gifsAllowed
+                          ? 'GIFs'
+                          : 'GIF search is unavailable in encrypted '
+                              'conversations',
+                      onPressed: sending ? null : onGif,
+                      muted: !gifsAllowed,
+                    ),
+                  _ComposerSend(
                     controller: controller,
-                    focusNode: focusNode,
-                    minLines: 1,
-                    maxLines: 5,
-                    maxLength: 4000,
-                    textCapitalization: TextCapitalization.sentences,
-                    decoration: const InputDecoration(
-                        hintText: 'Message',
-                        contentPadding:
-                            EdgeInsets.symmetric(horizontal: 10, vertical: 13),
-                        border: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                        counterText: ''),
+                    hasAttachments: uploads.isNotEmpty,
+                    sending: sending,
+                    enabled: !coolingDown,
+                    onSend: onSend,
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(right: 5, bottom: 3),
-                  child: IconButton.filled(
-                    constraints:
-                        const BoxConstraints.tightFor(width: 40, height: 40),
-                    padding: EdgeInsets.zero,
-                    onPressed: sending || coolingDown ? null : onSend,
-                    icon: sending
-                        ? const SizedBox.square(
-                            dimension: 17,
-                            child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Icons.arrow_upward_rounded, size: 21),
-                  ),
-                ),
-              ],
-            ),
-          ],
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
+}
+
+/// Circular composer affordance sized for comfortable one-handed reach.
+final class _ComposerButton extends StatelessWidget {
+  const _ComposerButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.size = 21,
+    this.muted = false,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final double size;
+  final bool muted;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.fromLTRB(3, 0, 3, 4),
+        child: IconButton(
+          tooltip: tooltip,
+          onPressed: onPressed,
+          visualDensity: VisualDensity.compact,
+          constraints: const BoxConstraints.tightFor(width: 40, height: 40),
+          padding: EdgeInsets.zero,
+          style: IconButton.styleFrom(
+            foregroundColor: muted ? KaedeColors.muted : KaedeColors.textSoft,
+            shape: const CircleBorder(),
+          ),
+          icon: Icon(icon, size: size),
+        ),
+      );
+}
+
+/// The send button only appears once there is something to send, so an empty
+/// composer stays out of the way.
+final class _ComposerSend extends StatelessWidget {
+  const _ComposerSend({
+    required this.controller,
+    required this.hasAttachments,
+    required this.sending,
+    required this.enabled,
+    required this.onSend,
+  });
+
+  final TextEditingController controller;
+  final bool hasAttachments;
+  final bool sending;
+  final bool enabled;
+  final VoidCallback onSend;
+
+  @override
+  Widget build(BuildContext context) =>
+      ValueListenableBuilder<TextEditingValue>(
+        valueListenable: controller,
+        builder: (context, value, _) {
+          final ready =
+              value.text.trim().isNotEmpty || hasAttachments || sending;
+          return AnimatedSize(
+            duration: const Duration(milliseconds: 160),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.centerLeft,
+            child: ready
+                ? Padding(
+                    padding: const EdgeInsets.fromLTRB(2, 0, 5, 5),
+                    child: IconButton.filled(
+                      tooltip: 'Send message',
+                      constraints: const BoxConstraints.tightFor(
+                        width: 38,
+                        height: 38,
+                      ),
+                      padding: EdgeInsets.zero,
+                      style: IconButton.styleFrom(
+                        backgroundColor: KaedeColors.coral,
+                        foregroundColor: KaedeColors.onCoral,
+                        disabledBackgroundColor: KaedeColors.hover,
+                        disabledForegroundColor: KaedeColors.muted,
+                      ),
+                      onPressed: sending || !enabled ? null : onSend,
+                      icon: sending
+                          ? const SizedBox.square(
+                              dimension: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: KaedeColors.muted,
+                              ),
+                            )
+                          : const Icon(Icons.arrow_upward_rounded, size: 20),
+                    ),
+                  )
+                : const SizedBox(width: 6, height: 46),
+          );
+        },
+      );
+}
+
+/// Placeholder text naming the conversation, like the web composer.
+String composerHint(KaedeChannel channel) {
+  if (channel.guildRef != null) {
+    final name = channel.name?.trim();
+    return 'Message #${name?.isNotEmpty == true ? name : 'channel'}';
+  }
+  if (channel.conversationType == 'group') {
+    final name = channel.name?.trim();
+    return name?.isNotEmpty == true ? 'Message $name' : 'Message the group';
+  }
+  final recipient =
+      channel.recipients.isEmpty ? null : channel.recipients.first.name.trim();
+  return recipient?.isNotEmpty == true ? 'Message $recipient' : 'Message';
 }
 
 final class _PermissionNotice extends StatelessWidget {
@@ -3867,26 +4870,28 @@ final class _PermissionNotice extends StatelessWidget {
   Widget build(BuildContext context) => SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 3, 8, 7),
+          padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
           child: DecoratedBox(
-            decoration: const BoxDecoration(
-              color: KaedeColors.raised,
-              borderRadius: BorderRadius.all(Radius.circular(18)),
-              border: Border.fromBorderSide(
-                BorderSide(color: KaedeColors.border),
-              ),
+            decoration: BoxDecoration(
+              color: KaedeColors.panel,
+              borderRadius: BorderRadius.circular(KaedeRadius.large),
+              border: Border.all(color: KaedeColors.border),
             ),
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 14),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
               child: Row(
                 children: [
                   const Icon(Icons.lock_outline_rounded,
-                      size: 18, color: KaedeColors.muted),
+                      size: 17, color: KaedeColors.muted),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
                       message,
-                      style: const TextStyle(color: KaedeColors.muted),
+                      style: const TextStyle(
+                        color: KaedeColors.muted,
+                        fontSize: 13,
+                        height: 1.35,
+                      ),
                     ),
                   ),
                 ],
@@ -3900,27 +4905,64 @@ final class _PermissionNotice extends StatelessWidget {
 final class _ConversationStart extends StatelessWidget {
   const _ConversationStart({required this.channel});
   final KaedeChannel channel;
+
   @override
-  Widget build(BuildContext context) => Align(
-        alignment: Alignment.bottomLeft,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(18, 28, 18, 22),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const CircleAvatar(radius: 30, child: Icon(Icons.tag_rounded)),
-              const SizedBox(height: 14),
-              Text('Welcome to ${channel.name ?? 'this conversation'}',
-                  style: Theme.of(context).textTheme.headlineMedium,
-                  textAlign: TextAlign.left),
-              const SizedBox(height: 8),
-              const Text('This is the beginning of the conversation.',
-                  style: TextStyle(color: KaedeColors.muted)),
-            ],
-          ),
+  Widget build(BuildContext context) {
+    final guildChannel = channel.guildRef != null;
+    final name = channel.name?.trim();
+    final title = guildChannel
+        ? '#${name?.isNotEmpty == true ? name : 'channel'}'
+        : name?.isNotEmpty == true
+            ? name!
+            : channel.recipients.isEmpty
+                ? 'this conversation'
+                : channel.recipients.first.name;
+    final topic = channel.topic?.trim();
+    return Align(
+      alignment: Alignment.bottomLeft,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(18, 30, 18, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 62,
+              height: 62,
+              decoration: BoxDecoration(
+                color: KaedeColors.raised,
+                shape: BoxShape.circle,
+                border: Border.all(color: KaedeColors.border),
+              ),
+              child: Icon(
+                guildChannel
+                    ? Icons.tag_rounded
+                    : channel.conversationType == 'group'
+                        ? Icons.group_rounded
+                        : Icons.alternate_email_rounded,
+                size: 28,
+                color: KaedeColors.muted,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              guildChannel ? 'Welcome to $title' : title,
+              style: Theme.of(context).textTheme.headlineMedium,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              topic?.isNotEmpty == true
+                  ? topic!
+                  : guildChannel
+                      ? 'This is the start of #${name ?? 'channel'}. Say hello.'
+                      : 'This is the beginning of your conversation.',
+              style: const TextStyle(color: KaedeColors.muted, height: 1.4),
+            ),
+          ],
         ),
-      );
+      ),
+    );
+  }
 }
 
 final class _PendingUpload {
@@ -3939,6 +4981,18 @@ final class _PendingUpload {
   Future<void> deleteIfTemporary() async {
     if (temporary && await file.exists()) await file.delete();
   }
+}
+
+/// Human readable attachment size, used by upload chips and attachment cards.
+String formatAttachmentSize(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  final kilobytes = bytes / 1024;
+  if (kilobytes < 1024) return '${kilobytes.toStringAsFixed(0)} KB';
+  final megabytes = kilobytes / 1024;
+  if (megabytes < 1024) {
+    return '${megabytes.toStringAsFixed(megabytes < 10 ? 1 : 0)} MB';
+  }
+  return '${(megabytes / 1024).toStringAsFixed(1)} GB';
 }
 
 String _safeName(String filename) =>

@@ -148,6 +148,21 @@ export class ChatEntityStore {
     this.presences = { ...this.presences, [entityKey(user)]: status };
   }
 
+  ingestPresences(
+    presences: Array<{
+      user_id: string;
+      user_domain: string;
+      status: PresenceStatus;
+    }>
+  ): void {
+    for (const presence of presences) {
+      this.setPresence(
+        { id: presence.user_id, origin_domain: presence.user_domain },
+        presence.status
+      );
+    }
+  }
+
   presenceFor(user: Pick<UserSummary, 'id' | 'origin_domain'>): PresenceStatus {
     return this.presences[entityKey(user)] ?? 'offline';
   }

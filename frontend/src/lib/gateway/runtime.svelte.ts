@@ -24,6 +24,11 @@ type ReadyPayload = {
   user: UserSummary;
   guilds: Guild[];
   dm_channels: Channel[];
+  presences?: Array<{
+    user_id: string;
+    user_domain: string;
+    status: PresenceStatus;
+  }>;
   read_states: ReadStateStatus[];
   presence_preference?: 'online' | 'idle' | 'dnd' | 'invisible';
 };
@@ -59,6 +64,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       chatEntities.beginGatewaySession(ready.user);
       chatEntities.ingestGuilds(ready.guilds);
       chatEntities.ingestDirectMessages(ready.dm_channels);
+      chatEntities.ingestPresences(ready.presences ?? []);
       chatEntities.readStates.upsertMany(ready.read_states);
       applyOwnPresencePreference(ready.presence_preference);
       return;
@@ -66,7 +72,13 @@ function applyEntityDispatch(dispatch: Dispatch): void {
     case 'RESUMED': {
       const resumed = dispatch.d as {
         presence_preference?: 'online' | 'idle' | 'dnd' | 'invisible';
+        presences?: Array<{
+          user_id: string;
+          user_domain: string;
+          status: PresenceStatus;
+        }>;
       };
+      chatEntities.ingestPresences(resumed.presences ?? []);
       applyOwnPresencePreference(resumed.presence_preference);
       return;
     }

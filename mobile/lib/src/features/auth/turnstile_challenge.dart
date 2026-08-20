@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:uuid/uuid.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -58,7 +59,7 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
     );
     controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(const Color(0xff111210))
+      ..setBackgroundColor(KaedeColors.canvas)
       ..addJavaScriptChannel(
         'KaedeChallenge',
         onMessageReceived: _receive,

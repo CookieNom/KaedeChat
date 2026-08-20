@@ -308,40 +308,71 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
         child: CustomScrollView(
           slivers: [
             SliverPadding(
-              padding: const EdgeInsets.fromLTRB(24, 28, 24, 40),
+              padding: EdgeInsets.fromLTRB(
+                24,
+                28,
+                24,
+                40 + MediaQuery.viewInsetsOf(context).bottom,
+              ),
               sliver: SliverList.list(
                 children: [
-                  const Row(
+                  Row(
                     children: [
-                      DecoratedBox(
+                      Container(
+                        width: 42,
+                        height: 42,
                         decoration: BoxDecoration(
-                            color: KaedeColors.coral,
-                            borderRadius:
-                                BorderRadius.all(Radius.circular(14))),
-                        child: Padding(
-                            padding: EdgeInsets.all(11),
-                            child: Icon(Icons.forum_rounded,
-                                color: KaedeColors.canvas)),
+                          color: KaedeColors.coral,
+                          borderRadius:
+                              BorderRadius.circular(KaedeRadius.medium),
+                        ),
+                        child: const Icon(Icons.forum_rounded,
+                            color: KaedeColors.onCoral, size: 21),
                       ),
-                      SizedBox(width: 12),
-                      Text('Kaede Chat',
-                          style: TextStyle(
-                              fontSize: 21, fontWeight: FontWeight.w800)),
+                      const SizedBox(width: 12),
+                      const Text(
+                        'Kaede Chat',
+                        style: TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: -.3,
+                        ),
+                      ),
                     ],
                   ),
-                  const SizedBox(height: 48),
-                  Text(register ? 'Create your account.' : 'Welcome back.',
-                      style: Theme.of(context).textTheme.displayLarge),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 34),
+                  SegmentedButton<bool>(
+                    segments: const [
+                      ButtonSegment(value: false, label: Text('Sign in')),
+                      ButtonSegment(value: true, label: Text('Create account')),
+                    ],
+                    selected: {register},
+                    showSelectedIcon: false,
+                    onSelectionChanged: _submitting
+                        ? null
+                        : (selection) =>
+                            setState(() => register = selection.first),
+                  ),
+                  const SizedBox(height: 26),
+                  Text(
+                    register ? 'Create your account.' : 'Welcome back.',
+                    style: Theme.of(context).textTheme.displaySmall,
+                  ),
+                  const SizedBox(height: 10),
                   Text(
                     register
-                        ? 'Choose the server that will own your identity. You can still join communities across the fediverse.'
-                        : 'Sign in through your home server—the server where your account was created.',
-                    style:
-                        const TextStyle(color: KaedeColors.muted, fontSize: 17),
+                        ? 'Choose the server that will own your identity. You '
+                            'can still join communities across the fediverse.'
+                        : 'Sign in through your home server — the server where '
+                            'your account was created.',
+                    style: const TextStyle(
+                      color: KaedeColors.muted,
+                      fontSize: 15,
+                      height: 1.45,
+                    ),
                   ),
-                  const SizedBox(height: 30),
-                  const _Label('HOME SERVER'),
+                  const SizedBox(height: 28),
+                  const _Label('Home server'),
                   TextField(
                     controller: instance,
                     keyboardType: TextInputType.url,
@@ -355,24 +386,24 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                   ),
                   const SizedBox(height: 18),
                   if (register) ...[
-                    const _Label('USERNAME'),
+                    const _Label('Username'),
                     TextField(
                         controller: username,
                         textInputAction: TextInputAction.next),
                     const SizedBox(height: 18),
-                    const _Label('EMAIL'),
+                    const _Label('Email'),
                     TextField(
                         controller: email,
                         keyboardType: TextInputType.emailAddress,
                         textInputAction: TextInputAction.next),
                   ] else ...[
-                    const _Label('USERNAME OR EMAIL'),
+                    const _Label('Username or email'),
                     TextField(
                         controller: identifier,
                         textInputAction: TextInputAction.next),
                   ],
                   const SizedBox(height: 18),
-                  const _Label('PASSWORD'),
+                  const _Label('Password'),
                   TextField(
                     controller: password,
                     obscureText: obscure,
@@ -390,7 +421,7 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                   ),
                   if (register) ...[
                     const SizedBox(height: 18),
-                    const _Label('CONFIRM PASSWORD'),
+                    const _Label('Confirm password'),
                     TextField(
                         controller: confirmation,
                         obscureText: obscure,
@@ -398,9 +429,32 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                         onSubmitted: (_) => submit()),
                   ],
                   if (state.error case final error?) ...[
-                    const SizedBox(height: 16),
-                    Text(error,
-                        style: const TextStyle(color: KaedeColors.danger)),
+                    const SizedBox(height: 18),
+                    Container(
+                      padding: const EdgeInsets.all(13),
+                      decoration: BoxDecoration(
+                        color: KaedeColors.dangerSoft,
+                        borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.error_outline_rounded,
+                              size: 17, color: KaedeColors.danger),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              error,
+                              style: const TextStyle(
+                                color: KaedeColors.danger,
+                                fontSize: 13,
+                                height: 1.35,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ],
                   const SizedBox(height: 26),
                   FilledButton.icon(
@@ -418,18 +472,15 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                             : Icons.login_rounded),
                     label: Text(register ? 'Create account' : 'Sign in'),
                   ),
-                  const SizedBox(height: 10),
-                  TextButton(
-                    onPressed: () => setState(() => register = !register),
-                    child: Text(register
-                        ? 'Already have an account? Sign in'
-                        : 'Need an account? Create one'),
-                  ),
-                  if (!register)
-                    TextButton(
-                      onPressed: _forgotPassword,
-                      child: const Text('Forgot password?'),
+                  if (!register) ...[
+                    const SizedBox(height: 6),
+                    Center(
+                      child: TextButton(
+                        onPressed: _forgotPassword,
+                        child: const Text('Forgot password?'),
+                      ),
                     ),
+                  ],
                 ],
               ),
             ),
@@ -550,12 +601,15 @@ final class _Label extends StatelessWidget {
   final String text;
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 8),
-        child: Text(text,
-            style: const TextStyle(
-                color: KaedeColors.muted,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 1.2)),
+        padding: const EdgeInsets.only(bottom: 7),
+        child: Text(
+          text,
+          style: const TextStyle(
+            color: KaedeColors.textSoft,
+            fontSize: 12.5,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
       );
 }
 

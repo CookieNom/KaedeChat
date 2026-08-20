@@ -495,12 +495,14 @@ final class KaedeRepository {
         headers: <String, String>{'If-Match': version},
       ));
   Future<void> reorderChannels(
-          EntityRef guild, List<Map<String, Object?>> positions) =>
-      api.sendJson(
-        'PATCH',
-        '/api/v1/guilds/${guild.wire}/channels',
-        data: <String, Object?>{'channels': positions},
-      );
+      EntityRef guild, List<Map<String, Object?>> positions) async {
+    await api.sendJsonList(
+      'PATCH',
+      '/api/v1/guilds/${guild.wire}/channels',
+      data: <String, Object?>{'channels': positions},
+    );
+  }
+
   Future<void> deleteChannel(
           EntityRef guild, EntityRef channel, String version) =>
       api.sendJson(
@@ -820,14 +822,16 @@ final class KaedeRepository {
           if (role.version != null) 'If-Match': role.version!
         },
       );
-  Future<void> reorderRoles(EntityRef guild, List<KaedeRole> roles) =>
-      api.sendJson(
-        'PATCH',
-        '/api/v1/guilds/${guild.wire}/roles',
-        data: <String, Object?>{
-          'roles': guildRolePositionRequest(roles),
-        },
-      );
+  Future<void> reorderRoles(EntityRef guild, List<KaedeRole> roles) async {
+    await api.sendJsonList(
+      'PATCH',
+      '/api/v1/guilds/${guild.wire}/roles',
+      data: <String, Object?>{
+        'roles': guildRolePositionRequest(roles),
+      },
+    );
+  }
+
   Future<List<Map<String, Object?>>> overwrites(
           EntityRef guild, EntityRef channel) =>
       api.getList(

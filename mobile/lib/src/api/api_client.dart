@@ -8,7 +8,9 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 
 final class KaedeApiClient {
-  KaedeApiClient({required SessionVault vault}) : _vault = vault {
+  KaedeApiClient({required SessionVault vault, Dio? httpClient})
+      : _vault = vault,
+        _dio = httpClient ?? _defaultHttpClient() {
     _dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: _authorize,
@@ -18,17 +20,18 @@ final class KaedeApiClient {
   }
 
   final SessionVault _vault;
-  final Dio _dio = Dio(
-    BaseOptions(
-      connectTimeout: const Duration(seconds: 12),
-      receiveTimeout: const Duration(seconds: 30),
-      sendTimeout: const Duration(seconds: 30),
-      headers: const <String, String>{
-        'Accept': 'application/json',
-        'X-Kaede-Client': 'mobile',
-      },
-    ),
-  );
+  final Dio _dio;
+  static Dio _defaultHttpClient() => Dio(
+        BaseOptions(
+          connectTimeout: const Duration(seconds: 12),
+          receiveTimeout: const Duration(seconds: 30),
+          sendTimeout: const Duration(seconds: 30),
+          headers: const <String, String>{
+            'Accept': 'application/json',
+            'X-Kaede-Client': 'mobile',
+          },
+        ),
+      );
   final Dio uploadClient = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 12),
@@ -482,6 +485,30 @@ final class KaedeApiClient {
         return const <String, Object?>{};
       }
       return _jsonObject(response.data);
+    } on DioException catch (error) {
+      throw KaedeException.fromDio(error);
+    }
+  }
+
+  Future<List<Map<String, Object?>>> sendJsonList(
+    String method,
+    String path, {
+    Object? data,
+    Map<String, Object?>? query,
+    Map<String, String>? headers,
+  }) async {
+    try {
+      final response = await _dio.request<Object?>(
+        path,
+        data: data,
+        queryParameters: query,
+        options: Options(method: method, headers: headers),
+      );
+      if (response.data == null ||
+          response.statusCode == HttpStatus.noContent) {
+        return const <Map<String, Object?>>[];
+      }
+      return _jsonList(response.data);
     } on DioException catch (error) {
       throw KaedeException.fromDio(error);
     }

@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:io';
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,9 +9,11 @@ import 'package:image_picker/image_picker.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
+import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:local_auth/local_auth.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 final class SettingsScreen extends ConsumerStatefulWidget {
@@ -279,10 +283,27 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
+  String? _versionLabel;
+
   @override
   void initState() {
     super.initState();
     _load();
+    unawaited(_loadVersion());
+  }
+
+  Future<void> _loadVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (mounted) {
+        setState(
+          () => _versionLabel =
+              'Kaede Chat ${info.version} (${info.buildNumber})',
+        );
+      }
+    } on Object {
+      // The version footer is cosmetic; a missing platform channel is fine.
+    }
   }
 
   @override
@@ -333,65 +354,56 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final user = mobile.user;
     if (_loading) return const Center(child: CircularProgressIndicator());
     return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 40),
       children: [
-        Text('Your account', style: Theme.of(context).textTheme.headlineLarge),
-        const SizedBox(height: 6),
-        Text(user?.handle ?? '',
-            style: const TextStyle(color: KaedeColors.muted)),
+        _AccountHero(
+          user: user,
+          presence: mobile.presencePreference,
+          onEditAvatar: _saving ? null : () => _pickAsset('avatar'),
+          onEditBanner: _saving ? null : () => _pickAsset('banner'),
+        ),
         if (_loadError case final warning?) ...[
           const SizedBox(height: 12),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.warning_amber_rounded,
-                  color: KaedeColors.warning),
-              title: Text(warning),
-              trailing: TextButton(
-                onPressed: () {
-                  setState(() => _loading = true);
-                  _load();
-                },
-                child: const Text('Retry'),
-              ),
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
+            decoration: BoxDecoration(
+              color: KaedeColors.warningSoft,
+              borderRadius: BorderRadius.circular(KaedeRadius.medium),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.warning_amber_rounded,
+                    size: 17, color: KaedeColors.warning),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    warning,
+                    style: const TextStyle(
+                      color: KaedeColors.warning,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () {
+                    setState(() => _loading = true);
+                    _load();
+                  },
+                  style: TextButton.styleFrom(minimumSize: const Size(0, 34)),
+                  child: const Text('Retry'),
+                ),
+              ],
             ),
           ),
         ],
-        const SizedBox(height: 18),
+        const SizedBox(height: 16),
         _Section(
           icon: Icons.person_outline_rounded,
           title: 'Profile',
           subtitle: 'How people see you across the federation.',
           child: Column(
             children: [
-              Row(
-                children: [
-                  if (user != null)
-                    UserAvatar(user: user, radius: 36)
-                  else
-                    const CircleAvatar(radius: 36, child: Text('?')),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        OutlinedButton.icon(
-                          onPressed:
-                              _saving ? null : () => _pickAsset('avatar'),
-                          icon: const Icon(Icons.add_a_photo_outlined),
-                          label: const Text('Change avatar'),
-                        ),
-                        TextButton.icon(
-                          onPressed:
-                              _saving ? null : () => _pickAsset('banner'),
-                          icon: const Icon(Icons.panorama_outlined),
-                          label: const Text('Change banner'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
               TextField(
                   controller: _displayName,
                   decoration: const InputDecoration(labelText: 'Display name')),
@@ -781,15 +793,72 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ],
           ),
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 18),
         OutlinedButton.icon(
-          onPressed: () => ref.read(mobileControllerProvider.notifier).logout(),
-          icon: const Icon(Icons.logout_rounded, color: KaedeColors.danger),
-          label: const Text('Sign out',
-              style: TextStyle(color: KaedeColors.danger)),
+          onPressed: _confirmSignOut,
+          style: OutlinedButton.styleFrom(
+            foregroundColor: KaedeColors.danger,
+            side: const BorderSide(color: KaedeColors.dangerSoft),
+          ),
+          icon: const Icon(Icons.logout_rounded),
+          label: const Text('Sign out'),
+        ),
+        const SizedBox(height: 10),
+        Center(
+          child: TextButton(
+            onPressed: () => showLicensePage(
+              context: context,
+              applicationName: 'Kaede Chat',
+              applicationVersion: _versionLabel,
+              applicationIcon: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Icon(Icons.forum_rounded,
+                    color: KaedeColors.coral, size: 34),
+              ),
+            ),
+            style: TextButton.styleFrom(
+              foregroundColor: KaedeColors.muted,
+              textStyle: const TextStyle(fontSize: 12.5),
+            ),
+            child: const Text('Open-source licences'),
+          ),
+        ),
+        Center(
+          child: Text(
+            _versionLabel ?? 'Kaede Chat',
+            style: const TextStyle(color: KaedeColors.muted, fontSize: 11.5),
+          ),
         ),
       ],
     );
+  }
+
+  Future<void> _confirmSignOut() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Sign out of Kaede?'),
+        content: const Text(
+          'Saved conversations on this device stay encrypted at rest and are '
+          'removed when you sign out.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Stay signed in'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: KaedeColors.danger,
+            ),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Sign out'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await ref.read(mobileControllerProvider.notifier).logout();
   }
 
   Future<void> _saveProfile() async {
@@ -1245,6 +1314,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 }
 
+/// Collapsible settings group. Everything the account owns is reachable from
+/// this one screen, so the groups stay closed until they are needed.
 final class _Section extends StatelessWidget {
   const _Section(
       {required this.icon,
@@ -1257,29 +1328,220 @@ final class _Section extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => Card(
-        margin: const EdgeInsets.only(bottom: 10),
-        clipBehavior: Clip.antiAlias,
-        child: ExpansionTile(
-          leading: Icon(icon, color: KaedeColors.coral),
-          title:
-              Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
-          subtitle: subtitle == null
-              ? null
-              : Text(subtitle!,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style:
-                      const TextStyle(color: KaedeColors.muted, fontSize: 12)),
-          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 14),
-              child: child,
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: KaedeColors.panel,
+            borderRadius: BorderRadius.circular(KaedeRadius.large),
+            border: Border.all(color: KaedeColors.border),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(KaedeRadius.large),
+            child: Theme(
+              data:
+                  Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                tilePadding: const EdgeInsets.symmetric(horizontal: 14),
+                leading: Container(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: KaedeColors.raised,
+                    borderRadius: BorderRadius.circular(KaedeRadius.small),
+                  ),
+                  child: Icon(icon, size: 18, color: KaedeColors.coralText),
+                ),
+                title: Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 15,
+                  ),
+                ),
+                subtitle: subtitle == null
+                    ? null
+                    : Text(
+                        subtitle!,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: KaedeColors.muted,
+                          fontSize: 12,
+                          height: 1.3,
+                        ),
+                      ),
+                childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 16),
+                expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Divider(height: 1),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 14),
+                    child: child,
+                  ),
+                ],
+              ),
             ),
-          ],
+          ),
         ),
+      );
+}
+
+/// Avatar, name and address at the top of settings.
+final class _AccountHero extends StatelessWidget {
+  const _AccountHero({
+    required this.user,
+    required this.presence,
+    required this.onEditAvatar,
+    required this.onEditBanner,
+  });
+
+  final KaedeUser? user;
+  final PresenceStatus presence;
+  final VoidCallback? onEditAvatar;
+  final VoidCallback? onEditBanner;
+
+  @override
+  Widget build(BuildContext context) {
+    final banner = user == null
+        ? null
+        : publicAssetUri(
+            user!.ref.domain,
+            user!.bannerHash,
+            variant: 'thumbnail_1024',
+          );
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: KaedeColors.panel,
+        borderRadius: BorderRadius.circular(KaedeRadius.large),
+        border: Border.all(color: KaedeColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            height: 74,
+            child: banner == null
+                ? const DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          KaedeColors.coralSoft,
+                          KaedeColors.purpleSoft,
+                        ],
+                      ),
+                    ),
+                  )
+                : CachedNetworkImage(
+                    imageUrl: '$banner',
+                    fit: BoxFit.cover,
+                    errorWidget: (_, __, ___) =>
+                        const ColoredBox(color: KaedeColors.coralSoft),
+                  ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 2),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Transform.translate(
+                  offset: const Offset(0, -22),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(3),
+                        decoration: const BoxDecoration(
+                          color: KaedeColors.panel,
+                          shape: BoxShape.circle,
+                        ),
+                        child: user == null
+                            ? const CircleAvatar(
+                                radius: 30,
+                                backgroundColor: KaedeColors.raised,
+                                child: Icon(Icons.person_rounded),
+                              )
+                            : UserAvatar(
+                                user: user!,
+                                radius: 30,
+                                presence: presence,
+                                ringColor: KaedeColors.panel,
+                              ),
+                      ),
+                      const Spacer(),
+                      _HeroAction(
+                        icon: Icons.photo_camera_outlined,
+                        label: 'Avatar',
+                        onPressed: onEditAvatar,
+                      ),
+                      const SizedBox(width: 8),
+                      _HeroAction(
+                        icon: Icons.panorama_outlined,
+                        label: 'Banner',
+                        onPressed: onEditBanner,
+                      ),
+                    ],
+                  ),
+                ),
+                Transform.translate(
+                  offset: const Offset(0, -12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        user?.name ?? 'Your account',
+                        style: Theme.of(context).textTheme.headlineSmall,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        user?.handle ?? '',
+                        style: const TextStyle(
+                          color: KaedeColors.muted,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Small outlined action used by the account hero.
+final class _HeroAction extends StatelessWidget {
+  const _HeroAction({
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) => OutlinedButton.icon(
+        onPressed: onPressed,
+        style: OutlinedButton.styleFrom(
+          minimumSize: const Size(0, 34),
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          side: const BorderSide(color: KaedeColors.border),
+          backgroundColor: KaedeColors.raised,
+          textStyle: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        icon: Icon(icon, size: 15),
+        label: Text(label),
       );
 }
 

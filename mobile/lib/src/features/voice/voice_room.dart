@@ -340,17 +340,33 @@ final class VoiceRoom extends ConsumerWidget {
             onPressed: tap == null ? null : () => _runVoiceAction(context, tap),
             style: IconButton.styleFrom(
               backgroundColor: destructive
-                  ? Theme.of(context).colorScheme.errorContainer
+                  ? KaedeColors.dangerSoft
                   : selected
-                      ? KaedeColors.coralDark
-                      : null,
+                      ? KaedeColors.coralSoft
+                      : KaedeColors.raised,
+              foregroundColor: destructive
+                  ? KaedeColors.danger
+                  : selected
+                      ? KaedeColors.coralText
+                      : KaedeColors.text,
+              disabledBackgroundColor: KaedeColors.panel,
+              disabledForegroundColor: KaedeColors.muted,
             ),
-            icon: Icon(icon),
+            icon: Icon(icon, size: 21),
           ),
+          const SizedBox(height: 3),
           Text(label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 10)),
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                color: destructive
+                    ? KaedeColors.danger
+                    : tap == null
+                        ? KaedeColors.muted
+                        : KaedeColors.textSoft,
+              )),
         ],
       );
 
