@@ -157,6 +157,70 @@ local generation = redis.call('INCR', KEYS[1])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
 return generation
 """
+CLAIM_CONNECTION_LUA = """
+local raw = redis.call('GET', KEYS[1])
+if raw then
+  local current = cjson.decode(raw)
+  if current['connection_id'] == ARGV[1] and current['room'] == ARGV[2] then
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
+    return {1, tostring(current['generation']), '', ''}
+  end
+  if ARGV[5] ~= '1' then
+    return {
+      0,
+      tostring(current['generation']),
+      current['room'],
+      current['client_kind'] or 'another device'
+    }
+  end
+  if current['room'] ~= ARGV[2] then
+    local old_generation_key = ARGV[7] .. current['room'] .. ':' .. ARGV[8]
+    redis.call('INCR', old_generation_key)
+    redis.call('EXPIRE', old_generation_key, tonumber(ARGV[9]))
+  end
+end
+local generation = redis.call('INCR', KEYS[2])
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[9]))
+local claimed = {
+  connection_id = ARGV[1],
+  room = ARGV[2],
+  generation = generation,
+  client_kind = ARGV[3],
+  claimed_at = tonumber(ARGV[4])
+}
+redis.call('SET', KEYS[1], cjson.encode(claimed), 'EX', tonumber(ARGV[6]))
+local previous = raw and cjson.decode(raw) or nil
+return {
+  1,
+  tostring(generation),
+  previous and previous['room'] or '',
+  previous and (previous['client_kind'] or 'another device') or ''
+}
+"""
+RELEASE_CONNECTION_LUA = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local current = cjson.decode(raw)
+if current['connection_id'] ~= ARGV[1] then return 0 end
+return redis.call('DEL', KEYS[1])
+"""
+REFRESH_CONNECTION_LUA = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local current = cjson.decode(raw)
+if current['connection_id'] ~= ARGV[1] then return 0 end
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return 1
+"""
+REMOVE_OCCUPANT_CONNECTION_LUA = """
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then return 0 end
+local current = cjson.decode(raw)
+if current['connection_id'] ~= ARGV[2] then return 0 end
+redis.call('HDEL', KEYS[1], ARGV[1])
+if redis.call('GET', KEYS[2]) == ARGV[3] then redis.call('DEL', KEYS[2]) end
+return 1
+"""
 REMOVE_OCCUPANT_LUA = """
 redis.call('HDEL', KEYS[1], ARGV[1])
 if redis.call('GET', KEYS[2]) == ARGV[2] then
@@ -254,6 +318,8 @@ class Occupant:
     guild_id: str | None
     channel_id: str
     joined_at: int
+    connection_id: str = ""
+    client_kind: str = "unknown"
     self_mute: bool = False
     self_deaf: bool = False
     server_mute: bool = False
@@ -285,6 +351,100 @@ def room_state_key(kind: str, authority_domain: str, room: str) -> str:
 
 def generation_key(authority_domain: str, room: str, identity: str) -> str:
     return f"{room_state_key('generation', authority_domain, room)}:{identity}"
+
+
+def voice_connection_key(authority_domain: str, identity: str) -> str:
+    return f"voice:v2:connection:{_authority(authority_domain)}:{identity}"
+
+
+async def claim_voice_connection(
+    redis: Redis,
+    authority_domain: str,
+    identity: str,
+    *,
+    connection_id: str,
+    room: str,
+    client_kind: str,
+    takeover: bool,
+) -> tuple[bool, int, str, str]:
+    authority = _authority(authority_domain)
+    result = await cast(
+        Awaitable[object],
+        redis.eval(
+            CLAIM_CONNECTION_LUA,
+            2,
+            voice_connection_key(authority, identity),
+            generation_key(authority, room, identity),
+            connection_id,
+            room,
+            client_kind,
+            str(int(time.time())),
+            "1" if takeover else "0",
+            str(2 * 60),
+            f"{room_state_key('generation', authority, '')}",
+            identity,
+            str(24 * 60 * 60),
+        ),
+    )
+    if not isinstance(result, (list, tuple)) or len(result) != 4:
+        raise RuntimeError("Dragonfly returned an invalid voice connection claim")
+    decoded = [item.decode() if isinstance(item, bytes) else str(item) for item in result]
+    return decoded[0] == "1", int(decoded[1]), decoded[2], decoded[3]
+
+
+async def release_voice_connection(
+    redis: Redis, authority_domain: str, identity: str, connection_id: str
+) -> bool:
+    result = await cast(
+        Awaitable[object],
+        redis.eval(
+            RELEASE_CONNECTION_LUA,
+            1,
+            voice_connection_key(authority_domain, identity),
+            connection_id,
+        ),
+    )
+    return bool(result)
+
+
+async def refresh_voice_connection(
+    redis: Redis, authority_domain: str, identity: str, connection_id: str
+) -> bool:
+    result = await cast(
+        Awaitable[object],
+        redis.eval(
+            REFRESH_CONNECTION_LUA,
+            1,
+            voice_connection_key(authority_domain, identity),
+            connection_id,
+            str(24 * 60 * 60),
+        ),
+    )
+    return bool(result)
+
+
+async def voice_connection_matches(
+    redis: Redis,
+    authority_domain: str,
+    identity: str,
+    *,
+    connection_id: str,
+    room: str,
+    generation: int,
+) -> bool:
+    raw = await redis.get(voice_connection_key(authority_domain, identity))
+    if raw is None:
+        return False
+    try:
+        current = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(current, dict)
+        and current.get("connection_id") == connection_id
+        and current.get("room") == room
+        and current.get("generation") == generation
+    )
 
 
 def federated_voice_session_key(role: str, identity: str) -> str:
@@ -520,6 +680,10 @@ async def set_occupant(redis: Redis, authority_domain: str, occupant: Occupant) 
             ex=300,
         )
         await pipeline.execute()
+    if occupant.connection_id:
+        await refresh_voice_connection(
+            redis, authority_domain, occupant.identity, occupant.connection_id
+        )
 
 
 async def remove_occupant(redis: Redis, authority_domain: str, room: str, identity: str) -> None:
@@ -534,6 +698,28 @@ async def remove_occupant(redis: Redis, authority_domain: str, room: str, identi
             room,
         ),
     )
+
+
+async def remove_occupant_connection(
+    redis: Redis,
+    authority_domain: str,
+    room: str,
+    identity: str,
+    connection_id: str,
+) -> bool:
+    result = await cast(
+        Awaitable[object],
+        redis.eval(
+            REMOVE_OCCUPANT_CONNECTION_LUA,
+            2,
+            room_state_key("occupancy", authority_domain, room),
+            f"voice:user-room:{identity}",
+            identity,
+            connection_id,
+            room,
+        ),
+    )
+    return bool(result)
 
 
 async def update_self_flags(

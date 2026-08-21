@@ -155,6 +155,7 @@ struct VoiceTarget {
     expected_policy: ExpectedVoicePolicy,
     e2ee_key: Option<SecretString>,
     sender_device_id: Option<String>,
+    connection_id: String,
 }
 
 struct HotkeyRegistration {
@@ -1863,6 +1864,8 @@ async fn native_voice_join(
     expected_policy: ExpectedVoicePolicy,
     e2ee_key: Option<String>,
     sender_device_id: Option<String>,
+    connection_id: String,
+    takeover: bool,
     state: State<'_, NativeState>,
 ) -> Result<(), NativeError> {
     join_native_voice(
@@ -1871,6 +1874,8 @@ async fn native_voice_join(
         expected_policy,
         e2ee_key,
         sender_device_id,
+        connection_id,
+        takeover,
         &state,
     )
     .await
@@ -1882,6 +1887,8 @@ async fn join_native_voice(
     expected_policy: ExpectedVoicePolicy,
     e2ee_key: Option<String>,
     sender_device_id: Option<String>,
+    connection_id: String,
+    takeover: bool,
     state: &NativeState,
 ) -> Result<(), NativeError> {
     let generation = state.voice_install.begin().await;
@@ -1891,6 +1898,8 @@ async fn join_native_voice(
         expected_policy,
         e2ee_key,
         sender_device_id,
+        connection_id,
+        takeover,
         state,
         generation,
     )
@@ -1904,6 +1913,8 @@ async fn join_native_voice_reserved(
     expected_policy: ExpectedVoicePolicy,
     e2ee_key: Option<String>,
     sender_device_id: Option<String>,
+    connection_id: String,
+    takeover: bool,
     state: &NativeState,
     generation: u64,
 ) -> Result<(), NativeError> {
@@ -1969,6 +1980,8 @@ async fn join_native_voice_reserved(
             expected_policy.clone(),
             media_key,
             sender_device_id.as_deref(),
+            &connection_id,
+            takeover,
         )
         .await
     } else {
@@ -1979,6 +1992,8 @@ async fn join_native_voice_reserved(
             expected_policy.clone(),
             media_key,
             sender_device_id.as_deref(),
+            &connection_id,
+            takeover,
         )
         .await
     }
@@ -1996,6 +2011,7 @@ async fn join_native_voice_reserved(
         expected_policy,
         e2ee_key: e2ee_key.map(SecretString::from),
         sender_device_id,
+        connection_id,
     });
     *state.voice_ui.write().await = VoiceUiState::default();
     drop(install_guard);
@@ -2128,6 +2144,8 @@ async fn native_media_quality_set(
                 .as_ref()
                 .map(|key| key.expose_secret().to_owned()),
             target.sender_device_id,
+            target.connection_id,
+            false,
             &state,
             generation,
         )
@@ -2300,6 +2318,8 @@ async fn native_preferences_set(
                 .as_ref()
                 .map(|key| key.expose_secret().to_owned()),
             target.sender_device_id,
+            target.connection_id,
+            false,
             &state,
             generation,
         )

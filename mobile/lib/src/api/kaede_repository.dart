@@ -982,11 +982,18 @@ final class KaedeRepository {
   Future<Map<String, Object?>> voiceToken(
     EntityRef channel, {
     String? senderDeviceId,
+    required String connectionId,
+    bool takeover = false,
   }) =>
       api.sendJson(
         'POST',
         '/api/v1/channels/${channel.wire}/voice/token',
-        data: <String, Object?>{'sender_device_id': senderDeviceId},
+        data: <String, Object?>{
+          'sender_device_id': senderDeviceId,
+          'connection_id': connectionId,
+          'takeover': takeover,
+          'client_kind': 'mobile',
+        },
       );
   Future<Map<String, Object?>> voiceOccupancy(EntityRef channel) =>
       api.getJson('/api/v1/channels/${channel.wire}/voice/occupancy');
@@ -1047,11 +1054,18 @@ final class KaedeRepository {
   Future<Map<String, Object?>> callVoiceToken(
     EntityRef call, {
     String? senderDeviceId,
+    required String connectionId,
+    bool takeover = false,
   }) =>
       api.sendJson(
         'POST',
         '/api/v1/calls/${call.wire}/voice/token',
-        data: <String, Object?>{'sender_device_id': senderDeviceId},
+        data: <String, Object?>{
+          'sender_device_id': senderDeviceId,
+          'connection_id': connectionId,
+          'takeover': takeover,
+          'client_kind': 'mobile',
+        },
       );
   Future<KaedeChannel> createGroupDm(List<String> handles,
           {String? name}) async =>

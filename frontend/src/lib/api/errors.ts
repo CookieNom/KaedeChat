@@ -127,6 +127,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   AUTHENTICATION_REQUIRED: 'Your session has expired. Sign in again to continue.',
   CSRF_GUARD: 'This page is out of date. Reload it and try again.',
   MISSING_PERMISSIONS: "You don't have permission to do that.",
+  VOICE_ACTIVE_ELSEWHERE:
+    'Voice is already active on another device. Choose where you want to continue.',
   CANNOT_MANAGE_PERMISSIONS: "You can't change those permissions.",
   CANNOT_GRANT_PERMISSIONS: "You can't grant permissions you don't have.",
   ROLE_HIERARCHY: 'That member or role is higher than your highest role.',

@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -232,11 +234,11 @@ KaedeChannel? findVoiceSessionChannel({
 
 String voiceDisconnectMessage(DisconnectReason? reason) => switch (reason) {
       DisconnectReason.duplicateIdentity =>
-        'Voice was opened for this account on another device.',
+        'Voice moved to another device. This device will stay disconnected unless you explicitly move voice back here.',
       DisconnectReason.serverShutdown =>
         'The voice server restarted. Rejoin in a moment.',
       DisconnectReason.participantRemoved =>
-        'A moderator disconnected you from voice.',
+        'This voice connection was ended from another device or by a moderator. It will not reconnect automatically.',
       DisconnectReason.roomDeleted => 'This voice room no longer exists.',
       DisconnectReason.stateMismatch =>
         'The voice session was out of date. Rejoin the channel.',
@@ -267,6 +269,8 @@ final class VoiceSession extends ChangeNotifier {
   final KaedeRepository _repository;
   final Future<MobileE2EEClient> Function() _e2eeClient;
   final VoiceBackgroundService _backgroundService;
+  String? _connectionId;
+  String? _activeElsewhereClient;
   static const _backgroundServiceError =
       'Voice is connected, but Android could not keep the call active in the background.';
   Room? _room;
@@ -325,6 +329,7 @@ final class VoiceSession extends ChangeNotifier {
   bool get _microphoneShouldPublish =>
       _canSpeak && !_muted && (!_pushToTalk || _pushHeld);
   String? get error => _error;
+  String? get activeElsewhereClient => _activeElsewhereClient;
   Map<String, Object?>? occupant(String identity) => _occupants[identity];
   double participantVolume(String identity) =>
       _participantVolumes[identity] ?? 1;
@@ -342,6 +347,7 @@ final class VoiceSession extends ChangeNotifier {
     KaedeChannel target, {
     EntityRef? callRef,
     bool force = false,
+    bool takeover = false,
   }) async {
     _mediaQuality = await MobileMediaQuality.load();
     if (!force &&
@@ -353,12 +359,19 @@ final class VoiceSession extends ChangeNotifier {
     final requestedCamera = _camera;
     final requestedScreen = _screen;
     final generation = ++_generation;
+    if (_connectionId == null || takeover) {
+      final random = Random.secure();
+      _connectionId = base64UrlEncode(
+        List<int>.generate(32, (_) => random.nextInt(256)),
+      ).replaceAll('=', '');
+    }
     await _disposeRoom(notify: false);
     if (generation != _generation) return;
     _channel = target;
     _callRef = callRef;
     _connecting = true;
     _error = null;
+    _activeElsewhereClient = null;
     _recoverableDisconnect = false;
     _retryJoinOnResume = false;
     _canUseVad = callRef != null || target.allows(Permission.useVad);
@@ -404,10 +417,14 @@ final class VoiceSession extends ChangeNotifier {
           ? await _repository.voiceToken(
               target.ref,
               senderDeviceId: e2ee?.deviceId,
+              connectionId: _connectionId!,
+              takeover: takeover,
             )
           : await _repository.callVoiceToken(
               callRef,
               senderDeviceId: e2ee?.deviceId,
+              connectionId: _connectionId!,
+              takeover: takeover,
             );
       if (generation != _generation) return;
       final url = '${grant['url'] ?? ''}';
@@ -621,6 +638,16 @@ final class VoiceSession extends ChangeNotifier {
       if (connectedSuccessfully) _retryJoinOnResume = false;
     } on Object catch (exception) {
       if (generation == _generation) {
+        if (exception is KaedeException &&
+            exception.code == 'VOICE_ACTIVE_ELSEWHERE') {
+          final kind = '${exception.details['active_client'] ?? ''}';
+          _activeElsewhereClient = switch (kind) {
+            'mobile' => 'your other phone or tablet',
+            'desktop' => 'the desktop app',
+            'web' => 'another browser',
+            _ => 'another device',
+          };
+        }
         final error = _friendly(exception);
         if (_room != null) await _disposeRoom(notify: false);
         _canSpeak = false;
@@ -1267,6 +1294,8 @@ final class VoiceSession extends ChangeNotifier {
     _canUseVad = false;
     _recoverableDisconnect = false;
     _retryJoinOnResume = false;
+    _activeElsewhereClient = null;
+    _connectionId = null;
     _error = voiceDisconnectMessage(reason);
     _notify();
     await disposeTerminalVoiceResources(
@@ -1298,6 +1327,8 @@ final class VoiceSession extends ChangeNotifier {
     _canStream = false;
     _recoverableDisconnect = false;
     _retryJoinOnResume = false;
+    _activeElsewhereClient = null;
+    _connectionId = null;
     _error = reason;
     notifyListeners();
   }

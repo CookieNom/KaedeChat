@@ -1359,7 +1359,11 @@ void main() {
       expect(gateway, isNot(contains('DM_PRIVACY_REJECTED')));
       expect(
         voiceDisconnectMessage(DisconnectReason.participantRemoved),
-        'A moderator disconnected you from voice.',
+        contains('another device or by a moderator'),
+      );
+      expect(
+        voiceDisconnectMessage(DisconnectReason.duplicateIdentity),
+        contains('will stay disconnected'),
       );
       expect(
         voiceDisconnectMessage(DisconnectReason.reconnectAttemptsExceeded),

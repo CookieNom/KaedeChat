@@ -24,6 +24,7 @@ from app.voice.service import parse_minted_metadata
 from app.voice.state import (
     Occupant,
     current_generation,
+    release_voice_connection,
     remove_occupant,
     room_occupants,
     room_state_key,
@@ -205,6 +206,8 @@ async def _reconcile_room(redis: Redis, settings: Settings, room: str) -> None:
                 guild_id=str(scope_id) if kind == "g" else None,
                 channel_id=str(resolved_channel_id),
                 joined_at=int(getattr(participant, "joined_at", 0)) or int(time.time()),
+                connection_id=str(metadata["connection_id"]),
+                client_kind=str(metadata["client_kind"]),
                 server_mute=bool(metadata["server_mute"]),
                 server_deaf=bool(metadata["server_deaf"]),
                 can_speak=bool(metadata["can_speak"]),
@@ -214,6 +217,10 @@ async def _reconcile_room(redis: Redis, settings: Settings, room: str) -> None:
     for occupant in await room_occupants(redis, settings.domain, room):
         if occupant.identity not in seen:
             await remove_occupant(redis, settings.domain, room, occupant.identity)
+            if occupant.connection_id:
+                await release_voice_connection(
+                    redis, settings.domain, occupant.identity, occupant.connection_id
+                )
 
 
 async def voice_coordinator(

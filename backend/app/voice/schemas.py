@@ -17,6 +17,14 @@ class VoiceTokenRequest(BaseModel):
         max_length=47,
         pattern=r"^ked_[A-Za-z0-9_-]{43}$",
     )
+    connection_id: str | None = Field(
+        default=None,
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
+    takeover: bool = False
+    client_kind: Literal["web", "desktop", "mobile"] = "web"
 
 
 class VoiceTokenResponse(BaseModel):
@@ -26,6 +34,11 @@ class VoiceTokenResponse(BaseModel):
     url: str = Field(min_length=6, max_length=2048)
     room: str = Field(pattern=r"^[gd]\.[0-9]+\.[0-9]+$", max_length=80)
     generation: int = Field(ge=0)
+    connection_id: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
     expires_at: str = Field(min_length=20, max_length=64)
     can_speak: bool
     can_stream: bool
@@ -145,6 +158,13 @@ class VoiceBrokerRequest(BaseModel):
         max_length=47,
         pattern=r"^ked_[A-Za-z0-9_-]{43}$",
     )
+    connection_id: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
+    takeover: bool = False
+    client_kind: Literal["web", "desktop", "mobile"] = "web"
 
 
 class DMVoiceBrokerRequest(BaseModel):
@@ -159,6 +179,13 @@ class DMVoiceBrokerRequest(BaseModel):
         max_length=47,
         pattern=r"^ked_[A-Za-z0-9_-]{43}$",
     )
+    connection_id: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
+    takeover: bool = False
+    client_kind: Literal["web", "desktop", "mobile"] = "web"
 
 
 class VoiceOccupantState(BaseModel):

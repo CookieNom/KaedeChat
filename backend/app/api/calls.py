@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
+from contextlib import suppress
 from typing import Any, cast
 
 import structlog
@@ -60,12 +62,13 @@ from app.voice.service import (
 )
 from app.voice.state import (
     apply_authoritative_call,
+    claim_voice_connection,
     create_call,
-    current_generation,
     discard_all_federated_voice_home_sessions,
     get_active_call,
     get_call,
     is_call_accepted,
+    remove_occupant,
     transition_call,
 )
 
@@ -565,6 +568,9 @@ async def mint_dm_call_token(
     *,
     sender_device_id: str | None,
     remote_device_attested: bool = False,
+    connection_id: str,
+    takeover: bool = False,
+    client_kind: str = "web",
 ) -> VoiceTokenResponse:
     await require_call_policy(session, settings, record, user)
     identity = participant_identity(user.id, user.origin_domain)
@@ -577,7 +583,33 @@ async def mint_dm_call_token(
     if identity != record.get("caller") and not accepted:
         raise HTTPException(status_code=409, detail={"code": "CALL_NOT_ACCEPTED"})
     room = str(record["room"])
-    generation = await current_generation(redis, authority, room, identity)
+    try:
+        await LiveKitControl(settings).ensure_room(room)
+    except LiveKitError as exc:
+        raise HTTPException(status_code=503, detail={"code": "VOICE_HOME_UNREACHABLE"}) from exc
+    claimed, generation, previous_room, previous_client = await claim_voice_connection(
+        redis,
+        authority,
+        identity,
+        connection_id=connection_id,
+        room=room,
+        client_kind=client_kind,
+        takeover=takeover,
+    )
+    if not claimed:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VOICE_ACTIVE_ELSEWHERE",
+                "message": "Voice is already active for your account on another device.",
+                "active_client": previous_client,
+                "active_room": previous_room,
+            },
+        )
+    if takeover and previous_room:
+        with suppress(LiveKitError):
+            await LiveKitControl(settings).remove_participant(previous_room, identity)
+        await remove_occupant(redis, authority, previous_room, identity)
     channel = await session.get(
         Channel,
         (int(record["channel_id"]), str(record["channel_domain"])),
@@ -596,6 +628,8 @@ async def mint_dm_call_token(
     metadata: dict[str, object] = {
         "version": 1,
         "generation": generation,
+        "connection_id": connection_id,
+        "client_kind": client_kind,
         "user_id": str(user.id),
         "user_domain": user.origin_domain,
         "channel_id": str(record["channel_id"]),
@@ -611,7 +645,6 @@ async def mint_dm_call_token(
     if e2ee_context:
         metadata.update({"e2ee": True, **e2ee_context})
     try:
-        await LiveKitControl(settings).ensure_room(room)
         token, expires_at = mint_join_token(
             settings,
             room=room,
@@ -628,6 +661,7 @@ async def mint_dm_call_token(
         url=cast(str, settings.voice_public_url),
         room=room,
         generation=generation,
+        connection_id=connection_id,
         expires_at=expires_at.isoformat(),
         can_speak=True,
         can_stream=True,
@@ -665,6 +699,13 @@ async def call_voice_token(
     if record is None or record.get("authority_domain") != authority:
         raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
     identity = participant_identity(auth.user.id, auth.user.origin_domain)
+    connection_id = (
+        payload.connection_id
+        if payload is not None and payload.connection_id
+        else secrets.token_urlsafe(32)
+    )
+    takeover = payload.takeover if payload is not None else False
+    client_kind = payload.client_kind if payload is not None else "web"
     if authority == settings.domain:
         grant = await mint_dm_call_token(
             session,
@@ -673,6 +714,9 @@ async def call_voice_token(
             record,
             auth.user,
             sender_device_id=payload.sender_device_id if payload is not None else None,
+            connection_id=connection_id,
+            takeover=takeover,
+            client_kind=client_kind,
         )
         await discard_all_federated_voice_home_sessions(redis, identity)
         return grant
@@ -702,6 +746,9 @@ async def call_voice_token(
                 "actor_id": str(auth.user.id),
                 "actor_domain": auth.user.origin_domain,
                 "sender_device_id": payload.sender_device_id if payload is not None else None,
+                "connection_id": connection_id,
+                "takeover": takeover,
+                "client_kind": client_kind,
             },
             request_timeout=5,
             max_response_bytes=16 * 1024,
@@ -709,6 +756,14 @@ async def call_voice_token(
     except FederationNetworkError as exc:
         raise HTTPException(status_code=503, detail={"code": "VOICE_HOME_UNREACHABLE"}) from exc
     if response.status_code != 200:
+        if response.status_code == 409:
+            try:
+                body = decode_federation_response_json(response)
+                detail = body.get("detail", {}) if isinstance(body, dict) else {}
+            except (FederationNetworkError, ValueError, json.JSONDecodeError):
+                detail = {}
+            if isinstance(detail, dict) and detail.get("code") == "VOICE_ACTIVE_ELSEWHERE":
+                raise HTTPException(status_code=409, detail=detail)
         raise HTTPException(status_code=response.status_code, detail={"code": "VOICE_DENIED"})
     try:
         grant = VoiceTokenResponse.model_validate(decode_federation_response_json(response))
@@ -754,6 +809,9 @@ async def federation_dm_voice_token(
         user,
         sender_device_id=payload.sender_device_id,
         remote_device_attested=True,
+        connection_id=payload.connection_id,
+        takeover=payload.takeover,
+        client_kind=payload.client_kind,
     )
 
 

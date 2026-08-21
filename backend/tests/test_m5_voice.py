@@ -248,7 +248,9 @@ async def test_track_webhook_cannot_evict_a_joined_participant(monkeypatch: Any)
     assert removed == []
 
 
-async def test_participant_left_does_not_require_join_metadata(monkeypatch: Any) -> None:
+async def test_participant_left_without_connection_metadata_cannot_remove_new_lease(
+    monkeypatch: Any,
+) -> None:
     removed: list[tuple[str, str, str]] = []
     published: list[tuple[str, str, dict[str, object]]] = []
     queued: list[str] = []
@@ -280,10 +282,9 @@ async def test_participant_left_does_not_require_join_metadata(monkeypatch: Any)
     )
 
     assert response.status_code == 204
-    assert removed == [("alpha.localhost", "g.12.34", "78@alpha.localhost")]
-    assert published[0][1] == "VOICE_STATE_UPDATE"
-    assert published[0][2]["connected"] is False
-    assert queued == ["g.12.34"]
+    assert removed == []
+    assert published == []
+    assert queued == []
 
 
 async def test_voice_coordinator_publishes_scoped_local_snapshots(monkeypatch: Any) -> None:
@@ -329,6 +330,8 @@ async def test_voice_coordinator_publishes_scoped_local_snapshots(monkeypatch: A
 def test_voice_metadata_is_bound_to_identity_and_room() -> None:
     metadata = {
         "generation": 4,
+        "connection_id": "c" * 43,
+        "client_kind": "web",
         "user_id": "78",
         "user_domain": "alpha.localhost",
         "channel_id": "34",
@@ -377,6 +380,7 @@ def test_encrypted_voice_context_is_complete_and_policy_bound() -> None:
         "url": "wss://alpha.localhost/livekit",
         "room": "g.12.34",
         "generation": 1,
+        "connection_id": "c" * 43,
         "expires_at": "2026-08-11T12:00:00+00:00",
         "can_speak": True,
         "can_stream": True,
@@ -507,6 +511,7 @@ def test_voice_and_call_federation_schemas_forbid_malleable_fields() -> None:
             "actor_id": "78",
             "actor_domain": "beta.localhost",
             "move_session_id": move_session_id,
+            "connection_id": "c" * 43,
         }
     )
     assert request.actor_domain == "beta.localhost"
@@ -520,6 +525,7 @@ def test_voice_and_call_federation_schemas_forbid_malleable_fields() -> None:
         url="wss://alpha.localhost/livekit",
         room="g.12.35",
         generation=5,
+        connection_id="c" * 43,
         expires_at="2026-08-11T12:00:00+00:00",
         can_speak=True,
         can_stream=True,
@@ -596,6 +602,7 @@ def test_plaintext_federated_voice_grant_is_bound_to_room_channel_and_authority(
         url="wss://beta.localhost/livekit",
         room="d.34.56",
         generation=1,
+        connection_id="c" * 43,
         expires_at="2026-08-18T12:00:00+00:00",
         can_speak=True,
         can_stream=True,
@@ -639,6 +646,7 @@ def test_encrypted_federated_voice_grant_is_bound_to_room_channel_and_authority(
         url="wss://beta.localhost/livekit",
         room=room,
         generation=1,
+        connection_id="c" * 43,
         expires_at="2026-08-18T12:00:00+00:00",
         can_speak=True,
         can_stream=True,
@@ -694,6 +702,7 @@ async def test_remote_dm_voice_grant_rejects_a_substituted_room(
         url="wss://beta.localhost/livekit",
         room="d.34.57",
         generation=1,
+        connection_id="c" * 43,
         expires_at="2026-08-18T12:00:00+00:00",
         can_speak=True,
         can_stream=True,
@@ -737,6 +746,7 @@ async def test_successful_local_voice_replacement_revokes_federated_move_session
         url="wss://alpha.localhost/livekit",
         room="g.12.34",
         generation=1,
+        connection_id="c" * 43,
         expires_at="2026-08-11T12:00:00+00:00",
         can_speak=True,
         can_stream=True,
@@ -783,6 +793,7 @@ async def test_successful_dm_voice_replacement_revokes_federated_move_session(
         url="wss://alpha.localhost/livekit",
         room="d.34.56",
         generation=1,
+        connection_id="c" * 43,
         expires_at="2026-08-11T12:00:00+00:00",
         can_speak=True,
         can_stream=True,
@@ -1046,6 +1057,7 @@ async def test_federation_move_endpoint_rejects_unsolicited_before_dispatch(
             url="wss://beta.localhost/livekit",
             room="g.12.35",
             generation=5,
+            connection_id="c" * 43,
             expires_at="2026-08-11T12:00:00+00:00",
             can_speak=True,
             can_stream=True,
@@ -1129,6 +1141,7 @@ async def test_remote_move_rejection_preserves_the_source_voice_session(
         url="wss://alpha.localhost/livekit",
         room="g.12.35",
         generation=5,
+        connection_id="c" * 43,
         expires_at="2026-08-11T12:00:00+00:00",
         can_speak=True,
         can_stream=True,

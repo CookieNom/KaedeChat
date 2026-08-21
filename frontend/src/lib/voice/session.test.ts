@@ -122,6 +122,7 @@ function grant(overrides: Partial<VoiceToken> = {}): VoiceToken {
     url: 'wss://chat.example/livekit',
     room: 'g.1.2',
     generation: 0,
+    connection_id: 'c'.repeat(43),
     expires_at: '2026-07-19T12:15:00Z',
     can_speak: true,
     can_stream: true,

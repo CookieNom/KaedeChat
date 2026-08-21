@@ -280,11 +280,18 @@ pub async fn join_channel(
     expected_policy: ExpectedVoicePolicy,
     media_key: Option<Vec<u8>>,
     sender_device_id: Option<&str>,
+    connection_id: &str,
+    takeover: bool,
 ) -> Result<VoiceHandle, VoiceError> {
     let grant: VoiceGrant = api
         .post(
             &format!("channels/{channel}/voice/token"),
-            &serde_json::json!({"sender_device_id": sender_device_id}),
+            &serde_json::json!({
+                "sender_device_id": sender_device_id,
+                "connection_id": connection_id,
+                "takeover": takeover,
+                "client_kind": "desktop"
+            }),
         )
         .await?;
     Box::pin(join(grant, media, expected_policy, media_key)).await
@@ -303,11 +310,18 @@ pub async fn join_call(
     expected_policy: ExpectedVoicePolicy,
     media_key: Option<Vec<u8>>,
     sender_device_id: Option<&str>,
+    connection_id: &str,
+    takeover: bool,
 ) -> Result<VoiceHandle, VoiceError> {
     let grant: VoiceGrant = api
         .post(
             &format!("calls/{call}/voice/token"),
-            &serde_json::json!({"sender_device_id": sender_device_id}),
+            &serde_json::json!({
+                "sender_device_id": sender_device_id,
+                "connection_id": connection_id,
+                "takeover": takeover,
+                "client_kind": "desktop"
+            }),
         )
         .await?;
     Box::pin(join(grant, media, expected_policy, media_key)).await
@@ -1362,12 +1376,14 @@ fn disconnect_message(reason: DisconnectReason) -> &'static str {
     match reason {
         DisconnectReason::ClientInitiated => "You left voice.",
         DisconnectReason::DuplicateIdentity => {
-            "This account joined voice from another client, so this connection was closed."
+            "Voice moved to another device. This device will stay disconnected unless you explicitly move voice back here."
         }
         DisconnectReason::ServerShutdown => {
             "The voice server restarted. Wait a moment and join voice again."
         }
-        DisconnectReason::ParticipantRemoved => "A moderator disconnected you from voice.",
+        DisconnectReason::ParticipantRemoved => {
+            "This voice connection was ended from another device or by a moderator. It will not reconnect automatically."
+        }
         DisconnectReason::RoomDeleted | DisconnectReason::RoomClosed => {
             "This voice session has ended and is no longer available."
         }

@@ -131,7 +131,19 @@ final class VoiceRoom extends ConsumerWidget {
               text: 'You do not have permission to join this voice channel.',
             ),
           if (thisRoom)
-            if (session.error case final error?)
+            if (session.activeElsewhereClient case final activeClient?)
+              _VoiceTakeoverNotice(
+                activeClient: activeClient,
+                moving: session.connecting,
+                onMove: () => session.connect(
+                  channel,
+                  callRef: callRef,
+                  force: true,
+                  takeover: true,
+                ),
+                onCancel: () => session.leave(),
+              )
+            else if (session.error case final error?)
               _VoiceNotice(icon: Icons.error_outline_rounded, text: error),
           Expanded(
             child: !joined
@@ -889,6 +901,58 @@ final class _VoiceEmpty extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      );
+}
+
+final class _VoiceTakeoverNotice extends StatelessWidget {
+  const _VoiceTakeoverNotice({
+    required this.activeClient,
+    required this.moving,
+    required this.onMove,
+    required this.onCancel,
+  });
+
+  final String activeClient;
+  final bool moving;
+  final Future<void> Function() onMove;
+  final Future<void> Function() onCancel;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: double.infinity,
+        margin: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: KaedeColors.raised,
+          border: Border.all(color: KaedeColors.coralText),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Voice is active on $activeClient',
+                style: const TextStyle(fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            const Text(
+              'Moving voice here will disconnect that device. It will not reconnect automatically.',
+              style: TextStyle(color: KaedeColors.textSoft),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                FilledButton(
+                  onPressed: moving ? null : onMove,
+                  child: Text(moving ? 'Moving voice…' : 'Move voice here'),
+                ),
+                const SizedBox(width: 8),
+                TextButton(
+                  onPressed: moving ? null : onCancel,
+                  child: const Text('Keep it there'),
+                ),
+              ],
+            ),
+          ],
         ),
       );
 }

@@ -1,4 +1,11 @@
-import { ExternalE2EEKeyProvider, Room, RoomEvent, Track, type Participant } from 'livekit-client';
+import {
+  DisconnectReason,
+  ExternalE2EEKeyProvider,
+  Room,
+  RoomEvent,
+  Track,
+  type Participant
+} from 'livekit-client';
 import type { LocalTrackPublication, RemoteTrack, RemoteTrackPublication } from 'livekit-client';
 import { userErrorMessage } from '$lib/api/client';
 import type { Channel } from '$lib/chat/types';
@@ -17,6 +24,7 @@ export interface VoiceToken {
   url: string;
   room: string;
   generation: number;
+  connection_id: string;
   expires_at: string;
   can_speak: boolean;
   can_stream: boolean;
@@ -132,6 +140,7 @@ export function isUsableVoiceToken(value: VoiceToken, now = Date.now()): boolean
     /^[gd]\.\d+\.\d+$/.test(value.room) &&
     Number.isInteger(value.generation) &&
     value.generation >= 0 &&
+    /^[A-Za-z0-9_-]{43}$/.test(value.connection_id) &&
     (value.move_session_id == null ||
       (typeof value.move_session_id === 'string' &&
         /^[A-Za-z0-9_-]{32,64}$/.test(value.move_session_id))) &&
@@ -284,7 +293,7 @@ export class VoiceSession extends EventTarget {
       this.#activeSpeakers = new Set(speakers.map((speaker) => speaker.identity));
       changed();
     });
-    room.on(RoomEvent.Disconnected, () => {
+    room.on(RoomEvent.Disconnected, (reason) => {
       if (this.room !== room) return;
       this.connected = false;
       this.encrypted = null;
@@ -292,6 +301,13 @@ export class VoiceSession extends EventTarget {
       this.microphone = false;
       this.camera = false;
       this.screen = false;
+      if (
+        reason === DisconnectReason.DUPLICATE_IDENTITY ||
+        reason === DisconnectReason.PARTICIPANT_REMOVED
+      ) {
+        this.error =
+          'This voice connection was ended from another device or by a moderator. It will not reconnect automatically.';
+      }
       this.#activeSpeakers.clear();
       this.#changed();
     });
@@ -416,7 +432,8 @@ export class VoiceSession extends EventTarget {
     grant: VoiceToken,
     channel: VoiceChannelPolicy,
     encryptionKey?: ArrayBuffer,
-    senderDeviceId?: string
+    senderDeviceId?: string,
+    takeover = false
   ): Promise<void> {
     if (!isNativeDesktop()) throw new Error('Native voice is unavailable.');
     if (this.connected || this.connecting) return;
@@ -430,7 +447,9 @@ export class VoiceSession extends EventTarget {
         isCall,
         expectedPolicy,
         e2eeKey: encryptionKey ? base64url(new Uint8Array(encryptionKey)) : null,
-        senderDeviceId: senderDeviceId ?? null
+        senderDeviceId: senderDeviceId ?? null,
+        connectionId: grant.connection_id,
+        takeover
       });
       this.#startNativePolling();
       await this.#pollNativeStatus();

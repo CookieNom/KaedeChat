@@ -20,7 +20,7 @@ from app.db.models import Channel, E2EEDevice, Guild, GuildMember, User
 from app.voice.livekit import LiveKitControl, LiveKitError, mint_join_token
 from app.voice.rooms import guild_room_name, parse_room_name, participant_identity
 from app.voice.schemas import VoiceTokenResponse
-from app.voice.state import bump_generation, current_generation, remove_occupant
+from app.voice.state import claim_voice_connection, remove_occupant
 
 log = structlog.get_logger()
 
@@ -223,6 +223,9 @@ async def authoritative_guild_token(
     disconnect_previous: bool = True,
     sender_device_id: str | None = None,
     remote_device_attested: bool = False,
+    connection_id: str,
+    takeover: bool = False,
+    client_kind: str = "web",
 ) -> VoiceTokenResponse:
     require_voice_enabled(settings)
     if guild.origin_domain != settings.domain or channel.origin_domain != settings.domain:
@@ -254,23 +257,44 @@ async def authoritative_guild_token(
     )
     e2ee_context = voice_e2ee_context(channel, room)
     identity = participant_identity(actor.id, actor.origin_domain)
-    previous_raw = await redis.get(f"voice:user-room:{identity}")
-    if disconnect_previous and previous_raw is not None:
-        previous_room = (
-            previous_raw.decode() if isinstance(previous_raw, bytes) else str(previous_raw)
+    try:
+        await LiveKitControl(settings).ensure_room(room)
+    except LiveKitError as exc:
+        log.warning("voice_home_unavailable", room=room, error_type=type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "VOICE_HOME_UNREACHABLE", "retry_after_ms": 2000},
+            headers={"Retry-After": "2"},
+        ) from exc
+    claimed, generation, previous_room, previous_client = await claim_voice_connection(
+        redis,
+        settings.domain,
+        identity,
+        connection_id=connection_id,
+        room=room,
+        client_kind=client_kind,
+        takeover=takeover,
+    )
+    if not claimed:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VOICE_ACTIVE_ELSEWHERE",
+                "message": "Voice is already active for your account on another device.",
+                "active_client": previous_client,
+                "active_room": previous_room,
+            },
         )
-        if previous_room != room:
-            await bump_generation(redis, settings.domain, previous_room, identity)
-            try:
-                await LiveKitControl(settings).remove_participant(previous_room, identity)
-            except LiveKitError:
-                log.warning(
-                    "voice_previous_room_disconnect_failed",
-                    room=previous_room,
-                    identity=identity,
-                )
-            await remove_occupant(redis, settings.domain, previous_room, identity)
-    generation = await current_generation(redis, settings.domain, room, identity)
+    if takeover and disconnect_previous and previous_room:
+        try:
+            await LiveKitControl(settings).remove_participant(previous_room, identity)
+        except LiveKitError:
+            log.warning(
+                "voice_previous_connection_disconnect_failed",
+                room=previous_room,
+                identity=identity,
+            )
+        await remove_occupant(redis, settings.domain, previous_room, identity)
     server_mute = bool(member.voice_flags & VOICE_SERVER_MUTE)
     server_deaf = bool(member.voice_flags & VOICE_SERVER_DEAF)
     can_speak = bool(permissions & Permission.SPEAK) and not server_mute
@@ -279,6 +303,8 @@ async def authoritative_guild_token(
     metadata: dict[str, object] = {
         "version": 1,
         "generation": generation,
+        "connection_id": connection_id,
+        "client_kind": client_kind,
         "user_id": str(actor.id),
         "user_domain": actor.origin_domain,
         "guild_id": str(guild.id),
@@ -296,7 +322,6 @@ async def authoritative_guild_token(
     if e2ee_context:
         metadata.update({"e2ee": True, **e2ee_context})
     try:
-        await LiveKitControl(settings).ensure_room(room)
         token, expires_at = mint_join_token(
             settings,
             room=room,
@@ -319,6 +344,7 @@ async def authoritative_guild_token(
         url=cast(str, settings.voice_public_url),
         room=room,
         generation=generation,
+        connection_id=connection_id,
         expires_at=expires_at.isoformat(),
         can_speak=can_speak,
         can_stream=can_stream,
@@ -351,6 +377,8 @@ def parse_minted_metadata(raw: str, *, room: str, identity: str) -> dict[str, ob
         raise ValueError("invalid voice token metadata")
     required = {
         "generation": int,
+        "connection_id": str,
+        "client_kind": str,
         "user_id": str,
         "user_domain": str,
         "channel_id": str,
@@ -365,6 +393,12 @@ def parse_minted_metadata(raw: str, *, room: str, identity: str) -> dict[str, ob
     for name, expected in required.items():
         if type(metadata.get(name)) is not expected:
             raise ValueError("invalid voice token metadata")
+    if (
+        len(cast(str, metadata["connection_id"])) != 43
+        or not cast(str, metadata["connection_id"]).replace("_", "a").replace("-", "a").isalnum()
+        or metadata["client_kind"] not in {"web", "desktop", "mobile"}
+    ):
+        raise ValueError("invalid voice connection metadata")
     e2ee_fields = {
         "encryption_policy_generation",
         "encryption_epoch",

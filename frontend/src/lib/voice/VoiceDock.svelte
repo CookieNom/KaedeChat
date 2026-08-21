@@ -27,11 +27,19 @@
   const voice = new VoiceSession();
   let revision = $state(0);
   let error = $state('');
+  let takeoverPrompt = $state<string | null>(null);
   let screenShareOpen = $state(false);
   let audioHost = $state<HTMLElement | null>(null);
   let detachAudio: (() => void) | null = null;
   let mounted = false;
   const connectionFence = new VoiceConnectionFence();
+  let connectionId = (() => {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    return btoa(String.fromCharCode(...bytes))
+      .replaceAll('+', '-')
+      .replaceAll('/', '_')
+      .replaceAll('=', '');
+  })();
   let joinController: AbortController | null = null;
   const permissionBits = $derived.by(() => {
     if (callRef || permissions === null) return null;
@@ -120,6 +128,7 @@
           );
         }
         const key = await mediaKey(grant, channel);
+        connectionId = grant.connection_id;
         const deviceId = await senderDeviceId(channel);
         if (!mounted || !connectionFence.isCurrent(generation)) return;
         await voice.disconnect();
@@ -183,7 +192,7 @@
     await voice.disconnect();
   }
 
-  async function join() {
+  async function join(takeover = false) {
     if (!mounted) return;
     if (!canConnect) {
       error = 'You do not have permission to join this voice channel.';
@@ -194,6 +203,7 @@
     const controller = new AbortController();
     joinController = controller;
     error = '';
+    takeoverPrompt = null;
     try {
       const channel = selectedChannel();
       if (!channel) throw new Error('Voice channel policy is unavailable. Refresh and try again.');
@@ -203,7 +213,12 @@
         : `/channels/${encodeURIComponent(channelRef ?? '')}/voice/token`;
       const grant = await api<VoiceToken>(path, {
         method: 'POST',
-        body: JSON.stringify({ sender_device_id: deviceId }),
+        body: JSON.stringify({
+          sender_device_id: deviceId,
+          connection_id: connectionId,
+          takeover,
+          client_kind: isNativeDesktop() ? 'desktop' : 'web'
+        }),
         signal: controller.signal
       });
       if (!mounted || !connectionFence.isCurrent(generation) || controller.signal.aborted) return;
@@ -218,7 +233,8 @@
           grant,
           channel,
           key,
-          deviceId ?? undefined
+          deviceId ?? undefined,
+          takeover
         );
       } else {
         await voice.connect(grant, channel, key);
@@ -236,16 +252,30 @@
       }
     } catch (caught) {
       if (mounted && connectionFence.isCurrent(generation) && !controller.signal.aborted) {
-        error =
-          caught instanceof ApiError
-            ? caught.code === 'MISSING_PERMISSIONS'
-              ? 'You do not have permission to join this voice channel.'
-              : caught.message
-            : voice.error ||
-              userErrorMessage(
-                caught,
-                'Could not join voice. Check your network and microphone permission, then try again.'
-              );
+        if (caught instanceof ApiError && caught.code === 'VOICE_ACTIVE_ELSEWHERE') {
+          const activeClient =
+            typeof caught.detail.active_client === 'string' ? caught.detail.active_client : '';
+          takeoverPrompt =
+            activeClient === 'mobile'
+              ? 'your phone or tablet'
+              : activeClient === 'desktop'
+                ? 'the desktop app'
+                : activeClient === 'web'
+                  ? 'another browser'
+                  : 'another device';
+          error = '';
+        } else {
+          error =
+            caught instanceof ApiError
+              ? caught.code === 'MISSING_PERMISSIONS'
+                ? 'You do not have permission to join this voice channel.'
+                : caught.message
+              : voice.error ||
+                userErrorMessage(
+                  caught,
+                  'Could not join voice. Check your network and microphone permission, then try again.'
+                );
+        }
       }
     } finally {
       if (joinController === controller) joinController = null;
@@ -284,7 +314,7 @@
         class="primary"
         disabled={view.connecting || !canConnect}
         title={!canConnect ? 'You do not have permission to join this voice channel.' : undefined}
-        onclick={join}
+        onclick={() => join()}
       >
         {view.connecting ? 'Connecting…' : 'Join voice'}
       </button>
@@ -295,7 +325,19 @@
 
   <main class="voice-stage">
     {#if error}<p class="voice-error" role="alert">{error}</p>{/if}
-    {#if view.connected}
+    {#if takeoverPrompt}
+      <div class="takeover-prompt" role="alertdialog" aria-labelledby="voice-takeover-title">
+        <span><Icon name="screen" size={28} /></span>
+        <strong id="voice-takeover-title">Voice is active on {takeoverPrompt}</strong>
+        <p>Moving voice here will disconnect that device. It will not reconnect automatically.</p>
+        <div class="takeover-actions">
+          <button class="primary" disabled={view.connecting} onclick={() => join(true)}>
+            {view.connecting ? 'Moving voice…' : 'Move voice here'}
+          </button>
+          <button class="secondary" onclick={() => (takeoverPrompt = null)}>Keep it there</button>
+        </div>
+      </div>
+    {:else if view.connected}
       {#if view.tiles.length > 0}
         <div
           class="video-grid"
@@ -716,6 +758,46 @@
     place-items: center;
     gap: 0.55rem;
     text-align: center;
+  }
+
+  .takeover-prompt {
+    display: grid;
+    width: min(100%, 30rem);
+    place-items: center;
+    gap: 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--maple) 45%, var(--line));
+    border-radius: 14px;
+    padding: 1.4rem;
+    background: var(--paper-raised);
+    text-align: center;
+    box-shadow: 0 14px 34px rgb(0 0 0 / 16%);
+  }
+
+  .takeover-prompt > span {
+    color: var(--maple);
+  }
+
+  .takeover-prompt p {
+    margin: 0;
+    color: var(--ink-soft);
+    font-size: 0.8rem;
+  }
+
+  .takeover-actions {
+    display: flex;
+    gap: 0.6rem;
+    margin-top: 0.35rem;
+  }
+
+  .secondary {
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 0.52rem 0.78rem;
+    color: var(--ink);
+    background: var(--paper);
+    font-size: 0.74rem;
+    font-weight: 700;
+    cursor: pointer;
   }
 
   .join-prompt > span {

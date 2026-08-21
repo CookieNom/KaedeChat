@@ -79,12 +79,15 @@ from app.voice.state import (
     discard_pending_federated_voice_home_session,
     get_federated_voice_session,
     occupancy_snapshot,
+    release_voice_connection,
     remove_occupant,
+    remove_occupant_connection,
     replace_occupancy,
     room_occupants,
     room_state_key,
     set_federated_voice_authority_session,
     set_occupant,
+    voice_connection_matches,
 )
 
 router = APIRouter(tags=["voice"])
@@ -123,6 +126,13 @@ async def channel_voice_token(
         )
     identity = participant_identity(auth.user.id, auth.user.origin_domain)
     sender_device_id = payload.sender_device_id if payload is not None else None
+    connection_id = (
+        payload.connection_id
+        if payload is not None and payload.connection_id
+        else secrets.token_urlsafe(32)
+    )
+    takeover = payload.takeover if payload is not None else False
+    client_kind = payload.client_kind if payload is not None else "web"
     if guild.origin_domain == settings.domain:
         grant = await authoritative_guild_token(
             session,
@@ -132,6 +142,9 @@ async def channel_voice_token(
             guild=guild,
             actor=auth.user,
             sender_device_id=sender_device_id,
+            connection_id=connection_id,
+            takeover=takeover,
+            client_kind=client_kind,
         )
         await discard_all_federated_voice_home_sessions(redis, identity)
         return grant
@@ -164,11 +177,22 @@ async def channel_voice_token(
                 "actor_domain": auth.user.origin_domain,
                 "move_session_id": move_session_id,
                 "sender_device_id": sender_device_id,
+                "connection_id": connection_id,
+                "takeover": takeover,
+                "client_kind": client_kind,
             },
             request_timeout=5,
             max_response_bytes=16 * 1024,
         )
         if response.status_code != 200:
+            if response.status_code == 409:
+                try:
+                    body = decode_federation_response_json(response)
+                    detail = body.get("detail", {}) if isinstance(body, dict) else {}
+                except (FederationNetworkError, ValueError, json.JSONDecodeError):
+                    detail = {}
+                if isinstance(detail, dict) and detail.get("code") == "VOICE_ACTIVE_ELSEWHERE":
+                    raise HTTPException(status_code=409, detail=detail)
             if response.status_code in {401, 403, 404}:
                 raise HTTPException(
                     status_code=response.status_code, detail={"code": "VOICE_DENIED"}
@@ -246,6 +270,9 @@ async def federation_voice_token(
         move_session_id=payload.move_session_id,
         sender_device_id=payload.sender_device_id,
         remote_device_attested=True,
+        connection_id=payload.connection_id,
+        takeover=payload.takeover,
+        client_kind=payload.client_kind,
     )
 
 
@@ -400,6 +427,14 @@ async def disconnect_member_voice(
     room_raw = await redis.get(f"voice:user-room:{identity}")
     if room_raw is not None:
         room = room_raw.decode() if isinstance(room_raw, bytes) else str(room_raw)
+        current_occupant = next(
+            (
+                item
+                for item in await room_occupants(redis, settings.domain, room)
+                if item.identity == identity
+            ),
+            None,
+        )
         kind, room_guild_id, room_channel_id = parse_room_name(room)
         if kind != "g" or room_guild_id != guild.id:
             raise HTTPException(status_code=409, detail={"code": "VOICE_NOT_IN_GUILD"})
@@ -433,6 +468,10 @@ async def disconnect_member_voice(
         except LiveKitError:
             log.warning("voice_disconnect_control_failed", room=room, identity=identity)
         await remove_occupant(redis, settings.domain, room, identity)
+        if current_occupant is not None and current_occupant.connection_id:
+            await release_voice_connection(
+                redis, settings.domain, identity, current_occupant.connection_id
+            )
     else:
         await require_permissions(session, redis, guild, auth.user, Permission.MOVE_MEMBERS)
         await session.commit()
@@ -503,6 +542,14 @@ async def move_member_voice(
     if source_room == f"g.{guild.id}.{target_channel.id}":
         return Response(status_code=204)
     source_generation = await current_generation(redis, settings.domain, source_room, identity)
+    source_occupant = next(
+        (
+            item
+            for item in await room_occupants(redis, settings.domain, source_room)
+            if item.identity == identity
+        ),
+        None,
+    )
     move_session: FederatedVoiceSession | None = None
     if user_domain != settings.domain:
         move_session = await get_federated_voice_session(redis, "authority", identity)
@@ -541,6 +588,18 @@ async def move_member_voice(
         actor=target_user,
         move_session_id=(move_session.move_session_id if move_session is not None else None),
         disconnect_previous=user_domain == settings.domain,
+        connection_id=(
+            source_occupant.connection_id
+            if source_occupant is not None and source_occupant.connection_id
+            else secrets.token_urlsafe(32)
+        ),
+        takeover=True,
+        client_kind=(
+            source_occupant.client_kind
+            if source_occupant is not None
+            and source_occupant.client_kind in {"web", "desktop", "mobile"}
+            else "web"
+        ),
     )
     move_data = {
         "guild_id": str(guild.id),
@@ -759,7 +818,17 @@ async def livekit_webhook(
                 await LiveKitControl(settings).remove_participant(room, identity)
             return await completed()
         generation = int(cast(int, metadata["generation"]))
-        if generation != await current_generation(redis, settings.domain, room, identity):
+        connection_id = str(metadata["connection_id"])
+        if generation != await current_generation(
+            redis, settings.domain, room, identity
+        ) or not await voice_connection_matches(
+            redis,
+            settings.domain,
+            identity,
+            connection_id=connection_id,
+            room=room,
+            generation=generation,
+        ):
             with suppress(LiveKitError):
                 await LiveKitControl(settings).remove_participant(room, identity)
             return await completed()
@@ -805,6 +874,8 @@ async def livekit_webhook(
             guild_id=str(scope_id) if kind == "g" else None,
             channel_id=str(resolved_channel_id),
             joined_at=int(time.time()),
+            connection_id=connection_id,
+            client_kind=str(metadata["client_kind"]),
             server_mute=bool(metadata["server_mute"]),
             server_deaf=bool(metadata["server_deaf"]),
             can_speak=bool(metadata["can_speak"]),
@@ -827,7 +898,15 @@ async def livekit_webhook(
                 ),
             )
     elif event_type == "participant_left":
-        await remove_occupant(redis, settings.domain, room, identity)
+        try:
+            metadata = parse_minted_metadata(
+                str(event.participant.metadata), room=room, identity=identity
+            )
+            connection_id = str(metadata["connection_id"])
+        except ValueError:
+            return await completed()
+        await remove_occupant_connection(redis, settings.domain, room, identity, connection_id)
+        await release_voice_connection(redis, settings.domain, identity, connection_id)
         if kind == "g" and user_domain != settings.domain:
             await discard_federated_voice_session(
                 redis,
