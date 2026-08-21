@@ -586,7 +586,15 @@ export class VoiceSession extends EventTarget {
         throw caught;
       }
     }
-    const { capture, publish } = webScreenShareOptions(preferences);
+    const preferredSurface =
+      sourceId === 'browser:window'
+        ? 'window'
+        : sourceId === 'browser:browser'
+          ? 'browser'
+          : sourceId === 'browser:monitor'
+            ? 'monitor'
+            : undefined;
+    const { capture, publish } = webScreenShareOptions(preferences, preferredSurface);
     await this.room.localParticipant.setScreenShareEnabled(true, capture, {
       ...publish,
       ...webAudioPublishOptions(preferences)

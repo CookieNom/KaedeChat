@@ -70,4 +70,16 @@ describe('media quality preferences', () => {
     expect(options.capture.resolution).toEqual({ width: 7680, height: 4320, frameRate: 30 });
     expect(screenShareProfile('source').maxBitrate).toBe(8_000_000);
   });
+
+  it('passes the selected source category to the protected browser picker', () => {
+    expect(webScreenShareOptions(DEFAULT_MEDIA_QUALITY, 'window').capture.video).toEqual({
+      displaySurface: 'window'
+    });
+    expect(webScreenShareOptions(DEFAULT_MEDIA_QUALITY, 'browser').capture.video).toEqual({
+      displaySurface: 'browser'
+    });
+    expect(webScreenShareOptions(DEFAULT_MEDIA_QUALITY, 'monitor').capture.video).toEqual({
+      displaySurface: 'monitor'
+    });
+  });
 });

@@ -155,7 +155,10 @@ export function saveMediaQuality(
   }
 }
 
-export function webScreenShareOptions(preferences: MediaQualityPreferences): {
+export function webScreenShareOptions(
+  preferences: MediaQualityPreferences,
+  preferredSurface?: 'window' | 'browser' | 'monitor'
+): {
   capture: ScreenShareCaptureOptions;
   publish: TrackPublishOptions;
 } {
@@ -167,6 +170,7 @@ export function webScreenShareOptions(preferences: MediaQualityPreferences): {
   return {
     capture: {
       audio: preferences.shareAudio,
+      video: preferredSurface ? { displaySurface: preferredSurface } : true,
       resolution,
       contentHint: profile.contentHint,
       systemAudio: preferences.shareAudio ? 'include' : 'exclude',

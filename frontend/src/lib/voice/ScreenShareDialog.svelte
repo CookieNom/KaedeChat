@@ -51,6 +51,9 @@
   );
   const selectedProfile = $derived(screenShareProfile(preferences.screenProfile));
   const securePicker = $derived(native && sources.length === 0);
+  const selectedSource = $derived(
+    visibleSources.find((source) => source.id === selectedSourceId) ?? null
+  );
 
   $effect(() => {
     if (!dialog) return;
@@ -149,6 +152,16 @@
     open = false;
   }
 
+  function changeSourceTab(tab: 'application' | 'screen') {
+    sourceTab = tab;
+    if (!native) return;
+    const next = sources.find((source) => {
+      const kind = source.kind ?? (source.id.startsWith('window:') ? 'application' : 'screen');
+      return kind === tab;
+    });
+    selectedSourceId = next?.id ?? null;
+  }
+
   function reset() {
     loadGeneration += 1;
     open = false;
@@ -159,9 +172,9 @@
     selectedSourceId = null;
   }
 
-  async function share() {
+  async function share(browserSurface?: 'window' | 'browser' | 'monitor') {
     if (sharing) return;
-    if (native && !securePicker && !selectedSourceId) {
+    if (native && !securePicker && !selectedSource) {
       error = 'Choose a window or display to share.';
       return;
     }
@@ -169,7 +182,13 @@
     error = '';
     saveMediaQuality(preferences);
     try {
-      await onShare(preferences, selectedSourceId);
+      await onShare(
+        preferences,
+        selectedSource?.id ??
+          (!native
+            ? `browser:${browserSurface ?? (sourceTab === 'application' ? 'window' : 'monitor')}`
+            : null)
+      );
       open = false;
     } catch (caught) {
       error =
@@ -196,59 +215,52 @@
   }}
 >
   <section class="share-shell">
-    <header class="share-heading">
-      <div>
-        <p>Go live</p>
-        <h2 id="screen-share-title">Share your screen</h2>
-      </div>
+    <h2 id="screen-share-title" class="visually-hidden">Choose what to share</h2>
+    <button class="close-button" type="button" aria-label="Close" disabled={sharing} onclick={close}
+      >×</button
+    >
+
+    <nav class="source-tabs" aria-label="Screen-share source type">
       <button
-        class="icon-button"
         type="button"
-        aria-label="Close"
-        disabled={sharing}
-        onclick={close}>×</button
+        data-initial-focus
+        class:active={sourceTab === 'application'}
+        aria-pressed={sourceTab === 'application'}
+        onclick={() => changeSourceTab('application')}
       >
-    </header>
+        <Icon name="image" size={21} /> Applications
+      </button>
+      <button
+        type="button"
+        class:active={sourceTab === 'screen'}
+        aria-pressed={sourceTab === 'screen'}
+        onclick={() => changeSourceTab('screen')}
+      >
+        <Icon name="screen" size={21} /> Entire Screen
+      </button>
+    </nav>
 
-    {#if native}
-      <nav class="source-tabs" aria-label="Screen-share source type">
-        <button
-          type="button"
-          data-initial-focus
-          class:active={sourceTab === 'application'}
-          aria-pressed={sourceTab === 'application'}
-          onclick={() => (sourceTab = 'application')}
-        >
-          <Icon name="image" size={19} /> Applications
-        </button>
-        <button
-          type="button"
-          class:active={sourceTab === 'screen'}
-          aria-pressed={sourceTab === 'screen'}
-          onclick={() => (sourceTab = 'screen')}
-        >
-          <Icon name="screen" size={19} /> Entire screen
-        </button>
-      </nav>
-
-      <div class="source-region" aria-live="polite">
+    <main class="source-region" aria-live="polite">
+      {#if native}
         {#if loadingSources}
           <div class="source-message"><span class="spinner"></span>Finding shareable sources…</div>
         {:else if securePicker}
-          <div class="secure-picker">
-            <span><Icon name="shield" size={30} /></span>
-            <h3>The system chooser will open next</h3>
-            <p>
-              {nativeOs === 'macos'
-                ? 'macOS keeps available windows private until you use its secure sharing picker.'
-                : 'This desktop session uses a privacy-preserving system picker, which is common on Wayland.'}
-            </p>
-          </div>
+          <button class="system-picker-card" type="button" onclick={() => void share()}>
+            <span class="picker-illustration"><Icon name="shield" size={54} /></span>
+            <span class="picker-copy">
+              <strong>Open the secure system picker</strong>
+              <small>
+                {nativeOs === 'macos'
+                  ? 'macOS shows applications and displays in its privacy-protected chooser.'
+                  : 'Your Wayland session shows applications and displays through the desktop portal.'}
+              </small>
+            </span>
+          </button>
         {:else if visibleSources.length === 0}
-          <div class="secure-picker">
-            <span><Icon name="screen" size={30} /></span>
-            <h3>No {sourceTab === 'application' ? 'applications' : 'displays'} available</h3>
-            <p>Open a window or connect a display, then refresh the list.</p>
+          <div class="empty-sources">
+            <Icon name={sourceTab === 'application' ? 'image' : 'screen'} size={38} />
+            <strong>No {sourceTab === 'application' ? 'applications' : 'screens'} found</strong>
+            <span>Open a window or connect a display, then refresh.</span>
             <button class="secondary" type="button" onclick={() => void loadNativeSources()}
               >Refresh</button
             >
@@ -262,400 +274,706 @@
                 class:selected={selectedSourceId === source.id}
                 aria-pressed={selectedSourceId === source.id}
                 onclick={() => (selectedSourceId = source.id)}
+                ondblclick={() => void share()}
               >
                 <span class="source-preview">
                   {#if thumbnails[source.id]}
                     <img src={thumbnails[source.id]} alt="" />
                   {:else}
-                    <Icon name={sourceTab === 'application' ? 'image' : 'screen'} size={34} />
+                    <Icon name={sourceTab === 'application' ? 'image' : 'screen'} size={42} />
                   {/if}
                   {#if selectedSourceId === source.id}
-                    <span class="selected-check"><Icon name="check" size={15} /></span>
+                    <span class="selected-check"><Icon name="check" size={16} /></span>
                   {/if}
                 </span>
-                <strong>{source.label.replace(/^(Window|Display):\s*/, '')}</strong>
+                <span class="source-label">
+                  <Icon name={sourceTab === 'application' ? 'image' : 'screen'} size={18} />
+                  <strong>{source.label.replace(/^(Window|Display):\s*/, '')}</strong>
+                </span>
               </button>
             {/each}
           </div>
         {/if}
-      </div>
-    {:else}
-      <div class="browser-picker" data-initial-focus tabindex="-1">
-        <span><Icon name="shield" size={32} /></span>
-        <div>
-          <h3>Your browser protects the source list</h3>
-          <p>
-            After you press Share, your browser will ask you to choose a tab, window, or screen.
-            Kaede cannot see those choices until you approve one.
-          </p>
+      {:else}
+        <div class="browser-source-grid" class:single-source={sourceTab === 'screen'}>
+          <button
+            class="browser-source-card selected"
+            type="button"
+            onclick={() => void share(sourceTab === 'application' ? 'window' : 'monitor')}
+          >
+            <span class="browser-preview" class:screen-preview={sourceTab === 'screen'}>
+              <span class="preview-window preview-window-back"></span>
+              <span class="preview-window preview-window-front">
+                <Icon name={sourceTab === 'application' ? 'image' : 'screen'} size={52} />
+              </span>
+              <span class="privacy-chip"><Icon name="shield" size={15} /> Protected picker</span>
+            </span>
+            <span class="source-label">
+              <Icon name={sourceTab === 'application' ? 'image' : 'screen'} size={18} />
+              <span>
+                <strong
+                  >{sourceTab === 'application' ? 'Application window' : 'Entire screen'}</strong
+                >
+                <small>Your browser will show the available sources</small>
+              </span>
+            </span>
+          </button>
+          {#if sourceTab === 'application'}
+            <button class="browser-source-card" type="button" onclick={() => void share('browser')}>
+              <span class="browser-preview tab-preview">
+                <span class="preview-window preview-window-front">
+                  <Icon name="globe" size={52} />
+                </span>
+                <span class="privacy-chip"><Icon name="shield" size={15} /> Protected picker</span>
+              </span>
+              <span class="source-label">
+                <Icon name="globe" size={18} />
+                <span>
+                  <strong>Browser tab</strong>
+                  <small>Share one tab without exposing your desktop</small>
+                </span>
+              </span>
+            </button>
+          {/if}
         </div>
-      </div>
-    {/if}
-
-    <div class="quality-panel">
-      <div class="quality-summary">
-        <div>
-          <p>Stream quality</p>
-          <strong>{selectedProfile.label}</strong>
-          <span>
-            {selectedProfile.description} · {selectedProfile.height
-              ? `${selectedProfile.height}p`
-              : 'Source'} ·
-            {selectedProfile.frameRate} FPS
-          </span>
-        </div>
-        <span class="quality-badge"
-          >{selectedProfile.height ? `${selectedProfile.height}p` : 'MAX'}</span
-        >
-      </div>
-
-      <fieldset>
-        <legend>Video</legend>
-        <div class="option-grid video-options">
-          {#each SCREEN_SHARE_PROFILES as profile (profile.id)}
-            <label class:selected={preferences.screenProfile === profile.id}>
-              <input
-                type="radio"
-                name="screen-quality"
-                value={profile.id}
-                checked={preferences.screenProfile === profile.id}
-                onchange={() => (preferences.screenProfile = profile.id as ScreenShareProfileId)}
-              />
-              <strong>{profile.height ? `${profile.height}p` : 'Source'}</strong>
-              <span>{profile.frameRate} FPS</span>
-            </label>
-          {/each}
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Outgoing audio</legend>
-        <div class="option-grid audio-options">
-          {#each AUDIO_QUALITIES as quality (quality.id)}
-            <label class:selected={preferences.audioQuality === quality.id}>
-              <input
-                type="radio"
-                name="audio-quality"
-                value={quality.id}
-                checked={preferences.audioQuality === quality.id}
-                onchange={() => (preferences.audioQuality = quality.id as AudioQualityId)}
-              />
-              <strong>{quality.label}</strong>
-              <span>{quality.description}</span>
-            </label>
-          {/each}
-        </div>
-        <p class="bitrate-note">
-          Bitrate is an upper target. Voice automatically uses less bandwidth during silence or
-          network congestion.
+        <p class="browser-privacy">
+          <Icon name="shield" size={16} /> Kaede cannot inspect window titles or previews until you approve
+          a source in your browser.
         </p>
-      </fieldset>
-
-      <label class="audio-toggle">
-        <span>
-          <strong>Share computer audio</strong>
-          <small>
-            {native
-              ? 'Desktop system-audio capture is not available in this build.'
-              : 'Availability depends on the selected source and browser.'}
-          </small>
-        </span>
-        <input type="checkbox" bind:checked={preferences.shareAudio} disabled={native} />
-      </label>
-    </div>
+      {/if}
+    </main>
 
     {#if error}<p class="share-error" role="alert">{error}</p>{/if}
 
-    <footer class="share-actions">
-      <button class="secondary" type="button" disabled={sharing} onclick={close}>Cancel</button>
-      <button
-        class="primary"
-        type="button"
-        disabled={sharing || loadingSources}
-        onclick={() => void share()}
-      >
-        <Icon name="screen" size={18} />
-        {sharing ? 'Starting…' : native && !securePicker ? 'Share' : 'Choose source'}
-      </button>
+    <footer class="stream-footer">
+      <div class="quality-summary">
+        <strong>{selectedProfile.label}</strong>
+        <span>
+          {selectedProfile.description} <b>•</b>
+          {selectedProfile.height ? `${selectedProfile.height}p` : 'Source'} <b>•</b>
+          {selectedProfile.frameRate} FPS
+        </span>
+      </div>
+
+      <div class="footer-controls">
+        <div class="quick-quality" aria-label="Quick stream quality">
+          <button
+            type="button"
+            class:active={preferences.screenProfile === 'data_saver' ||
+              preferences.screenProfile === 'smooth'}
+            aria-label="Standard definition, 720p at 30 frames per second"
+            onclick={() => (preferences.screenProfile = 'smooth')}>SD</button
+          >
+          <button
+            type="button"
+            class:active={preferences.screenProfile === 'sharp'}
+            aria-label="High definition, 1080p at 30 frames per second"
+            onclick={() => (preferences.screenProfile = 'sharp')}>HD</button
+          >
+        </div>
+
+        <details class="quality-settings">
+          <summary aria-label="Advanced stream settings"><Icon name="settings" size={23} /></summary
+          >
+          <div class="settings-card">
+            <header>
+              <div>
+                <strong>Stream settings</strong>
+                <span>Video quality and outgoing microphone audio</span>
+              </div>
+            </header>
+
+            <fieldset>
+              <legend>Resolution and frame rate</legend>
+              <div class="option-grid video-options">
+                {#each SCREEN_SHARE_PROFILES as profile (profile.id)}
+                  <label class:selected={preferences.screenProfile === profile.id}>
+                    <input
+                      type="radio"
+                      name="screen-quality"
+                      value={profile.id}
+                      checked={preferences.screenProfile === profile.id}
+                      onchange={() =>
+                        (preferences.screenProfile = profile.id as ScreenShareProfileId)}
+                    />
+                    <strong>{profile.height ? `${profile.height}p` : 'Source'}</strong>
+                    <span>{profile.frameRate} FPS</span>
+                  </label>
+                {/each}
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend>Outgoing audio bitrate</legend>
+              <div class="option-grid audio-options">
+                {#each AUDIO_QUALITIES as quality (quality.id)}
+                  <label class:selected={preferences.audioQuality === quality.id}>
+                    <input
+                      type="radio"
+                      name="audio-quality"
+                      value={quality.id}
+                      checked={preferences.audioQuality === quality.id}
+                      onchange={() => (preferences.audioQuality = quality.id as AudioQualityId)}
+                    />
+                    <strong>{quality.maxBitrate / 1000} kbps</strong>
+                    <span>{quality.label}</span>
+                  </label>
+                {/each}
+              </div>
+              <p class="bitrate-note">Adaptive upper limit; silence and congestion use less.</p>
+            </fieldset>
+
+            <label class="audio-toggle">
+              <span>
+                <strong>Share computer audio</strong>
+                <small>
+                  {native
+                    ? 'Unavailable in the native desktop capture pipeline.'
+                    : 'Availability depends on your browser and selected source.'}
+                </small>
+              </span>
+              <input type="checkbox" bind:checked={preferences.shareAudio} disabled={native} />
+            </label>
+          </div>
+        </details>
+
+        <button class="cancel-button" type="button" disabled={sharing} onclick={close}
+          >Cancel</button
+        >
+        <button
+          class="share-button"
+          type="button"
+          disabled={sharing || loadingSources || (native && !securePicker && !selectedSource)}
+          onclick={() => void share()}
+        >
+          <Icon name="screen" size={18} />
+          {sharing ? 'Starting…' : native && !securePicker ? 'Go Live' : 'Choose source'}
+        </button>
+      </div>
     </footer>
   </section>
 </dialog>
 
 <style>
   .share-dialog {
-    width: min(1060px, calc(100vw - 28px));
-    max-height: min(900px, calc(100dvh - 28px));
+    width: min(1120px, calc(100vw - 32px));
+    max-height: min(820px, calc(100dvh - 32px));
     padding: 0;
-    overflow: hidden;
+    overflow: visible;
     color: var(--text);
     border: 1px solid var(--line-strong);
-    border-radius: 24px;
+    border-radius: 22px;
     background: var(--surface);
     box-shadow: var(--shadow-lg);
   }
 
   .share-dialog::backdrop {
-    background: rgb(0 0 0 / 72%);
-    backdrop-filter: blur(3px);
+    background: rgb(0 0 0 / 74%);
+    backdrop-filter: blur(5px);
   }
 
   .share-shell {
+    position: relative;
     display: grid;
-    max-height: min(900px, calc(100dvh - 28px));
-    grid-template-rows: auto auto minmax(180px, 1fr) auto auto auto;
-    overflow: hidden;
+    max-height: min(820px, calc(100dvh - 32px));
+    grid-template-rows: auto minmax(260px, 1fr) auto auto;
+    overflow: visible;
   }
 
-  .share-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 20px 24px 16px;
-  }
-
-  .share-heading p,
-  .share-heading h2,
-  .quality-summary p,
-  .quality-summary span,
-  .secure-picker h3,
-  .secure-picker p,
-  .browser-picker h3,
-  .browser-picker p,
-  .bitrate-note,
-  .share-error {
-    margin: 0;
-  }
-
-  .share-heading p,
-  .quality-summary p {
-    color: var(--accent-text);
-    font-size: 0.69rem;
-    font-weight: 800;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
-  }
-
-  .share-heading h2 {
-    margin-top: 2px;
-    font-family: var(--font-display);
-    font-size: clamp(1.35rem, 3vw, 1.8rem);
-  }
-
-  .icon-button {
-    width: 36px;
-    height: 36px;
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
     padding: 0;
-    color: var(--text-muted);
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
     border: 0;
-    border-radius: 10px;
-    background: transparent;
-    font-size: 1.8rem;
+  }
+
+  .close-button {
+    position: absolute;
+    z-index: 4;
+    top: -13px;
+    right: -13px;
+    display: grid;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    place-items: center;
+    color: var(--text-muted);
+    border: 1px solid var(--line-strong);
+    border-radius: 50%;
+    background: var(--surface-raised);
+    box-shadow: 0 8px 18px rgb(0 0 0 / 28%);
+    font-size: 1.45rem;
     line-height: 1;
     cursor: pointer;
-  }
-
-  .icon-button:hover {
-    background: var(--surface-hover);
   }
 
   .source-tabs {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 5px;
-    margin: 0 24px;
+    gap: 6px;
+    margin: 22px 24px 0;
     padding: 5px;
-    border-radius: 15px;
+    border-radius: 16px;
     background: var(--rail);
   }
 
   .source-tabs button {
     display: flex;
-    min-height: 50px;
+    min-height: 48px;
     align-items: center;
     justify-content: center;
-    gap: 9px;
+    gap: 10px;
     color: var(--rail-text);
     border: 0;
-    border-radius: 11px;
+    border-radius: 12px;
     background: transparent;
+    font-size: 0.96rem;
     font-weight: 720;
     cursor: pointer;
-    opacity: 0.68;
+    opacity: 0.62;
   }
 
   .source-tabs button.active {
     background: var(--rail-hover);
+    box-shadow: 0 3px 12px rgb(0 0 0 / 22%);
     opacity: 1;
   }
 
   .source-region {
-    min-height: 180px;
+    min-height: 0;
     overflow: auto;
-    padding: 20px 24px;
+    padding: 20px 24px 24px;
+    scrollbar-gutter: stable;
   }
 
   .source-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 14px;
+    gap: 18px 20px;
   }
 
-  .source-card {
-    display: grid;
+  .source-card,
+  .browser-source-card,
+  .system-picker-card {
     min-width: 0;
-    gap: 8px;
     padding: 0;
-    overflow: hidden;
     color: var(--text);
     text-align: left;
     border: 2px solid transparent;
-    border-radius: 14px;
     background: transparent;
     cursor: pointer;
   }
 
-  .source-card.selected {
+  .source-card,
+  .browser-source-card {
+    display: grid;
+    gap: 9px;
+    border-radius: 15px;
+  }
+
+  .source-card:hover .source-preview,
+  .browser-source-card:hover .browser-preview {
+    border-color: var(--line-strong);
+    transform: translateY(-1px);
+  }
+
+  .source-card.selected,
+  .browser-source-card.selected {
     border-color: var(--accent);
     background: var(--accent-soft);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
   }
 
-  .source-card > strong {
-    padding: 0 10px 10px;
-    overflow: hidden;
-    font-size: 0.79rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .source-preview {
+  .source-preview,
+  .browser-preview {
     position: relative;
     display: grid;
-    min-height: 150px;
+    width: 100%;
+    aspect-ratio: 16 / 8.7;
     place-items: center;
     overflow: hidden;
     color: var(--text-muted);
     border: 1px solid var(--line-soft);
-    border-radius: 11px;
-    background:
-      linear-gradient(
-        145deg,
-        color-mix(in srgb, var(--surface-raised) 76%, transparent),
-        transparent
-      ),
-      var(--surface-subtle);
+    border-radius: 12px;
+    background: #151515;
+    transition: 140ms ease;
   }
 
   .source-preview img {
     display: block;
     width: 100%;
     height: 100%;
-    max-height: 240px;
     object-fit: contain;
     background: #111;
   }
 
+  .source-label {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 9px;
+    padding: 0 10px 10px;
+  }
+
+  .source-label > strong,
+  .source-label > span {
+    min-width: 0;
+  }
+
+  .source-label > strong,
+  .source-label span > strong {
+    display: block;
+    overflow: hidden;
+    font-size: 0.86rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .source-label small {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+  }
+
   .selected-check {
     position: absolute;
-    top: 9px;
-    right: 9px;
+    top: 10px;
+    right: 10px;
     display: grid;
-    width: 25px;
-    height: 25px;
+    width: 27px;
+    height: 27px;
     place-items: center;
     color: var(--on-accent);
-    border-radius: 999px;
+    border: 2px solid var(--surface);
+    border-radius: 50%;
     background: var(--accent);
   }
 
-  .source-message,
-  .secure-picker,
-  .browser-picker {
-    min-height: 180px;
+  .browser-source-grid {
+    display: grid;
+    grid-template-columns: minmax(300px, 1fr) minmax(220px, 0.58fr);
+    min-height: 330px;
   }
 
+  .browser-source-grid.single-source .browser-source-card {
+    grid-column: 1;
+  }
+
+  .browser-preview {
+    min-height: 255px;
+    background:
+      radial-gradient(
+        circle at 50% 42%,
+        color-mix(in srgb, var(--accent) 18%, transparent),
+        transparent 43%
+      ),
+      #151515;
+  }
+
+  .preview-window {
+    position: absolute;
+    display: grid;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--text-muted) 42%, transparent);
+    border-radius: 8px;
+    background: var(--surface-raised);
+    box-shadow: 0 14px 30px rgb(0 0 0 / 36%);
+  }
+
+  .preview-window::before {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 18px;
+    border-bottom: 1px solid var(--line-soft);
+    background: var(--surface-subtle);
+    content: '';
+  }
+
+  .preview-window-back {
+    width: 55%;
+    height: 53%;
+    transform: translate(18%, -12%) rotate(3deg);
+    opacity: 0.55;
+  }
+
+  .preview-window-front {
+    width: 60%;
+    height: 58%;
+    color: var(--accent-text);
+    transform: translate(-7%, 7%);
+  }
+
+  .screen-preview .preview-window-back {
+    display: none;
+  }
+
+  .tab-preview .preview-window-front {
+    width: 68%;
+    height: 62%;
+    color: var(--accent-text);
+    transform: none;
+  }
+
+  .screen-preview .preview-window-front {
+    width: 68%;
+    height: 62%;
+    border-width: 5px;
+    border-color: var(--surface-raised);
+    border-radius: 5px;
+    transform: none;
+  }
+
+  .screen-preview .preview-window-front::after {
+    position: absolute;
+    bottom: -18px;
+    width: 26%;
+    height: 13px;
+    border-top: 4px solid var(--surface-raised);
+    content: '';
+  }
+
+  .privacy-chip {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 9px;
+    color: var(--text-soft);
+    border: 1px solid var(--line-soft);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--surface) 90%, transparent);
+    font-size: 0.68rem;
+    font-weight: 700;
+  }
+
+  .browser-privacy {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 14px 0 0;
+    color: var(--text-muted);
+    font-size: 0.74rem;
+  }
+
+  .system-picker-card,
+  .empty-sources,
+  .source-message {
+    min-height: 330px;
+  }
+
+  .system-picker-card {
+    display: grid;
+    grid-template-columns: minmax(300px, 1fr) minmax(220px, 0.58fr);
+    width: 100%;
+  }
+
+  .picker-illustration {
+    display: grid;
+    min-height: 300px;
+    place-items: center;
+    color: var(--accent-text);
+    border: 2px solid var(--accent);
+    border-radius: 14px;
+    background:
+      radial-gradient(circle, color-mix(in srgb, var(--accent) 18%, transparent), transparent 52%),
+      #151515;
+  }
+
+  .picker-copy {
+    align-self: end;
+    padding: 14px 12px;
+  }
+
+  .picker-copy strong,
+  .picker-copy small {
+    display: block;
+  }
+
+  .picker-copy small {
+    margin-top: 4px;
+    color: var(--text-muted);
+  }
+
+  .empty-sources,
   .source-message {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 10px;
+    flex-direction: column;
+    gap: 9px;
     color: var(--text-muted);
+    text-align: center;
+  }
+
+  .empty-sources strong {
+    color: var(--text);
   }
 
   .spinner {
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
     border: 2px solid var(--line);
     border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 800ms linear infinite;
   }
 
-  .secure-picker,
-  .browser-picker {
-    display: grid;
-    place-content: center;
-    gap: 10px;
-    padding: 26px;
-    color: var(--text-muted);
-    text-align: center;
-    border: 1px dashed var(--line-strong);
-    border-radius: 16px;
-    background: var(--surface-subtle);
-  }
-
-  .secure-picker > span,
-  .browser-picker > span {
-    color: var(--accent-text);
-  }
-
-  .secure-picker h3,
-  .browser-picker h3 {
-    color: var(--text);
-  }
-
-  .browser-picker {
-    grid-template-columns: auto minmax(0, 1fr);
-    min-height: 150px;
-    margin: 0 24px 20px;
-    align-items: center;
-    text-align: left;
-  }
-
-  .quality-panel {
-    display: grid;
-    gap: 15px;
-    padding: 18px 24px;
-    border-top: 1px solid var(--line-soft);
-    background: color-mix(in srgb, var(--surface-subtle) 72%, var(--surface));
-  }
-
-  .quality-summary {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-  }
-
-  .quality-summary > div {
-    display: grid;
-    gap: 2px;
-  }
-
-  .quality-summary > div > span {
-    color: var(--text-muted);
+  .share-error {
+    margin: 0 24px 12px;
+    padding: 10px 12px;
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
+    border-radius: 10px;
+    background: var(--danger-soft);
     font-size: 0.78rem;
   }
 
-  .quality-badge {
-    padding: 9px 12px;
+  .stream-footer {
+    position: relative;
+    display: flex;
+    min-height: 92px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 16px 24px;
+    border-top: 1px solid var(--line-soft);
+    border-radius: 0 0 22px 22px;
+    background: var(--surface-subtle);
+  }
+
+  .quality-summary {
+    display: grid;
+    min-width: 0;
+    gap: 4px;
+  }
+
+  .quality-summary strong {
+    font-size: 1rem;
+  }
+
+  .quality-summary span {
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 0.79rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .quality-summary b {
+    padding: 0 3px;
+    color: var(--line-strong);
+  }
+
+  .footer-controls {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: stretch;
+    gap: 9px;
+  }
+
+  .quick-quality {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    padding: 4px;
+    border-radius: 13px;
+    background: var(--rail);
+  }
+
+  .quick-quality button {
+    min-width: 54px;
+    padding: 0 14px;
+    color: var(--text-muted);
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    font-weight: 820;
+    cursor: pointer;
+  }
+
+  .quick-quality button.active {
+    color: var(--rail-text);
+    background: var(--rail-hover);
+  }
+
+  .quality-settings {
+    position: relative;
+  }
+
+  .quality-settings > summary {
+    display: grid;
+    width: 48px;
+    height: 100%;
+    min-height: 48px;
+    padding: 0;
+    place-items: center;
+    color: var(--text);
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    background: var(--surface-raised);
+    cursor: pointer;
+    list-style: none;
+  }
+
+  .quality-settings > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .quality-settings[open] > summary {
     color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
-    border-radius: 10px;
+    border-color: var(--accent);
     background: var(--accent-soft);
-    font-size: 0.75rem;
-    font-weight: 850;
+  }
+
+  .settings-card {
+    position: absolute;
+    z-index: 10;
+    right: 0;
+    bottom: calc(100% + 14px);
+    display: grid;
+    width: min(610px, calc(100vw - 48px));
+    gap: 16px;
+    padding: 18px;
+    border: 1px solid var(--line-strong);
+    border-radius: 16px;
+    background: var(--surface-raised);
+    box-shadow: 0 18px 50px rgb(0 0 0 / 42%);
+  }
+
+  .settings-card::after {
+    position: absolute;
+    right: 15px;
+    bottom: -7px;
+    width: 12px;
+    height: 12px;
+    border-right: 1px solid var(--line-strong);
+    border-bottom: 1px solid var(--line-strong);
+    background: var(--surface-raised);
+    content: '';
+    transform: rotate(45deg);
+  }
+
+  .settings-card header strong,
+  .settings-card header span {
+    display: block;
+  }
+
+  .settings-card header strong {
+    font-size: 1rem;
+  }
+
+  .settings-card header span {
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 0.74rem;
   }
 
   fieldset {
@@ -668,7 +986,7 @@
   legend {
     margin-bottom: 7px;
     color: var(--text-soft);
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     font-weight: 800;
     letter-spacing: 0.05em;
     text-transform: uppercase;
@@ -682,12 +1000,12 @@
 
   .option-grid label {
     display: grid;
-    gap: 1px;
+    gap: 2px;
     min-width: 0;
-    padding: 9px 10px;
+    padding: 10px;
     border: 1px solid var(--line);
     border-radius: 10px;
-    background: var(--surface-raised);
+    background: var(--surface-subtle);
     cursor: pointer;
   }
 
@@ -719,7 +1037,7 @@
   }
 
   .bitrate-note {
-    margin-top: 6px;
+    margin: 6px 0 0;
     color: var(--text-muted);
     font-size: 0.68rem;
   }
@@ -729,18 +1047,22 @@
     align-items: center;
     justify-content: space-between;
     gap: 20px;
-    padding: 11px 13px;
+    padding: 10px 12px;
     border: 1px solid var(--line-soft);
-    border-radius: 11px;
-    background: var(--surface-raised);
+    border-radius: 10px;
+    background: var(--surface-subtle);
   }
 
-  .audio-toggle span {
-    display: grid;
+  .audio-toggle span,
+  .audio-toggle strong,
+  .audio-toggle small {
+    display: block;
   }
 
   .audio-toggle small {
+    margin-top: 2px;
     color: var(--text-muted);
+    font-size: 0.7rem;
   }
 
   .audio-toggle input {
@@ -749,50 +1071,39 @@
     accent-color: var(--accent);
   }
 
-  .share-error {
-    margin: 0 24px;
-    padding: 10px 12px;
-    color: var(--danger);
-    border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
-    border-radius: 10px;
-    background: var(--danger-soft);
-    font-size: 0.78rem;
-  }
-
-  .share-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 9px;
-    padding: 16px 24px 20px;
-    border-top: 1px solid var(--line-soft);
-    background: var(--surface);
-  }
-
-  .primary,
+  .cancel-button,
+  .share-button,
   .secondary {
     display: inline-flex;
-    min-height: 40px;
+    min-height: 48px;
     align-items: center;
     justify-content: center;
     gap: 8px;
     padding: 0 16px;
     border: 1px solid var(--line);
-    border-radius: 10px;
+    border-radius: 12px;
     font-weight: 760;
     cursor: pointer;
   }
 
-  .primary {
+  .cancel-button,
+  .secondary {
+    color: var(--text);
+    background: var(--surface-raised);
+  }
+
+  .share-button {
     color: var(--on-accent);
     border-color: var(--accent);
     background: var(--accent);
   }
 
-  .secondary {
-    background: var(--surface-raised);
+  .share-button:hover {
+    background: var(--accent-hover);
   }
 
-  button:disabled {
+  button:disabled,
+  input:disabled {
     cursor: not-allowed;
     opacity: 0.5;
   }
@@ -803,48 +1114,93 @@
     }
   }
 
-  @media (max-width: 700px) {
+  @media (max-width: 760px) {
     .share-dialog {
-      width: min(100vw - 12px, 680px);
+      width: calc(100vw - 12px);
       max-height: calc(100dvh - 12px);
-      border-radius: 18px;
+      border-radius: 17px;
     }
 
     .share-shell {
       max-height: calc(100dvh - 12px);
+      grid-template-rows: auto minmax(210px, 1fr) auto auto;
     }
 
-    .share-heading,
-    .source-region,
-    .quality-panel,
-    .share-actions {
-      padding-right: 16px;
-      padding-left: 16px;
+    .source-tabs {
+      margin: 12px 12px 0;
     }
 
-    .source-tabs,
-    .browser-picker,
-    .share-error {
-      margin-right: 16px;
-      margin-left: 16px;
+    .source-tabs button {
+      min-height: 44px;
+      font-size: 0.82rem;
     }
 
-    .source-grid {
+    .source-region {
+      padding: 12px;
+    }
+
+    .source-grid,
+    .browser-source-grid,
+    .system-picker-card {
       grid-template-columns: 1fr;
+    }
+
+    .browser-source-grid,
+    .system-picker-card,
+    .empty-sources,
+    .source-message {
+      min-height: 240px;
+    }
+
+    .browser-preview,
+    .picker-illustration {
+      min-height: 210px;
+    }
+
+    .stream-footer {
+      align-items: stretch;
+      flex-direction: column;
+      gap: 12px;
+      padding: 13px;
+      border-radius: 0 0 17px 17px;
+    }
+
+    .footer-controls {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+    }
+
+    .cancel-button {
+      display: none;
+    }
+
+    .settings-card {
+      position: fixed;
+      right: 12px;
+      bottom: 108px;
+      left: 12px;
+      width: auto;
+      max-height: calc(100dvh - 138px);
+      overflow: auto;
+    }
+
+    .settings-card::after {
+      display: none;
     }
 
     .option-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .source-preview {
-      min-height: 120px;
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
     .spinner {
       animation-duration: 1.8s;
+    }
+
+    .source-preview,
+    .browser-preview {
+      transition: none;
     }
   }
 </style>
