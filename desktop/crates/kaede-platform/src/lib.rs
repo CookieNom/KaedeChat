@@ -118,6 +118,9 @@ pub struct DesktopPreferences {
     pub noise_suppression: NoiseSuppressionPreference,
     pub echo_cancellation: bool,
     pub automatic_gain_control: bool,
+    pub screen_share_profile: ScreenShareProfilePreference,
+    pub audio_quality: AudioQualityPreference,
+    pub share_system_audio: bool,
 }
 
 impl Default for DesktopPreferences {
@@ -133,8 +136,31 @@ impl Default for DesktopPreferences {
             noise_suppression: NoiseSuppressionPreference::Standard,
             echo_cancellation: true,
             automatic_gain_control: true,
+            screen_share_profile: ScreenShareProfilePreference::Smooth,
+            audio_quality: AudioQualityPreference::Standard,
+            share_system_audio: true,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenShareProfilePreference {
+    DataSaver,
+    #[default]
+    Smooth,
+    Sharp,
+    Source,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioQualityPreference {
+    DataSaver,
+    #[default]
+    Standard,
+    High,
+    Studio,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
@@ -850,6 +876,9 @@ mod tests {
             noise_suppression: NoiseSuppressionPreference::VoiceIsolation,
             echo_cancellation: true,
             automatic_gain_control: false,
+            screen_share_profile: ScreenShareProfilePreference::Sharp,
+            audio_quality: AudioQualityPreference::High,
+            share_system_audio: false,
         };
         preferences.save(&paths).await.expect("save preferences");
         assert_eq!(

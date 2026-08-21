@@ -252,10 +252,12 @@ void main() {
     expect(calls.first.arguments, <String, Object?>{
       'active': true,
       'microphone': true,
+      'screenShare': false,
     });
     expect(calls.last.arguments, <String, Object?>{
       'active': false,
       'microphone': false,
+      'screenShare': false,
     });
   });
 }

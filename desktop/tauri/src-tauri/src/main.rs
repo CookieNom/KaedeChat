@@ -21,13 +21,15 @@ use kaede_audio::{
 use kaede_auth::{AuthError, LoginOutcome, SessionManager};
 use kaede_gateway::{GatewayCommand, GatewayHandle};
 use kaede_platform::{
-    AccountRegistry, DesktopPreferences, InputModePreference, KnownAccount, PlatformError,
-    PlatformPaths, SystemCredentialVault,
+    AccountRegistry, AudioQualityPreference, DesktopPreferences, DevicePreference,
+    InputModePreference, KnownAccount, PlatformError, PlatformPaths, ScreenShareProfilePreference,
+    SystemCredentialVault,
 };
 use kaede_protocol::{Domain, EntityRef};
 use kaede_turnstile::EmbeddedTurnstile;
 use kaede_voice::{
-    ExpectedVoicePolicy, VoiceCommand, VoiceError, VoiceHandle, VoiceStatus, camera_devices,
+    ExpectedVoicePolicy, MediaPublishSettings, ScreenShareSettings, VoiceCommand, VoiceError,
+    VoiceHandle, VoiceMediaSettings, VoiceStatus, camera_devices, screen_source_thumbnail,
     screen_sources,
 };
 use parking_lot::Mutex as SyncMutex;
@@ -278,7 +280,9 @@ impl From<VoiceError> for NativeError {
                     VoiceError::EncryptionPolicyMismatch | VoiceError::EncryptionKeyMissing => {
                         "VOICE_E2EE_POLICY_MISMATCH"
                     }
-                    VoiceError::CaptureThread(_) => "SCREEN_CAPTURE_UNAVAILABLE",
+                    VoiceError::CaptureThread(_) | VoiceError::ScreenWorker(_) => {
+                        "SCREEN_CAPTURE_UNAVAILABLE"
+                    }
                     VoiceError::Api(_) => unreachable!("API voice errors returned above"),
                 };
                 Self::operation(code, message, error)
@@ -1683,6 +1687,41 @@ async fn native_audio_devices() -> Result<Value, NativeError> {
     }))
 }
 
+#[tauri::command]
+async fn native_screen_thumbnail(source_id: String) -> Result<Response, NativeError> {
+    if source_id.len() > 128
+        || !source_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'-' | b'_'))
+    {
+        return Err(NativeError::local(
+            "INVALID_SCREEN_SOURCE",
+            "That screen-share source is invalid. Refresh the source list and try again.",
+        ));
+    }
+    let thumbnail = tokio::task::spawn_blocking(move || screen_source_thumbnail(&source_id))
+        .await
+        .map_err(|error| {
+            NativeError::operation(
+                "SCREEN_PREVIEW_FAILED",
+                "Kaede could not prepare that screen preview.",
+                error,
+            )
+        })?
+        .ok_or_else(|| {
+            NativeError::local(
+                "SCREEN_PREVIEW_UNAVAILABLE",
+                "That window or display could not be previewed. It may have closed or require the system picker.",
+            )
+        })?;
+    let mut packet = Vec::with_capacity(12 + thumbnail.rgba.len());
+    packet.extend_from_slice(b"KST1");
+    packet.extend_from_slice(&thumbnail.width.to_le_bytes());
+    packet.extend_from_slice(&thumbnail.height.to_le_bytes());
+    packet.extend_from_slice(&thumbnail.rgba);
+    Ok(Response::new(packet))
+}
+
 fn capture_settings(preferences: &DesktopPreferences) -> CaptureSettings {
     CaptureSettings {
         device_id: preferences
@@ -1703,6 +1742,41 @@ fn capture_settings(preferences: &DesktopPreferences) -> CaptureSettings {
         },
         echo_cancellation: preferences.echo_cancellation,
         automatic_gain_control: preferences.automatic_gain_control,
+    }
+}
+
+fn media_publish_settings(preferences: &DesktopPreferences) -> MediaPublishSettings {
+    MediaPublishSettings {
+        audio_max_bitrate: match preferences.audio_quality {
+            AudioQualityPreference::DataSaver => 24_000,
+            AudioQualityPreference::Standard => 48_000,
+            AudioQualityPreference::High => 96_000,
+            AudioQualityPreference::Studio => 128_000,
+        },
+    }
+}
+
+fn screen_share_settings(preferences: &DesktopPreferences) -> ScreenShareSettings {
+    match preferences.screen_share_profile {
+        ScreenShareProfilePreference::DataSaver => ScreenShareSettings {
+            width: 1280,
+            height: 720,
+            frame_rate: 15,
+            max_bitrate: 1_200_000,
+        },
+        ScreenShareProfilePreference::Smooth => ScreenShareSettings::default(),
+        ScreenShareProfilePreference::Sharp => ScreenShareSettings {
+            width: 1920,
+            height: 1080,
+            frame_rate: 30,
+            max_bitrate: 4_500_000,
+        },
+        ScreenShareProfilePreference::Source => ScreenShareSettings {
+            width: 3840,
+            height: 2160,
+            frame_rate: 30,
+            max_bitrate: 8_000_000,
+        },
     }
 }
 
@@ -1861,7 +1935,13 @@ async fn join_native_voice_reserved(
         })?;
     let preferences = state.preferences.read().await.clone();
     let capture = capture_settings(&preferences);
+    let media = media_publish_settings(&preferences);
     let output = preferences.output_device.map(|device| device.id);
+    let media = VoiceMediaSettings {
+        capture,
+        output_device: output,
+        publish: media,
+    };
     let media_key = e2ee_key
         .as_deref()
         .map(|encoded| {
@@ -1885,8 +1965,7 @@ async fn join_native_voice_reserved(
         kaede_voice::join_call(
             account.api.clone(),
             &entity,
-            capture,
-            output,
+            media,
             expected_policy.clone(),
             media_key,
             sender_device_id.as_deref(),
@@ -1896,8 +1975,7 @@ async fn join_native_voice_reserved(
         kaede_voice::join_channel(
             account.api.clone(),
             &entity,
-            capture,
-            output,
+            media,
             expected_policy.clone(),
             media_key,
             sender_device_id.as_deref(),
@@ -1951,11 +2029,16 @@ async fn native_voice_control(
         },
         VoiceControl::ScreenOn => VoiceCommand::SetScreenShare {
             enabled: true,
-            source_id: preferences.screen_source.map(|device| device.id),
+            source_id: preferences
+                .screen_source
+                .as_ref()
+                .map(|device| device.id.clone()),
+            settings: screen_share_settings(&preferences),
         },
         VoiceControl::ScreenOff => VoiceCommand::SetScreenShare {
             enabled: false,
             source_id: None,
+            settings: screen_share_settings(&preferences),
         },
     };
     voice
@@ -1985,6 +2068,77 @@ async fn native_voice_control(
         }
         VoiceControl::Undeafen => ui.deafened = false,
         _ => {}
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn native_media_quality_set(
+    screen_profile: ScreenShareProfilePreference,
+    audio_quality: AudioQualityPreference,
+    share_system_audio: bool,
+    source_id: Option<String>,
+    state: State<'_, NativeState>,
+) -> Result<(), NativeError> {
+    let source = source_id.as_deref().and_then(|requested| {
+        screen_sources()
+            .into_iter()
+            .find(|candidate| candidate.id == requested)
+            .map(|candidate| DevicePreference {
+                id: candidate.id,
+                label: candidate.label,
+            })
+    });
+    if source_id.is_some() && source.is_none() {
+        return Err(NativeError::local(
+            "SCREEN_SOURCE_UNAVAILABLE",
+            "That window or display is no longer available. Refresh the source list and choose it again.",
+        ));
+    }
+    let mut preferences = state.preferences.write().await;
+    let previous_preferences = preferences.clone();
+    let restart_voice = preferences.audio_quality != audio_quality;
+    preferences.screen_share_profile = screen_profile;
+    preferences.audio_quality = audio_quality;
+    preferences.share_system_audio = share_system_audio;
+    preferences.screen_source = source;
+    preferences.save(&state.paths).await.map_err(|error| {
+        NativeError::operation(
+            "PREFERENCES_SAVE_FAILED",
+            "Kaede could not save media quality settings. Check the app configuration directory and try again.",
+            error,
+        )
+    })?;
+    drop(preferences);
+    let restart = if restart_voice {
+        state
+            .voice_install
+            .reserve_restart(&state.voice_target)
+            .await
+    } else {
+        None
+    };
+    if let Some((generation, target)) = restart
+        && let Err(error) = join_native_voice_reserved(
+            target.reference,
+            target.is_call,
+            target.expected_policy,
+            target
+                .e2ee_key
+                .as_ref()
+                .map(|key| key.expose_secret().to_owned()),
+            target.sender_device_id,
+            &state,
+            generation,
+        )
+        .await
+    {
+        let rollback_result = previous_preferences.save(&state.paths).await;
+        *state.preferences.write().await = previous_preferences;
+        if let Err(rollback_error) = rollback_result {
+            tracing::error!(%rollback_error, "failed to roll back media preferences after voice restart failure");
+        }
+        return Err(error);
     }
     Ok(())
 }
@@ -2107,7 +2261,8 @@ async fn native_preferences_set(
         || (previous.vad_threshold - preferences.vad_threshold).abs() > f32::EPSILON
         || previous.noise_suppression != preferences.noise_suppression
         || previous.echo_cancellation != preferences.echo_cancellation
-        || previous.automatic_gain_control != preferences.automatic_gain_control;
+        || previous.automatic_gain_control != preferences.automatic_gain_control
+        || previous.audio_quality != preferences.audio_quality;
     {
         let mut hotkey = state.hotkey.lock();
         replace_global_hotkey(
@@ -2466,10 +2621,12 @@ fn main() {
             native_gateway_next,
             native_gateway_command,
             native_audio_devices,
+            native_screen_thumbnail,
             native_test_input,
             native_test_output,
             native_voice_join,
             native_voice_control,
+            native_media_quality_set,
             native_voice_leave,
             native_voice_status,
             native_voice_next_video,

@@ -24,7 +24,7 @@ use livekit::{
         EncryptionType,
         key_provider::{KeyProvider, KeyProviderOptions},
     },
-    options::TrackPublishOptions,
+    options::{AudioEncoding, TrackPublishOptions, VideoEncoding},
     prelude::{
         DisconnectReason, LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteTrack, Room,
         RoomEvent, RoomOptions, TrackSource,
@@ -33,7 +33,10 @@ use livekit::{
         audio_frame::AudioFrame,
         audio_source::{AudioSourceOptions, RtcAudioSource, native::NativeAudioSource},
         audio_stream::native::NativeAudioStream,
-        desktop_capturer::{DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions},
+        desktop_capturer::{
+            CaptureError, DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
+            DesktopFrame,
+        },
         video_frame::{I420Buffer, VideoFormatType, VideoFrame, VideoRotation},
         video_source::{RtcVideoSource, VideoResolution, native::NativeVideoSource},
         video_stream::native::NativeVideoStream,
@@ -203,8 +206,47 @@ pub enum VoiceCommand {
     SetScreenShare {
         enabled: bool,
         source_id: Option<String>,
+        settings: ScreenShareSettings,
     },
     Leave,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MediaPublishSettings {
+    pub audio_max_bitrate: u64,
+}
+
+pub struct VoiceMediaSettings {
+    pub capture: CaptureSettings,
+    pub output_device: Option<String>,
+    pub publish: MediaPublishSettings,
+}
+
+impl Default for MediaPublishSettings {
+    fn default() -> Self {
+        Self {
+            audio_max_bitrate: 48_000,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ScreenShareSettings {
+    pub width: u32,
+    pub height: u32,
+    pub frame_rate: u32,
+    pub max_bitrate: u64,
+}
+
+impl Default for ScreenShareSettings {
+    fn default() -> Self {
+        Self {
+            width: 1280,
+            height: 720,
+            frame_rate: 30,
+            max_bitrate: 2_500_000,
+        }
+    }
 }
 
 pub struct VoiceHandle {
@@ -234,8 +276,7 @@ impl VoiceHandle {
 pub async fn join_channel(
     api: ApiClient,
     channel: &EntityRef,
-    capture_settings: CaptureSettings,
-    output_device: Option<String>,
+    media: VoiceMediaSettings,
     expected_policy: ExpectedVoicePolicy,
     media_key: Option<Vec<u8>>,
     sender_device_id: Option<&str>,
@@ -246,14 +287,7 @@ pub async fn join_channel(
             &serde_json::json!({"sender_device_id": sender_device_id}),
         )
         .await?;
-    Box::pin(join(
-        grant,
-        capture_settings,
-        output_device,
-        expected_policy,
-        media_key,
-    ))
-    .await
+    Box::pin(join(grant, media, expected_policy, media_key)).await
 }
 
 /// Obtains a home-instance grant and joins a direct-message call.
@@ -265,8 +299,7 @@ pub async fn join_channel(
 pub async fn join_call(
     api: ApiClient,
     call: &EntityRef,
-    capture_settings: CaptureSettings,
-    output_device: Option<String>,
+    media: VoiceMediaSettings,
     expected_policy: ExpectedVoicePolicy,
     media_key: Option<Vec<u8>>,
     sender_device_id: Option<&str>,
@@ -277,27 +310,19 @@ pub async fn join_call(
             &serde_json::json!({"sender_device_id": sender_device_id}),
         )
         .await?;
-    Box::pin(join(
-        grant,
-        capture_settings,
-        output_device,
-        expected_policy,
-        media_key,
-    ))
-    .await
+    Box::pin(join(grant, media, expected_policy, media_key)).await
 }
 
 async fn join(
     grant: VoiceGrant,
-    capture_settings: CaptureSettings,
-    output_device: Option<String>,
+    media: VoiceMediaSettings,
     expected_policy: ExpectedVoicePolicy,
     media_key: Option<Vec<u8>>,
 ) -> Result<VoiceHandle, VoiceError> {
     let room_options = media_room_options(&grant, &expected_policy, media_key)?;
     let move_session_id = grant.move_session_id.clone();
     if grant.can_speak
-        && capture_settings.mode == kaede_audio::InputMode::VoiceActivity
+        && media.capture.mode == kaede_audio::InputMode::VoiceActivity
         && !grant.can_use_vad
     {
         return Err(VoiceError::VoiceActivityDenied);
@@ -309,15 +334,15 @@ async fn join(
     // without retaining a large amount of decoded RGBA data.
     let (video_tx, video_rx) = mpsc::channel(16);
     let mut processor_chain = ProcessorChain::default();
-    processor_chain.push(Box::new(SpeechProcessor::from_settings(&capture_settings)));
+    processor_chain.push(Box::new(SpeechProcessor::from_settings(&media.capture)));
     // Do not open the operating-system microphone when the server grant is
     // listen-only. This avoids an unnecessary privacy prompt and ensures that
     // a missing SPEAK grant cannot accidentally feed a local capture graph.
     let capture = grant
         .can_speak
-        .then(|| NativeCapture::open(&capture_settings))
+        .then(|| NativeCapture::open(&media.capture))
         .transpose()?;
-    let playback = NativePlayback::open(output_device.as_deref())?;
+    let playback = NativePlayback::open(media.output_device.as_deref())?;
     let input_level = capture.as_ref().map(|capture| capture.gate.clone());
     let room_name = grant.room.clone();
     let (room, events) = Box::pin(Room::connect(
@@ -343,6 +368,9 @@ async fn join(
                 LocalTrack::Audio(track),
                 TrackPublishOptions {
                     source: TrackSource::Microphone,
+                    audio_encoding: Some(AudioEncoding {
+                        max_bitrate: media.publish.audio_max_bitrate.clamp(12_000, 128_000),
+                    }),
                     ..TrackPublishOptions::default()
                 },
             )
@@ -544,14 +572,14 @@ async fn run_room(
                             }
                         }
                     }
-                    Some(VoiceCommand::SetScreenShare { enabled, source_id }) => {
+                    Some(VoiceCommand::SetScreenShare { enabled, source_id, settings }) => {
                         if enabled && !can_stream {
                             send_media_error(&status, &room, can_speak, can_stream, screen_share.as_ref(), camera.as_ref(),
                                 "You do not have permission to share your screen in this channel.".to_owned());
                             continue;
                         }
                         let result = if enabled && screen_share.is_none() {
-                            publish_screen_share(&room, source_id.as_deref()).await.map(|published| {
+                            publish_screen_share(&room, source_id.as_deref(), settings).await.map(|published| {
                                 screen_share = Some(published);
                             })
                         } else if !enabled {
@@ -690,35 +718,80 @@ struct PublishedVideo {
 async fn publish_screen_share(
     room: &Room,
     source_id: Option<&str>,
+    settings: ScreenShareSettings,
 ) -> Result<PublishedVideo, VoiceError> {
+    let settings = ScreenShareSettings {
+        width: settings.width.clamp(640, 3840),
+        height: settings.height.clamp(360, 2160),
+        frame_rate: settings.frame_rate.clamp(5, 60),
+        max_bitrate: settings.max_bitrate.clamp(300_000, 12_000_000),
+    };
     let source = NativeVideoSource::new(
         VideoResolution {
-            width: 1280,
-            height: 720,
+            width: settings.width,
+            height: settings.height,
         },
         true,
     );
     let track =
         LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source.clone()));
-    room.local_participant()
-        .publish_track(
-            LocalTrack::Video(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Screenshare,
-                ..TrackPublishOptions::default()
-            },
-        )
-        .await?;
-
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = stop.clone();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let capture_thread = thread::Builder::new()
         .name("kaede-screen-capture".to_owned())
         .spawn({
             let source_id = source_id.map(str::to_owned);
-            move || run_screen_capture(source, thread_stop, source_id.as_deref())
+            move || {
+                run_screen_capture(
+                    source,
+                    thread_stop,
+                    source_id.as_deref(),
+                    settings,
+                    ready_tx,
+                );
+            }
         })
         .map_err(VoiceError::CaptureThread)?;
+    match time::timeout(Duration::from_secs(120), ready_rx).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => {
+            stop.store(true, Ordering::Release);
+            let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
+            return Err(VoiceError::ScreenWorker(error));
+        }
+        Ok(Err(error)) => {
+            stop.store(true, Ordering::Release);
+            let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
+            return Err(VoiceError::ScreenWorker(error.to_string()));
+        }
+        Err(_) => {
+            stop.store(true, Ordering::Release);
+            let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
+            return Err(VoiceError::ScreenWorker(
+                "screen chooser timed out before capture started".to_owned(),
+            ));
+        }
+    }
+    if let Err(error) = room
+        .local_participant()
+        .publish_track(
+            LocalTrack::Video(track.clone()),
+            TrackPublishOptions {
+                source: TrackSource::Screenshare,
+                video_encoding: Some(VideoEncoding {
+                    max_bitrate: settings.max_bitrate,
+                    max_framerate: f64::from(settings.frame_rate),
+                }),
+                ..TrackPublishOptions::default()
+            },
+        )
+        .await
+    {
+        stop.store(true, Ordering::Release);
+        let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
+        return Err(error.into());
+    }
     Ok(PublishedVideo {
         track,
         stop,
@@ -736,6 +809,14 @@ pub struct CameraDevice {
 pub struct ScreenSource {
     pub id: String,
     pub label: String,
+    pub kind: &'static str,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScreenThumbnail {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 /// Enumerate displays and individual windows without starting capture. Some
@@ -743,6 +824,20 @@ pub struct ScreenSource {
 /// secure operating-system picker when sharing begins.
 #[must_use]
 pub fn screen_sources() -> Vec<ScreenSource> {
+    #[cfg(target_os = "macos")]
+    {
+        // ScreenCaptureKit owns source disclosure and selection. Returning an
+        // application-enumerated list here would make the UI imply it can
+        // bypass the secure system chooser when capture deliberately cannot.
+        return Vec::new();
+    }
+    #[cfg(target_os = "linux")]
+    if is_wayland_session() {
+        // The XDG desktop portal owns source enumeration and consent. Asking
+        // XWayland for a parallel source list would bypass that privacy model
+        // and commonly produces unusable numeric IDs.
+        return Vec::new();
+    }
     let mut result = Vec::new();
     for (kind, prefix) in [
         (DesktopCaptureSourceType::Screen, "screen"),
@@ -768,11 +863,96 @@ pub fn screen_sources() -> Vec<ScreenSource> {
                         title
                     }
                 ),
+                kind: if prefix == "screen" {
+                    "screen"
+                } else {
+                    "application"
+                },
             });
         }
     }
     result.sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
     result
+}
+
+/// Captures one bounded preview frame for a source that was explicitly listed
+/// to the user. macOS intentionally returns no application-owned thumbnail:
+/// `ScreenCaptureKit`'s secure picker remains the privacy authority there.
+#[must_use]
+pub fn screen_source_thumbnail(source_id: &str) -> Option<ScreenThumbnail> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = source_id;
+        return None;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        #[cfg(target_os = "linux")]
+        if is_wayland_session() {
+            let _ = source_id;
+            return None;
+        }
+        let (kind, requested_id) = source_id
+            .split_once(':')
+            .and_then(|(kind, id)| id.parse::<u64>().ok().map(|id| (kind, id)))?;
+        let source_type = if kind == "window" {
+            DesktopCaptureSourceType::Window
+        } else if kind == "screen" {
+            DesktopCaptureSourceType::Screen
+        } else {
+            return None;
+        };
+        let mut capturer = DesktopCapturer::new(DesktopCapturerOptions::new(source_type))?;
+        let selected = capturer
+            .get_source_list()
+            .into_iter()
+            .find(|source| source.id() == requested_id)?;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        capturer.start_capture(Some(selected), move |result| {
+            let Ok(frame) = result else { return };
+            let Ok(width) = u32::try_from(frame.width()) else {
+                return;
+            };
+            let Ok(height) = u32::try_from(frame.height()) else {
+                return;
+            };
+            let (preview_width, preview_height) = bounded_dimensions(width, height, 384, 216);
+            let width_usize = usize::try_from(width).unwrap_or(0);
+            let height_usize = usize::try_from(height).unwrap_or(0);
+            let preview_width_usize = usize::try_from(preview_width).unwrap_or(0);
+            let preview_height_usize = usize::try_from(preview_height).unwrap_or(0);
+            let stride = frame.stride() as usize;
+            if width_usize == 0
+                || height_usize == 0
+                || preview_width_usize == 0
+                || preview_height_usize == 0
+                || stride < width_usize.saturating_mul(4)
+                || frame.data().len() < stride.saturating_mul(height_usize)
+            {
+                return;
+            }
+            let mut rgba = vec![0_u8; preview_width_usize * preview_height_usize * 4];
+            for target_y in 0..preview_height_usize {
+                let source_y = target_y * height_usize / preview_height_usize;
+                for target_x in 0..preview_width_usize {
+                    let source_x = target_x * width_usize / preview_width_usize;
+                    let source_offset = source_y * stride + source_x * 4;
+                    let target_offset = (target_y * preview_width_usize + target_x) * 4;
+                    rgba[target_offset] = frame.data()[source_offset + 2];
+                    rgba[target_offset + 1] = frame.data()[source_offset + 1];
+                    rgba[target_offset + 2] = frame.data()[source_offset];
+                    rgba[target_offset + 3] = 255;
+                }
+            }
+            let _ = sender.try_send(ScreenThumbnail {
+                width: preview_width,
+                height: preview_height,
+                rgba,
+            });
+        });
+        capturer.capture_frame();
+        receiver.recv_timeout(Duration::from_millis(800)).ok()
+    }
 }
 
 /// Enumerate cameras without opening one. Opening remains tied to an explicit
@@ -955,7 +1135,13 @@ async fn stop_published_video(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_screen_capture(source: NativeVideoSource, stop: Arc<AtomicBool>, requested: Option<&str>) {
+fn run_screen_capture(
+    source: NativeVideoSource,
+    stop: Arc<AtomicBool>,
+    requested: Option<&str>,
+    settings: ScreenShareSettings,
+    ready: tokio::sync::oneshot::Sender<Result<(), String>>,
+) {
     let (kind, requested_id) = requested
         .and_then(|value| value.split_once(':'))
         .and_then(|(kind, id)| id.parse::<u64>().ok().map(|id| (kind, id)))
@@ -969,9 +1155,18 @@ fn run_screen_capture(source: NativeVideoSource, stop: Arc<AtomicBool>, requeste
                 Some(id),
             )
         });
+    #[cfg(target_os = "linux")]
+    let kind = if is_wayland_session() {
+        DesktopCaptureSourceType::Generic
+    } else {
+        kind
+    };
     let mut options = DesktopCapturerOptions::new(kind);
     options.set_include_cursor(true);
     let Some(mut capturer) = DesktopCapturer::new(options) else {
+        let _ = ready.send(Err(
+            "screen capture is unavailable in this desktop session".to_owned()
+        ));
         tracing::error!("screen capture is not available on this platform/session");
         return;
     };
@@ -986,44 +1181,114 @@ fn run_screen_capture(source: NativeVideoSource, stop: Arc<AtomicBool>, requeste
     #[cfg(not(target_os = "macos"))]
     let selected = {
         let sources = capturer.get_source_list();
-        requested_id
-            .and_then(|id| sources.iter().find(|source| source.id() == id).cloned())
-            .or_else(|| sources.into_iter().next())
+        let selected = match requested_id {
+            Some(id) => sources.into_iter().find(|source| source.id() == id),
+            None => sources.into_iter().next(),
+        };
+        if requested_id.is_some() && selected.is_none() {
+            let _ = ready.send(Err(
+                "the selected screen-share source is no longer available".to_owned(),
+            ));
+            return;
+        }
+        selected
     };
 
+    let mut ready = Some(ready);
     capturer.start_capture(selected, move |result| match result {
         Ok(frame) => {
-            let Ok(width) = u32::try_from(frame.width()) else {
+            let Some(buffer) = prepare_screen_frame(&frame, settings) else {
                 return;
             };
-            let Ok(height) = u32::try_from(frame.height()) else {
-                return;
-            };
-            let Some(converted) = (PackedFrame {
-                width,
-                height,
-                stride: frame.stride() as usize,
-                format: PackedPixelFormat::Bgra,
-                data: frame.data(),
-            })
-            .to_i420() else {
-                tracing::warn!(width, height, "screen capture produced an invalid frame");
-                return;
-            };
-            let mut buffer = I420Buffer::new(converted.width, converted.height);
-            let (y, u, v) = buffer.data_mut();
-            y.copy_from_slice(&converted.y);
-            u.copy_from_slice(&converted.u);
-            v.copy_from_slice(&converted.v);
             source.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, buffer));
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(Ok(()));
+            }
         }
-        Err(error) => tracing::warn!(?error, "screen capture frame failed"),
+        Err(error) => {
+            if error == CaptureError::Permanent
+                && let Some(ready) = ready.take()
+            {
+                let _ = ready.send(Err(
+                    "screen capture permission was denied or the selected source closed".to_owned(),
+                ));
+            }
+            tracing::warn!(?error, "screen capture frame failed");
+        }
     });
 
     while !stop.load(Ordering::Acquire) {
         capturer.capture_frame();
-        thread::sleep(Duration::from_millis(67));
+        thread::sleep(Duration::from_millis(
+            1000_u64 / u64::from(settings.frame_rate.max(1)),
+        ));
     }
+}
+
+fn prepare_screen_frame(frame: &DesktopFrame, settings: ScreenShareSettings) -> Option<I420Buffer> {
+    let width = u32::try_from(frame.width()).ok()?;
+    let height = u32::try_from(frame.height()).ok()?;
+    let converted = (PackedFrame {
+        width,
+        height,
+        stride: usize::try_from(frame.stride()).ok()?,
+        format: PackedPixelFormat::Bgra,
+        data: frame.data(),
+    })
+    .to_i420();
+    let Some(converted) = converted else {
+        tracing::warn!(width, height, "screen capture produced an invalid frame");
+        return None;
+    };
+    let mut buffer = I420Buffer::new(converted.width, converted.height);
+    let (y, u, v) = buffer.data_mut();
+    y.copy_from_slice(&converted.y);
+    u.copy_from_slice(&converted.u);
+    v.copy_from_slice(&converted.v);
+    let (scaled_width, scaled_height) = bounded_dimensions(
+        converted.width,
+        converted.height,
+        settings.width,
+        settings.height,
+    );
+    if scaled_width == converted.width && scaled_height == converted.height {
+        Some(buffer)
+    } else {
+        Some(buffer.scale(
+            i32::try_from(scaled_width).unwrap_or(i32::MAX),
+            i32::try_from(scaled_height).unwrap_or(i32::MAX),
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_wayland_session() -> bool {
+    is_wayland_environment(
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn is_wayland_environment(has_wayland_display: bool, session_type: Option<&str>) -> bool {
+    has_wayland_display || session_type.is_some_and(|value| value.eq_ignore_ascii_case("wayland"))
+}
+
+fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
+    if width <= max_width && height <= max_height {
+        return (width.max(2) & !1, height.max(2) & !1);
+    }
+    let (scaled_width, scaled_height) =
+        if u64::from(max_width) * u64::from(height) <= u64::from(max_height) * u64::from(width) {
+            let height = u64::from(height) * u64::from(max_width) / u64::from(width.max(1));
+            (max_width, u32::try_from(height).unwrap_or(max_height))
+        } else {
+            let width = u64::from(width) * u64::from(max_height) / u64::from(height.max(1));
+            (u32::try_from(width).unwrap_or(max_width), max_height)
+        };
+    let scaled_width = scaled_width.max(2) & !1;
+    let scaled_height = scaled_height.max(2) & !1;
+    (scaled_width, scaled_height)
 }
 
 #[derive(Debug, Error)]
@@ -1038,6 +1303,8 @@ pub enum VoiceError {
     Camera(#[from] nokhwa::NokhwaError),
     #[error("camera capture worker failed: {0}")]
     CameraWorker(String),
+    #[error("screen capture worker failed: {0}")]
+    ScreenWorker(String),
     #[error("voice activity is disabled in this channel; select push to talk")]
     VoiceActivityDenied,
     #[error("the encrypted voice grant did not match the supplied media key")]
@@ -1071,6 +1338,9 @@ impl VoiceError {
                     .to_owned(),
             Self::CameraWorker(_) =>
                 "The camera stopped unexpectedly. Turn the camera off and on; if it keeps failing, choose another camera."
+                    .to_owned(),
+            Self::ScreenWorker(_) =>
+                "Screen sharing did not start. Approve the system chooser and screen-recording permission, then try again."
                     .to_owned(),
             Self::VoiceActivityDenied =>
                 "Voice activity is not allowed in this channel. Switch your input mode to push to talk and try again."
@@ -1131,9 +1401,11 @@ fn disconnect_message(reason: DisconnectReason) -> &'static str {
 mod tests {
     use secrecy::SecretString;
 
+    #[cfg(target_os = "linux")]
+    use super::is_wayland_environment;
     use super::{
-        DisconnectReason, ExpectedVoicePolicy, VoiceError, VoiceGrant, disconnect_message,
-        media_room_options,
+        DisconnectReason, ExpectedVoicePolicy, VoiceError, VoiceGrant, bounded_dimensions,
+        disconnect_message, media_room_options,
     };
 
     fn grant(e2ee: bool) -> VoiceGrant {
@@ -1230,5 +1502,22 @@ mod tests {
             "channel_domain": "chat.example"
         });
         assert!(serde_json::from_value::<VoiceGrant>(value).is_err());
+    }
+
+    #[test]
+    fn screen_share_scaling_preserves_aspect_ratio_and_even_dimensions() {
+        assert_eq!(bounded_dimensions(1920, 1080, 1280, 720), (1280, 720));
+        assert_eq!(bounded_dimensions(3440, 1440, 1920, 1080), (1920, 802));
+        assert_eq!(bounded_dimensions(1279, 719, 1920, 1080), (1278, 718));
+        assert_eq!(bounded_dimensions(1, 1, 1280, 720), (2, 2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_detection_accepts_either_authoritative_session_signal() {
+        assert!(is_wayland_environment(true, Some("x11")));
+        assert!(is_wayland_environment(false, Some("Wayland")));
+        assert!(!is_wayland_environment(false, Some("x11")));
+        assert!(!is_wayland_environment(false, None));
     }
 }

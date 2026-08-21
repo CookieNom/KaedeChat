@@ -17,13 +17,15 @@ class VoiceForegroundService : Service() {
     companion object {
         private const val ACTION_START = "chat.kaede.mobile.voice.START"
         private const val EXTRA_MICROPHONE = "chat.kaede.mobile.voice.MICROPHONE"
+        private const val EXTRA_SCREEN_SHARE = "chat.kaede.mobile.voice.SCREEN_SHARE"
         private const val CHANNEL_ID = "kaede_voice_calls"
         private const val NOTIFICATION_ID = 7301
 
-        fun start(context: Context, microphone: Boolean) {
+        fun start(context: Context, microphone: Boolean, screenShare: Boolean) {
             val intent = Intent(context, VoiceForegroundService::class.java)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_MICROPHONE, microphone)
+                .putExtra(EXTRA_SCREEN_SHARE, screenShare)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
@@ -46,8 +48,9 @@ class VoiceForegroundService : Service() {
         }
         createNotificationChannel()
         startVoiceForeground(
-            buildNotification(),
+            buildNotification(intent.getBooleanExtra(EXTRA_SCREEN_SHARE, false)),
             useMicrophone = intent.getBooleanExtra(EXTRA_MICROPHONE, false),
+            useScreenShare = intent.getBooleanExtra(EXTRA_SCREEN_SHARE, false),
         )
         return START_NOT_STICKY
     }
@@ -57,7 +60,7 @@ class VoiceForegroundService : Service() {
         super.onDestroy()
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(screenShare: Boolean): Notification {
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
         val contentIntent = launchIntent?.let {
             PendingIntent.getActivity(
@@ -75,8 +78,8 @@ class VoiceForegroundService : Service() {
         }
         return builder
             .setSmallIcon(R.drawable.ic_stat_kaede)
-            .setContentTitle("Kaede voice connected")
-            .setContentText("Tap to return to your call")
+            .setContentTitle(if (screenShare) "Kaede is sharing your screen" else "Kaede voice connected")
+            .setContentText(if (screenShare) "Tap to manage or stop sharing" else "Tap to return to your call")
             .setCategory(Notification.CATEGORY_CALL)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setOngoing(true)
@@ -101,7 +104,11 @@ class VoiceForegroundService : Service() {
         manager.createNotificationChannel(channel)
     }
 
-    private fun startVoiceForeground(notification: Notification, useMicrophone: Boolean) {
+    private fun startVoiceForeground(
+        notification: Notification,
+        useMicrophone: Boolean,
+        useScreenShare: Boolean,
+    ) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             var serviceTypes = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
             if (
@@ -109,6 +116,9 @@ class VoiceForegroundService : Service() {
                 checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             ) {
                 serviceTypes = serviceTypes or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            }
+            if (useScreenShare) {
+                serviceTypes = serviceTypes or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             }
             startForeground(NOTIFICATION_ID, notification, serviceTypes)
         } else {

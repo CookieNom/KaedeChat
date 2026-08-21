@@ -111,8 +111,9 @@ device can decrypt locally. Full protocol and privacy details are in
 
 ## Platform notes
 
-- Android background voice intentionally protects audio only. Camera capture is foreground-only; screen sharing requires a user-approved MediaProjection session and an active foreground media-projection service before system-wide/background sharing can be claimed.
-- iOS screen sharing uses ReplayKit and requires an app-group/upload extension in the signed release target.
+- Android camera capture is foreground-only. Screen sharing requests a user-approved MediaProjection session and promotes the active voice service to the media-projection foreground type before capture.
+- iOS screen sharing uses the bundled ReplayKit Broadcast Upload extension. Runner and the extension require the `group.chat.kaede.mobile` App Group in their signed provisioning profiles.
+- The shared preset behavior, privacy boundaries, and physical-device release checklist are documented in [`docs/screen-sharing-quality.md`](../docs/screen-sharing-quality.md).
 - Android background voice uses a microphone/media-playback foreground service. System call presentation still requires Android Telecom and iOS CallKit/VoIP push integration for store releases.
 - Flutter's LiveKit client uses native WebRTC audio processing. A future neural isolation model belongs after echo cancellation and before the publication gate; it must not replace acoustic echo cancellation.
 

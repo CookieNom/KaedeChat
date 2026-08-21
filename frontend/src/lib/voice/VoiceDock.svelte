@@ -8,6 +8,8 @@
   import { entityKey } from '$lib/chat/refs';
   import type { Channel } from '$lib/chat/types';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
+  import ScreenShareDialog from './ScreenShareDialog.svelte';
+  import type { MediaQualityPreferences } from './quality';
 
   import {
     attachVideo,
@@ -25,6 +27,7 @@
   const voice = new VoiceSession();
   let revision = $state(0);
   let error = $state('');
+  let screenShareOpen = $state(false);
   let audioHost = $state<HTMLElement | null>(null);
   let detachAudio: (() => void) | null = null;
   let mounted = false;
@@ -257,6 +260,10 @@
       if (mounted) error = userErrorMessage(caught, 'Voice control failed. Try again.');
     }
   }
+
+  async function startScreenShare(preferences: MediaQualityPreferences, sourceId: string | null) {
+    await voice.startScreenShare(preferences, sourceId);
+  }
 </script>
 
 <section class="voice-panel" aria-label="Voice channel">
@@ -392,7 +399,10 @@
           : view.screen
             ? 'Stop sharing'
             : 'Share screen'}
-        onclick={() => safely(() => voice.toggleScreen())}
+        onclick={() => {
+          if (view.screen) void safely(() => voice.stopScreenShare());
+          else screenShareOpen = true;
+        }}
       >
         <Icon name="screen" size={21} />
       </button>
@@ -408,6 +418,8 @@
     </footer>
   {/if}
 </section>
+
+<ScreenShareDialog bind:open={screenShareOpen} onShare={startScreenShare} />
 
 <style>
   .voice-panel {

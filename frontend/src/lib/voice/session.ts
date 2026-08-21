@@ -4,6 +4,13 @@ import { userErrorMessage } from '$lib/api/client';
 import type { Channel } from '$lib/chat/types';
 import { isNativeDesktop, nativeInvoke, type NativeVoiceStatus } from '$lib/platform/native';
 import { base64url } from '$lib/e2ee/encoding';
+import {
+  loadMediaQuality,
+  saveMediaQuality,
+  webAudioPublishOptions,
+  webScreenShareOptions,
+  type MediaQualityPreferences
+} from './quality';
 
 export interface VoiceToken {
   token: string;
@@ -247,10 +254,12 @@ export class VoiceSession extends EventTarget {
   #candidateWorker: Worker | null = null;
   #e2eeWorker: Worker | null = null;
   readonly #roomFactory: VoiceRoomFactory;
+  #mediaQuality: MediaQualityPreferences;
 
   constructor(roomFactory: VoiceRoomFactory = (options) => new Room(options)) {
     super();
     this.#roomFactory = roomFactory;
+    this.#mediaQuality = loadMediaQuality();
     this.room = this.#createRoom();
   }
 
@@ -260,6 +269,7 @@ export class VoiceSession extends EventTarget {
       dynacast: true,
       disconnectOnPageLeave: true,
       stopLocalTrackOnUnpublish: true,
+      publishDefaults: webAudioPublishOptions(this.#mediaQuality),
       ...(e2ee ? { e2ee } : {})
     });
     const changed = () => this.#changed();
@@ -544,20 +554,83 @@ export class VoiceSession extends EventTarget {
     this.#changed();
   }
 
-  async toggleScreen(): Promise<void> {
+  async startScreenShare(
+    preferences: MediaQualityPreferences,
+    sourceId: string | null = null
+  ): Promise<void> {
     if (!this.connected || !this.canStream) return;
-    const enabled = !this.screen;
+    if (this.screen) return;
+    const previous = this.#mediaQuality;
+    this.#mediaQuality = { ...preferences };
+    saveMediaQuality(this.#mediaQuality);
     if (isNativeDesktop()) {
-      await nativeInvoke('native_voice_control', {
-        control: enabled ? 'screen_on' : 'screen_off'
+      await nativeInvoke('native_media_quality_set', {
+        screenProfile: preferences.screenProfile,
+        audioQuality: preferences.audioQuality,
+        shareSystemAudio: preferences.shareAudio,
+        sourceId
       });
-      this.screen = enabled;
+      await nativeInvoke('native_voice_control', {
+        control: 'screen_on'
+      });
+      this.screen = true;
       this.#changed();
       return;
     }
-    await this.room.localParticipant.setScreenShareEnabled(enabled, { audio: true });
-    this.screen = enabled;
+    if (previous.audioQuality !== preferences.audioQuality) {
+      try {
+        await this.#republishMicrophoneWithQuality();
+      } catch (caught) {
+        this.#mediaQuality = previous;
+        saveMediaQuality(previous);
+        throw caught;
+      }
+    }
+    const { capture, publish } = webScreenShareOptions(preferences);
+    await this.room.localParticipant.setScreenShareEnabled(true, capture, {
+      ...publish,
+      ...webAudioPublishOptions(preferences)
+    });
+    this.screen = true;
     this.#changed();
+  }
+
+  async stopScreenShare(): Promise<void> {
+    if (!this.connected || !this.screen) return;
+    if (isNativeDesktop()) {
+      await nativeInvoke('native_voice_control', { control: 'screen_off' });
+    } else {
+      await this.room.localParticipant.setScreenShareEnabled(false);
+    }
+    this.screen = false;
+    this.#changed();
+  }
+
+  async toggleScreen(): Promise<void> {
+    if (this.screen) return this.stopScreenShare();
+    return this.startScreenShare(this.#mediaQuality);
+  }
+
+  async #republishMicrophoneWithQuality(): Promise<void> {
+    const publication = this.room.localParticipant.getTrackPublication(Track.Source.Microphone);
+    const track = publication?.track;
+    if (!track) return;
+    const wasMuted = track.isMuted;
+    const previousOptions = publication.options;
+    await this.room.localParticipant.unpublishTrack(track, false);
+    try {
+      await this.room.localParticipant.publishTrack(
+        track,
+        webAudioPublishOptions(this.#mediaQuality)
+      );
+      if (wasMuted) await track.mute();
+    } catch (caught) {
+      // Do not leave a connected user without a microphone if applying a
+      // preference fails on an older browser/encoder.
+      await this.room.localParticipant.publishTrack(track, previousOptions);
+      if (wasMuted) await track.mute();
+      throw caught;
+    }
   }
 
   async disconnect(): Promise<void> {

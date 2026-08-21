@@ -44,13 +44,22 @@ export interface NativePreferences {
   noise_suppression: 'off' | 'standard' | 'voice_isolation';
   echo_cancellation: boolean;
   automatic_gain_control: boolean;
+  screen_share_profile: 'data_saver' | 'smooth' | 'sharp' | 'source';
+  audio_quality: 'data_saver' | 'standard' | 'high' | 'studio';
+  share_system_audio: boolean;
 }
 
 export interface NativeDevices {
   inputs: NativeAudioDevice[];
   outputs: NativeAudioDevice[];
   cameras: { id: string; label: string }[];
-  screens: { id: string; label: string }[];
+  screens: NativeScreenSource[];
+}
+
+export interface NativeScreenSource {
+  id: string;
+  label: string;
+  kind?: 'application' | 'screen';
 }
 
 export interface NativeVoiceStatus {

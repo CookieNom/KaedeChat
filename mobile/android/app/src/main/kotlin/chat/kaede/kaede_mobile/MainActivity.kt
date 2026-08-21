@@ -30,6 +30,7 @@ class MainActivity : FlutterFragmentActivity() {
                     VoiceForegroundService.start(
                         this,
                         microphone = call.argument<Boolean>("microphone") == true,
+                        screenShare = call.argument<Boolean>("screenShare") == true,
                     )
                 } else {
                     VoiceForegroundService.stop(this)

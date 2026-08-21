@@ -1,11 +1,13 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/voice/media_quality.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -247,7 +249,11 @@ final class VoiceRoom extends ConsumerWidget {
                       context,
                       Icons.screen_share_rounded,
                       session.screen ? 'Stop sharing' : 'Share',
-                      session.canStream ? session.toggleScreen : null,
+                      session.canStream
+                          ? session.screen
+                              ? session.stopScreenShare
+                              : () => _showScreenShare(context, session)
+                          : null,
                       selected: session.screen,
                     )),
                     Expanded(
@@ -280,6 +286,229 @@ final class VoiceRoom extends ConsumerWidget {
                     label: Text(
                         session.pushToTalk ? 'Push to talk' : 'Voice activity'),
                   ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+  Future<void> _showScreenShare(
+    BuildContext context,
+    VoiceSession session,
+  ) async {
+    var screen = session.mediaQuality.screen;
+    var audio = session.mediaQuality.audio;
+    var starting = false;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) => SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(
+            20,
+            0,
+            20,
+            20 + MediaQuery.viewInsetsOf(context).bottom,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: KaedeColors.coralSoft,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: const Icon(
+                      Icons.screen_share_rounded,
+                      color: KaedeColors.coralText,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Share your screen',
+                            style: Theme.of(context).textTheme.titleLarge),
+                        const Text(
+                          'Choose quality before the system asks what to share.',
+                          style: TextStyle(color: KaedeColors.muted),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 22),
+              Text('VIDEO QUALITY',
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: KaedeColors.muted,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.8,
+                      )),
+              const SizedBox(height: 8),
+              GridView.count(
+                crossAxisCount: 2,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+                childAspectRatio: 2.35,
+                children: [
+                  for (final quality in ScreenShareQuality.values)
+                    _qualityChoice(
+                      context,
+                      selected: quality == screen,
+                      title: quality.profile.label,
+                      subtitle: quality.profile.description,
+                      onTap: () => setSheetState(() => screen = quality),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              Text('OUTGOING AUDIO',
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: KaedeColors.muted,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.8,
+                      )),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 7,
+                runSpacing: 7,
+                children: [
+                  for (final quality in VoiceAudioQuality.values)
+                    ChoiceChip(
+                      selected: quality == audio,
+                      onSelected: (_) => setSheetState(() => audio = quality),
+                      label: Text(
+                          '${quality.label} · ${quality.bitrate ~/ 1000} kbps'),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Bitrate is an upper target. Opus automatically uses less bandwidth during silence and congestion.',
+                style: TextStyle(fontSize: 12, color: KaedeColors.muted),
+              ),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(13),
+                decoration: BoxDecoration(
+                  color: KaedeColors.panel,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.shield_outlined,
+                        size: 20, color: KaedeColors.muted),
+                    SizedBox(width: 9),
+                    Expanded(
+                      child: Text(
+                        'Android and iOS always use a protected system chooser. Kaede cannot see other apps or your screen until you approve sharing.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: KaedeColors.textSoft,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 18),
+              FilledButton.icon(
+                onPressed: starting
+                    ? null
+                    : () async {
+                        setSheetState(() => starting = true);
+                        try {
+                          await session.startScreenShare(MobileMediaQuality(
+                            screen: screen,
+                            audio: audio,
+                          ));
+                          final chooserWasPresented = !kIsWeb &&
+                              defaultTargetPlatform == TargetPlatform.iOS;
+                          if (sheetContext.mounted &&
+                              (session.screen || chooserWasPresented)) {
+                            Navigator.pop(sheetContext);
+                          }
+                        } on Object catch (error) {
+                          if (sheetContext.mounted) {
+                            ScaffoldMessenger.of(sheetContext).showSnackBar(
+                              SnackBar(
+                                content: Text(userFacingError(
+                                  error,
+                                  summary: 'Could not start screen sharing',
+                                )),
+                              ),
+                            );
+                          }
+                        } finally {
+                          if (sheetContext.mounted) {
+                            setSheetState(() => starting = false);
+                          }
+                        }
+                      },
+                icon: const Icon(Icons.screen_share_rounded),
+                label: Text(starting ? 'Starting…' : 'Choose what to share'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _qualityChoice(
+    BuildContext context, {
+    required bool selected,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) =>
+      Material(
+        color: selected ? KaedeColors.coralSoft : KaedeColors.raised,
+        shape: RoundedRectangleBorder(
+          side: BorderSide(
+            color: selected ? KaedeColors.coral : KaedeColors.border,
+          ),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w700)),
+                      Text(subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 11, color: KaedeColors.muted)),
+                    ],
+                  ),
+                ),
+                if (selected)
+                  const Icon(Icons.check_circle_rounded,
+                      size: 18, color: KaedeColors.coralText),
               ],
             ),
           ),

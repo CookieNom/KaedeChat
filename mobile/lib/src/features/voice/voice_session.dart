@@ -11,6 +11,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/features/voice/e2ee_policy.dart';
+import 'package:kaede_mobile/src/features/voice/media_quality.dart';
 import 'package:kaede_mobile/src/platform/voice_background_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
@@ -259,7 +260,9 @@ final class VoiceSession extends ChangeNotifier {
     this._repository,
     this._e2eeClient, {
     VoiceBackgroundService backgroundService = const VoiceBackgroundService(),
-  }) : _backgroundService = backgroundService;
+  }) : _backgroundService = backgroundService {
+    unawaited(_loadMediaQuality());
+  }
 
   final KaedeRepository _repository;
   final Future<MobileE2EEClient> Function() _e2eeClient;
@@ -276,6 +279,7 @@ final class VoiceSession extends ChangeNotifier {
   var _deafened = false;
   var _camera = false;
   var _screen = false;
+  var _mediaQuality = const MobileMediaQuality();
   var _speaker = true;
   var _audioRoute = VoiceAudioRoute.speaker;
   var _pushToTalk = false;
@@ -310,6 +314,7 @@ final class VoiceSession extends ChangeNotifier {
   bool get deafened => _deafened;
   bool get camera => _camera;
   bool get screen => _screen;
+  MobileMediaQuality get mediaQuality => _mediaQuality;
   bool get speaker => _speaker;
   VoiceAudioRoute get audioRoute => _audioRoute;
   bool get pushToTalk => _pushToTalk;
@@ -338,6 +343,7 @@ final class VoiceSession extends ChangeNotifier {
     EntityRef? callRef,
     bool force = false,
   }) async {
+    _mediaQuality = await MobileMediaQuality.load();
     if (!force &&
         (_connecting || connected) &&
         _channel?.ref == target.ref &&
@@ -466,6 +472,12 @@ final class VoiceSession extends ChangeNotifier {
       final room = candidate = Room(
         roomOptions: RoomOptions(
           e2eeOptions: e2eeOptions,
+          defaultScreenShareCaptureOptions: _mediaQuality.screenCaptureOptions(
+            useIosBroadcastExtension:
+                !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS,
+          ),
+          defaultAudioPublishOptions: _mediaQuality.audioPublishOptions,
+          defaultVideoPublishOptions: _mediaQuality.videoPublishOptions,
           defaultAudioCaptureOptions: const AudioCaptureOptions(
             echoCancellation: true,
             noiseSuppression: true,
@@ -525,7 +537,24 @@ final class VoiceSession extends ChangeNotifier {
           }
           notifyListeners();
         })
-        ..on<TrackUnsubscribedEvent>((_) => _roomChanged(room));
+        ..on<TrackUnsubscribedEvent>((_) => _roomChanged(room))
+        ..on<LocalTrackPublishedEvent>((event) {
+          if (_room != room ||
+              event.publication.source != TrackSource.screenShareVideo) {
+            return;
+          }
+          _screen = true;
+          notifyListeners();
+        })
+        ..on<LocalTrackUnpublishedEvent>((event) {
+          if (_room != room ||
+              event.publication.source != TrackSource.screenShareVideo) {
+            return;
+          }
+          _screen = false;
+          unawaited(_activateBackgroundService(room, screenShare: false));
+          notifyListeners();
+        });
 
       await room.connect(url, token);
       if (generation != _generation) return;
@@ -709,12 +738,130 @@ final class VoiceSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> toggleScreen() async {
+  Future<void> startScreenShare(MobileMediaQuality quality) async {
     if (!_canStream) return;
-    final next = !_screen;
-    await _room?.localParticipant?.setScreenShareEnabled(next);
-    _screen = next;
+    if (_screen) return;
+    final room = _room;
+    final participant = room?.localParticipant;
+    if (room == null || participant == null) return;
+    final previousQuality = _mediaQuality;
+    final audioChanged = _mediaQuality.audio != quality.audio;
+    _mediaQuality = quality;
+    try {
+      if (audioChanged) await _applyAudioQuality(participant);
+      await quality.save();
+      await quality.prepareIosBroadcastExtension();
+    } on Object {
+      _mediaQuality = previousQuality;
+      if (audioChanged) {
+        try {
+          await _applyAudioQuality(participant);
+        } on Object {
+          // Preserve the original setup error. A transport reconnect will use
+          // the restored last-publish options.
+        }
+      }
+      try {
+        await previousQuality.save();
+      } on Object {
+        // The active session rollback matters more than a best-effort local
+        // preference write on a device with unavailable storage.
+      }
+      rethrow;
+    }
+
+    final isAndroid =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+    final isIos = !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+    if (isAndroid) {
+      final approved = await rtc.Helper.requestCapturePermission();
+      if (!approved) {
+        _error = 'Screen sharing was cancelled.';
+        notifyListeners();
+        return;
+      }
+      final protected = await _activateBackgroundService(
+        room,
+        screenShare: true,
+      );
+      if (!protected) return;
+    }
+    try {
+      await participant.setScreenShareEnabled(
+        true,
+        captureScreenAudio: false,
+        screenShareCaptureOptions: quality.screenCaptureOptions(
+          useIosBroadcastExtension:
+              !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS,
+        ),
+      );
+      // On iOS this call only presents ReplayKit's picker. The authoritative
+      // state arrives asynchronously if the user actually starts broadcasting.
+      _screen = isIos ? false : true;
+    } on Object {
+      if (isAndroid) {
+        await _activateBackgroundService(room, screenShare: false);
+      }
+      rethrow;
+    }
     notifyListeners();
+  }
+
+  Future<void> stopScreenShare() async {
+    if (!_screen) return;
+    final room = _room;
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+      await _mediaQuality.stopIosBroadcastExtension();
+    }
+    await room?.localParticipant?.setScreenShareEnabled(false);
+    _screen = false;
+    if (room != null) {
+      await _activateBackgroundService(room, screenShare: false);
+    }
+    notifyListeners();
+  }
+
+  Future<void> toggleScreen() async {
+    if (_screen) return stopScreenShare();
+    return startScreenShare(_mediaQuality);
+  }
+
+  Future<void> _loadMediaQuality() async {
+    final loaded = await MobileMediaQuality.load();
+    if (_disposed) return;
+    _mediaQuality = loaded;
+    notifyListeners();
+  }
+
+  Future<void> _applyAudioQuality(LocalParticipant participant) async {
+    final publication = participant.getTrackPublicationBySource(
+      TrackSource.microphone,
+    );
+    final track = publication?.track;
+    if (track is! LocalAudioTrack) return;
+    final sender = track.transceiver?.sender;
+    if (sender == null) return;
+    final parameters = sender.parameters;
+    final encodings = parameters.encodings;
+    if (encodings == null || encodings.isEmpty) {
+      throw StateError('The microphone encoder is not available.');
+    }
+    final previousBitrates =
+        encodings.map((encoding) => encoding.maxBitrate).toList();
+    for (final encoding in encodings) {
+      encoding.maxBitrate = _mediaQuality.audio.bitrate;
+    }
+    final applied = await sender.setParameters(parameters);
+    if (!applied) {
+      for (var index = 0; index < encodings.length; index += 1) {
+        encodings[index].maxBitrate = previousBitrates[index];
+      }
+      await sender.setParameters(parameters);
+      throw StateError('The microphone encoder rejected that bitrate.');
+    }
+    // LiveKit uses this on a future transport negotiation/reconnect, at which
+    // point Studio's DTX preference is applied as well as the bitrate ceiling.
+    track.lastPublishOptions = _mediaQuality.audioPublishOptions;
   }
 
   Future<void> toggleSpeaker() async {
@@ -1043,7 +1190,14 @@ final class VoiceSession extends ChangeNotifier {
         if (participant == null) {
           throw StateError('The local voice participant is unavailable.');
         }
-        await participant.setScreenShareEnabled(true);
+        await participant.setScreenShareEnabled(
+          true,
+          captureScreenAudio: false,
+          screenShareCaptureOptions: _mediaQuality.screenCaptureOptions(
+            useIosBroadcastExtension:
+                !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS,
+          ),
+        );
       },
     );
     if (generation != _generation || _room != room) return result;
@@ -1064,12 +1218,14 @@ final class VoiceSession extends ChangeNotifier {
   Future<bool> _activateBackgroundService(
     Room room, {
     bool? microphone,
+    bool? screenShare,
   }) async {
     if (!_appActive || _room != room) return false;
     final generation = _generation;
     final ready = await _backgroundService.setActive(
       true,
       microphone: microphone ?? _microphoneShouldPublish,
+      screenShare: screenShare ?? _screen,
     );
     if (generation != _generation || _room != room) return false;
     if (!ready && defaultTargetPlatform == TargetPlatform.android) {
@@ -1165,6 +1321,9 @@ final class VoiceSession extends ChangeNotifier {
     _room = null;
     _events = null;
     room?.removeListener(_notifyRoomChanged);
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS && _screen) {
+      await _mediaQuality.stopIosBroadcastExtension();
+    }
     await _backgroundService.setActive(false);
     await room?.localParticipant?.setMicrophoneEnabled(false);
     await room?.disconnect();

@@ -232,6 +232,28 @@
             onSelect={(id) => (preferences!.screen_source = devicePreference(id, devices.screens))}
           />
         </div>
+        <div class="native-device-grid">
+          <label class="form-field">
+            <span>Outgoing audio quality</span>
+            <small>Sets the maximum Opus bitrate. Network conditions can reduce it.</small>
+            <select bind:value={preferences.audio_quality}>
+              <option value="data_saver">Data saver · 24 kbps</option>
+              <option value="standard">Standard · 48 kbps</option>
+              <option value="high">High · 96 kbps</option>
+              <option value="studio">Studio · 128 kbps</option>
+            </select>
+          </label>
+          <label class="form-field">
+            <span>Default screen-share quality</span>
+            <small>You can change this again before each share.</small>
+            <select bind:value={preferences.screen_share_profile}>
+              <option value="data_saver">720p · 15 FPS</option>
+              <option value="smooth">720p · 30 FPS</option>
+              <option value="sharp">1080p · 30 FPS</option>
+              <option value="source">Source · 30 FPS</option>
+            </select>
+          </label>
+        </div>
         <div class="native-device-actions">
           <button
             class="secondary-button"

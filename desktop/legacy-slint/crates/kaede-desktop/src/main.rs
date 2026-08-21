@@ -801,7 +801,11 @@ fn install_voice(
                 .and_then(|preferences| preferences.screen_source.clone());
             let _ = handle
                 .commands
-                .try_send(kaede_voice::VoiceCommand::SetScreenShare { enabled, source_id });
+                .try_send(kaede_voice::VoiceCommand::SetScreenShare {
+                    enabled,
+                    source_id,
+                    settings: kaede_voice::ScreenShareSettings::default(),
+                });
         }
     });
 

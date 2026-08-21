@@ -8,7 +8,11 @@ final class VoiceBackgroundService {
 
   static const _channel = MethodChannel('chat.kaede.mobile/voice_lifecycle');
 
-  Future<bool> setActive(bool active, {bool microphone = false}) async {
+  Future<bool> setActive(
+    bool active, {
+    bool microphone = false,
+    bool screenShare = false,
+  }) async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return true;
     try {
       return await _channel.invokeMethod<bool>(
@@ -16,6 +20,7 @@ final class VoiceBackgroundService {
             <String, Object?>{
               'active': active,
               'microphone': microphone,
+              'screenShare': screenShare,
             },
           ) ??
           false;
