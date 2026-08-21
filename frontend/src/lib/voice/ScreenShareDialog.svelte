@@ -307,13 +307,24 @@
           </div>
         {/if}
       {:else}
-        <div class="browser-picker-intro" data-initial-focus tabindex="-1">
+        <div class="browser-picker-intro">
           <span class="picker-hero"><Icon name="screen" size={36} /></span>
           <h3>Choose in your browser</h3>
           <p>
-            Click <strong>Open browser picker</strong>, then select exactly what you want to share.
-            Nothing is visible to the call until you approve it.
+            Your browser keeps the source list private. Nothing is visible to the call until you
+            choose a source and approve it.
           </p>
+          <button
+            class="open-picker-button"
+            type="button"
+            data-initial-focus
+            disabled={sharing}
+            onclick={() => void share()}
+          >
+            <Icon name="screen" size={18} />
+            {sharing ? 'Opening…' : 'Open browser picker'}
+          </button>
+          <small class="source-types-label">In the browser picker you can choose:</small>
           <div class="browser-source-types" aria-label="Available source types">
             <span><Icon name="globe" size={18} /> Browser tab</span>
             <span><Icon name="image" size={18} /> Window</span>
@@ -428,21 +439,17 @@
         <button class="cancel-button" type="button" disabled={sharing} onclick={close}
           >Cancel</button
         >
-        <button
-          class="share-button"
-          type="button"
-          disabled={sharing || loadingSources || (native && !securePicker && !selectedSource)}
-          onclick={() => void share()}
-        >
-          <Icon name="screen" size={18} />
-          {sharing
-            ? 'Starting…'
-            : native && !securePicker
-              ? 'Go Live'
-              : native
-                ? 'Open system picker'
-                : 'Open browser picker'}
-        </button>
+        {#if native}
+          <button
+            class="share-button"
+            type="button"
+            disabled={sharing || loadingSources || (!securePicker && !selectedSource)}
+            onclick={() => void share()}
+          >
+            <Icon name="screen" size={18} />
+            {sharing ? 'Starting…' : securePicker ? 'Open system picker' : 'Go Live'}
+          </button>
+        {/if}
       </div>
     </footer>
   </section>
@@ -697,25 +704,48 @@
     line-height: 1.55;
   }
 
+  .open-picker-button {
+    display: inline-flex;
+    min-height: 48px;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 18px;
+    padding: 0 20px;
+    color: var(--on-accent);
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+    background: var(--accent);
+    font-weight: 780;
+    cursor: pointer;
+  }
+
+  .open-picker-button:hover {
+    background: var(--accent-hover);
+  }
+
+  .source-types-label {
+    margin-top: 22px;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+  }
+
   .browser-source-types {
     display: flex;
     flex-wrap: wrap;
     justify-content: center;
     gap: 8px;
-    margin-top: 20px;
+    margin-top: 7px;
   }
 
   .browser-source-types span {
     display: flex;
     align-items: center;
     gap: 7px;
-    padding: 9px 12px;
-    color: var(--text-soft);
-    border: 1px solid var(--line-soft);
-    border-radius: 10px;
-    background: var(--surface-raised);
-    font-size: 0.76rem;
-    font-weight: 700;
+    padding: 3px 8px;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-weight: 600;
   }
 
   .browser-privacy {
