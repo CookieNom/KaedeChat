@@ -4,7 +4,6 @@ import 'dart:math';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -18,6 +17,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
+import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/voice/voice_room.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -483,7 +483,12 @@ final class KaedeMessageMarkdown extends StatelessWidget {
           kind: _MessageTokenKind.emoji,
         ),
       },
-      selectable: true,
+      // Selectable text renders a SelectableText, which on mobile installs a
+      // horizontal drag recognizer for selection dragging. Sitting deeper than
+      // the row's reply gesture, it silently swallowed every swipe that started
+      // on message text — the largest part of a row. Long-press exposes both
+      // 'Copy text' and 'Copy message link' instead.
+      selectable: false,
       softLineBreak: true,
       styleSheet: MarkdownStyleSheet(
         p: const TextStyle(
@@ -699,6 +704,29 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                         controller: _scroll,
                         reverse: true,
                         padding: const EdgeInsets.fromLTRB(0, 6, 0, 12),
+                        // New realtime messages move every visible child by an
+                        // index in this reversed list. Tell the sliver where a
+                        // keyed row moved so it preserves the row (and any
+                        // pointer currently swiping it) instead of disposing it
+                        // midway through the gesture.
+                        findChildIndexCallback: (key) {
+                          String? messageWire;
+                          for (final entry in _messageKeys.entries) {
+                            if (entry.value == key) {
+                              messageWire = entry.key;
+                              break;
+                            }
+                          }
+                          if (messageWire == null) return null;
+                          final chronologicalIndex = messages.indexWhere(
+                            (message) => message.ref.wire == messageWire,
+                          );
+                          if (chronologicalIndex < 0) return null;
+                          return pending.length +
+                              messages.length -
+                              chronologicalIndex -
+                              1;
+                        },
                         itemCount: messages.length +
                             pending.length +
                             (state.channelsWithOlderMessages
@@ -835,7 +863,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                                   color: _highlightedMessage == message.ref
                                       ? KaedeColors.coral.withValues(alpha: .13)
                                       : Colors.transparent,
-                                  child: _SwipeToReply(
+                                  child: SwipeToReply(
                                     enabled:
                                         canSend && message.deletedAt == null,
                                     onReply: reply,
@@ -2101,151 +2129,6 @@ final class _DayDivider extends StatelessWidget {
           ],
         ),
       );
-}
-
-/// Drag a message to the right to reply to it, the way every other mobile
-/// chat client behaves.
-///
-/// Drags that begin within [_edgeWidth] of the screen's left edge are left
-/// alone so the shell's page swipe can still take the reader back to the
-/// channel list, matching the edge-drawer convention on other clients.
-final class _SwipeToReply extends StatefulWidget {
-  const _SwipeToReply({
-    required this.enabled,
-    required this.onReply,
-    required this.child,
-  });
-
-  final bool enabled;
-  final VoidCallback onReply;
-  final Widget child;
-
-  @override
-  State<_SwipeToReply> createState() => _SwipeToReplyState();
-}
-
-final class _SwipeToReplyState extends State<_SwipeToReply>
-    with SingleTickerProviderStateMixin {
-  static const _trigger = 58.0;
-  static const _limit = 84.0;
-  static const _edgeWidth = 32.0;
-
-  late final AnimationController _settleController = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 190),
-  );
-  Animation<double>? _settle;
-  var _offset = 0.0;
-  var _armed = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _settleController.addListener(() {
-      final value = _settle?.value;
-      if (value != null && mounted) setState(() => _offset = value);
-    });
-  }
-
-  @override
-  void dispose() {
-    _settleController.dispose();
-    super.dispose();
-  }
-
-  void _start() {
-    _settleController.stop();
-    _settle = null;
-  }
-
-  void _update(DragUpdateDetails details) {
-    // Resistance past the trigger keeps the gesture from feeling loose.
-    final raw = _offset + details.delta.dx;
-    final next = raw <= _trigger
-        ? raw.clamp(0.0, _trigger)
-        : (_trigger + (raw - _trigger) * .35).clamp(0.0, _limit);
-    final armed = next >= _trigger;
-    if (armed && !_armed) HapticFeedback.selectionClick();
-    _armed = armed;
-    setState(() => _offset = next);
-  }
-
-  void _release() {
-    final fire = _armed;
-    _armed = false;
-    if (fire) widget.onReply();
-    if (_offset == 0) return;
-    _settle = Tween<double>(begin: _offset, end: 0).animate(
-      CurvedAnimation(parent: _settleController, curve: Curves.easeOutCubic),
-    );
-    _settleController
-      ..value = 0
-      ..forward();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (!widget.enabled) return widget.child;
-    final progress = (_offset / _trigger).clamp(0.0, 1.0);
-    return RawGestureDetector(
-      gestures: <Type, GestureRecognizerFactory>{
-        _MessageDragRecognizer:
-            GestureRecognizerFactoryWithHandlers<_MessageDragRecognizer>(
-          () => _MessageDragRecognizer(edgeWidth: _edgeWidth),
-          (recognizer) {
-            recognizer.onStart = (_) => _start();
-            recognizer.onUpdate = _update;
-            recognizer.onEnd = (_) => _release();
-            recognizer.onCancel = _release;
-          },
-        ),
-      },
-      child: Stack(
-        children: [
-          if (_offset > 0)
-            Positioned.fill(
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 18),
-                  child: Opacity(
-                    opacity: progress,
-                    child: Transform.scale(
-                      scale: .72 + .28 * progress,
-                      child: Icon(
-                        Icons.reply_rounded,
-                        size: 21,
-                        color: progress == 1
-                            ? KaedeColors.coralText
-                            : KaedeColors.muted,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          Transform.translate(
-            offset: Offset(_offset, 0),
-            child: widget.child,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Horizontal drag recognizer that declines pointers starting at the screen's
-/// left edge, so the surrounding page view keeps its back swipe.
-final class _MessageDragRecognizer extends HorizontalDragGestureRecognizer {
-  _MessageDragRecognizer({required this.edgeWidth});
-
-  final double edgeWidth;
-
-  @override
-  void addAllowedPointer(PointerDownEvent event) {
-    if (event.position.dx <= edgeWidth) return;
-    super.addAllowedPointer(event);
-  }
 }
 
 /// Compact reminder of which message an action sheet applies to.
@@ -3837,9 +3720,8 @@ final class _SpoilerTextState extends State<_SpoilerText> {
                 color: _revealed ? KaedeColors.raised : KaedeColors.hover,
                 borderRadius: BorderRadius.circular(4),
                 border: Border.all(
-                  color: _revealed
-                      ? KaedeColors.border
-                      : KaedeColors.borderStrong,
+                  color:
+                      _revealed ? KaedeColors.border : KaedeColors.borderStrong,
                 ),
               ),
               child: Text(

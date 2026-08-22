@@ -349,7 +349,50 @@ void main() {
       guildAuditActionLabel(<String, Object?>{
         'action_type': 'guild.channel.create',
       }),
-      'guild.channel.create',
+      'Channel created',
+    );
+    expect(
+      guildAuditActionLabel(<String, Object?>{
+        'action_type': 25,
+        'target_type': 'instance',
+      }),
+      'Instance banned',
+    );
+  });
+
+  test('audit helpers build readable summaries and change details', () {
+    final item = <String, Object?>{
+      'action_type': 11,
+      'target_type': 'channel',
+      'changes': <Object?>[
+        <String, Object?>{
+          'key': 'rate_limit_per_user',
+          'old_value': 0,
+          'new_value': 15,
+        },
+      ],
+    };
+
+    expect(
+      guildAuditSummary(
+        item,
+        actorName: 'Kaede',
+        targetName: '#general',
+      ),
+      'Kaede updated #general',
+    );
+    expect(guildAuditChanges(item), hasLength(1));
+    expect(guildAuditFieldLabel('rate_limit_per_user'), 'Rate limit per user');
+    expect(
+      guildAuditChangeDescription(guildAuditChanges(item).single),
+      '0 → 15',
+    );
+    expect(
+      guildAuditRelativeTime(
+        DateTime.utc(2026, 8, 21, 10),
+        now: DateTime.utc(2026, 8, 21, 12),
+      ),
+      '2 hours ago',
     );
   });
 }

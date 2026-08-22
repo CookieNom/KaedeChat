@@ -11,11 +11,15 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
+import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// Account settings, laid out Discord-style: one flat scrolling surface with
+/// uppercase section headers, hover rows and Discord toggles instead of a
+/// stack of bordered cards.
 final class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
@@ -34,6 +38,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   var _biometricLock = false;
   var _biometricLockTimeout = 30;
   String? _loadError;
+  String? _versionLabel;
 
   Future<String?> _secretPrompt(String title, String label) async {
     final input = TextEditingController();
@@ -144,7 +149,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 const Text(
-                  'Use a recovery backup when automatic account-vault recovery is unavailable. Restoring replaces this client’s cached state and resumes the same portable account identity. Backups carry at most 2,000 recent decrypted messages or 8 MiB of cached plaintext.',
+                  'Use a recovery backup when automatic account-vault recovery is unavailable. Restoring replaces this client\u2019s cached state and resumes the same portable account identity. Backups carry at most 2,000 recent decrypted messages or 8 MiB of cached plaintext.',
                 ),
                 const SizedBox(height: 12),
                 TextField(
@@ -225,8 +230,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       : Icons.phonelink_erase_rounded),
                   title: const Text('Portable account identity'),
                   subtitle: Text(
-                    'Last enrolled from ${device['device_name'] ?? 'Kaede'} (${device['platform'] ?? 'unknown'}) · ${device['id']}'
-                    '${device['id'] == currentDeviceId ? ' · Loaded here' : ''}',
+                    'Last enrolled from ${device['device_name'] ?? 'Kaede'} (${device['platform'] ?? 'unknown'}) \u00b7 ${device['id']}'
+                    '${device['id'] == currentDeviceId ? ' \u00b7 Loaded here' : ''}',
                   ),
                   trailing: device['revoked_at'] != null
                       ? const Text('Revoked')
@@ -282,8 +287,6 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _showError(error, summary: 'Could not load encryption identity');
     }
   }
-
-  String? _versionLabel;
 
   @override
   void initState() {
@@ -352,79 +355,91 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Widget build(BuildContext context) {
     final mobile = ref.watch(mobileControllerProvider);
     final user = mobile.user;
-    if (_loading) return const Center(child: CircularProgressIndicator());
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 40),
-      children: [
-        _AccountHero(
-          user: user,
-          presence: mobile.presencePreference,
-          onEditAvatar: _saving ? null : () => _pickAsset('avatar'),
-          onEditBanner: _saving ? null : () => _pickAsset('banner'),
-        ),
-        if (_loadError case final warning?) ...[
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
-            decoration: BoxDecoration(
-              color: KaedeColors.warningSoft,
-              borderRadius: BorderRadius.circular(KaedeRadius.medium),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.warning_amber_rounded,
-                    size: 17, color: KaedeColors.warning),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    warning,
-                    style: const TextStyle(
-                      color: KaedeColors.warning,
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
+    if (_loading) {
+      return const ColoredBox(
+        color: kSettingsSurface,
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    final presence = '${_settings['presence_preference'] ?? 'online'}';
+    final usesRelay = ref.read(mobileControllerProvider.notifier).usesPushRelay;
+    final pushRelayHost =
+        ref.read(mobileControllerProvider.notifier).pushRelayHost;
+
+    return ColoredBox(
+      color: kSettingsSurface,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 40),
+        children: [
+          _AccountHero(
+            user: user,
+            presence: mobile.presencePreference,
+            onEditAvatar: _saving ? null : () => _pickAsset('avatar'),
+            onEditBanner: _saving ? null : () => _pickAsset('banner'),
+          ),
+          if (_loadError case final warning?) ...[
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
+              decoration: BoxDecoration(
+                color: KaedeColors.warningSoft,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded,
+                      size: 17, color: KaedeColors.warning),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      warning,
+                      style: const TextStyle(
+                        color: KaedeColors.warning,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
-                ),
-                TextButton(
-                  onPressed: () {
-                    setState(() => _loading = true);
-                    _load();
-                  },
-                  style: TextButton.styleFrom(minimumSize: const Size(0, 34)),
-                  child: const Text('Retry'),
-                ),
-              ],
+                  TextButton(
+                    onPressed: () {
+                      setState(() => _loading = true);
+                      _load();
+                    },
+                    style: TextButton.styleFrom(minimumSize: const Size(0, 34)),
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
-        const SizedBox(height: 16),
-        _Section(
-          icon: Icons.person_outline_rounded,
-          title: 'Profile',
-          subtitle: 'How people see you across the federation.',
-          child: Column(
-            children: [
-              TextField(
+          ],
+          const SettingsSectionHeader('Profile',
+              subheading: 'How people see you across the federation.'),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Column(
+              children: [
+                SettingsField(
+                  label: 'DISPLAY NAME',
                   controller: _displayName,
-                  decoration: const InputDecoration(labelText: 'Display name')),
-              const SizedBox(height: 12),
-              TextField(
+                  enabled: !_saving,
+                ),
+                const SizedBox(height: 16),
+                SettingsField(
+                  label: 'CUSTOM STATUS',
                   controller: _customStatus,
                   maxLength: 128,
-                  decoration:
-                      const InputDecoration(labelText: 'Custom status')),
-              const SizedBox(height: 4),
-              TextField(
-                controller: _bio,
-                minLines: 3,
-                maxLines: 6,
-                maxLength: 500,
-                decoration: const InputDecoration(labelText: 'About me'),
-              ),
-              const SizedBox(height: 10),
-              Align(
-                alignment: Alignment.centerRight,
-                child: FilledButton.icon(
+                  enabled: !_saving,
+                ),
+                const SizedBox(height: 16),
+                SettingsField(
+                  label: 'ABOUT ME',
+                  controller: _bio,
+                  maxLines: 4,
+                  maxLength: 500,
+                  enabled: !_saving,
+                ),
+                const SizedBox(height: 18),
+                FilledButton.icon(
                   onPressed: _saving ? null : _saveProfile,
                   icon: _saving
                       ? const SizedBox.square(
@@ -433,411 +448,348 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       : const Icon(Icons.check_rounded),
                   label: const Text('Save profile'),
                 ),
-              ),
-            ],
-          ),
-        ),
-        _Section(
-          icon: Icons.security_rounded,
-          title: 'Account security',
-          subtitle: 'Protect the account hosted by your home instance.',
-          child: Column(
-            children: [
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.alternate_email_rounded),
-                title: Text(user?.email ?? 'No email address'),
-                subtitle: Text(user?.email == null
-                    ? 'This instance does not require email.'
-                    : user!.emailVerified
-                        ? 'Verified email'
-                        : 'Email verification is pending'),
-                trailing: user?.email == null
-                    ? null
-                    : Icon(
-                        user!.emailVerified
-                            ? Icons.verified_rounded
-                            : Icons.warning_amber_rounded,
-                        color: user.emailVerified
-                            ? KaedeColors.mint
-                            : KaedeColors.coral,
-                      ),
-              ),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _saving ? null : _changeEmail,
-                      icon: const Icon(Icons.edit_outlined),
-                      label: const Text('Change email'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _saving ? null : _confirmEmail,
-                      icon: const Icon(Icons.mark_email_read_outlined),
-                      label: const Text('Confirm token'),
-                    ),
-                  ),
-                ],
-              ),
-              const Divider(height: 30),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.password_rounded),
-                title: const Text('Authenticator app'),
-                subtitle: Text(user?.mfaEnabled == true
-                    ? 'Two-factor authentication is enabled.'
-                    : 'Require a code in addition to your password.'),
-                trailing: user?.mfaEnabled == true
-                    ? const Icon(Icons.verified_user_rounded,
-                        color: KaedeColors.mint)
-                    : null,
-              ),
-              SizedBox(
-                width: double.infinity,
-                child: user?.mfaEnabled == true
-                    ? OutlinedButton.icon(
-                        onPressed: _saving ? null : _disableMfa,
-                        icon: const Icon(Icons.no_encryption_outlined),
-                        label: const Text('Disable two-factor authentication'),
-                      )
-                    : FilledButton.tonalIcon(
-                        onPressed: _saving ? null : _enableMfa,
-                        icon: const Icon(Icons.enhanced_encryption_outlined),
-                        label: const Text('Set up two-factor authentication'),
-                      ),
-              ),
-            ],
-          ),
-        ),
-        _Section(
-          icon: Icons.lock_person_outlined,
-          title: 'End-to-end encryption',
-          subtitle:
-              'Your password unlocks an encrypted account vault on each trusted device. Your instance stores only ciphertext and cannot decrypt or recover it.',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Text(
-                'Encrypted rooms disable server-side message search, link previews, bots, webhooks, server attachment scanning and server-side media thumbnails. Notifications do not contain message previews until this app decrypts them locally.',
-                style: TextStyle(color: KaedeColors.muted),
-              ),
-              const SizedBox(height: 12),
-              FilledButton.tonalIcon(
-                onPressed: _saving ? null : _initializeEncryption,
-                icon: const Icon(Icons.key_rounded),
-                label: const Text('Set up this device'),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: _saving ? null : _manageEncryptionDevices,
-                icon: const Icon(Icons.devices_other_rounded),
-                label: const Text('Manage encryption identity'),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: _saving ? null : _exportEncryptionRecovery,
-                icon: const Icon(Icons.download_for_offline_outlined),
-                label: const Text('Create recovery backup'),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: _saving ? null : _importEncryptionRecovery,
-                icon: const Icon(Icons.restore_rounded),
-                label: const Text('Restore recovery backup'),
-              ),
-            ],
-          ),
-        ),
-        _Section(
-          icon: Icons.adjust_rounded,
-          title: 'Presence',
-          subtitle:
-              'Your availability follows you between mobile, desktop, and web.',
-          child: SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(
-                  value: 'online',
-                  label: Text('Online'),
-                  icon: Icon(Icons.circle, color: KaedeColors.mint, size: 12)),
-              ButtonSegment(
-                  value: 'idle',
-                  label: Text('Idle'),
-                  icon: Icon(Icons.bedtime, size: 16)),
-              ButtonSegment(
-                  value: 'dnd',
-                  label: Text('DND'),
-                  icon: Icon(Icons.do_not_disturb_on,
-                      color: KaedeColors.danger, size: 16)),
-              ButtonSegment(
-                  value: 'invisible',
-                  label: Text('Invisible'),
-                  icon: Icon(Icons.circle_outlined, size: 14)),
-            ],
-            selected: <String>{
-              '${_settings['presence_preference'] ?? 'online'}'
-            },
-            onSelectionChanged: (value) =>
-                _saveSetting('presence_preference', value.first),
-          ),
-        ),
-        _Section(
-          icon: Icons.notifications_outlined,
-          title: 'Notifications',
-          subtitle:
-              'System notification categories can also be changed in your phone settings.',
-          child: Column(
-            children: [
-              Text(
-                ref.read(mobileControllerProvider.notifier).usesPushRelay
-                    ? 'If enabled, your account on ${mobile.user?.ref.domain.value ?? 'your home instance'} '
-                        'uses Kaede Push Relay (${ref.read(mobileControllerProvider.notifier).pushRelayHost}) for '
-                        'closed-app delivery. Your home sends a signed, content-free '
-                        'wake. The relay sees your home instance, an opaque device '
-                        'subscription, delivery timing, and provider results; it does '
-                        'not receive message text, sender names, room identifiers, '
-                        'attachments, or encryption keys.'
-                    : 'This community build uses its own Firebase provider for '
-                        'closed-app delivery. If enabled, your home stores this '
-                        'installation’s provider token and sends only an opaque '
-                        'wake to Firebase. The wake contains no message text, sender '
-                        'name, room identifier, attachment, or encryption key.',
-                style: const TextStyle(color: KaedeColors.muted),
-              ),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed: () async {
-                    try {
-                      final enabled = await ref
-                          .read(mobileControllerProvider.notifier)
-                          .enablePushNotifications();
-                      if (!context.mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                        content: Text(enabled
-                            ? 'System notifications are enabled.'
-                            : 'Android blocked notifications. Allow them in system settings, then try again.'),
-                      ));
-                    } on Object catch (error) {
-                      _showError(
-                        error,
-                        summary: 'Could not enable system notifications',
-                      );
-                    }
-                  },
-                  icon: const Icon(Icons.notifications_active_outlined),
-                  label: const Text('Enable background notifications'),
-                ),
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: () async {
-                    await ref
-                        .read(mobileControllerProvider.notifier)
-                        .disablePushNotifications();
-                    if (!context.mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                      content: Text(
-                        'Background notifications are disabled for this account.',
-                      ),
-                    ));
-                  },
-                  icon: const Icon(Icons.notifications_off_outlined),
-                  label: const Text('Disable background notifications'),
-                ),
-              ),
-              if (mobile.pushWarning case final warning?)
-                Padding(
-                  padding: const EdgeInsets.only(top: 10),
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: KaedeColors.warning.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: KaedeColors.warning.withValues(alpha: 0.45),
-                      ),
-                    ),
-                    child: ListTile(
-                      dense: true,
-                      leading: const Icon(
-                        Icons.warning_amber_rounded,
-                        color: KaedeColors.warning,
-                      ),
-                      title:
-                          const Text('Notification delivery needs attention'),
-                      subtitle: Text(warning),
-                    ),
-                  ),
-                ),
-              if (!ref
-                  .read(mobileControllerProvider.notifier)
-                  .remotePushAvailable)
-                const Padding(
-                  padding: EdgeInsets.only(top: 10),
-                  child: Text(
-                    'This build can show alerts while Kaede is running, but '
-                    'it has no compatible closed-app push provider.',
-                    style: TextStyle(color: KaedeColors.muted),
-                  ),
-                ),
-              const SizedBox(height: 8),
-              _PreferenceSwitch(
-                title: 'Direct messages',
-                value: _notification('direct_messages', true),
-                onChanged: (value) =>
-                    _saveNotification('direct_messages', value),
-              ),
-              _PreferenceSwitch(
-                title: 'Mentions and replies',
-                value: _notification('mentions', true),
-                onChanged: (value) => _saveNotification('mentions', value),
-              ),
-              _PreferenceSwitch(
-                title: 'Friend requests',
-                value: _notification('relationships', true),
-                onChanged: (value) => _saveNotification('relationships', value),
-              ),
-              _PreferenceSwitch(
-                title: 'Show message previews',
-                subtitle:
-                    'Enabled by default. Show the sender, message text, and profile picture. Kaede fetches these directly after the private push wake-up; FCM never receives them. Your lock-screen privacy settings still apply.',
-                value: _notification('show_notification_previews', true),
-                onChanged: (value) =>
-                    _saveNotification('show_notification_previews', value),
-              ),
-              const Padding(
-                padding: EdgeInsets.only(top: 8),
-                child: Text(
-                    'Do Not Disturb suppresses banners and sounds on every signed-in client.',
-                    style: TextStyle(color: KaedeColors.muted)),
-              ),
-            ],
-          ),
-        ),
-        _Section(
-          icon: Icons.lock_outline_rounded,
-          title: 'Privacy and app lock',
-          child: Column(
-            children: [
-              DropdownButtonFormField<String>(
-                initialValue: '${_settings['dm_privacy'] ?? 'friends'}',
-                decoration:
-                    const InputDecoration(labelText: 'Who can message you'),
-                items: const [
-                  DropdownMenuItem(value: 'everyone', child: Text('Everyone')),
-                  DropdownMenuItem(
-                      value: 'friends', child: Text('Friends only')),
-                  DropdownMenuItem(
-                      value: 'shared_guild',
-                      child: Text('Friends and shared guilds')),
-                ],
-                onChanged: (value) {
-                  if (value != null) _saveSetting('dm_privacy', value);
-                },
-              ),
-              const SizedBox(height: 10),
-              SwitchListTile.adaptive(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Lock Kaede when you leave'),
-                subtitle: const Text(
-                    'Unlock with biometrics, your device passcode, or your device PIN.'),
-                value: _biometricLock,
-                onChanged: _setBiometricLock,
-              ),
-              if (_biometricLock) ...[
-                const SizedBox(height: 8),
-                DropdownButtonFormField<int>(
-                  initialValue: _biometricLockTimeout,
-                  decoration:
-                      const InputDecoration(labelText: 'Lock after leaving'),
-                  items: const [
-                    DropdownMenuItem(value: 0, child: Text('Immediately')),
-                    DropdownMenuItem(value: 15, child: Text('15 seconds')),
-                    DropdownMenuItem(value: 30, child: Text('30 seconds')),
-                    DropdownMenuItem(value: 60, child: Text('1 minute')),
-                    DropdownMenuItem(value: 300, child: Text('5 minutes')),
-                  ],
-                  onChanged: _setBiometricLockTimeout,
-                ),
               ],
-            ],
+            ),
           ),
-        ),
-        _Section(
-          icon: Icons.devices_rounded,
-          title: 'Signed-in devices',
-          subtitle: 'Revoke any session you do not recognize.',
-          child: Column(
-            children: [
-              if (_sessions.isEmpty)
-                const ListTile(
-                    title: Text('This device'),
-                    subtitle: Text('Current session')),
-              for (final session in _sessions)
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(_deviceIcon('${session['device_name'] ?? ''}')),
-                  title: Text('${session['device_name'] ?? 'Kaede client'}'),
-                  subtitle: Text(_sessionSubtitle(session)),
-                  trailing: IconButton(
-                    tooltip: 'Sign out device',
-                    icon: const Icon(Icons.logout_rounded),
-                    onPressed: () => _revoke('${session['id']}'),
-                  ),
+          const SettingsSectionHeader('Account',
+              subheading: 'The identity hosted by your home instance.'),
+          SettingsRow.chevron(
+            title: user?.email ?? 'No email address',
+            subtitle: user?.email == null
+                ? 'This instance does not require email.'
+                : user!.emailVerified
+                    ? 'Verified email'
+                    : 'Email verification is pending',
+            leading: _LeadingIcon(Icons.alternate_email_rounded),
+            onTap: _saving ? null : _changeEmail,
+          ),
+          SettingsRow.chevron(
+            divider: true,
+            title: 'Confirm email change',
+            subtitle: 'Enter the token from your confirmation email.',
+            leading: _LeadingIcon(Icons.mark_email_read_outlined),
+            onTap: _saving ? null : _confirmEmail,
+          ),
+          const SizedBox(height: 16),
+          SettingsRow(
+            title: 'Authenticator app',
+            subtitle: user?.mfaEnabled == true
+                ? 'Two-factor authentication is enabled.'
+                : 'Require a code in addition to your password.',
+            leading: _LeadingIcon(Icons.password_rounded),
+            divider: true,
+            onTap: user?.mfaEnabled == true ? _disableMfa : _enableMfa,
+          ),
+          const SettingsSectionHeader('Security',
+              subheading:
+                  'Encryption keys unlock your account vault on each trusted device. Your instance stores only ciphertext.'),
+          SettingsRow.chevron(
+            title: 'Set up this device',
+            subtitle: 'Enable end-to-end encryption on this phone.',
+            leading: _LeadingIcon(Icons.key_rounded),
+            onTap: _saving ? null : _initializeEncryption,
+          ),
+          SettingsRow.chevron(
+            title: 'Encryption identity',
+            subtitle: 'Devices sharing this account\u2019s MLS identity.',
+            leading: _LeadingIcon(Icons.devices_other_rounded),
+            divider: true,
+            onTap: _saving ? null : _manageEncryptionDevices,
+          ),
+          SettingsRow.chevron(
+            title: 'Create recovery backup',
+            leading: _LeadingIcon(Icons.download_for_offline_outlined),
+            divider: true,
+            onTap: _saving ? null : _exportEncryptionRecovery,
+          ),
+          SettingsRow.chevron(
+            title: 'Restore recovery backup',
+            leading: _LeadingIcon(Icons.restore_rounded),
+            onTap: _saving ? null : _importEncryptionRecovery,
+          ),
+          const SettingsSectionHeader('Activity status',
+              subheading: 'Your availability follows you between mobile, desktop, and web.'),
+          SettingsRow(
+            title: 'Online',
+            leading: _PresenceIcon(PresenceStatus.online),
+            divider: true,
+            onTap: () => _saveSetting('presence_preference', 'online'),
+            trailing: _presenceCheck(presence == 'online'),
+          ),
+          SettingsRow(
+            title: 'Idle',
+            leading: _PresenceIcon(PresenceStatus.idle),
+            divider: true,
+            onTap: () => _saveSetting('presence_preference', 'idle'),
+            trailing: _presenceCheck(presence == 'idle'),
+          ),
+          SettingsRow(
+            title: 'Do not disturb',
+            leading: _PresenceIcon(PresenceStatus.dnd),
+            divider: true,
+            onTap: () => _saveSetting('presence_preference', 'dnd'),
+            trailing: _presenceCheck(presence == 'dnd'),
+          ),
+          SettingsRow(
+            title: 'Invisible',
+            leading: _PresenceIcon(PresenceStatus.invisible),
+            onTap: () => _saveSetting('presence_preference', 'invisible'),
+            trailing: _presenceCheck(presence == 'invisible'),
+          ),
+          SettingsSectionHeader('Notifications',
+              subheading: usesRelay
+                  ? 'Closed-app delivery runs through Kaede Push Relay ($pushRelayHost). The relay sees your home instance and an opaque device subscription, but never message text, sender names, rooms or encryption keys.'
+                  : 'This community build uses its own Firebase provider for closed-app delivery. Firebase only receives an opaque wake with no message content, and your lock-screen privacy settings still apply.'),
+          SettingsRow.chevron(
+            title: 'Enable background notifications',
+            leading: _LeadingIcon(Icons.notifications_active_outlined),
+            divider: true,
+            onTap: () async {
+              try {
+                final enabled = await ref
+                    .read(mobileControllerProvider.notifier)
+                    .enablePushNotifications();
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(enabled
+                      ? 'System notifications are enabled.'
+                      : 'Android blocked notifications. Allow them in system settings, then try again.'),
+                ));
+              } on Object catch (error) {
+                _showError(
+                  error,
+                  summary: 'Could not enable system notifications',
+                );
+              }
+            },
+          ),
+          SettingsRow.chevron(
+            title: 'Disable background notifications',
+            leading: _LeadingIcon(Icons.notifications_off_outlined),
+            divider: true,
+            onTap: () async {
+              await ref
+                  .read(mobileControllerProvider.notifier)
+                  .disablePushNotifications();
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text(
+                  'Background notifications are disabled for this account.',
                 ),
-            ],
+              ));
+            },
           ),
-        ),
-        const SizedBox(height: 18),
-        OutlinedButton.icon(
-          onPressed: _confirmSignOut,
-          style: OutlinedButton.styleFrom(
-            foregroundColor: KaedeColors.danger,
-            side: const BorderSide(color: KaedeColors.dangerSoft),
-          ),
-          icon: const Icon(Icons.logout_rounded),
-          label: const Text('Sign out'),
-        ),
-        const SizedBox(height: 10),
-        Center(
-          child: TextButton(
-            onPressed: () => showLicensePage(
-              context: context,
-              applicationName: 'Kaede Chat',
-              applicationVersion: _versionLabel,
-              applicationIcon: const Padding(
-                padding: EdgeInsets.symmetric(vertical: 8),
-                child: Icon(Icons.forum_rounded,
-                    color: KaedeColors.coral, size: 34),
+          if (mobile.pushWarning case final warning?) ...[
+            const SizedBox(height: 10),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: KaedeColors.warning.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(10),
+                border:
+                    Border.all(color: KaedeColors.warning.withValues(alpha: .4)),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 10),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded,
+                        size: 18, color: KaedeColors.warning),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Notification delivery needs attention',
+                        style: const TextStyle(
+                          color: KaedeColors.warning,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-            style: TextButton.styleFrom(
-              foregroundColor: KaedeColors.muted,
-              textStyle: const TextStyle(fontSize: 12.5),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
+              child: Text(
+                warning,
+                style: const TextStyle(
+                    color: KaedeColors.textSoft, fontSize: 12.5, height: 1.4),
+              ),
             ),
-            child: const Text('Open-source licences'),
+          ],
+          if (!ref
+              .read(mobileControllerProvider.notifier)
+              .remotePushAvailable)
+            const SettingsInfo(
+              'This build can show alerts while Kaede is running, but it has no compatible closed-app push provider.',
+            ),
+          SettingsSwitchRow(
+            title: 'Direct messages',
+            value: _notification('direct_messages', true),
+            onChanged: (value) => _saveNotification('direct_messages', value),
+            divider: true,
           ),
-        ),
-        Center(
-          child: Text(
-            _versionLabel ?? 'Kaede Chat',
-            style: const TextStyle(color: KaedeColors.muted, fontSize: 11.5),
+          SettingsSwitchRow(
+            title: 'Mentions and replies',
+            value: _notification('mentions', true),
+            onChanged: (value) => _saveNotification('mentions', value),
+            divider: true,
           ),
-        ),
-      ],
+          SettingsSwitchRow(
+            title: 'Friend requests',
+            value: _notification('relationships', true),
+            onChanged: (value) => _saveNotification('relationships', value),
+            divider: true,
+          ),
+          SettingsSwitchRow(
+            title: 'Show message previews',
+            subtitle:
+                'Shows the sender, text and profile picture after the private wake-up. FCM never receives them.',
+            value: _notification('show_notification_previews', true),
+            onChanged: (value) =>
+                _saveNotification('show_notification_previews', value),
+          ),
+          const SettingsInfo(
+            'Do Not Disturb suppresses banners and sounds on every signed-in client.',
+          ),
+          const SettingsSectionHeader('Privacy'),
+          SettingsChoiceRow(
+            title: 'Who can message you',
+            value: '${_settings['dm_privacy'] ?? 'friends'}',
+            display: _dmPrivacyLabel('${_settings['dm_privacy'] ?? 'friends'}'),
+            leading: _LeadingIcon(Icons.lock_outline_rounded),
+            divider: true,
+            onSelected: (value) async {
+              final chosen = await showSettingsChoiceSheet(
+                context,
+                title: 'Who can message you',
+                choices: const [
+                  SettingsChoice(
+                      'everyone',
+                      'Everyone',
+                      hint: 'Any Kaede account can start a direct message.'),
+                  SettingsChoice(
+                      'friends',
+                      'Friends only',
+                      hint: 'Only people you have added as a friend.'),
+                  SettingsChoice('shared_guild', 'Friends and shared guilds',
+                      hint:
+                          'Friends and members of guilds you share with them.'),
+                ],
+                selected: value,
+              );
+              if (chosen != null && chosen != value) {
+                _saveSetting('dm_privacy', chosen);
+              }
+            },
+          ),
+          SettingsSwitchRow(
+            title: 'Lock Kaede when you leave',
+            subtitle:
+                'Unlock with biometrics, your device passcode, or your device PIN.',
+            value: _biometricLock,
+            onChanged: _setBiometricLock,
+          ),
+          if (_biometricLock)
+            SettingsChoiceRow(
+              title: 'Lock after leaving',
+              value: '$_biometricLockTimeout',
+              display: _lockTimeoutLabel(_biometricLockTimeout),
+              onSelected: (value) {
+                final chosen = int.tryParse(value);
+                if (chosen != null) _setBiometricLockTimeout(chosen);
+              },
+            ),
+          const SettingsSectionHeader('Devices',
+              subheading: 'Signed-in devices on this account.'),
+          SettingsRow(
+            title: 'This device',
+            subtitle: 'Current session',
+            leading: _LeadingIcon(Icons.check_circle_rounded,
+                color: KaedeColors.mint),
+          ),
+          for (final session in _sessions) SettingsRow(
+            title: '${session['device_name'] ?? 'Kaede client'}',
+            subtitle: _sessionSubtitle(session),
+            leading: _LeadingIcon(_deviceIcon('${session['device_name'] ?? ''}')),
+            divider: true,
+            trailing: TextButton(
+              onPressed: () => _revoke('${session['id']}'),
+              style: TextButton.styleFrom(
+                foregroundColor: KaedeColors.danger,
+                minimumSize: const Size(0, 36),
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+              ),
+              child: const Text('Sign out'),
+            ),
+          ),
+          const SizedBox(height: 26),
+          Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 320),
+              child: SettingsDangerButton('Log out',
+                  onPressed: _confirmSignOut),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Center(
+            child: TextButton(
+              onPressed: () => showLicensePage(
+                context: context,
+                applicationName: 'Kaede Chat',
+                applicationVersion: _versionLabel,
+                applicationIcon: const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Icon(Icons.forum_rounded,
+                      color: KaedeColors.coral, size: 34),
+                ),
+              ),
+              style: TextButton.styleFrom(
+                foregroundColor: KaedeColors.muted,
+                textStyle: const TextStyle(fontSize: 12.5),
+              ),
+              child: const Text('Open-source licences'),
+            ),
+          ),
+          Center(
+            child: Text(
+              _versionLabel ?? 'Kaede Chat',
+              style: const TextStyle(color: KaedeColors.muted, fontSize: 11.5),
+            ),
+          ),
+        ],
+      ),
     );
   }
+
+  Widget _presenceCheck(bool selected) => Icon(
+        selected
+            ? Icons.check_circle_rounded
+            : Icons.radio_button_unchecked_rounded,
+        color: selected ? KaedeColors.coralText : KaedeColors.muted.withValues(alpha: .6),
+      );
+
+  static String _dmPrivacyLabel(String value) => switch (value) {
+        'everyone' => 'Everyone',
+        'shared_guild' => 'Friends and shared guilds',
+        _ => 'Friends only',
+      };
+
+  static String _lockTimeoutLabel(int seconds) => switch (seconds) {
+        0 => 'Immediately',
+        15 => '15 seconds',
+        30 => '30 seconds',
+        60 => '1 minute',
+        _ => '$seconds seconds',
+      };
 
   Future<void> _confirmSignOut() async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Sign out of Kaede?'),
+        title: const Text('Log out of Kaede?'),
         content: const Text(
           'Saved conversations on this device stay encrypted at rest and are '
           'removed when you sign out.',
@@ -852,7 +804,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               backgroundColor: KaedeColors.danger,
             ),
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Sign out'),
+            child: const Text('Log out'),
           ),
         ],
       ),
@@ -1178,7 +1130,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 const Text(
                     'Each code can be used once if you lose your authenticator. Kaede will not show them again.'),
                 const SizedBox(height: 14),
-                SelectableText(codes.join('\n'),
+                SelectableText(codes.join('\\n'),
                     style: const TextStyle(fontFamily: 'monospace')),
               ],
             ),
@@ -1259,8 +1211,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
-  Future<void> _setBiometricLockTimeout(int? seconds) async {
-    if (seconds == null) return;
+  Future<void> _setBiometricLockTimeout(int seconds) async {
     try {
       final preferences = await SharedPreferences.getInstance();
       await preferences.setInt('biometric_lock_timeout_seconds', seconds);
@@ -1314,81 +1265,42 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 }
 
-/// Collapsible settings group. Everything the account owns is reachable from
-/// this one screen, so the groups stay closed until they are needed.
-final class _Section extends StatelessWidget {
-  const _Section(
-      {required this.icon,
-      required this.title,
-      required this.child,
-      this.subtitle});
+/// Muted leading glyph for a flat settings row.
+class _LeadingIcon extends StatelessWidget {
+  const _LeadingIcon(this.icon, {this.color = KaedeColors.muted});
+
   final IconData icon;
-  final String title;
-  final String? subtitle;
-  final Widget child;
+  final Color color;
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 8),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: KaedeColors.panel,
-            borderRadius: BorderRadius.circular(KaedeRadius.large),
-            border: Border.all(color: KaedeColors.border),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(KaedeRadius.large),
-            child: Theme(
-              data:
-                  Theme.of(context).copyWith(dividerColor: Colors.transparent),
-              child: ExpansionTile(
-                tilePadding: const EdgeInsets.symmetric(horizontal: 14),
-                leading: Container(
-                  width: 34,
-                  height: 34,
-                  decoration: BoxDecoration(
-                    color: KaedeColors.raised,
-                    borderRadius: BorderRadius.circular(KaedeRadius.small),
-                  ),
-                  child: Icon(icon, size: 18, color: KaedeColors.coralText),
-                ),
-                title: Text(
-                  title,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 15,
-                  ),
-                ),
-                subtitle: subtitle == null
-                    ? null
-                    : Text(
-                        subtitle!,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: KaedeColors.muted,
-                          fontSize: 12,
-                          height: 1.3,
-                        ),
-                      ),
-                childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 16),
-                expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Divider(height: 1),
-                  Padding(
-                    padding: const EdgeInsets.only(top: 14),
-                    child: child,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
+  Widget build(BuildContext context) => Container(
+        width: 26,
+        height: 26,
+        alignment: Alignment.center,
+        child: Icon(icon, size: 20, color: color),
       );
 }
 
-/// Avatar, name and address at the top of settings.
-final class _AccountHero extends StatelessWidget {
+/// Presence dot used as the leading glyph of the activity rows.
+class _PresenceIcon extends StatelessWidget {
+  const _PresenceIcon(this.status);
+
+  final PresenceStatus status;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: 26,
+        height: 26,
+        alignment: Alignment.center,
+        child: Icon(presenceIcon(status),
+            size: 18, color: presenceColor(status)),
+      );
+}
+
+/// Banner, avatar and identity at the top of settings, Discord-style: a flat
+/// banner strip with the avatar overlapping its bottom edge and the edit
+/// buttons drawn directly on the images.
+class _AccountHero extends StatelessWidget {
   const _AccountHero({
     required this.user,
     required this.presence,
@@ -1410,160 +1322,152 @@ final class _AccountHero extends StatelessWidget {
             user!.bannerHash,
             variant: 'thumbnail_1024',
           );
-    return Container(
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: KaedeColors.panel,
-        borderRadius: BorderRadius.circular(KaedeRadius.large),
-        border: Border.all(color: KaedeColors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(
-            height: 74,
-            child: banner == null
-                ? const DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          KaedeColors.coralSoft,
-                          KaedeColors.purpleSoft,
-                        ],
-                      ),
-                    ),
-                  )
-                : CachedNetworkImage(
-                    imageUrl: '$banner',
-                    fit: BoxFit.cover,
-                    errorWidget: (_, __, ___) =>
-                        const ColoredBox(color: KaedeColors.coralSoft),
-                  ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 0, 14, 2),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          height: 96,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: Stack(
+              fit: StackFit.expand,
               children: [
-                Transform.translate(
-                  offset: const Offset(0, -22),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(3),
-                        decoration: const BoxDecoration(
-                          color: KaedeColors.panel,
-                          shape: BoxShape.circle,
+                banner == null
+                    ? const DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              KaedeColors.coralSoft,
+                              KaedeColors.purpleSoft,
+                            ],
+                          ),
                         ),
-                        child: user == null
-                            ? const CircleAvatar(
-                                radius: 30,
-                                backgroundColor: KaedeColors.raised,
-                                child: Icon(Icons.person_rounded),
-                              )
-                            : UserAvatar(
-                                user: user!,
-                                radius: 30,
-                                presence: presence,
-                                ringColor: KaedeColors.panel,
-                              ),
+                      )
+                    : CachedNetworkImage(
+                        imageUrl: '$banner',
+                        fit: BoxFit.cover,
+                        errorWidget: (_, __, ___) =>
+                            const ColoredBox(color: KaedeColors.coralSoft),
                       ),
-                      const Spacer(),
-                      _HeroAction(
-                        icon: Icons.photo_camera_outlined,
-                        label: 'Avatar',
-                        onPressed: onEditAvatar,
-                      ),
-                      const SizedBox(width: 8),
-                      _HeroAction(
-                        icon: Icons.panorama_outlined,
-                        label: 'Banner',
-                        onPressed: onEditBanner,
-                      ),
-                    ],
-                  ),
-                ),
-                Transform.translate(
-                  offset: const Offset(0, -12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        user?.name ?? 'Your account',
-                        style: Theme.of(context).textTheme.headlineSmall,
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        user?.handle ?? '',
-                        style: const TextStyle(
-                          color: KaedeColors.muted,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ],
+                Positioned(
+                  right: 10,
+                  top: 10,
+                  child: _HeroEditButton(
+                    icon: Icons.panorama_rounded,
+                    tooltip: 'Change banner',
+                    onPressed: onEditBanner,
                   ),
                 ),
               ],
             ),
           ),
-        ],
-      ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 84,
+                height: 84,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Positioned.fill(
+                      child: Material(
+                        color: kSettingsSurface,
+                        shape: const CircleBorder(),
+                        child: user == null
+                            ? const CircleAvatar(
+                                radius: 36,
+                                backgroundColor: KaedeColors.raised,
+                                child: Icon(Icons.person_rounded,
+                                    size: 34, color: KaedeColors.textSoft),
+                              )
+                            : UserAvatar(
+                                user: user!,
+                                radius: 36,
+                                presence: presence,
+                                ringColor: kSettingsSurface,
+                              ),
+                      ),
+                    ),
+                    Positioned(
+                      right: 0,
+                      bottom: 0,
+                      child: _HeroEditButton(
+                        icon: Icons.photo_camera_rounded,
+                        tooltip: 'Change avatar',
+                        onPressed: onEditAvatar,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      user?.name ?? 'Your account',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -.4,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      user?.handle ?? '',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: KaedeColors.muted,
+                        fontSize: 13.5,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
 
-/// Small outlined action used by the account hero.
-final class _HeroAction extends StatelessWidget {
-  const _HeroAction({
+/// Small circular action drawn on the hero images.
+class _HeroEditButton extends StatelessWidget {
+  const _HeroEditButton({
     required this.icon,
-    required this.label,
+    required this.tooltip,
     required this.onPressed,
   });
 
   final IconData icon;
-  final String label;
+  final String tooltip;
   final VoidCallback? onPressed;
 
   @override
-  Widget build(BuildContext context) => OutlinedButton.icon(
-        onPressed: onPressed,
-        style: OutlinedButton.styleFrom(
-          minimumSize: const Size(0, 34),
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          side: const BorderSide(color: KaedeColors.border),
-          backgroundColor: KaedeColors.raised,
-          textStyle: const TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
+  Widget build(BuildContext context) => Material(
+        color: KaedeColors.canvas.withValues(alpha: .78),
+        borderRadius: BorderRadius.circular(16),
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(16),
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Tooltip(
+              message: tooltip,
+              child: Icon(icon, size: 16, color: KaedeColors.text),
+            ),
           ),
         ),
-        icon: Icon(icon, size: 15),
-        label: Text(label),
-      );
-}
-
-final class _PreferenceSwitch extends StatelessWidget {
-  const _PreferenceSwitch({
-    required this.title,
-    required this.value,
-    required this.onChanged,
-    this.subtitle,
-  });
-  final String title;
-  final String? subtitle;
-  final bool value;
-  final ValueChanged<bool> onChanged;
-
-  @override
-  Widget build(BuildContext context) => SwitchListTile.adaptive(
-        contentPadding: EdgeInsets.zero,
-        title: Text(title),
-        subtitle: subtitle == null ? null : Text(subtitle!),
-        value: value,
-        onChanged: onChanged,
       );
 }
 

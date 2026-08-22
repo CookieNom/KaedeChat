@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -12,6 +13,16 @@ final class LocalDatabase {
 
   final Database database;
   final _LocalCipher _cipher;
+
+  /// Test-only factory: wraps an injected [Database] (for example a no-op
+  /// test double) and skips the path_provider, sqflite and secure-storage
+  /// channel setup by generating an ephemeral cipher key in memory.
+  @visibleForTesting
+  static Future<LocalDatabase> openWithDatabase(Database database) async {
+    final random = Random.secure();
+    final key = List<int>.generate(32, (_) => random.nextInt(256));
+    return LocalDatabase._(database, _LocalCipher(SecretKey(key)));
+  }
 
   static Future<LocalDatabase> open() async {
     final directory = await getApplicationSupportDirectory();

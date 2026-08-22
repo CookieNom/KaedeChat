@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -251,7 +252,11 @@ final class MobileShell extends ConsumerStatefulWidget {
 final class _MobileShellState extends ConsumerState<MobileShell> {
   var _section = _ShellSection.messages;
   late final PageController _pages;
-  var _messagePage = 0;
+
+  /// Page index and conversation visibility are notifiers rather than state
+  /// fields so settling a swipe rebuilds the back handler and nothing else.
+  final _messagePage = ValueNotifier(0);
+  final _conversationVisible = ValueNotifier(false);
 
   @override
   void initState() {
@@ -262,115 +267,35 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
   @override
   void dispose() {
     _pages.dispose();
+    _messagePage.dispose();
+    _conversationVisible.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final state = ref.watch(mobileControllerProvider);
-    final activeChannel = state.activeChannel;
-    final voice = ref.watch(voiceSessionProvider);
+    // Only the open conversation belongs to this build. Banners and the voice
+    // strip watch their own slices, so an arriving message or presence update
+    // cannot rebuild the page view while a swipe is still in flight.
+    final activeChannel = ref.watch(
+      mobileControllerProvider.select((state) => state.activeChannel),
+    );
     final body = SafeArea(
       bottom: false,
       child: Column(
         children: [
-          if (state.offline)
-            _StatusBanner(
-              icon: Icons.cloud_off_rounded,
-              background: KaedeColors.coralSoft,
-              foreground: KaedeColors.coralText,
-              title: 'Offline · showing saved conversations',
-              actionLabel: 'Retry',
-              onAction: () => ref
-                  .read(mobileControllerProvider.notifier)
-                  .refreshNavigation(),
-            ),
-          if (state.phase == SessionPhase.ready &&
-              !state.gatewayHealth.isConnected)
-            _StatusBanner(
-              icon: state.gatewayHealth.phase == GatewayConnectionPhase.offline
-                  ? Icons.sync_problem_rounded
-                  : Icons.sync_rounded,
-              background: KaedeColors.warningSoft,
-              foreground: KaedeColors.warning,
-              busy: state.gatewayHealth.phase != GatewayConnectionPhase.offline,
-              title: state.gatewayHealth.message ??
-                  'Realtime updates are temporarily unavailable.',
-              actionLabel: 'Retry',
-              actionKey: const ValueKey('retry-realtime-button'),
-              onAction: () =>
-                  ref.read(mobileControllerProvider.notifier).retryRealtime(),
-            ),
-          if (state.gatewayProtocolWarning case final warning?)
-            _StatusBanner(
-              icon: Icons.warning_amber_rounded,
-              background: KaedeColors.warningSoft,
-              foreground: KaedeColors.warning,
-              title: warning,
-            ),
-          if (state.degradedWarnings.isNotEmpty)
-            _StatusBanner(
-              icon: Icons.cloud_sync_outlined,
-              background: KaedeColors.warningSoft,
-              foreground: KaedeColors.warning,
-              title: state.degradedWarnings.values.first,
-              subtitle: state.degradedWarnings.length > 1
-                  ? '${state.degradedWarnings.length} account areas need to '
-                      'resync.'
-                  : null,
-              actionLabel: 'Retry',
-              onAction: () => ref
-                  .read(mobileControllerProvider.notifier)
-                  .retryDegradedData(),
-            ),
-          if (state.pushWarning case final warning?)
-            _StatusBanner(
-              icon: Icons.notifications_off_outlined,
-              background: KaedeColors.warningSoft,
-              foreground: KaedeColors.warning,
-              title: warning,
-              actionLabel: 'Settings',
-              onAction: () => _showSection(_ShellSection.settings),
-            ),
-          if (voice.joined && voice.channel?.ref != activeChannel?.ref)
-            _VoiceStatusBar(
-              voice: voice,
-              onOpen: () async {
-                final channel = voice.channel;
-                if (channel == null) return;
-                await ref
-                    .read(mobileControllerProvider.notifier)
-                    .selectChannel(channel);
-                if (mounted) {
-                  setState(() {
-                    _section = _ShellSection.messages;
-                    _openConversation();
-                  });
-                }
-              },
-              onToggleMute: voice.canSpeak
-                  ? () => _runVisibleAction(
-                        context,
-                        'Could not change the microphone state',
-                        voice.toggleMute,
-                      )
-                  : null,
-              onLeave: () => _runVisibleAction(
-                context,
-                'Could not leave voice',
-                voice.leave,
-              ),
-            ),
+          _ShellBanners(
+            onOpenSettings: () => _showSection(_ShellSection.settings),
+          ),
+          _VoiceStatusStrip(onOpenChannel: _openVoiceChannel),
           Expanded(
             child: switch (_section) {
               _ShellSection.messages => PageView(
                   controller: _pages,
-                  onPageChanged: (page) {
-                    setState(() => _messagePage = page);
-                    ref
-                        .read(mobileControllerProvider.notifier)
-                        .setConversationPaneVisible(page == 1);
-                  },
+                  // Builds the neighbouring page ahead of time so the first
+                  // frames of a swipe are not spent laying it out.
+                  allowImplicitScrolling: true,
+                  onPageChanged: _onPageChanged,
                   children: [
                     _ChatBrowser(
                       onOpenChannel: _openConversation,
@@ -382,18 +307,12 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
                         ? const _NoConversationSelected()
                         : _ConversationScreen(
                             channel: activeChannel,
-                            visible: _messagePage == 1,
+                            visible: _conversationVisible,
                             onBack: _openNavigation,
                             onMembers: activeChannel.guildRef == null
                                 ? null
                                 : _openMembers,
                           ),
-                    if (activeChannel?.guildRef != null &&
-                        state.activeGuild != null)
-                      _GuildMemberPane(
-                        guild: state.activeGuild!,
-                        onBack: _openConversation,
-                      ),
                   ],
                 ),
               _ShellSection.friends => _SectionScreen(
@@ -414,22 +333,39 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
         ],
       ),
     );
-    return PopScope(
-      canPop: _section == _ShellSection.messages && _messagePage == 0,
-      onPopInvokedWithResult: (didPop, _) {
-        if (didPop) return;
-        if (_messagePage > 0) {
-          if (_messagePage == 2) {
-            _openConversation();
-          } else {
-            _openNavigation();
-          }
-        } else {
-          _showSection(_ShellSection.messages);
-        }
-      },
+    return ValueListenableBuilder<int>(
+      valueListenable: _messagePage,
       child: Scaffold(body: body),
+      builder: (context, page, child) => PopScope(
+        canPop: _section == _ShellSection.messages && page == 0,
+        onPopInvokedWithResult: (didPop, _) {
+          if (didPop) return;
+          if (page > 0) {
+            _openNavigation();
+          } else {
+            _showSection(_ShellSection.messages);
+          }
+        },
+        child: child!,
+      ),
     );
+  }
+
+  void _onPageChanged(int page) {
+    _messagePage.value = page;
+    _conversationVisible.value = page == 1;
+    ref
+        .read(mobileControllerProvider.notifier)
+        .setConversationPaneVisible(page == 1);
+  }
+
+  Future<void> _openVoiceChannel(KaedeChannel channel) async {
+    await ref.read(mobileControllerProvider.notifier).selectChannel(channel);
+    if (!mounted) return;
+    if (_section != _ShellSection.messages) {
+      setState(() => _section = _ShellSection.messages);
+    }
+    _openConversation();
   }
 
   void _openConversation() {
@@ -447,16 +383,17 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
   }
 
   void _openMembers() {
-    if (!_pages.hasClients) return;
-    _pages.animateToPage(2,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOutCubic);
+    final guild = ref.read(mobileControllerProvider).activeGuild;
+    if (guild == null) return;
+    unawaited(Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => _GuildMemberRoute(guild: guild)),
+    ));
   }
 
   void _showSection(_ShellSection section) {
     setState(() => _section = section);
     ref.read(mobileControllerProvider.notifier).setConversationPaneVisible(
-          section == _ShellSection.messages && _messagePage == 1,
+          section == _ShellSection.messages && _messagePage.value == 1,
         );
   }
 }
@@ -501,7 +438,11 @@ final class _ConversationScreen extends ConsumerStatefulWidget {
   });
 
   final KaedeChannel channel;
-  final bool visible;
+
+  /// Whether the conversation is the page on screen. A listenable rather than a
+  /// plain flag so settling a swipe does not rebuild the conversation, which
+  /// only needs the value for its encryption disclosure.
+  final ValueListenable<bool> visible;
   final VoidCallback onBack;
   final VoidCallback? onMembers;
 
@@ -529,6 +470,7 @@ final class _ConversationScreenState
   @override
   void initState() {
     super.initState();
+    widget.visible.addListener(_visibilityChanged);
     unawaited(_loadCall());
     _scheduleEncryptedRoomDisclosure();
   }
@@ -536,26 +478,41 @@ final class _ConversationScreenState
   @override
   void didUpdateWidget(covariant _ConversationScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.visible != widget.visible) {
+      oldWidget.visible.removeListener(_visibilityChanged);
+      widget.visible.addListener(_visibilityChanged);
+    }
     if (oldWidget.channel.ref != widget.channel.ref ||
         !identical(oldWidget.channel, widget.channel)) {
       unawaited(_loadCall());
     }
     if (oldWidget.channel.ref != widget.channel.ref ||
-        (!oldWidget.visible && widget.visible) ||
         oldWidget.channel.encryptionMode != widget.channel.encryptionMode) {
       _scheduleEncryptedRoomDisclosure();
     }
   }
 
+  @override
+  void dispose() {
+    widget.visible.removeListener(_visibilityChanged);
+    super.dispose();
+  }
+
+  void _visibilityChanged() {
+    if (widget.visible.value) _scheduleEncryptedRoomDisclosure();
+  }
+
   void _scheduleEncryptedRoomDisclosure() {
-    if (!widget.visible || widget.channel.encryptionMode != 'e2ee') return;
+    if (!widget.visible.value || widget.channel.encryptionMode != 'e2ee') {
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(_showEncryptedRoomDisclosure());
     });
   }
 
   Future<void> _showEncryptedRoomDisclosure() async {
-    if (!widget.visible ||
+    if (!widget.visible.value ||
         widget.channel.encryptionMode != 'e2ee' ||
         _disclosureInFlight != null) {
       return;
@@ -570,7 +527,9 @@ final class _ConversationScreenState
       if (await hasAcknowledgedEncryptedRoom(accountRef, channel.ref.wire)) {
         return;
       }
-      if (!mounted || !widget.visible || widget.channel.ref != channel.ref) {
+      if (!mounted ||
+          !widget.visible.value ||
+          widget.channel.ref != channel.ref) {
         return;
       }
       final kind = channel.guildRef == null
@@ -1818,6 +1777,31 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
   }
 }
 
+/// The member list as its own route.
+///
+/// It used to be a third page of the shell's page view, which meant leftward
+/// drags were shared between it and swipe-to-reply. Pushing it instead leaves
+/// the page view with one gesture per direction.
+final class _GuildMemberRoute extends ConsumerWidget {
+  const _GuildMemberRoute({required this.guild});
+
+  final KaedeGuild guild;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Keeps roles and the guild name live while the route is open, ignoring a
+    // selection that moved on to some other guild underneath it.
+    final live = ref.watch(mobileControllerProvider.select((state) =>
+        state.activeGuild?.ref == guild.ref ? state.activeGuild : null));
+    return Scaffold(
+      body: _GuildMemberPane(
+        guild: live ?? guild,
+        onBack: () => Navigator.of(context).pop(),
+      ),
+    );
+  }
+}
+
 final class _GuildMemberPane extends ConsumerStatefulWidget {
   const _GuildMemberPane({required this.guild, required this.onBack});
 
@@ -1828,15 +1812,11 @@ final class _GuildMemberPane extends ConsumerStatefulWidget {
   ConsumerState<_GuildMemberPane> createState() => _GuildMemberPaneState();
 }
 
-final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane>
-    with AutomaticKeepAliveClientMixin {
+final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
   List<GuildMember>? _members;
   String? _error;
   var _partial = false;
   EntityRef? _rosterRequestedFor;
-
-  @override
-  bool get wantKeepAlive => true;
 
   @override
   void initState() {
@@ -1911,7 +1891,6 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane>
 
   @override
   Widget build(BuildContext context) {
-    super.build(context);
     final mobile = ref.watch(mobileControllerProvider);
     if (mobile.gatewayHealth.isConnected &&
         _rosterRequestedFor != widget.guild.ref) {
@@ -3879,6 +3858,122 @@ final class _AccountBar extends ConsumerWidget {
 
 /// A one line notice pinned above the shell: offline, realtime, push and
 /// federation states all share this treatment.
+/// Connection and account warnings shown above the shell's pages.
+///
+/// Kept in its own consumer because these fields change often; rebuilding a
+/// banner must not rebuild the page view underneath an in-flight swipe.
+final class _ShellBanners extends ConsumerWidget {
+  const _ShellBanners({required this.onOpenSettings});
+
+  final VoidCallback onOpenSettings;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(mobileControllerProvider);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (state.offline)
+          _StatusBanner(
+            icon: Icons.cloud_off_rounded,
+            background: KaedeColors.coralSoft,
+            foreground: KaedeColors.coralText,
+            title: 'Offline · showing saved conversations',
+            actionLabel: 'Retry',
+            onAction: () => ref
+                .read(mobileControllerProvider.notifier)
+                .refreshNavigation(),
+          ),
+        if (state.phase == SessionPhase.ready &&
+            !state.gatewayHealth.isConnected)
+          _StatusBanner(
+            icon: state.gatewayHealth.phase == GatewayConnectionPhase.offline
+                ? Icons.sync_problem_rounded
+                : Icons.sync_rounded,
+            background: KaedeColors.warningSoft,
+            foreground: KaedeColors.warning,
+            busy: state.gatewayHealth.phase != GatewayConnectionPhase.offline,
+            title: state.gatewayHealth.message ??
+                'Realtime updates are temporarily unavailable.',
+            actionLabel: 'Retry',
+            actionKey: const ValueKey('retry-realtime-button'),
+            onAction: () =>
+                ref.read(mobileControllerProvider.notifier).retryRealtime(),
+          ),
+        if (state.gatewayProtocolWarning case final warning?)
+          _StatusBanner(
+            icon: Icons.warning_amber_rounded,
+            background: KaedeColors.warningSoft,
+            foreground: KaedeColors.warning,
+            title: warning,
+          ),
+        if (state.degradedWarnings.isNotEmpty)
+          _StatusBanner(
+            icon: Icons.cloud_sync_outlined,
+            background: KaedeColors.warningSoft,
+            foreground: KaedeColors.warning,
+            title: state.degradedWarnings.values.first,
+            subtitle: state.degradedWarnings.length > 1
+                ? '${state.degradedWarnings.length} account areas need to '
+                    'resync.'
+                : null,
+            actionLabel: 'Retry',
+            onAction: () => ref
+                .read(mobileControllerProvider.notifier)
+                .retryDegradedData(),
+          ),
+        if (state.pushWarning case final warning?)
+          _StatusBanner(
+            icon: Icons.notifications_off_outlined,
+            background: KaedeColors.warningSoft,
+            foreground: KaedeColors.warning,
+            title: warning,
+            actionLabel: 'Settings',
+            onAction: () => onOpenSettings(),
+          ),
+      ],
+    );
+  }
+}
+
+/// Voice call strip, shown while the call is happening somewhere the reader is
+/// not currently looking.
+final class _VoiceStatusStrip extends ConsumerWidget {
+  const _VoiceStatusStrip({required this.onOpenChannel});
+
+  final void Function(KaedeChannel channel) onOpenChannel;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final voice = ref.watch(voiceSessionProvider);
+    final openChannel = ref.watch(
+      mobileControllerProvider.select((state) => state.activeChannel?.ref),
+    );
+    if (!voice.joined || voice.channel?.ref == openChannel) {
+      return const SizedBox.shrink();
+    }
+    return _VoiceStatusBar(
+      voice: voice,
+      onOpen: () {
+        final channel = voice.channel;
+        if (channel != null) onOpenChannel(channel);
+      },
+      onToggleMute: voice.canSpeak
+          ? () => _runVisibleAction(
+                context,
+                'Could not change the microphone state',
+                voice.toggleMute,
+              )
+          : null,
+      onLeave: () => _runVisibleAction(
+        context,
+        'Could not leave voice',
+        voice.leave,
+      ),
+    );
+  }
+}
+
 final class _StatusBanner extends StatelessWidget {
   const _StatusBanner({
     required this.icon,

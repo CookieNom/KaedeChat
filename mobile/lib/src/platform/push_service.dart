@@ -374,6 +374,18 @@ final class PushService {
     this._healthEvents,
   );
 
+  /// Test-only constructor: builds the service around inert platform
+  /// objects so widget tests can exercise the controller without
+  /// notification or Firebase channels.
+  @visibleForTesting
+  PushService.test({bool firebaseReady = true})
+      : this._(
+          FlutterLocalNotificationsPlugin(),
+          firebaseReady,
+          StreamController<PushDestination>.broadcast(),
+          StreamController<String?>.broadcast(sync: true),
+        );
+
   final FlutterLocalNotificationsPlugin _local;
   final bool _firebaseReady;
   final StreamController<PushDestination> _destinations;

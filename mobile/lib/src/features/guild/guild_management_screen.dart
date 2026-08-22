@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:intl/intl.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
@@ -15,6 +16,7 @@ import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/disclosures.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
+import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
@@ -193,6 +195,7 @@ final class _GuildManagementScreenState
             guild: _guild,
             repository: _repository,
             canView: isOwner || _guild.allows(Permission.viewAuditLog),
+            userProfiles: mobile.userProfiles,
           )
         ),
     ];
@@ -212,24 +215,29 @@ final class _GuildManagementScreenState
           appBar: AppBar(title: title),
           body: _loading
               ? const Center(child: CircularProgressIndicator())
-              : Row(
-                  children: [
-                    NavigationRail(
-                      extended: constraints.maxWidth >= 1120,
-                      selectedIndex: _selectedSection,
-                      onDestinationSelected: (value) =>
-                          setState(() => _selectedSection = value),
-                      destinations: [
-                        for (final section in sections)
-                          NavigationRailDestination(
-                            icon: Icon(section.icon),
-                            label: Text(section.label),
-                          ),
-                      ],
-                    ),
-                    const VerticalDivider(width: 1),
-                    Expanded(child: sections[_selectedSection].page),
-                  ],
+              : ColoredBox(
+                  color: kSettingsSurface,
+                  child: Row(
+                    children: [
+                      NavigationRail(
+                        extended: constraints.maxWidth >= 1120,
+                        backgroundColor: kSettingsSurface,
+                        indicatorColor: kSettingsRowHover,
+                        selectedIndex: _selectedSection,
+                        onDestinationSelected: (value) =>
+                            setState(() => _selectedSection = value),
+                        destinations: [
+                          for (final section in sections)
+                            NavigationRailDestination(
+                              icon: Icon(section.icon),
+                              label: Text(section.label),
+                            ),
+                        ],
+                      ),
+                      const VerticalDivider(width: 1),
+                      Expanded(child: sections[_selectedSection].page),
+                    ],
+                  ),
                 ),
         );
       }
@@ -237,51 +245,77 @@ final class _GuildManagementScreenState
         appBar: AppBar(title: title),
         body: _loading
             ? const Center(child: CircularProgressIndicator())
-            : ListView(
-                padding: const EdgeInsets.fromLTRB(14, 8, 14, 30),
-                children: [
-                  Row(
-                    children: [
-                      GuildIcon(guild: _guild, size: 52, borderRadius: 17),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              _guild.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.headlineSmall,
+            : ColoredBox(
+                color: kSettingsSurface,
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 30),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: Row(
+                        children: [
+                          GuildIcon(guild: _guild, size: 56, borderRadius: 16),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  _guild.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style:
+                                      Theme.of(context).textTheme.headlineSmall,
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  _guild.ref.domain.value,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: KaedeColors.muted,
+                                    fontSize: 12.5,
+                                  ),
+                                ),
+                                if (_guild.description?.trim().isNotEmpty ==
+                                    true) ...[
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    _guild.description!.trim(),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: KaedeColors.muted,
+                                      fontSize: 12.5,
+                                      height: 1.35,
+                                    ),
+                                  ),
+                                ],
+                              ],
                             ),
-                            Text(
-                              _guild.ref.domain.value,
-                              style: const TextStyle(
-                                color: KaedeColors.muted,
-                                fontSize: 12.5,
-                              ),
-                            ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 18),
-                  for (final section in sections)
-                    _SectionRow(
-                      label: section.label,
-                      description: section.description,
-                      icon: section.icon,
-                      onTap: () => Navigator.of(context).push<void>(
-                        MaterialPageRoute<void>(
-                          builder: (context) => Scaffold(
-                            appBar: AppBar(title: Text(section.label)),
-                            body: section.page,
+                    ),
+                    const SizedBox(height: 22),
+                    for (final section in sections)
+                      _SectionRow(
+                        label: section.label,
+                        description: section.description,
+                        icon: section.icon,
+                        divider: true,
+                        onTap: () => Navigator.of(context).push<void>(
+                          MaterialPageRoute<void>(
+                            builder: (context) => Scaffold(
+                              backgroundColor: kSettingsSurface,
+                              appBar: AppBar(title: Text(section.label)),
+                              body: section.page,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
       );
     });
@@ -309,77 +343,90 @@ final class _GuildManagementScreenState
   }
 }
 
-/// One tappable settings area in the compact guild settings list.
+/// One tappable settings area in the compact guild settings list: a flat
+/// row that fills on hover, Discord style, with a hairline between rows.
 final class _SectionRow extends StatelessWidget {
   const _SectionRow({
     required this.label,
     required this.description,
     required this.icon,
     required this.onTap,
+    this.divider = false,
   });
 
   final String label;
   final String description;
   final IconData icon;
   final VoidCallback onTap;
+  final bool divider;
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 8),
-        child: Material(
-          color: KaedeColors.panel,
-          borderRadius: BorderRadius.circular(KaedeRadius.large),
-          child: InkWell(
-            onTap: onTap,
-            borderRadius: BorderRadius.circular(KaedeRadius.large),
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(14, 13, 10, 13),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(KaedeRadius.large),
-                border: Border.all(color: KaedeColors.border),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 34,
-                    height: 34,
-                    decoration: BoxDecoration(
-                      color: KaedeColors.raised,
-                      borderRadius: BorderRadius.circular(KaedeRadius.small),
+  Widget build(BuildContext context) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: onTap,
+              borderRadius: BorderRadius.circular(10),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 34,
+                      height: 34,
+                      decoration: BoxDecoration(
+                        color: KaedeColors.raised,
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: Icon(icon, size: 18, color: KaedeColors.coralText),
                     ),
-                    child: Icon(icon, size: 18, color: KaedeColors.coralText),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          label,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 15,
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            label,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 15,
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 1),
-                        Text(
-                          description,
-                          style: const TextStyle(
-                            color: KaedeColors.muted,
-                            fontSize: 12,
-                            height: 1.3,
+                          const SizedBox(height: 1),
+                          Text(
+                            description,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: KaedeColors.muted,
+                              fontSize: 12,
+                              height: 1.3,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-                  const Icon(Icons.chevron_right_rounded,
-                      color: KaedeColors.muted),
-                ],
+                    const Icon(Icons.chevron_right_rounded,
+                        size: 18, color: KaedeColors.muted),
+                  ],
+                ),
               ),
             ),
           ),
-        ),
+          if (divider)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 44),
+              child: SizedBox(
+                height: 1,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(color: kSettingsDividerColor),
+                ),
+              ),
+            ),
+        ],
       );
 }
 
@@ -530,19 +577,15 @@ final class _ManagementRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: EdgeInsets.fromLTRB(indented ? 18 : 0, 0, 0, 7),
+        padding: EdgeInsets.fromLTRB(indented ? 18 : 0, 0, 0, 2),
         child: Material(
-          color: KaedeColors.panel,
-          borderRadius: BorderRadius.circular(KaedeRadius.medium),
+          color: Colors.transparent,
           child: InkWell(
             onTap: onTap,
-            borderRadius: BorderRadius.circular(KaedeRadius.medium),
-            child: Container(
-              padding: EdgeInsets.fromLTRB(12, 8, trailing == null ? 12 : 2, 8),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(KaedeRadius.medium),
-                border: Border.all(color: KaedeColors.border),
-              ),
+            borderRadius: BorderRadius.circular(10),
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                  horizontal: indented ? 4 : 8, vertical: 9),
               child: Row(
                 children: [
                   SizedBox.square(dimension: 30, child: Center(child: leading)),
@@ -709,6 +752,26 @@ final class _OverviewTabState extends State<_OverviewTab> {
     }
   }
 
+  Future<void> _chooseHistory(String current) async {
+    final chosen = await showSettingsChoiceSheet(
+      context,
+      title: 'Federated message history',
+      description:
+          'Whether instances that join later may fetch older messages from this guild.',
+      choices: const [
+        SettingsChoice('disabled', 'Disabled',
+            hint:
+                'The recommended default. New instances start with a blank history.'),
+        SettingsChoice('full_retained', 'Share permitted history',
+            hint: 'Later instances may fetch retained older messages.'),
+      ],
+      selected: current,
+    );
+    if (chosen != null && chosen != current && mounted) {
+      setState(() => _history = chosen);
+    }
+  }
+
   @override
   void dispose() {
     _name.dispose();
@@ -724,7 +787,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
               'Identity and presentation are federated to every joined instance.',
           child: Column(children: [
             Row(children: [
-              GuildIcon(guild: _guild, size: 62, borderRadius: 20),
+              GuildIcon(guild: _guild, size: 64, borderRadius: 19),
               const SizedBox(width: 14),
               Expanded(
                 child: Column(
@@ -736,6 +799,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
                           : () => _asset('icon'),
                       style: OutlinedButton.styleFrom(
                         minimumSize: const Size(0, 38),
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
                         textStyle: const TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w600,
@@ -751,6 +815,7 @@ final class _OverviewTabState extends State<_OverviewTab> {
                           : () => _asset('banner'),
                       style: OutlinedButton.styleFrom(
                         minimumSize: const Size(0, 38),
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
                         textStyle: const TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w600,
@@ -764,51 +829,39 @@ final class _OverviewTabState extends State<_OverviewTab> {
               ),
             ]),
             const SizedBox(height: 18),
-            TextField(
-                controller: _name,
-                enabled: widget.canManage,
-                decoration: const InputDecoration(labelText: 'Guild name')),
-            const SizedBox(height: 12),
-            TextField(
-                controller: _description,
-                minLines: 3,
-                maxLines: 6,
-                maxLength: 500,
-                enabled: widget.canManage,
-                decoration: const InputDecoration(
-                  labelText: 'Description',
-                  alignLabelWithHint: true,
-                )),
-            const SizedBox(height: 8),
-            DropdownButtonFormField<String>(
-              key: ValueKey(
-                'guild-history-${_guild.ref.wire}-${_guild.version}-$_history',
-              ),
-              initialValue: _history,
-              decoration: const InputDecoration(
-                labelText: 'Federated message history',
-                helperText: 'Whether instances that join later may fetch older '
-                    'messages.',
-              ),
-              items: const [
-                DropdownMenuItem(
-                    value: 'disabled',
-                    child: Text('Disabled (recommended default)')),
-                DropdownMenuItem(
-                    value: 'full_retained',
-                    child: Text('Share permitted history')),
-              ],
-              onChanged: widget.canManage
-                  ? (value) => setState(() => _history = value ?? _history)
-                  : null,
+            SettingsField(
+              label: 'GUILD NAME',
+              controller: _name,
+              enabled: widget.canManage,
             ),
-            const SizedBox(height: 14),
-            Align(
-                alignment: Alignment.centerRight,
-                child: FilledButton.icon(
-                    onPressed: _busy || !widget.canManage ? null : _save,
-                    icon: const Icon(Icons.save_outlined),
-                    label: const Text('Save changes'))),
+            const SizedBox(height: 16),
+            SettingsField(
+              label: 'DESCRIPTION',
+              controller: _description,
+              maxLines: 4,
+              maxLength: 500,
+              enabled: widget.canManage,
+            ),
+            const SizedBox(height: 18),
+            SettingsChoiceRow(
+              title: 'Federated message history',
+              subtitle:
+                  'Whether instances that join later may fetch older messages.',
+              value: _history,
+              display: _history == 'full_retained'
+                  ? 'Share permitted history'
+                  : 'Disabled',
+              onSelected:
+                  widget.canManage ? (value) => _chooseHistory(value) : (_) {},
+            ),
+            const SizedBox(height: 18),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                  onPressed: _busy || !widget.canManage ? null : _save,
+                  icon: const Icon(Icons.save_outlined),
+                  label: const Text('Save changes')),
+            ),
           ]),
         ),
         _Panel(
@@ -816,17 +869,36 @@ final class _OverviewTabState extends State<_OverviewTab> {
           subtitle: 'What this guild is allowed to notify you about.',
           child: Column(children: [
             if (_notificationError case final warning?) ...[
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.warning_amber_rounded,
-                    color: KaedeColors.warning),
-                title: Text(warning),
-                trailing: TextButton(
-                  onPressed: _loadNotificationSettings,
-                  child: const Text('Retry'),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  color: KaedeColors.warning.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                      color: KaedeColors.warning.withValues(alpha: .4)),
+                ),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.warning_amber_rounded,
+                          size: 18, color: KaedeColors.warning),
+                      const SizedBox(width: 10),
+                      Expanded(
+                          child: Text(warning,
+                              style: const TextStyle(
+                                  color: KaedeColors.textSoft,
+                                  fontSize: 12.5,
+                                  height: 1.4))),
+                      TextButton(
+                        onPressed: _loadNotificationSettings,
+                        child: const Text('Retry'),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 10),
             ],
             SegmentedButton<String>(
               segments: const [
@@ -859,29 +931,38 @@ final class _OverviewTabState extends State<_OverviewTab> {
           title: 'Ownership',
           subtitle:
               'Remote instances keep untrusted replicas. Deletion and cache purges are best effort once data has federated.',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              OutlinedButton.icon(
-                  onPressed: widget.isOwner ? _transfer : null,
-                  icon: const Icon(Icons.swap_horiz_rounded, size: 18),
-                  label: const Text('Transfer ownership')),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                  onPressed: _leave,
-                  icon: const Icon(Icons.logout_rounded, size: 18),
-                  label: const Text('Leave guild')),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                  onPressed: widget.isOwner ? _delete : null,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: KaedeColors.danger,
-                    side: const BorderSide(color: KaedeColors.dangerSoft),
-                  ),
-                  icon: const Icon(Icons.delete_forever_outlined, size: 18),
-                  label: const Text('Delete guild')),
-            ],
-          ),
+          child: Column(children: [
+            SettingsRow.chevron(
+              title: 'Transfer ownership',
+              leading: const Padding(
+                padding: EdgeInsets.all(3),
+                child: Icon(Icons.swap_horiz_rounded,
+                    size: 20, color: KaedeColors.muted),
+              ),
+              divider: true,
+              onTap: widget.isOwner ? _transfer : null,
+            ),
+            SettingsRow.chevron(
+              title: 'Leave guild',
+              leading: const Padding(
+                padding: EdgeInsets.all(3),
+                child: Icon(Icons.logout_rounded,
+                    size: 20, color: KaedeColors.muted),
+              ),
+              divider: true,
+              onTap: _leave,
+            ),
+            SettingsRow(
+              danger: true,
+              title: 'Delete guild',
+              leading: const Padding(
+                padding: EdgeInsets.all(3),
+                child: Icon(Icons.delete_forever_outlined,
+                    size: 20, color: KaedeColors.danger),
+              ),
+              onTap: widget.isOwner ? _delete : null,
+            ),
+          ]),
         ),
       ]);
 
@@ -1044,13 +1125,14 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        backgroundColor: Colors.transparent,
+        backgroundColor: kSettingsSurface,
         body: ReorderableListView.builder(
           buildDefaultDragHandles: false,
           padding: const EdgeInsets.all(14),
           header: const _TabHint(
-            'Press and hold a row to reorder. Channels keep the category they '
-            'belong to.',
+            'Press and hold a row to reorder it. Use a row’s menu to move a '
+            'channel between categories, or the + on a category to create one '
+            'inside it.',
           ),
           itemCount: _channels.length,
           onReorder: widget.canManageChannels ? _reorder : (_, __) {},
@@ -1111,10 +1193,14 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                 ? _encryption(channel)
                 : action == 'delete'
                     ? _delete(channel)
-                    : _edit(channel),
+                    : action == 'move'
+                        ? _moveToCategory(channel)
+                        : _edit(channel),
         itemBuilder: (_) => [
           if (widget.canManageChannels)
             const PopupMenuItem(value: 'edit', child: Text('Edit channel')),
+          if (widget.canManageChannels && channel.type != ChannelType.category)
+            const PopupMenuItem(value: 'move', child: Text('Move to category')),
           if (widget.canManagePermissions)
             const PopupMenuItem(
                 value: 'permissions', child: Text('Permissions')),
@@ -1135,17 +1221,32 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                     style: TextStyle(color: KaedeColors.danger))),
         ],
       ),
-      if (widget.canManageChannels)
-        ReorderableDragStartListener(
-          index: index,
-          child: const Tooltip(
-            message: 'Drag to reorder',
-            child: SizedBox.square(
-              dimension: 44,
-              child: Icon(Icons.drag_handle_rounded, color: KaedeColors.muted),
+      if (widget.canManageChannels) ...[
+        if (channel.type == ChannelType.category)
+          Tooltip(
+            message: 'Add a channel to this category',
+            child: InkWell(
+              onTap: () => _createChannel(initialParent: channel.ref),
+              borderRadius: BorderRadius.circular(10),
+              child: const SizedBox.square(
+                dimension: 44,
+                child: Icon(Icons.add_rounded, color: KaedeColors.muted),
+              ),
+            ),
+          )
+        else
+          ReorderableDragStartListener(
+            index: index,
+            child: const Tooltip(
+              message: 'Drag to reorder',
+              child: SizedBox.square(
+                dimension: 44,
+                child:
+                    Icon(Icons.drag_handle_rounded, color: KaedeColors.muted),
+              ),
             ),
           ),
-        ),
+      ],
     ]);
   }
 
@@ -1175,10 +1276,106 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
     }
   }
 
-  Future<void> _create() async {
+  /// Discord's "Move to category": a radio-style choice sheet, reachable
+  /// from every non-category row's menu instead of digging through the
+  /// edit form.
+  Future<void> _moveToCategory(KaedeChannel channel) async {
+    final categories = [
+      for (final candidate in _channels)
+        if (candidate.type == ChannelType.category &&
+            candidate.ref != channel.ref)
+          candidate,
+    ]..sort((a, b) => a.position.compareTo(b.position));
+    final current = channel.parentRef?.wire ?? '';
+    final chosen = await showSettingsChoiceSheet(
+      context,
+      title: 'Move to category',
+      description: 'Choose where ${channel.name ?? 'the channel'} lives.',
+      selected: categories.any((category) => category.ref.wire == current)
+          ? current
+          : '',
+      choices: [
+        const SettingsChoice('', 'No category'),
+        for (final category in categories)
+          SettingsChoice(category.ref.wire, category.name ?? 'Category'),
+      ],
+    );
+    if (chosen == null) return;
+    final target = chosen.isEmpty
+        ? null
+        : categories.firstWhere((category) => category.ref.wire == chosen).ref;
+    if (target == channel.parentRef) return;
+    final previous = [..._channels];
+    final index = _channels.indexWhere((item) => item.ref == channel.ref);
+    if (index < 0) return;
+    final moved = _withParent(channel, target);
+    final next = [..._channels]..[index] = moved;
+    try {
+      // The batch reorder endpoint is the channel of record for parents, so
+      // it persists the full ordering — including the new parent — atomically.
+      await widget.repository.reorderChannels(
+        widget.guild.ref,
+        guildChannelPositionRequest(next),
+      );
+      if (!mounted) return;
+      setState(() => _channels = next);
+      final refreshed = await widget.changed('Channel moved');
+      if (mounted) _reconcileChannels(refreshed, preserve: moved);
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() => _channels = previous);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(userFacingError(
+          error,
+          summary: 'Could not move the channel',
+        )),
+        backgroundColor: KaedeColors.danger,
+      ));
+    }
+  }
+
+  KaedeChannel _withParent(KaedeChannel channel, EntityRef? parent) =>
+      KaedeChannel(
+        ref: channel.ref,
+        type: channel.type,
+        position: channel.position,
+        permissions: channel.permissions,
+        guildRef: channel.guildRef,
+        name: channel.name,
+        topic: channel.topic,
+        parentRef: parent,
+        lastMessageRef: channel.lastMessageRef,
+        recipients: channel.recipients,
+        conversationType: channel.conversationType,
+        ownerRef: channel.ownerRef,
+        slowModeSeconds: channel.slowModeSeconds,
+        permissionsSynced: channel.permissionsSynced,
+        historyTruncated: channel.historyTruncated,
+        historyRetention: channel.historyRetention,
+        historyRemoteAvailable: channel.historyRemoteAvailable,
+        oldestAvailableMessageRef: channel.oldestAvailableMessageRef,
+        historyDegradedCode: channel.historyDegradedCode,
+        encryptionMode: channel.encryptionMode,
+        encryptionState: channel.encryptionState,
+        encryptionPolicyGeneration: channel.encryptionPolicyGeneration,
+        encryptionProtocol: channel.encryptionProtocol,
+        encryptionSuite: channel.encryptionSuite,
+        encryptionGroupId: channel.encryptionGroupId,
+        encryptionEpoch: channel.encryptionEpoch,
+        encryptionActivatedAt: channel.encryptionActivatedAt,
+        searchAvailable: channel.searchAvailable,
+        version: channel.version,
+      );
+
+  Future<void> _create() => _createChannel();
+
+  /// Opens the creation editor, optionally pinned to [initialParent] so a
+  /// new channel lands inside a category — the per-category "+" flow.
+  Future<void> _createChannel({EntityRef? initialParent}) async {
     final value = await showGuildChannelEditorSheet(
       context,
       channels: _channels,
+      initialParent: initialParent,
     );
     if (value == null) return;
     try {
@@ -1450,7 +1647,7 @@ final class _RolesTabState extends State<_RolesTab> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        backgroundColor: Colors.transparent,
+        backgroundColor: kSettingsSurface,
         body: ReorderableListView.builder(
           buildDefaultDragHandles: false,
           padding: const EdgeInsets.all(14),
@@ -1770,90 +1967,114 @@ final class _MembersTabState extends State<_MembersTab> {
   }
 
   @override
-  Widget build(BuildContext context) => Column(children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
-          child: TextField(
-            controller: _search,
-            textInputAction: TextInputAction.search,
-            decoration: InputDecoration(
-              hintText: 'Search members',
-              prefixIcon: const Icon(Icons.search_rounded, size: 19),
-              suffixIcon: _search.text.isEmpty
-                  ? null
-                  : IconButton(
-                      tooltip: 'Clear search',
-                      onPressed: () {
-                        _search.clear();
-                        _load(reset: true);
-                      },
-                      icon: const Icon(Icons.close_rounded, size: 18),
-                    ),
-              isDense: true,
+  Widget build(BuildContext context) => ColoredBox(
+        color: kSettingsSurface,
+        child: Column(children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+            child: TextField(
+              controller: _search,
+              textInputAction: TextInputAction.search,
+              onChanged: (_) => setState(() {}),
+              onSubmitted: (_) => _load(reset: true),
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: 'Search members',
+                hintStyle:
+                    const TextStyle(color: KaedeColors.muted, fontSize: 13.5),
+                prefixIcon: const Icon(Icons.search_rounded,
+                    size: 18, color: KaedeColors.muted),
+                suffixIcon: _search.text.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: 'Clear search',
+                        onPressed: () {
+                          _search.clear();
+                          _load(reset: true);
+                        },
+                        icon: const Icon(Icons.close_rounded, size: 18),
+                      ),
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                filled: true,
+                fillColor: KaedeColors.canvas,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: KaedeColors.border),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: KaedeColors.border),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide:
+                      const BorderSide(color: KaedeColors.coral, width: 1.4),
+                ),
+              ),
             ),
-            onChanged: (_) => setState(() {}),
-            onSubmitted: (_) => _load(reset: true),
           ),
-        ),
-        Expanded(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : RefreshIndicator(
-                    onRefresh: () => _load(reset: true),
-                    child: ListView.builder(
-                      controller: _scroll,
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      itemCount: _members.length + (_loadingMore ? 1 : 0),
-                      itemBuilder: (_, index) {
-                        if (index == _members.length) {
-                          return const Padding(
-                            padding: EdgeInsets.all(20),
-                            child: Center(child: CircularProgressIndicator()),
+          Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : RefreshIndicator(
+                      onRefresh: () => _load(reset: true),
+                      child: ListView.builder(
+                        controller: _scroll,
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        itemCount: _members.length + (_loadingMore ? 1 : 0),
+                        itemBuilder: (_, index) {
+                          if (index == _members.length) {
+                            return const Padding(
+                              padding: EdgeInsets.all(20),
+                              child: Center(child: CircularProgressIndicator()),
+                            );
+                          }
+                          final member = overlayGuildMemberProfile(
+                            _members[index],
+                            widget.userProfiles,
                           );
-                        }
-                        final member = overlayGuildMemberProfile(
-                          _members[index],
-                          widget.userProfiles,
-                        );
-                        final actions = _actionsFor(member);
-                        final roleCount = member.roleIds.length;
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 14),
-                          child: _ManagementRow(
-                            leading: UserAvatar(user: member.user, radius: 15),
-                            title: member.nickname ?? member.user.name,
-                            subtitle: member.user.profileResolved
-                                ? <String>[
-                                    member.user.handle,
-                                    if (roleCount > 0)
-                                      '$roleCount role'
-                                          '${roleCount == 1 ? '' : 's'}',
-                                    if (member.timeoutUntil != null)
-                                      'timed out',
-                                  ].join(' · ')
-                                : 'Profile unavailable · refreshes '
-                                    'automatically',
-                            badge: member.user.ref == widget.guild.ownerRef
-                                ? const Icon(Icons.workspace_premium_rounded,
-                                    size: 13, color: KaedeColors.warning)
-                                : null,
-                            trailing: actions.isEmpty
-                                ? null
-                                : PopupMenuButton<String>(
-                                    tooltip: 'Member actions',
-                                    position: PopupMenuPosition.under,
-                                    onSelected: (value) =>
-                                        _action(member, value),
-                                    itemBuilder: (_) => actions,
-                                  ),
-                            onTap: _canAssignRoles(member)
-                                ? () => _action(member, 'roles')
-                                : null,
-                          ),
-                        );
-                      },
-                    ))),
-      ]);
+                          final actions = _actionsFor(member);
+                          final roleCount = member.roleIds.length;
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 14),
+                            child: _ManagementRow(
+                              leading:
+                                  UserAvatar(user: member.user, radius: 15),
+                              title: member.nickname ?? member.user.name,
+                              subtitle: member.user.profileResolved
+                                  ? <String>[
+                                      member.user.handle,
+                                      if (roleCount > 0)
+                                        '$roleCount role'
+                                            '${roleCount == 1 ? '' : 's'}',
+                                      if (member.timeoutUntil != null)
+                                        'timed out',
+                                    ].join(' · ')
+                                  : 'Profile unavailable · refreshes '
+                                      'automatically',
+                              badge: member.user.ref == widget.guild.ownerRef
+                                  ? const Icon(Icons.workspace_premium_rounded,
+                                      size: 13, color: KaedeColors.warning)
+                                  : null,
+                              trailing: actions.isEmpty
+                                  ? null
+                                  : PopupMenuButton<String>(
+                                      tooltip: 'Member actions',
+                                      position: PopupMenuPosition.under,
+                                      onSelected: (value) =>
+                                          _action(member, value),
+                                      itemBuilder: (_) => actions,
+                                    ),
+                              onTap: _canAssignRoles(member)
+                                  ? () => _action(member, 'roles')
+                                  : null,
+                            ),
+                          );
+                        },
+                      ))),
+        ]),
+      );
 
   List<PopupMenuEntry<String>> _actionsFor(GuildMember member) {
     final owner = widget.guild.ownerRef == widget.actorRef;
@@ -2059,17 +2280,37 @@ final class _BansTabState extends State<_BansTab> {
               title: 'Member bans',
               child: Column(children: [
                 if (!widget.canBanMembers)
-                  const ListTile(
-                    leading: Icon(Icons.lock_outline_rounded),
-                    title: Text('You cannot manage member bans'),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8),
+                    child: Row(
+                      children: [
+                        Icon(Icons.lock_outline_rounded,
+                            size: 19, color: KaedeColors.muted),
+                        SizedBox(width: 11),
+                        Text('You cannot manage member bans',
+                            style: TextStyle(
+                                color: KaedeColors.muted, fontSize: 13.5)),
+                      ],
+                    ),
                   ),
                 if (_bans.isEmpty)
                   if (widget.canBanMembers)
-                    const ListTile(title: Text('No banned members')),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: Text('No banned members',
+                          style: TextStyle(
+                              color: KaedeColors.muted, fontSize: 13.5)),
+                    ),
                 for (final ban in _bans)
-                  ListTile(
-                      title: Text(_mapName(ban)),
-                      subtitle: Text('${ban['reason'] ?? 'No reason'}'),
+                  SettingsRow(
+                      title: _mapName(ban),
+                      subtitle: '${ban['reason'] ?? 'No reason'}',
+                      leading: const Padding(
+                        padding: EdgeInsets.all(3),
+                        child: Icon(Icons.person_outline_rounded,
+                            size: 20, color: KaedeColors.muted),
+                      ),
+                      divider: true,
                       trailing: TextButton(
                           onPressed: widget.canBanMembers
                               ? () async {
@@ -2086,6 +2327,11 @@ final class _BansTabState extends State<_BansTab> {
                                   }
                                 }
                               : null,
+                          style: TextButton.styleFrom(
+                            foregroundColor: KaedeColors.danger,
+                            minimumSize: const Size(0, 34),
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                          ),
                           child: const Text('Unban'))),
               ])),
           _Panel(
@@ -2093,15 +2339,28 @@ final class _BansTabState extends State<_BansTab> {
               subtitle:
                   'This prevents every account hosted by that domain from joining. It may exclude innocent users and does not erase copies already held by a malicious peer.',
               child: Column(children: [
-                FilledButton.tonalIcon(
-                    onPressed: widget.canBanInstances ? _addInstance : null,
-                    icon: const Icon(Icons.public_off_rounded),
-                    label: const Text('Ban an instance')),
+                SettingsRow.chevron(
+                    title: 'Ban an instance',
+                    leading: const Padding(
+                      padding: EdgeInsets.all(3),
+                      child: Icon(Icons.public_off_rounded,
+                          size: 20, color: KaedeColors.muted),
+                    ),
+                    divider: true,
+                    onTap: widget.canBanInstances ? _addInstance : null),
                 for (final ban in _instances)
                   if (guildInstanceBanDomain(ban) case final domain?)
-                    ListTile(
-                        title: Text(domain.value),
-                        subtitle: Text('${ban['reason'] ?? ''}'),
+                    SettingsRow(
+                        title: domain.value,
+                        subtitle: '${ban['reason'] ?? 'No reason'}'.isEmpty
+                            ? 'Every account on this domain is blocked.'
+                            : '${ban['reason'] ?? ''}',
+                        leading: const Padding(
+                          padding: EdgeInsets.all(3),
+                          child: Icon(Icons.public_rounded,
+                              size: 20, color: KaedeColors.muted),
+                        ),
+                        divider: true,
                         trailing: TextButton(
                             onPressed: widget.canBanInstances
                                 ? () async {
@@ -2119,13 +2378,30 @@ final class _BansTabState extends State<_BansTab> {
                                     }
                                   }
                                 : null,
+                            style: TextButton.styleFrom(
+                              foregroundColor: KaedeColors.danger,
+                              minimumSize: const Size(0, 34),
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 10),
+                            ),
                             child: const Text('Remove')))
                   else
-                    const ListTile(
-                      leading: Icon(Icons.warning_amber_rounded),
-                      title: Text('Invalid instance-ban record'),
-                      subtitle:
-                          Text('Refresh or contact the instance operator.'),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: Row(
+                        children: [
+                          Icon(Icons.warning_amber_rounded,
+                              size: 19, color: KaedeColors.warning),
+                          SizedBox(width: 11),
+                          Expanded(
+                            child: Text(
+                              'Invalid instance-ban record. Refresh or contact the instance operator.',
+                              style: TextStyle(
+                                  color: KaedeColors.muted, fontSize: 13.5),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
               ])),
         ]);
@@ -2208,7 +2484,7 @@ final class _InvitesTabState extends State<_InvitesTab> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-      backgroundColor: Colors.transparent,
+      backgroundColor: kSettingsSurface,
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
@@ -2381,7 +2657,7 @@ final class _EmojiTabState extends State<_EmojiTab> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-      backgroundColor: Colors.transparent,
+      backgroundColor: kSettingsSurface,
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
@@ -2524,66 +2800,73 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-      backgroundColor: Colors.transparent,
+      backgroundColor: kSettingsSurface,
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(padding: const EdgeInsets.all(14), children: [
-              const Text(
+              const _TabHint(
                   'Webhook tokens are secrets. A rotated token is shown only once.'),
-              const SizedBox(height: 12),
               if (!widget.canManage)
-                const ListTile(
-                  leading: Icon(Icons.lock_outline_rounded),
-                  title: Text('Manage Webhooks is required'),
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: Row(
+                    children: [
+                      Icon(Icons.lock_outline_rounded,
+                          size: 19, color: KaedeColors.muted),
+                      SizedBox(width: 11),
+                      Text('Manage Webhooks is required',
+                          style: TextStyle(
+                              color: KaedeColors.muted, fontSize: 13.5)),
+                    ],
+                  ),
                 ),
               for (final item in _items)
-                Card(
-                    child: ListTile(
-                        leading: const Icon(Icons.webhook_rounded),
-                        title: Text('${item['name'] ?? 'Webhook'}'),
-                        subtitle: Text('${item['channel_id']}'),
-                        trailing: PopupMenuButton<String>(
-                            enabled: widget.canManage,
-                            onSelected: (value) async {
-                              try {
-                                if (value == 'rotate') {
-                                  final rotated = await widget.repository
-                                      .rotateWebhook('${item['id']}');
-                                  if (context.mounted) {
-                                    await showDialog<void>(
-                                        context: context,
-                                        builder: (dialogContext) => AlertDialog(
-                                                title: const Text(
-                                                    'New webhook token'),
-                                                content: SelectableText(
-                                                    '${rotated['token']}'),
-                                                actions: [
-                                                  TextButton(
-                                                      onPressed: () =>
-                                                          Navigator.pop(
-                                                              dialogContext),
-                                                      child: const Text('Done'))
-                                                ]));
-                                  }
-                                } else {
-                                  await widget.repository
-                                      .deleteWebhook('${item['id']}');
-                                }
-                                await _load();
-                              } on Object catch (error) {
-                                if (mounted) {
-                                  _tabError(this.context,
-                                      'Could not update webhook', error);
-                                }
+                _ManagementRow(
+                    leading: const Icon(Icons.webhook_rounded,
+                        size: 20, color: KaedeColors.muted),
+                    title: '${item['name'] ?? 'Webhook'}',
+                    subtitle: '${item['channel_id']}',
+                    trailing: PopupMenuButton<String>(
+                        enabled: widget.canManage,
+                        onSelected: (value) async {
+                          try {
+                            if (value == 'rotate') {
+                              final rotated = await widget.repository
+                                  .rotateWebhook('${item['id']}');
+                              if (context.mounted) {
+                                await showDialog<void>(
+                                    context: context,
+                                    builder: (dialogContext) => AlertDialog(
+                                            title:
+                                                const Text('New webhook token'),
+                                            content: SelectableText(
+                                                '${rotated['token']}'),
+                                            actions: [
+                                              TextButton(
+                                                  onPressed: () =>
+                                                      Navigator.pop(
+                                                          dialogContext),
+                                                  child: const Text('Done'))
+                                            ]));
                               }
-                            },
-                            itemBuilder: (_) => const [
-                                  PopupMenuItem(
-                                      value: 'rotate',
-                                      child: Text('Rotate token')),
-                                  PopupMenuItem(
-                                      value: 'delete', child: Text('Delete'))
-                                ]))),
+                            } else {
+                              await widget.repository
+                                  .deleteWebhook('${item['id']}');
+                            }
+                            await _load();
+                          } on Object catch (error) {
+                            if (mounted) {
+                              _tabError(this.context,
+                                  'Could not update webhook', error);
+                            }
+                          }
+                        },
+                        itemBuilder: (_) => const [
+                              PopupMenuItem(
+                                  value: 'rotate', child: Text('Rotate token')),
+                              PopupMenuItem(
+                                  value: 'delete', child: Text('Delete'))
+                            ])),
             ]),
       floatingActionButton: FloatingActionButton.extended(
           onPressed: widget.canManage ? _create : null,
@@ -2637,17 +2920,26 @@ final class _AuditTab extends StatefulWidget {
     required this.guild,
     required this.repository,
     required this.canView,
+    required this.userProfiles,
   });
   final KaedeGuild guild;
   final KaedeRepository repository;
   final bool canView;
+  final Map<EntityRef, KaedeUser> userProfiles;
   @override
   State<_AuditTab> createState() => _AuditTabState();
 }
 
 final class _AuditTabState extends State<_AuditTab> {
   List<Map<String, Object?>> _items = const [];
+  List<GuildMember> _members = const [];
   var _loading = true;
+  var _loadingOlder = false;
+  var _hasMore = false;
+  String? _error;
+  String? _actorFilter;
+  String? _actionFilter;
+
   @override
   void initState() {
     super.initState();
@@ -2660,53 +2952,539 @@ final class _AuditTabState extends State<_AuditTab> {
     if (oldWidget.guild.ref != widget.guild.ref ||
         oldWidget.guild.version != widget.guild.version ||
         oldWidget.canView != widget.canView) {
-      setState(() => _loading = true);
+      setState(() {
+        _loading = true;
+        _actorFilter = null;
+        _actionFilter = null;
+      });
       unawaited(_load());
     }
   }
 
-  Future<void> _load() async {
+  Future<void> _load({bool refresh = false}) async {
+    if (!widget.canView) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+    if (refresh && mounted) setState(() => _error = null);
     try {
-      final items = widget.canView
-          ? await widget.repository.auditLog(widget.guild.ref)
-          : const <Map<String, Object?>>[];
+      final items = await widget.repository.auditLog(widget.guild.ref);
+      var members = _members;
+      try {
+        members = await widget.repository.members(widget.guild.ref);
+      } on Object {
+        // Actor IDs and targets still render if roster resolution is denied.
+      }
       if (mounted) {
         setState(() {
           _items = items;
+          _members = members;
+          _hasMore = items.length == 50;
           _loading = false;
+          _error = null;
         });
       }
     } on Object catch (error) {
       if (!mounted) return;
-      _tabError(context, 'Could not load audit log', error);
-      setState(() => _loading = false);
+      setState(() {
+        _error = userFacingError(
+          error,
+          summary: 'Could not load the audit log',
+        );
+        _loading = false;
+      });
     }
   }
 
+  Future<void> _loadOlder() async {
+    if (_loadingOlder || !_hasMore || _items.isEmpty) return;
+    setState(() => _loadingOlder = true);
+    try {
+      final older = await widget.repository.auditLog(
+        widget.guild.ref,
+        before: '${_items.last['id']}',
+      );
+      if (!mounted) return;
+      setState(() {
+        final known = _items.map((item) => '${item['id']}').toSet();
+        _items = [
+          ..._items,
+          ...older.where((item) => !known.contains('${item['id']}')),
+        ];
+        _hasMore = older.length == 50;
+        _loadingOlder = false;
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      _tabError(context, 'Could not load older audit events', error);
+      setState(() => _loadingOlder = false);
+    }
+  }
+
+  Map<EntityRef, KaedeUser> get _users => <EntityRef, KaedeUser>{
+        ...widget.userProfiles,
+        for (final member in _members) member.user.ref: member.user,
+      };
+
+  List<Map<String, Object?>> get _visibleItems => _items.where((item) {
+        final actorMatches = _actorFilter == null ||
+            guildAuditActorKey(item, widget.guild.ref.domain) == _actorFilter;
+        final actionMatches = _actionFilter == null ||
+            guildAuditActionFilterKey(item) == _actionFilter;
+        return actorMatches && actionMatches;
+      }).toList();
+
+  void _clearFilters() => setState(() {
+        _actorFilter = null;
+        _actionFilter = null;
+      });
+
   @override
   Widget build(BuildContext context) => !widget.canView
-      ? const Center(
-          child: ListTile(
-            leading: Icon(Icons.lock_outline_rounded),
-            title: Text('View Audit Log is required'),
+      ? const ColoredBox(
+          color: kSettingsSurface,
+          child: Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.lock_outline_rounded,
+                    size: 19, color: KaedeColors.muted),
+                SizedBox(width: 11),
+                Text('View Audit Log is required',
+                    style: TextStyle(color: KaedeColors.muted, fontSize: 13.5)),
+              ],
+            ),
           ),
         )
       : _loading
           ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: _load,
-              child: ListView.builder(
-                  padding: const EdgeInsets.all(14),
-                  itemCount: _items.length,
-                  itemBuilder: (_, index) {
-                    final item = _items[index];
-                    return ListTile(
-                        leading: const Icon(Icons.history_rounded),
-                        title: Text(guildAuditActionLabel(item)),
-                        subtitle: Text(
-                            '${item['reason'] ?? 'No reason'}\n${item['created_at'] ?? ''}'),
-                        isThreeLine: true);
-                  }));
+          : ColoredBox(
+              color: kSettingsSurface,
+              child: _error != null && _items.isEmpty
+                  ? _AuditErrorState(message: _error!, retry: _load)
+                  : RefreshIndicator(
+                      onRefresh: () => _load(refresh: true),
+                      child: _buildList(),
+                    ),
+            );
+
+  Widget _buildList() {
+    final users = _users;
+    final visible = _visibleItems;
+    final actorKeys = _items
+        .map((item) => guildAuditActorKey(item, widget.guild.ref.domain))
+        .whereType<String>()
+        .toSet()
+        .toList()
+      ..sort((left, right) => guildAuditActorNameFromKey(left, users)
+          .compareTo(guildAuditActorNameFromKey(right, users)));
+    final actions = <String, String>{
+      for (final item in _items)
+        guildAuditActionFilterKey(item): guildAuditActionLabel(item),
+    };
+    final actionKeys = actions.keys.toList()
+      ..sort((left, right) => actions[left]!.compareTo(actions[right]!));
+
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 32),
+      children: [
+        const SettingsSectionHeader(
+          'Audit log',
+          top: 0,
+          subheading:
+              'Review moderation and configuration changes made in this guild.',
+        ),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              _AuditFilterButton<String>(
+                icon: Icons.person_outline_rounded,
+                label: _actorFilter == null
+                    ? 'All members'
+                    : guildAuditActorNameFromKey(_actorFilter!, users),
+                value: _actorFilter,
+                allLabel: 'All members',
+                values: actorKeys,
+                itemLabel: (value) => guildAuditActorNameFromKey(value, users),
+                changed: (value) => setState(() => _actorFilter = value),
+              ),
+              const SizedBox(width: 8),
+              _AuditFilterButton<String>(
+                icon: Icons.tune_rounded,
+                label: _actionFilter == null
+                    ? 'All actions'
+                    : actions[_actionFilter] ?? 'All actions',
+                value: _actionFilter,
+                allLabel: 'All actions',
+                values: actionKeys,
+                itemLabel: (value) => actions[value]!,
+                changed: (value) => setState(() => _actionFilter = value),
+              ),
+              if (_actorFilter != null || _actionFilter != null) ...[
+                const SizedBox(width: 4),
+                TextButton(
+                  onPressed: _clearFilters,
+                  child: const Text('Clear'),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        if (_items.isEmpty)
+          const _AuditEmptyState(
+            title: 'No audit events yet',
+            message: 'Administrative actions will show up here.',
+          )
+        else if (visible.isEmpty)
+          _AuditEmptyState(
+            title: 'No matching events',
+            message: 'Try another member or action filter.',
+            action: TextButton(
+              onPressed: _clearFilters,
+              child: const Text('Clear filters'),
+            ),
+          )
+        else
+          for (final item in visible)
+            _AuditEventCard(
+              item: item,
+              guild: widget.guild,
+              users: users,
+            ),
+        if (_hasMore && visible.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Center(
+            child: OutlinedButton.icon(
+              onPressed: _loadingOlder ? null : _loadOlder,
+              icon: _loadingOlder
+                  ? const SizedBox.square(
+                      dimension: 15,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.expand_more_rounded),
+              label: Text(_loadingOlder ? 'Loading…' : 'Load older events'),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+final class _AuditFilterButton<T> extends StatelessWidget {
+  const _AuditFilterButton({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.allLabel,
+    required this.values,
+    required this.itemLabel,
+    required this.changed,
+  });
+
+  final IconData icon;
+  final String label;
+  final T? value;
+  final String allLabel;
+  final List<T> values;
+  final String Function(T value) itemLabel;
+  final ValueChanged<T?> changed;
+
+  @override
+  Widget build(BuildContext context) => PopupMenuButton<T>(
+        initialValue: value,
+        onSelected: (value) => changed(value),
+        itemBuilder: (context) => [
+          PopupMenuItem<T>(onTap: () => changed(null), child: Text(allLabel)),
+          for (final item in values)
+            PopupMenuItem<T>(value: item, child: Text(itemLabel(item))),
+        ],
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 210),
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+          decoration: BoxDecoration(
+            color: KaedeColors.raised,
+            borderRadius: BorderRadius.circular(KaedeRadius.small),
+            border: Border.all(color: KaedeColors.border),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 16, color: KaedeColors.textSoft),
+              const SizedBox(width: 7),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: KaedeColors.textSoft,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              const Icon(Icons.arrow_drop_down_rounded,
+                  size: 18, color: KaedeColors.muted),
+            ],
+          ),
+        ),
+      );
+}
+
+final class _AuditEventCard extends StatelessWidget {
+  const _AuditEventCard({
+    required this.item,
+    required this.guild,
+    required this.users,
+  });
+
+  final Map<String, Object?> item;
+  final KaedeGuild guild;
+  final Map<EntityRef, KaedeUser> users;
+
+  @override
+  Widget build(BuildContext context) {
+    final actorRef = guildAuditActorRef(item, guild.ref.domain);
+    final actor = actorRef == null ? null : users[actorRef];
+    final actorName =
+        actor?.name ?? guildAuditActorName(item, users, guild.ref.domain);
+    final target = guildAuditTargetName(item, guild, users);
+    final summary =
+        guildAuditSummary(item, actorName: actorName, targetName: target);
+    final createdAt =
+        DateTime.tryParse('${item['created_at'] ?? ''}')?.toLocal();
+    final changes = guildAuditChanges(item);
+    final reason = '${item['reason'] ?? ''}'.trim();
+    final metadata = <String>[
+      if (createdAt != null) guildAuditRelativeTime(createdAt),
+      guildAuditActionLabel(item),
+    ].join(' • ');
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: KaedeColors.panel,
+        borderRadius: BorderRadius.circular(KaedeRadius.medium),
+        clipBehavior: Clip.antiAlias,
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+          childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+          shape: const Border(),
+          collapsedShape: const Border(),
+          leading: actor == null
+              ? CircleAvatar(
+                  radius: 18,
+                  backgroundColor: guildAuditActionColor(item),
+                  child: Icon(guildAuditActionIcon(item),
+                      size: 18, color: KaedeColors.text),
+                )
+              : UserAvatar(user: actor, radius: 18),
+          title: Text(
+            summary,
+            style: const TextStyle(
+              fontSize: 14,
+              height: 1.3,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          subtitle: Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: Text(
+              metadata,
+              style: const TextStyle(
+                color: KaedeColors.muted,
+                fontSize: 11.5,
+              ),
+            ),
+          ),
+          children: [
+            const Divider(height: 1),
+            const SizedBox(height: 12),
+            if (reason.isNotEmpty) ...[
+              _AuditDetailLabel(label: 'Reason', value: reason),
+              const SizedBox(height: 10),
+            ],
+            _AuditDetailLabel(
+              label: 'Target',
+              value: guildAuditTargetDetail(item, guild, users),
+            ),
+            if (createdAt != null) ...[
+              const SizedBox(height: 10),
+              _AuditDetailLabel(
+                label: 'When',
+                value: DateFormat('MMM d, y • h:mm:ss a').format(createdAt),
+              ),
+            ],
+            if (reason.isEmpty) ...[
+              const SizedBox(height: 10),
+              const _AuditDetailLabel(
+                  label: 'Reason', value: 'No reason provided'),
+            ],
+            if (changes.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'CHANGES',
+                  style: TextStyle(
+                    color: KaedeColors.muted,
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 7),
+              for (final change in changes) _AuditChangeRow(change: change),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _AuditDetailLabel extends StatelessWidget {
+  const _AuditDetailLabel({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Align(
+        alignment: Alignment.centerLeft,
+        child: Text.rich(
+          TextSpan(
+            style: const TextStyle(
+              color: KaedeColors.textSoft,
+              fontSize: 12.5,
+              height: 1.4,
+            ),
+            children: [
+              TextSpan(
+                text: '$label  ',
+                style: const TextStyle(
+                  color: KaedeColors.muted,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              TextSpan(text: value),
+            ],
+          ),
+        ),
+      );
+}
+
+final class _AuditChangeRow extends StatelessWidget {
+  const _AuditChangeRow({required this.change});
+
+  final Map<String, Object?> change;
+
+  @override
+  Widget build(BuildContext context) {
+    final key = guildAuditFieldLabel('${change['key'] ?? 'value'}');
+    final value = guildAuditChangeDescription(change);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 5),
+            child: Icon(Icons.circle, size: 5, color: KaedeColors.coralText),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text.rich(
+              TextSpan(
+                style: const TextStyle(
+                  color: KaedeColors.textSoft,
+                  fontSize: 12,
+                  height: 1.4,
+                ),
+                children: [
+                  TextSpan(
+                    text: '$key: ',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  TextSpan(text: value),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _AuditEmptyState extends StatelessWidget {
+  const _AuditEmptyState({
+    required this.title,
+    required this.message,
+    this.action,
+  });
+
+  final String title;
+  final String message;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 52, horizontal: 20),
+        child: Column(
+          children: [
+            const Icon(Icons.manage_search_rounded,
+                size: 42, color: KaedeColors.muted),
+            const SizedBox(height: 12),
+            Text(title,
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 5),
+            Text(message,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: KaedeColors.muted, fontSize: 13)),
+            if (action case final button?) ...[
+              const SizedBox(height: 8),
+              button,
+            ],
+          ],
+        ),
+      );
+}
+
+final class _AuditErrorState extends StatelessWidget {
+  const _AuditErrorState({required this.message, required this.retry});
+
+  final String message;
+  final Future<void> Function() retry;
+
+  @override
+  Widget build(BuildContext context) => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.error_outline_rounded,
+                  size: 38, color: KaedeColors.danger),
+              const SizedBox(height: 10),
+              Text(message, textAlign: TextAlign.center),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: retry,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Try again'),
+              ),
+            ],
+          ),
+        ),
+      );
 }
 
 final class _PermissionScreen extends StatefulWidget {
@@ -3326,8 +4104,333 @@ Domain? guildInstanceBanDomain(Map<String, Object?> item) {
 }
 
 String guildAuditActionLabel(Map<String, Object?> item) {
-  final value = '${item['action_type'] ?? ''}'.trim();
-  return value.isEmpty ? 'Guild action' : value;
+  final code = guildAuditActionCode(item);
+  final targetType = '${item['target_type'] ?? ''}';
+  return switch (code) {
+    1 => 'Guild updated',
+    10 => 'Channel created',
+    11 => targetType == 'channel_order'
+        ? 'Channel order updated'
+        : 'Channel updated',
+    12 => 'Channel deleted',
+    15 => 'Channel permissions updated',
+    16 => 'Channel permissions removed',
+    17 => 'Channel permissions synced',
+    20 => 'Member kicked',
+    22 => 'Member banned',
+    23 => 'Member unbanned',
+    24 => 'Member updated',
+    25 => targetType == 'instance' ? 'Instance banned' : 'Member roles updated',
+    26 => targetType == 'instance' ? 'Instance unbanned' : 'Member moved',
+    27 =>
+      targetType == 'user' ? 'Ownership transferred' : 'Member disconnected',
+    30 => 'Role created',
+    31 => 'Role updated',
+    32 => 'Role deleted',
+    33 => 'Roles reordered',
+    40 => 'Invite created',
+    42 => 'Invite deleted',
+    50 => 'Webhook created',
+    51 => 'Webhook updated',
+    52 => 'Webhook deleted',
+    60 => 'Emoji created',
+    61 => 'Emoji updated',
+    62 => 'Emoji deleted',
+    final value? => 'Unknown action ($value)',
+    null => _humanizeAuditAction('${item['action_type'] ?? ''}'),
+  };
+}
+
+int? guildAuditActionCode(Map<String, Object?> item) {
+  final value = item['action_type'];
+  return value is num ? value.toInt() : int.tryParse('$value');
+}
+
+String guildAuditActionFilterKey(Map<String, Object?> item) =>
+    '${item['action_type'] ?? 'unknown'}|${item['target_type'] ?? ''}';
+
+String _humanizeAuditAction(String value) {
+  final normalized = value.trim();
+  if (normalized.isEmpty) return 'Guild action';
+  const known = <String, String>{
+    'guild.update': 'Guild updated',
+    'guild.channel.create': 'Channel created',
+    'guild.channel.update': 'Channel updated',
+    'guild.channel.delete': 'Channel deleted',
+    'guild.role.create': 'Role created',
+    'guild.role.update': 'Role updated',
+    'guild.role.delete': 'Role deleted',
+    'guild.member.update': 'Member updated',
+    'guild.member.kick': 'Member kicked',
+    'guild.member.ban': 'Member banned',
+    'guild.member.unban': 'Member unbanned',
+    'guild.invite.create': 'Invite created',
+    'guild.invite.delete': 'Invite deleted',
+  };
+  if (known[normalized] case final label?) return label;
+  final words = normalized
+      .split(RegExp(r'[._\-\s]+'))
+      .where((part) => part.isNotEmpty)
+      .toList();
+  if (words.isEmpty) return 'Guild action';
+  final useful = words.first == 'guild' ? words.skip(1).toList() : words;
+  final label = useful.join(' ');
+  return '${label[0].toUpperCase()}${label.substring(1)}';
+}
+
+EntityRef? guildAuditActorRef(
+  Map<String, Object?> item,
+  Domain defaultDomain,
+) {
+  final id = '${item['actor_id'] ?? ''}'.trim();
+  final domain = '${item['actor_domain'] ?? defaultDomain.value}'.trim();
+  if (id.isEmpty || domain.isEmpty) return null;
+  try {
+    return EntityRef(Snowflake(id), Domain(domain));
+  } on FormatException {
+    return null;
+  }
+}
+
+String? guildAuditActorKey(
+  Map<String, Object?> item,
+  Domain defaultDomain,
+) =>
+    guildAuditActorRef(item, defaultDomain)?.wire;
+
+String guildAuditActorName(
+  Map<String, Object?> item,
+  Map<EntityRef, KaedeUser> users,
+  Domain defaultDomain,
+) {
+  final ref = guildAuditActorRef(item, defaultDomain);
+  if (ref == null) return 'Unknown moderator';
+  return users[ref]?.name ?? '@${ref.id.value}';
+}
+
+String guildAuditActorNameFromKey(
+  String key,
+  Map<EntityRef, KaedeUser> users,
+) {
+  try {
+    final ref = EntityRef.parse(key);
+    return users[ref]?.name ?? '@${ref.id.value}';
+  } on FormatException {
+    return 'Unknown moderator';
+  }
+}
+
+Map<String, Object?> _guildAuditTarget(Map<String, Object?> item) {
+  final value = item['target_ref'];
+  if (value is! Map) return const <String, Object?>{};
+  return value.map((key, value) => MapEntry('$key', value));
+}
+
+EntityRef? _guildAuditTargetRef(
+  Map<String, Object?> item,
+  Domain defaultDomain,
+) {
+  final target = _guildAuditTarget(item);
+  final id = '${target['id'] ?? ''}'.trim();
+  final domain =
+      '${target['origin_domain'] ?? target['domain'] ?? defaultDomain.value}'
+          .trim();
+  if (id.isEmpty || domain.isEmpty) return null;
+  try {
+    return EntityRef(Snowflake(id), Domain(domain));
+  } on FormatException {
+    return null;
+  }
+}
+
+String guildAuditTargetName(
+  Map<String, Object?> item,
+  KaedeGuild guild,
+  Map<EntityRef, KaedeUser> users,
+) {
+  final type = '${item['target_type'] ?? ''}';
+  final target = _guildAuditTarget(item);
+  final ref = _guildAuditTargetRef(item, guild.ref.domain);
+  if (type == 'guild') return guild.name;
+  if (type == 'channel_order') return 'the channel list';
+  if (type == 'channel') {
+    final channel =
+        guild.channels.where((value) => value.ref == ref).firstOrNull;
+    final name = channel?.name ?? '${target['name'] ?? ''}'.trim();
+    return name.isEmpty ? 'a channel' : '#$name';
+  }
+  if (type == 'role') {
+    final role = guild.roles.where((value) => value.ref == ref).firstOrNull;
+    final name = role?.name ?? '${target['name'] ?? ''}'.trim();
+    if (name.isNotEmpty) return '@$name';
+    final ids = target['ids'];
+    if (ids is List) return '${ids.length} roles';
+    return 'a role';
+  }
+  if (type == 'member' || type == 'user') {
+    final user = ref == null ? null : users[ref];
+    return user?.name ?? (ref == null ? 'a member' : '@${ref.id.value}');
+  }
+  if (type == 'instance') {
+    final domain = '${target['domain'] ?? ''}'.trim();
+    return domain.isEmpty ? 'an instance' : domain;
+  }
+  if (type == 'invite') {
+    final code = '${target['code'] ?? ''}'.trim();
+    return code.isEmpty ? 'an invite' : 'invite $code';
+  }
+  return type.isEmpty ? 'the guild' : 'a $type';
+}
+
+String guildAuditTargetDetail(
+  Map<String, Object?> item,
+  KaedeGuild guild,
+  Map<EntityRef, KaedeUser> users,
+) {
+  final name = guildAuditTargetName(item, guild, users);
+  final ref = _guildAuditTargetRef(item, guild.ref.domain);
+  if (ref == null) return name;
+  final user = users[ref];
+  if (user != null) return '$name • ${user.handle}';
+  return '$name • ${ref.wire}';
+}
+
+String guildAuditSummary(
+  Map<String, Object?> item, {
+  required String actorName,
+  required String targetName,
+}) {
+  final code = guildAuditActionCode(item);
+  final targetType = '${item['target_type'] ?? ''}';
+  final verb = switch (code) {
+    1 => 'updated',
+    10 => 'created',
+    11 when targetType == 'channel_order' => 'reordered',
+    11 => 'updated',
+    12 => 'deleted',
+    15 => 'updated permissions for',
+    16 => 'removed a permission override from',
+    17 => 'synced permissions for',
+    20 => 'kicked',
+    22 => 'banned',
+    23 => 'unbanned',
+    24 => 'updated',
+    25 when targetType == 'instance' => 'banned',
+    25 => 'updated roles for',
+    26 when targetType == 'instance' => 'unbanned',
+    26 => 'moved',
+    27 when targetType == 'user' => 'transferred ownership to',
+    27 => 'disconnected',
+    30 => 'created',
+    31 => 'updated',
+    32 => 'deleted',
+    33 => 'reordered',
+    40 => 'created',
+    42 => 'deleted',
+    50 => 'created',
+    51 => 'updated',
+    52 => 'deleted',
+    60 => 'created',
+    61 => 'updated',
+    62 => 'deleted',
+    _ => 'performed an action on',
+  };
+  return '$actorName $verb $targetName';
+}
+
+IconData guildAuditActionIcon(Map<String, Object?> item) {
+  final code = guildAuditActionCode(item);
+  final targetType = '${item['target_type'] ?? ''}';
+  if (targetType == 'instance') return Icons.public_off_outlined;
+  if (code == 1) return Icons.settings_outlined;
+  if (code != null && code >= 10 && code < 20) return Icons.tag_rounded;
+  if (code != null && code >= 20 && code < 30) {
+    return code == 22 || code == 20
+        ? Icons.person_remove_outlined
+        : Icons.manage_accounts_outlined;
+  }
+  if (code != null && code >= 30 && code < 40) return Icons.badge_outlined;
+  if (code != null && code >= 40 && code < 50) {
+    return Icons.person_add_alt_1_rounded;
+  }
+  if (code != null && code >= 50 && code < 60) return Icons.webhook_rounded;
+  if (code != null && code >= 60 && code < 70) {
+    return Icons.emoji_emotions_outlined;
+  }
+  return Icons.receipt_long_outlined;
+}
+
+Color guildAuditActionColor(Map<String, Object?> item) {
+  final code = guildAuditActionCode(item);
+  if (code == 12 || code == 20 || code == 22 || code == 32 || code == 52) {
+    return KaedeColors.dangerSoft;
+  }
+  if (code == 10 || code == 23 || code == 30 || code == 40) {
+    return KaedeColors.mintSoft;
+  }
+  return KaedeColors.coralSoft;
+}
+
+String guildAuditRelativeTime(DateTime value, {DateTime? now}) {
+  final current = now ?? DateTime.now();
+  final difference = current.difference(value);
+  if (difference.isNegative || difference.inSeconds < 45) return 'Just now';
+  if (difference.inMinutes < 60) {
+    final count = difference.inMinutes;
+    return '$count minute${count == 1 ? '' : 's'} ago';
+  }
+  if (difference.inHours < 24) {
+    final count = difference.inHours;
+    return '$count hour${count == 1 ? '' : 's'} ago';
+  }
+  if (difference.inDays < 7) {
+    final count = difference.inDays;
+    return '$count day${count == 1 ? '' : 's'} ago';
+  }
+  return DateFormat('MMM d, y').format(value);
+}
+
+List<Map<String, Object?>> guildAuditChanges(Map<String, Object?> item) {
+  final values = item['changes'];
+  if (values is! List) return const [];
+  return values
+      .whereType<Map<Object?, Object?>>()
+      .map((value) => value.map((key, value) => MapEntry('$key', value)))
+      .toList();
+}
+
+String guildAuditFieldLabel(String value) {
+  final words = value
+      .trim()
+      .split(RegExp(r'[_\-\s]+'))
+      .where((word) => word.isNotEmpty)
+      .toList();
+  if (words.isEmpty) return 'Value';
+  final label = words.join(' ');
+  return '${label[0].toUpperCase()}${label.substring(1)}';
+}
+
+String guildAuditChangeDescription(Map<String, Object?> change) {
+  String display(Object? value) {
+    if (value == null || '$value' == 'null') return 'None';
+    if (value is List) return value.isEmpty ? 'None' : value.join(', ');
+    if (value is Map) {
+      final id = value['id'];
+      final domain = value['origin_domain'];
+      if (id != null && domain != null) return '$id@$domain';
+    }
+    return '$value';
+  }
+
+  if (change.containsKey('added') || change.containsKey('removed')) {
+    final parts = <String>[];
+    if (change['added'] != null) parts.add('Added ${display(change['added'])}');
+    if (change['removed'] != null) {
+      parts.add('Removed ${display(change['removed'])}');
+    }
+    return parts.join(' • ');
+  }
+  return '${display(change['old_value'])} → ${display(change['new_value'])}';
 }
 
 KaedeRole? _roleByMemberId(KaedeGuild guild, String roleId) {
@@ -4174,42 +5277,36 @@ final class _PageList extends StatelessWidget {
   const _PageList({required this.children});
   final List<Widget> children;
   @override
-  Widget build(BuildContext context) =>
-      ListView(padding: const EdgeInsets.all(14), children: children);
+  Widget build(BuildContext context) => ColoredBox(
+        color: kSettingsSurface,
+        child: ListView(padding: const EdgeInsets.all(14), children: children),
+      );
 }
 
+/// Flat settings panel: an uppercase heading over its content, no card
+/// border, the way Discord groups each settings page.
 final class _Panel extends StatelessWidget {
   const _Panel({required this.title, required this.child, this.subtitle});
   final String title;
   final String? subtitle;
   final Widget child;
   @override
-  Widget build(BuildContext context) => Card(
-        margin: const EdgeInsets.only(bottom: 12),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(title, style: Theme.of(context).textTheme.titleMedium),
-              if (subtitle != null) ...[
-                const SizedBox(height: 3),
-                Text(
-                  subtitle!,
-                  style: const TextStyle(
-                    color: KaedeColors.muted,
-                    fontSize: 12.5,
-                    height: 1.35,
-                  ),
-                ),
-              ],
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Divider(height: 1),
-              ),
-              child,
-            ],
-          ),
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SettingsSectionHeader(title, top: 10),
+            if (subtitle != null)
+              SettingsInfo(subtitle!,
+                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 12))
+            else
+              const SizedBox(height: 12),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: child,
+            ),
+          ],
         ),
       );
 }
