@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GuildMemberSummary, PresenceStatus, Role } from './types';
-import { groupGuildMembers } from './members';
+import { groupGuildMembers, highestColoredRole, memberRoleColor } from './members';
 
 function member(id: string, username: string, presence: PresenceStatus): GuildMemberSummary {
   return {
@@ -86,5 +86,30 @@ describe('groupGuildMembers', () => {
     expect(grouped.hoisted[1].members.map((item) => item.user.username)).toEqual(['staff']);
     expect(grouped.online.map((item) => item.user.username)).toEqual(['plain']);
     expect(grouped.offline.map((item) => item.user.username)).toEqual(['sleeping']);
+  });
+});
+
+describe('memberRoleColor', () => {
+  it('uses the highest assigned role that has a color', () => {
+    const lower = role('20', 'Green', 2);
+    lower.color = 0x22c55e;
+    const colorless = role('19', 'Moderator', 5);
+    colorless.color = 0;
+    const higher = role('18', 'Purple', 4);
+    higher.color = 0x8b5cf6;
+    const item = member('1', 'Ari', 'online');
+    item.role_ids = [lower.id, colorless.id, higher.id];
+
+    expect(highestColoredRole(item, [lower, colorless, higher])).toBe(higher);
+    expect(memberRoleColor(item, [lower, colorless, higher])).toBe('#8b5cf6');
+  });
+
+  it('uses the lower snowflake as the deterministic winner at the same position', () => {
+    const older = role('20', 'Older', 3);
+    const newer = role('21', 'Newer', 3);
+    const item = member('1', 'Ari', 'online');
+    item.role_ids = [newer.id, older.id];
+
+    expect(highestColoredRole(item, [newer, older])).toBe(older);
   });
 });

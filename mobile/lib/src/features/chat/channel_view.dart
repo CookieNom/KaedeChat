@@ -17,6 +17,7 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/domain/role_colors.dart';
 import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
@@ -3295,6 +3296,15 @@ final class _MessageTile extends StatelessWidget {
       return _SystemMessageRow(message: message);
     }
     final author = message.author;
+    final guild = state.activeGuild;
+    final authorMember = author == null
+        ? null
+        : state.activeGuildMembers
+            .where((member) => member.user.ref == author.ref)
+            .firstOrNull;
+    final authorColor = guild == null || authorMember == null
+        ? null
+        : memberRoleColor(guild, authorMember);
     final deleted = message.deletedAt != null;
     final mediaPreview = previewMediaUrl(message.content ?? '');
     final linkPreview = previewableMessageLink(message.content);
@@ -3348,7 +3358,8 @@ final class _MessageTile extends StatelessWidget {
                                 author?.name ?? 'Unknown author',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
+                                style: TextStyle(
+                                  color: authorColor,
                                   fontWeight: FontWeight.w700,
                                   fontSize: 15,
                                   height: 1.2,

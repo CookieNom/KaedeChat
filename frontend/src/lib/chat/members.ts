@@ -19,6 +19,38 @@ export function memberDisplayName(member: GuildMemberSummary): string {
   return member.nickname ?? userDisplayName(member.user);
 }
 
+export function compareRoleRank(left: Role, right: Role): number {
+  const position = left.position - right.position;
+  if (position) return position;
+  const leftId = BigInt(left.id);
+  const rightId = BigInt(right.id);
+  return leftId === rightId ? 0 : leftId < rightId ? 1 : -1;
+}
+
+export function highestColoredRole(
+  member: GuildMemberSummary | undefined,
+  roles: Role[] = []
+): Role | undefined {
+  if (!member) return undefined;
+  return roles
+    .filter((role) => role.color !== 0 && member.role_ids.includes(role.id))
+    .sort(compareRoleRank)
+    .at(-1);
+}
+
+export function roleColorCss(color: number): string | undefined {
+  if (color === 0) return undefined;
+  return `#${(color & 0x00ff_ffff).toString(16).padStart(6, '0')}`;
+}
+
+export function memberRoleColor(
+  member: GuildMemberSummary | undefined,
+  roles: Role[] = []
+): string | undefined {
+  const role = highestColoredRole(member, roles);
+  return role ? roleColorCss(role.color) : undefined;
+}
+
 export function groupGuildMembers(
   members: GuildMemberSummary[],
   presenceFor: (member: GuildMemberSummary) => PresenceStatus,
@@ -34,7 +66,7 @@ export function groupGuildMembers(
   const offline = sorted.filter((member) => presenceFor(member) === 'offline');
   const hoistedRoles = roles
     .filter((role) => role.hoist && role.position > 0)
-    .sort((left, right) => right.position - left.position || right.id.localeCompare(left.id));
+    .sort((left, right) => compareRoleRank(right, left));
   const hoisted = hoistedRoles
     .map((role) => ({
       role,

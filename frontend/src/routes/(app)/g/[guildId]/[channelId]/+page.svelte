@@ -88,6 +88,7 @@
     type Completion
   } from '$lib/components/ComposerAutocomplete.svelte';
   import GuildMemberRoster from '$lib/components/GuildMemberRoster.svelte';
+  import { memberRoleColor } from '$lib/chat/members';
   import EmojiPicker from '$lib/components/EmojiPicker.svelte';
   import GifPicker from '$lib/components/GifPicker.svelte';
   import Icon from '$lib/components/Icon.svelte';
@@ -3950,6 +3951,12 @@
                 <MessageRow
                   message={item.message}
                   compact={item.compact}
+                  authorColor={item.message.author
+                    ? memberRoleColor(
+                        memberFor(item.message.author_id, item.message.author_domain),
+                        guild?.roles ?? []
+                      )
+                    : undefined}
                   mentionUsers={entities.users.values}
                   mentionRoles={guild?.roles ?? []}
                   referencedMessage={referencedMessage(item.message)}

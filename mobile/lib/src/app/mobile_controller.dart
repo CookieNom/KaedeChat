@@ -337,6 +337,7 @@ final class MobileState {
     this.typingByChannel = const <EntityRef, List<TypingParticipant>>{},
     this.presenceByUser = const <EntityRef, PresenceStatus>{},
     this.userProfiles = const <EntityRef, KaedeUser>{},
+    this.guildMembers = const <EntityRef, List<GuildMember>>{},
     this.selfModerationByGuild = const <EntityRef, GuildSelfModerationStatus>{},
     this.messageJump,
     this.incomingCall,
@@ -374,6 +375,7 @@ final class MobileState {
   final Map<EntityRef, List<TypingParticipant>> typingByChannel;
   final Map<EntityRef, PresenceStatus> presenceByUser;
   final Map<EntityRef, KaedeUser> userProfiles;
+  final Map<EntityRef, List<GuildMember>> guildMembers;
   final Map<EntityRef, GuildSelfModerationStatus> selfModerationByGuild;
   final MessageJumpRequest? messageJump;
   final IncomingCall? incomingCall;
@@ -406,6 +408,10 @@ final class MobileState {
     final status = selfModerationByGuild[guild];
     return status?.activeAt() == true ? status : null;
   }
+
+  List<GuildMember> get activeGuildMembers => selectedGuild == null
+      ? const <GuildMember>[]
+      : guildMembers[selectedGuild] ?? const <GuildMember>[];
 
   List<KaedeMessage> get messages => selectedChannel == null
       ? const <KaedeMessage>[]
@@ -445,6 +451,7 @@ final class MobileState {
     Map<EntityRef, List<TypingParticipant>>? typingByChannel,
     Map<EntityRef, PresenceStatus>? presenceByUser,
     Map<EntityRef, KaedeUser>? userProfiles,
+    Map<EntityRef, List<GuildMember>>? guildMembers,
     Map<EntityRef, GuildSelfModerationStatus>? selfModerationByGuild,
     MessageJumpRequest? messageJump,
     bool clearMessageJump = false,
@@ -488,6 +495,7 @@ final class MobileState {
         typingByChannel: typingByChannel ?? this.typingByChannel,
         presenceByUser: presenceByUser ?? this.presenceByUser,
         userProfiles: userProfiles ?? this.userProfiles,
+        guildMembers: guildMembers ?? this.guildMembers,
         selfModerationByGuild:
             selfModerationByGuild ?? this.selfModerationByGuild,
         messageJump: clearMessageJump ? null : messageJump ?? this.messageJump,
@@ -850,6 +858,10 @@ final class MobileController extends StateNotifier<MobileState> {
   void _applyGatewayHealth(GatewayHealth health) {
     if (state.phase != SessionPhase.ready) return;
     state = state.copyWith(gatewayHealth: health);
+    final guild = state.selectedGuild;
+    if (health.isConnected && guild != null) {
+      requestGuildMembers(guild);
+    }
   }
 
   void _setPushRegistrationWarning(String? warning) {
@@ -1564,6 +1576,7 @@ final class MobileController extends StateNotifier<MobileState> {
     unawaited(_rememberConversation(channel.ref));
     if (channel.guildRef case final guild?) {
       unawaited(refreshSelfModeration(guild));
+      requestGuildMembers(guild);
     }
     _acknowledgeVisibleConversation();
     if (channel.type == ChannelType.text ||
@@ -2873,6 +2886,10 @@ final class MobileController extends StateNotifier<MobileState> {
         unawaited(_revokeChannelAccess(event.data));
         break;
       case 'GUILD_MEMBER_UPDATE':
+        _applyMemberRoster(
+          <Object?>[event.data],
+          guild: _guildRef(event.data),
+        );
         _scheduleNavigationRefresh();
         final nestedUser = event.data['user'];
         final user = nestedUser is Map
@@ -2884,13 +2901,22 @@ final class MobileController extends StateNotifier<MobileState> {
           if (!_appActive) unawaited(_notifyModerationEvent(event.data));
         }
         break;
+      case 'GUILD_MEMBER_ADD':
+        _applyMemberRoster(
+          <Object?>[event.data],
+          guild: _guildRef(event.data),
+        );
+        _scheduleNavigationRefresh();
+        break;
+      case 'GUILD_MEMBER_REMOVE':
+        _removeGuildMember(event.data);
+        _scheduleNavigationRefresh();
+        break;
       case 'CHANNEL_ACCESS_GRANTED' ||
             'CHANNEL_PERMISSION_UPDATE' ||
             'GUILD_ROLE_CREATE' ||
             'GUILD_ROLE_UPDATE' ||
             'GUILD_ROLE_DELETE' ||
-            'GUILD_MEMBER_ADD' ||
-            'GUILD_MEMBER_REMOVE' ||
             'GUILD_AVAILABILITY_UPDATE' ||
             'GUILD_EMOJI_CREATE' ||
             'GUILD_EMOJI_DELETE' ||
@@ -2952,7 +2978,10 @@ final class MobileController extends StateNotifier<MobileState> {
         }
         break;
       case 'GUILD_MEMBERS_CHUNK':
-        _applyMemberRoster(event.data['members']);
+        _applyMemberRoster(
+          event.data['members'],
+          guild: _guildRef(event.data),
+        );
         break;
       case 'GUILD_MEMBER_LIST_UPDATE':
         final operations = event.data['ops'];
@@ -2961,6 +2990,7 @@ final class MobileController extends StateNotifier<MobileState> {
             if (operation is Map) {
               _applyMemberRoster(
                 Map<String, Object?>.from(operation)['items'],
+                guild: _guildRef(event.data),
               );
             }
           }
@@ -3188,12 +3218,22 @@ final class MobileController extends StateNotifier<MobileState> {
   /// Applies a `GUILD_MEMBERS_CHUNK` or member-list range payload. Only the
   /// gateway knows presence: the REST roster deliberately omits it, so this is
   /// what keeps the member list's status dots honest.
-  void _applyMemberRoster(Object? raw) {
+  void _applyMemberRoster(Object? raw, {EntityRef? guild}) {
     if (raw is! List) return;
     final presenceByUser = Map<EntityRef, PresenceStatus>.of(
       state.presenceByUser,
     );
     final profiles = Map<EntityRef, KaedeUser>.of(state.userProfiles);
+    final membersByGuild = <EntityRef, List<GuildMember>>{
+      for (final entry in state.guildMembers.entries)
+        entry.key: List<GuildMember>.of(entry.value),
+    };
+    final roster = guild == null
+        ? null
+        : <EntityRef, GuildMember>{
+            for (final member in membersByGuild[guild] ?? const <GuildMember>[])
+              member.user.ref: member,
+          };
     var changed = false;
     for (final entry in raw.whereType<Map<Object?, Object?>>()) {
       final member = entry.map((key, value) => MapEntry('$key', value));
@@ -3211,6 +3251,14 @@ final class MobileController extends StateNotifier<MobileState> {
         profiles[user.ref] = user;
         changed = true;
       }
+      if (roster != null) {
+        try {
+          roster[user.ref] = GuildMember.fromJson(member);
+          changed = true;
+        } on Object {
+          // Profile and presence can still be useful for an older partial row.
+        }
+      }
       if (member.containsKey('presence')) {
         final presence = _presence(member['presence']);
         if (presenceByUser[user.ref] != presence) {
@@ -3219,10 +3267,36 @@ final class MobileController extends StateNotifier<MobileState> {
         }
       }
     }
+    if (guild != null && roster != null) {
+      membersByGuild[guild] = List.unmodifiable(roster.values);
+    }
     if (!changed) return;
     state = state.copyWith(
       presenceByUser: Map.unmodifiable(presenceByUser),
       userProfiles: Map.unmodifiable(profiles),
+      guildMembers: Map.unmodifiable(membersByGuild),
+    );
+  }
+
+  void _removeGuildMember(Map<String, Object?> data) {
+    final guild = _guildRef(data);
+    final nestedUser = data['user'];
+    final user = nestedUser is Map
+        ? _entityRef(nestedUser['id'], nestedUser['origin_domain'])
+        : _userRef(data);
+    if (guild == null ||
+        user == null ||
+        !state.guildMembers.containsKey(guild)) {
+      return;
+    }
+    final roster = state.guildMembers[guild]!
+        .where((member) => member.user.ref != user)
+        .toList(growable: false);
+    state = state.copyWith(
+      guildMembers: Map.unmodifiable(<EntityRef, List<GuildMember>>{
+        ...state.guildMembers,
+        guild: List.unmodifiable(roster),
+      }),
     );
   }
 
@@ -3242,6 +3316,9 @@ final class MobileController extends StateNotifier<MobileState> {
         data['user_id'] ?? data['id'],
         data['user_domain'] ?? data['origin_domain'],
       );
+
+  EntityRef? _guildRef(Map<String, Object?> data) =>
+      _entityRef(data['guild_id'], data['guild_domain']);
 
   EntityRef? _entityRef(Object? id, Object? domain) {
     if (id == null || domain == null || '$id'.isEmpty || '$domain'.isEmpty) {

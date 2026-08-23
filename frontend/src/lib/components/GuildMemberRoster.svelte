@@ -1,6 +1,11 @@
 <script lang="ts">
   import { assetUrl } from '$lib/media/assets';
-  import { groupGuildMembers, memberDisplayName } from '$lib/chat/members';
+  import {
+    groupGuildMembers,
+    memberDisplayName,
+    memberRoleColor,
+    roleColorCss
+  } from '$lib/chat/members';
   import type { GuildMemberSummary, PresenceStatus, Role, UserSummary } from '$lib/chat/types';
   import { userPublicHandle } from '$lib/chat/users';
   import Icon from './Icon.svelte';
@@ -25,6 +30,7 @@
 {#snippet memberRow(member: GuildMemberSummary, offline: boolean)}
   {@const presence = presenceFor(member.user)}
   {@const displayName = memberDisplayName(member)}
+  {@const nameColor = memberRoleColor(member, roles)}
   <button
     class:offline
     class="roster-member"
@@ -42,7 +48,7 @@
       <i class={`presence-dot presence-${presence}`}></i>
     </span>
     <span class="roster-member-copy">
-      <span class="roster-name"
+      <span class="roster-name" style:color={nameColor}
         ><strong>{displayName}</strong>{#if member.user.bot}<small class="bot-badge">BOT</small
           >{/if}</span
       >
@@ -68,7 +74,7 @@
       <section class="roster-group" aria-labelledby={`role-members-${group.role.id}`}>
         <h3
           id={`role-members-${group.role.id}`}
-          style={`--role-color:#${group.role.color.toString(16).padStart(6, '0')}`}
+          style:--role-color={roleColorCss(group.role.color)}
         >
           {group.role.name} — {group.members.length}
         </h3>

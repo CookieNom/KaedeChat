@@ -6167,6 +6167,8 @@ body.media-viewer-open {
 }
 
 .chat-token-role-mention {
+  color: var(--mention-role-color, var(--accent));
+  background: color-mix(in srgb, var(--mention-role-color, var(--accent)) 16%, transparent);
   box-shadow: inset 3px 0 var(--mention-role-color, var(--accent));
 }
 

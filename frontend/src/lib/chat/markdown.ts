@@ -3,6 +3,7 @@ import { marked } from 'marked';
 import { entityRef } from './refs';
 import { customEmojiUrl } from './emojis';
 import type { Role, UserSummary } from './types';
+import { roleColorCss } from './members';
 import { userDisplayName, userPublicHandle } from './users';
 
 const EXPLICIT_MENTION = /^<@(\d+)(?:@([a-z0-9.-]+))?>$/i;
@@ -116,7 +117,10 @@ function mentionSpan(token: string, users: UserSummary[], localDomain: string): 
   return span;
 }
 
-function roleMentionSpan(token: string, roles: Role[]): HTMLSpanElement {
+export function roleMentionPresentation(
+  token: string,
+  roles: Role[]
+): { text: string; title: string; color?: string } {
   const reference = ROLE_MENTION.exec(token);
   const role = reference
     ? roles.find(
@@ -125,12 +129,20 @@ function roleMentionSpan(token: string, roles: Role[]): HTMLSpanElement {
           candidate.origin_domain.toLowerCase() === reference[2].toLowerCase()
       )
     : undefined;
+  return {
+    text: role ? `@${role.name}` : '@unknown-role',
+    title: role ? `Role: ${role.name}` : token,
+    color: role ? roleColorCss(role.color) : undefined
+  };
+}
+
+function roleMentionSpan(token: string, roles: Role[]): HTMLSpanElement {
+  const presentation = roleMentionPresentation(token, roles);
   const span = document.createElement('span');
   span.className = 'chat-token chat-token-mention chat-token-role-mention';
-  span.textContent = role ? `@${role.name}` : '@unknown-role';
-  span.title = role ? `Role: ${role.name}` : token;
-  if (role)
-    span.style.setProperty('--mention-role-color', `#${role.color.toString(16).padStart(6, '0')}`);
+  span.textContent = presentation.text;
+  span.title = presentation.title;
+  if (presentation.color) span.style.setProperty('--mention-role-color', presentation.color);
   return span;
 }
 

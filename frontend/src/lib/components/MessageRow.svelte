@@ -50,6 +50,7 @@
     compact = false,
     canEdit = false,
     presence = 'offline',
+    authorColor,
     mentionUsers = [],
     mentionRoles = [],
     referencedMessage = null,
@@ -76,6 +77,7 @@
     compact?: boolean;
     canEdit?: boolean;
     presence?: PresenceStatus;
+    authorColor?: string;
     mentionUsers?: UserSummary[];
     mentionRoles?: Role[];
     referencedMessage?: Message | null;
@@ -612,9 +614,14 @@
     {#if !compact}
       <header>
         {#if message.author && message.author.profile_resolved !== false && !message.webhook && onViewProfile}
-          <button class="message-author" type="button" onclick={viewProfile}>{authorName()}</button>
+          <button
+            class="message-author"
+            style:color={authorColor}
+            type="button"
+            onclick={viewProfile}>{authorName()}</button
+          >
         {:else}
-          <strong>{authorName()}</strong>
+          <strong style:color={authorColor}>{authorName()}</strong>
         {/if}
         {#if message.webhook}<small class="webhook-badge">WEBHOOK</small>{/if}
         {#if message.author?.bot}<small class="bot-badge">BOT</small>{/if}

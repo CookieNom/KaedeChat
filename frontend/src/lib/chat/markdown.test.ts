@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { mentionPresentation, splitSpoilers, tokenizeText, tokenKind } from './markdown';
+import {
+  mentionPresentation,
+  roleMentionPresentation,
+  splitSpoilers,
+  tokenizeText,
+  tokenKind
+} from './markdown';
+import type { Role } from './types';
 
 describe('message markdown tokenization', () => {
   it('classifies immutable handles, channels, and emoji without dropping text', () => {
@@ -65,5 +72,25 @@ describe('message markdown tokenization', () => {
     expect(mention.userHandle).toBeUndefined();
     expect(mention.title).toBe('Remote user · remote.example');
     expect(JSON.stringify(mention)).not.toContain('history_deadbeef');
+  });
+
+  it('renders a role mention with that role’s explicit color', () => {
+    const role: Role = {
+      id: '75512661369970691',
+      origin_domain: 'chat.example',
+      guild_id: '1',
+      guild_domain: 'chat.example',
+      name: 'Moderators',
+      color: 0x8b5cf6,
+      permissions: '0',
+      position: 4,
+      hoist: false,
+      mentionable: true
+    };
+
+    const rendered = roleMentionPresentation('<@&75512661369970691@chat.example>', [role]);
+
+    expect(rendered.text).toBe('@Moderators');
+    expect(rendered.color).toBe('#8b5cf6');
   });
 });

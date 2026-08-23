@@ -11,6 +11,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/domain/role_colors.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/disclosures.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
@@ -2216,18 +2217,6 @@ List<MemberListSection> groupGuildMembers({
     ));
   }
   return sections;
-}
-
-/// Colour of a member's highest coloured role, the way names are tinted on
-/// web and desktop.
-Color? memberRoleColor(KaedeGuild guild, GuildMember member) {
-  KaedeRole? best;
-  for (final role in guild.roles) {
-    if (role.color == 0) continue;
-    if (!member.roleIds.contains(role.ref.id.value)) continue;
-    if (best == null || role.position > best.position) best = role;
-  }
-  return best == null ? null : Color(0xFF000000 | best.color);
 }
 
 final class _MemberRow extends StatelessWidget {

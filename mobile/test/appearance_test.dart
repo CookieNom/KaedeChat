@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/domain/role_colors.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
@@ -345,6 +346,47 @@ void main() {
           GuildMember(user: person('1', 'Ada'), roleIds: const []),
         ),
         isNull,
+      );
+    });
+
+    test('a colourless higher role lets the next coloured role show through',
+        () {
+      final guild = KaedeGuild(
+        ref: EntityRef.parse('900@home.example'),
+        name: 'Guild',
+        ownerRef: EntityRef.parse('1@home.example'),
+        permissions: BigInt.zero,
+        unavailable: false,
+        roles: [
+          KaedeRole(
+            ref: EntityRef.parse('10@home.example'),
+            guildRef: EntityRef.parse('900@home.example'),
+            name: 'Colour',
+            color: 0x55B998,
+            permissions: BigInt.zero,
+            position: 3,
+            hoist: false,
+            mentionable: false,
+          ),
+          KaedeRole(
+            ref: EntityRef.parse('11@home.example'),
+            guildRef: EntityRef.parse('900@home.example'),
+            name: 'Colourless moderator',
+            color: 0,
+            permissions: BigInt.zero,
+            position: 8,
+            hoist: false,
+            mentionable: false,
+          ),
+        ],
+      );
+
+      expect(
+        memberRoleColor(
+          guild,
+          GuildMember(user: person('1', 'Ada'), roleIds: const ['10', '11']),
+        ),
+        const Color(0xFF55B998),
       );
     });
   });
