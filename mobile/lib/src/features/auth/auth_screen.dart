@@ -11,14 +11,20 @@ import 'package:kaede_mobile/src/features/auth/turnstile_challenge.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 final class AuthScreen extends ConsumerStatefulWidget {
-  const AuthScreen({super.key});
+  const AuthScreen({super.key, this.initialInstance, this.notice});
+
+  final String? initialInstance;
+  final String? notice;
 
   @override
   ConsumerState<AuthScreen> createState() => _AuthScreenState();
 }
 
 final class _AuthScreenState extends ConsumerState<AuthScreen> {
-  final instance = TextEditingController(text: 'kaede.chat');
+  late final instance = TextEditingController(
+      text: widget.initialInstance?.trim().isNotEmpty == true
+          ? widget.initialInstance!.trim()
+          : 'kaede.chat');
   final identifier = TextEditingController();
   final password = TextEditingController();
   final username = TextEditingController();
@@ -341,6 +347,18 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                     ],
                   ),
                   const SizedBox(height: 34),
+                  if (widget.notice case final notice?) ...[
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: KaedeColors.coralSoft,
+                        borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                      ),
+                      child: Text(notice,
+                          style: const TextStyle(color: KaedeColors.coralText)),
+                    ),
+                    const SizedBox(height: 18),
+                  ],
                   SegmentedButton<bool>(
                     segments: const [
                       ButtonSegment(value: false, label: Text('Sign in')),

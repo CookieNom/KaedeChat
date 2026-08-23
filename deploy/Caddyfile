@@ -28,7 +28,7 @@ http://{$KAEDE_DOMAIN} {
 		# the live request before proxying or access-log serialization.
 		request_header -X-Kaede-Edge-Secret
 
-		@api path /api/* /media/* /_kaede/* /.well-known/kaede/*
+		@api path /api/* /media/* /_kaede/* /.well-known/kaede/* /.well-known/assetlinks.json /.well-known/apple-app-site-association
 		reverse_proxy @api api:8000 {
 			header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
 			header_up X-Forwarded-For {http.request.header.X-Forwarded-For}

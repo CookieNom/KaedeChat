@@ -12,7 +12,7 @@ http://beta.localhost {
 }
 
 alpha.localhost {
-	@api path /api/* /media/* /_kaede/* /.well-known/kaede/*
+	@api path /api/* /media/* /_kaede/* /.well-known/kaede/* /.well-known/assetlinks.json /.well-known/apple-app-site-association
 	reverse_proxy @api alpha-api:8000 {
 		header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
 	}
@@ -23,7 +23,7 @@ alpha.localhost {
 }
 
 beta.localhost {
-	@api path /api/* /media/* /_kaede/* /.well-known/kaede/*
+	@api path /api/* /media/* /_kaede/* /.well-known/kaede/* /.well-known/assetlinks.json /.well-known/apple-app-site-association
 	reverse_proxy @api beta-api:8000 {
 		header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
 	}

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -9,6 +10,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 enum ComposerAction { attach, emoji, gif }
 
@@ -189,6 +191,67 @@ final class ComposerGif {
   final Uri previewUrl;
   final int? width;
   final int? height;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'id': id,
+        'title': title,
+        'url': url.toString(),
+        'preview_url': previewUrl.toString(),
+        if (width != null) 'width': width,
+        if (height != null) 'height': height,
+      };
+}
+
+const composerGifFavoritesKey = 'kaede.gif-favorites.v1';
+
+Future<List<ComposerGif>> loadComposerGifFavorites() async {
+  final preferences = await SharedPreferences.getInstance();
+  final raw = preferences.getStringList(composerGifFavoritesKey) ?? const [];
+  final favorites = <ComposerGif>[];
+  for (final encoded in raw) {
+    try {
+      final decoded = jsonDecode(encoded);
+      if (decoded is Map) {
+        final gif = ComposerGif.tryParse(
+          decoded.map((key, value) => MapEntry('$key', value)),
+        );
+        if (gif != null) favorites.add(gif);
+      }
+    } on Object {
+      // Ignore one corrupt local favorite without discarding the others.
+    }
+  }
+  return List.unmodifiable(favorites.take(100));
+}
+
+Future<List<ComposerGif>> toggleComposerGifFavorite(ComposerGif gif) async {
+  final current = [...await loadComposerGifFavorites()];
+  final index = current.indexWhere(
+      (item) => item.id == gif.id || item.url.toString() == gif.url.toString());
+  if (index >= 0) {
+    current.removeAt(index);
+  } else {
+    current.insert(0, gif);
+  }
+  final bounded = current.take(100).toList(growable: false);
+  final preferences = await SharedPreferences.getInstance();
+  await preferences.setStringList(
+    composerGifFavoritesKey,
+    bounded.map((item) => jsonEncode(item.toJson())).toList(growable: false),
+  );
+  return List.unmodifiable(bounded);
+}
+
+ComposerGif? composerGifFromMessage(String? content) {
+  final uri = Uri.tryParse(content?.trim() ?? '');
+  if (uri == null) return null;
+  final parsed = ComposerGif.tryParse(<String, Object?>{
+    'id': uri.toString(),
+    'title': 'Saved GIF',
+    'url': uri.toString(),
+    'preview_url': uri.toString(),
+  });
+  return parsed;
 }
 
 final class ComposerGifPage {
@@ -560,6 +623,7 @@ final class ComposerGifPicker extends StatefulWidget {
 final class _ComposerGifPickerState extends State<ComposerGifPicker> {
   final _search = TextEditingController();
   final _items = <ComposerGif>[];
+  List<ComposerGif> _favorites = const [];
   Timer? _debounce;
   Object? _error;
   int? _nextPage;
@@ -571,7 +635,33 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
   @override
   void initState() {
     super.initState();
+    unawaited(_loadFavorites());
     unawaited(_load(page: 1, append: false));
+  }
+
+  Future<void> _loadFavorites() async {
+    final favorites = await loadComposerGifFavorites();
+    if (mounted) setState(() => _favorites = favorites);
+  }
+
+  Future<void> _toggleFavorite(ComposerGif gif) async {
+    final favorites = await toggleComposerGifFavorite(gif);
+    if (mounted) setState(() => _favorites = favorites);
+  }
+
+  bool _favorite(ComposerGif gif) => _favorites.any(
+      (item) => item.id == gif.id || item.url.toString() == gif.url.toString());
+
+  List<ComposerGif> get _visibleItems {
+    final query = _search.text.trim().toLowerCase();
+    final preferred = query.isEmpty
+        ? _favorites
+        : _favorites.where((item) => item.title.toLowerCase().contains(query));
+    final seen = <String>{};
+    return <ComposerGif>[
+      for (final gif in [...preferred, ..._items])
+        if (seen.add(gif.url.toString())) gif,
+    ];
   }
 
   void _queryChanged(String _) {
@@ -676,19 +766,20 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
       );
 
   Widget _buildResults() {
-    if (_loading && _items.isEmpty) {
+    if (_loading && _items.isEmpty && _favorites.isEmpty) {
       return const _PickerStatus(
         icon: CircularProgressIndicator(strokeWidth: 2),
         message: 'Loading GIFs…',
       );
     }
-    if (_error case final error? when _items.isEmpty) {
+    if (_error case final error? when _items.isEmpty && _favorites.isEmpty) {
       return _PickerError(
         message: userFacingError(error, summary: 'Could not load GIFs'),
         onRetry: () => _load(page: 1, append: false),
       );
     }
-    if (_items.isEmpty) {
+    final visible = _visibleItems;
+    if (visible.isEmpty) {
       return const _PickerStatus(
         icon: Icon(Icons.gif_box_outlined),
         message: 'No GIFs found. Try another search.',
@@ -708,9 +799,9 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
                 crossAxisSpacing: 8,
                 childAspectRatio: 1.18,
               ),
-              itemCount: _items.length,
+              itemCount: visible.length,
               itemBuilder: (context, index) {
-                final gif = _items[index];
+                final gif = visible[index];
                 return Semantics(
                   button: true,
                   label: 'Send GIF: ${gif.title}',
@@ -724,17 +815,34 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
                           borderRadius: BorderRadius.circular(12),
                           child: ColoredBox(
                             color: KaedeColors.raised,
-                            child: CachedNetworkImage(
-                              imageUrl: gif.previewUrl.toString(),
-                              fit: BoxFit.cover,
-                              placeholder: (_, __) => const Center(
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                CachedNetworkImage(
+                                  imageUrl: gif.previewUrl.toString(),
+                                  fit: BoxFit.cover,
+                                  placeholder: (_, __) => const Center(
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2),
+                                  ),
+                                  errorWidget: (_, __, ___) => const Center(
+                                    child: Icon(Icons.broken_image_outlined),
+                                  ),
                                 ),
-                              ),
-                              errorWidget: (_, __, ___) => const Center(
-                                child: Icon(Icons.broken_image_outlined),
-                              ),
+                                Positioned(
+                                  right: 5,
+                                  top: 5,
+                                  child: IconButton.filledTonal(
+                                    tooltip: _favorite(gif)
+                                        ? 'Remove from favorites'
+                                        : 'Add to favorites',
+                                    onPressed: () => _toggleFavorite(gif),
+                                    icon: Icon(_favorite(gif)
+                                        ? Icons.star_rounded
+                                        : Icons.star_border_rounded),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),

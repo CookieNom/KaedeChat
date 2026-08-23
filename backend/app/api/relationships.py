@@ -22,7 +22,7 @@ from app.db.models import Relationship, User
 from app.federation.events import build_envelope, queue_event
 from app.federation.relationships import relationship_event_content
 from app.federation.users import resolve_handle
-from app.tasks import federation_deliver
+from app.tasks import federation_deliver, mobile_push_activity
 
 router = APIRouter(prefix="/api/v1/users/@me/relationships", tags=["relationships"])
 
@@ -61,6 +61,23 @@ async def notify_relationship(redis: Redis, owner: User, target: User, relation_
         "USER_UPDATE",
         {"relationship": {"type": relation_type, "user": user_payload(target)}},
     )
+    if relation_type in {"pending_in", "friend"}:
+        name = target.display_name or target.username
+        await enqueue_best_effort(
+            mobile_push_activity,
+            owner.id,
+            owner.origin_domain,
+            secrets.randbits(63),
+            owner.origin_domain,
+            "relationship",
+            "New friend request" if relation_type == "pending_in" else "Friend request accepted",
+            (
+                f"{name} sent you a friend request."
+                if relation_type == "pending_in"
+                else f"You and {name} are now friends."
+            ),
+            f"relationship:{target.id}@{target.origin_domain}:{relation_type}",
+        )
 
 
 async def queue_relationship_event(

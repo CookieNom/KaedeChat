@@ -21,6 +21,7 @@ import 'package:kaede_mobile/src/e2ee/store.dart';
 import 'package:kaede_mobile/src/gateway/gateway_client.dart';
 import 'package:kaede_mobile/src/platform/notification_policy.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
+import 'package:kaede_mobile/src/platform/system_call_service.dart';
 import 'package:kaede_mobile/src/storage/local_database.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:path_provider/path_provider.dart';
@@ -268,6 +269,20 @@ final class MessageJumpRequest {
   final int generation;
 }
 
+final class IncomingCall {
+  const IncomingCall({
+    required this.call,
+    required this.channel,
+    required this.caller,
+    required this.callerName,
+  });
+
+  final EntityRef call;
+  final EntityRef channel;
+  final EntityRef caller;
+  final String callerName;
+}
+
 final class _PendingAcknowledgement {
   const _PendingAcknowledgement({
     required this.message,
@@ -324,6 +339,8 @@ final class MobileState {
     this.userProfiles = const <EntityRef, KaedeUser>{},
     this.selfModerationByGuild = const <EntityRef, GuildSelfModerationStatus>{},
     this.messageJump,
+    this.incomingCall,
+    this.pendingCallJoin,
     this.gatewayHealth = const GatewayHealth(
       GatewayConnectionPhase.offline,
       message: 'Realtime updates are not connected.',
@@ -359,6 +376,8 @@ final class MobileState {
   final Map<EntityRef, KaedeUser> userProfiles;
   final Map<EntityRef, GuildSelfModerationStatus> selfModerationByGuild;
   final MessageJumpRequest? messageJump;
+  final IncomingCall? incomingCall;
+  final IncomingCall? pendingCallJoin;
   final GatewayHealth gatewayHealth;
   final Map<DegradedFeature, String> degradedWarnings;
   final String? gatewayProtocolWarning;
@@ -429,6 +448,10 @@ final class MobileState {
     Map<EntityRef, GuildSelfModerationStatus>? selfModerationByGuild,
     MessageJumpRequest? messageJump,
     bool clearMessageJump = false,
+    IncomingCall? incomingCall,
+    bool clearIncomingCall = false,
+    IncomingCall? pendingCallJoin,
+    bool clearPendingCallJoin = false,
     GatewayHealth? gatewayHealth,
     Map<DegradedFeature, String>? degradedWarnings,
     String? gatewayProtocolWarning,
@@ -468,6 +491,11 @@ final class MobileState {
         selfModerationByGuild:
             selfModerationByGuild ?? this.selfModerationByGuild,
         messageJump: clearMessageJump ? null : messageJump ?? this.messageJump,
+        incomingCall:
+            clearIncomingCall ? null : incomingCall ?? this.incomingCall,
+        pendingCallJoin: clearPendingCallJoin
+            ? null
+            : pendingCallJoin ?? this.pendingCallJoin,
         gatewayHealth: gatewayHealth ?? this.gatewayHealth,
         degradedWarnings: degradedWarnings ?? this.degradedWarnings,
         gatewayProtocolWarning: clearGatewayProtocolWarning
@@ -508,6 +536,7 @@ final class MobileController extends StateNotifier<MobileState> {
   final GatewayClient gateway;
   final LocalDatabase database;
   final PushService push;
+  final SystemCallService systemCalls = SystemCallService();
   bool get remotePushAvailable => push.remotePushAvailable;
   bool get usesPushRelay => _pushTransport == 'relay';
   String get pushRelayHost => Uri.parse(_pinnedPushRelayUrl).host;
@@ -516,6 +545,7 @@ final class MobileController extends StateNotifier<MobileState> {
   StreamSubscription<String>? _pushTokenSubscription;
   StreamSubscription<PushDestination>? _pushDestinationSubscription;
   StreamSubscription<String?>? _pushHealthSubscription;
+  StreamSubscription<SystemCallEvent>? _systemCallSubscription;
   StreamSubscription<void>? _sessionExpiredSubscription;
   Timer? _outboxTimer;
   Timer? _appLockTimer;
@@ -1193,6 +1223,11 @@ final class MobileController extends StateNotifier<MobileState> {
     await _pushHealthSubscription?.cancel();
     if (!_sessionReadyIsCurrent(accountKey, generation)) return;
     _pushHealthSubscription = push.health.listen(_setPushRemoteDeliveryWarning);
+    await _systemCallSubscription?.cancel();
+    if (!_sessionReadyIsCurrent(accountKey, generation)) return;
+    _systemCallSubscription = systemCalls.events.listen(
+      (event) => unawaited(_onSystemCallAction(event)),
+    );
     if (push.consumeInitialDestination() case final destination?) {
       unawaited(openPushDestination(destination));
     }
@@ -2846,6 +2881,7 @@ final class MobileController extends StateNotifier<MobileState> {
         if (user == state.user?.ref) {
           final guild = state.selectedGuild;
           if (guild != null) unawaited(refreshSelfModeration(guild));
+          if (!_appActive) unawaited(_notifyModerationEvent(event.data));
         }
         break;
       case 'CHANNEL_ACCESS_GRANTED' ||
@@ -2860,14 +2896,24 @@ final class MobileController extends StateNotifier<MobileState> {
             'GUILD_EMOJI_DELETE' ||
             'VOICE_STATE_UPDATE' ||
             'VOICE_CHANNEL_MOVE' ||
-            'CALL_CREATE' ||
-            'CALL_RING' ||
-            'CALL_ACCEPT' ||
-            'CALL_DECLINE' ||
-            'CALL_END' ||
             'RESUMED' ||
             'INVALID_SESSION':
         _scheduleNavigationRefresh();
+        break;
+      case 'CALL_CREATE':
+        _scheduleNavigationRefresh();
+        break;
+      case 'CALL_RING':
+        _scheduleNavigationRefresh();
+        _receiveIncomingCall(event.data);
+        break;
+      case 'CALL_ACCEPT':
+        _scheduleNavigationRefresh();
+        _finishIncomingCall(event.data, active: true);
+        break;
+      case 'CALL_DECLINE' || 'CALL_END':
+        _scheduleNavigationRefresh();
+        _finishIncomingCall(event.data);
         break;
       case 'USER_UPDATE':
         final relationship = event.data['relationship'];
@@ -2882,6 +2928,7 @@ final class MobileController extends StateNotifier<MobileState> {
               ),
             );
           }
+          if (!_appActive) unawaited(_notifyRelationshipEvent(detail));
         } else if (event.data['id'] != null &&
             event.data['origin_domain'] != null &&
             event.data['username'] != null) {
@@ -3509,6 +3556,143 @@ final class MobileController extends StateNotifier<MobileState> {
     return user.wire;
   }
 
+  IncomingCall? _incomingCallFrom(Map<String, Object?> data) {
+    try {
+      final call = EntityRef(
+        Snowflake('${data['id']}'),
+        Domain('${data['authority_domain']}'),
+      );
+      final channel = EntityRef(
+        Snowflake('${data['channel_id']}'),
+        Domain('${data['channel_domain']}'),
+      );
+      final caller = EntityRef.parse('${data['caller']}');
+      if (caller == state.user?.ref || '${data['state']}' == 'ended') {
+        return null;
+      }
+      return IncomingCall(
+        call: call,
+        channel: channel,
+        caller: caller,
+        callerName: _displayName(caller),
+      );
+    } on Object {
+      return null;
+    }
+  }
+
+  void _receiveIncomingCall(Map<String, Object?> data) {
+    final incoming = _incomingCallFrom(data);
+    if (incoming == null) return;
+    state = state.copyWith(incomingCall: incoming);
+    unawaited(systemCalls.showIncoming(
+      callId: incoming.call.wire,
+      callerName: incoming.callerName,
+    ));
+    unawaited(push.show(
+      id: stableNotificationId(incoming.call.wire),
+      kind: NotificationKind.call,
+      title: incoming.callerName,
+      body: 'Incoming Kaede call',
+      payload: PushDestination(channel: incoming.channel).encode(),
+    ));
+  }
+
+  Future<void> _notifyRelationshipEvent(Map<String, Object?> detail) async {
+    final type = '${detail['type'] ?? ''}';
+    if (!{'pending_in', 'friend'}.contains(type)) return;
+    final user = detail['user'];
+    final name = user is Map
+        ? '${user['display_name'] ?? user['username'] ?? 'Someone'}'
+        : 'Someone';
+    await push.show(
+      id: stableNotificationId('relationship:$type:$name'),
+      kind: NotificationKind.activity,
+      title: type == 'pending_in'
+          ? 'New friend request'
+          : 'Friend request accepted',
+      body: type == 'pending_in'
+          ? '$name sent you a friend request.'
+          : 'You and $name are now friends.',
+    );
+  }
+
+  Future<void> _notifyModerationEvent(Map<String, Object?> data) async {
+    final timedOut =
+        data['timeout_indefinite'] == true || data['timeout_until'] != null;
+    await push.show(
+      id: stableNotificationId(
+          'moderation:${state.selectedGuild?.wire}:${DateTime.now().millisecondsSinceEpoch ~/ 60000}'),
+      kind: NotificationKind.moderation,
+      title: timedOut ? 'Messaging restricted' : 'Guild membership updated',
+      body: timedOut
+          ? 'Your guild timeout or restrictions changed. Open Kaede for details.'
+          : 'Your guild roles or membership changed.',
+    );
+  }
+
+  void _finishIncomingCall(
+    Map<String, Object?> data, {
+    bool active = false,
+  }) {
+    final incoming = state.incomingCall;
+    if (incoming == null || '${data['id']}' != incoming.call.id.value) return;
+    state = state.copyWith(clearIncomingCall: true);
+    unawaited(active
+        ? systemCalls.setActive(incoming.call.wire)
+        : systemCalls.end(incoming.call.wire));
+  }
+
+  Future<void> answerIncomingCall() async {
+    final incoming = state.incomingCall;
+    if (incoming == null) return;
+    try {
+      await repository.callAction(incoming.call, 'accept');
+      state = state.copyWith(
+        clearIncomingCall: true,
+        pendingCallJoin: incoming,
+        clearError: true,
+      );
+      await systemCalls.setActive(incoming.call.wire);
+    } on Object catch (error) {
+      await systemCalls.end(incoming.call.wire);
+      state = state.copyWith(
+        clearIncomingCall: true,
+        error: userFacingError(error, summary: 'Could not answer the call.'),
+      );
+    }
+  }
+
+  Future<void> declineIncomingCall() async {
+    final incoming = state.incomingCall;
+    if (incoming == null) return;
+    state = state.copyWith(clearIncomingCall: true);
+    await systemCalls.end(incoming.call.wire);
+    try {
+      await repository.callAction(incoming.call, 'decline');
+    } on Object catch (error) {
+      state = state.copyWith(
+        error: userFacingError(error, summary: 'Could not decline the call.'),
+      );
+    }
+  }
+
+  Future<void> _onSystemCallAction(SystemCallEvent event) async {
+    if (state.incomingCall?.call.wire != event.callId) return;
+    switch (event.action) {
+      case SystemCallAction.answer:
+        await answerIncomingCall();
+        return;
+      case SystemCallAction.decline:
+      case SystemCallAction.ended:
+        await declineIncomingCall();
+        return;
+    }
+  }
+
+  void clearPendingCallJoin() =>
+      state = state.copyWith(clearPendingCallJoin: true);
+
   Future<void> _revokeChannelAccess(Map<String, Object?> data) async {
     final tokens = api.tokens;
     final id = '${data['channel_id'] ?? ''}';
@@ -4119,6 +4303,7 @@ final class MobileController extends StateNotifier<MobileState> {
     _pushTokenSubscription?.cancel();
     _pushDestinationSubscription?.cancel();
     _pushHealthSubscription?.cancel();
+    _systemCallSubscription?.cancel();
     _sessionExpiredSubscription?.cancel();
     _outboxTimer?.cancel();
     _appLockTimer?.cancel();
@@ -4135,6 +4320,7 @@ final class MobileController extends StateNotifier<MobileState> {
     // lifecycle queue detaches this controller immediately, then waits for any
     // in-flight E2EE operation before freeing native state and vault material.
     unawaited(_queueE2eeTeardown());
+    unawaited(systemCalls.dispose());
     super.dispose();
   }
 

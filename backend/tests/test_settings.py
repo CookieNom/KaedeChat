@@ -4,8 +4,10 @@ import re
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
+from app.api.mobile_links import android_asset_links, apple_app_site_association
 from app.core.settings import AUXILIARY_KAEDE_ENV, Settings
 
 VALID_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
@@ -40,6 +42,32 @@ def test_settings_normalize_domain_and_hide_secrets() -> None:
     configured = settings(domain="Chat.Example.COM.")
     assert configured.domain == "chat.example.com"
     assert VALID_KEY not in repr(configured)
+
+
+@pytest.mark.asyncio
+async def test_mobile_link_associations_are_configuration_backed() -> None:
+    configured = settings(
+        mobile_android_sha256_cert_fingerprints="AA:BB, CC:DD",
+        mobile_ios_app_ids="TEAM.chat.kaede.mobile",
+    )
+    android = await android_asset_links(configured)
+    apple = await apple_app_site_association(configured)
+    assert android[0]["target"] == {
+        "namespace": "android_app",
+        "package_name": "chat.kaede.mobile",
+        "sha256_cert_fingerprints": ["AA:BB", "CC:DD"],
+    }
+    assert apple["applinks"]["details"][0]["appIDs"] == ["TEAM.chat.kaede.mobile"]
+
+
+@pytest.mark.asyncio
+async def test_mobile_link_associations_fail_closed_without_signing_ids() -> None:
+    with pytest.raises(HTTPException) as android_error:
+        await android_asset_links(settings())
+    with pytest.raises(HTTPException) as apple_error:
+        await apple_app_site_association(settings())
+    assert android_error.value.status_code == 404
+    assert apple_error.value.status_code == 404
 
 
 def test_secret_must_be_32_bytes() -> None:

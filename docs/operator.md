@@ -160,6 +160,12 @@ mobile apps, logs, or ordinary federated homes. Direct FCM is still
 available with `KAEDE_PUSH_ENABLED` for a separately signed custom app
 distribution; it does not notify the official app.
 
+For verified mobile links on a signed custom build, set
+`KAEDE_MOBILE_ANDROID_SHA256_CERT_FINGERPRINTS` to the comma-separated signing
+certificate fingerprints and `KAEDE_MOBILE_IOS_APP_IDS` to the comma-separated
+`TEAM_ID.bundle_id` identifiers. Kaede then serves Android Asset Links and the
+Apple App Site Association document from the required `/.well-known` paths.
+
 See [mobile push delivery](mobile-push.md) for the data flow, privacy table,
 E2EE behavior, conversion procedure, queue failure semantics, and
 custom-build requirements.

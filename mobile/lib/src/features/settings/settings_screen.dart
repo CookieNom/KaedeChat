@@ -10,6 +10,7 @@ import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/settings/reports_screen.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -655,6 +656,15 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             'Do Not Disturb suppresses banners and sounds on every signed-in client.',
           ),
           const SettingsSectionHeader('Privacy'),
+          SettingsRow.chevron(
+            title: 'My reports',
+            subtitle: 'Review reports submitted to Trust & Safety.',
+            leading: _LeadingIcon(Icons.flag_outlined),
+            divider: true,
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const MyReportsScreen()),
+            ),
+          ),
           SettingsChoiceRow(
             title: 'Who can message you',
             value: '${_settings['dm_privacy'] ?? 'friends'}',

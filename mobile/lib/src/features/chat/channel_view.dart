@@ -39,6 +39,31 @@ const _messageTokenPattern =
 final _messageSpoilerRegExp = RegExp(_messageSpoilerPattern);
 final _messageTokenRegExp = RegExp(_messageTokenPattern);
 
+final class MobileApplicationCommand {
+  const MobileApplicationCommand({
+    required this.application,
+    required this.applicationName,
+    required this.name,
+    required this.type,
+    required this.description,
+  });
+
+  factory MobileApplicationCommand.fromJson(Map<String, Object?> json) =>
+      MobileApplicationCommand(
+        application: EntityRef.parse('${json['application_ref']}'),
+        applicationName: '${json['application_name'] ?? 'App'}',
+        name: '${json['name']}',
+        type: '${json['type']}',
+        description: '${json['description'] ?? ''}'.trim(),
+      );
+
+  final EntityRef application;
+  final String applicationName;
+  final String name;
+  final String type;
+  final String description;
+}
+
 /// Deep link to a message that the web and desktop clients can open. Guild
 /// channels live under `/g/<guild>/<channel>` and conversations under
 /// `/home/<channel>`, both selecting a message with `?around=`.
@@ -333,6 +358,25 @@ Uri? previewMediaUrl(String content) {
   return null;
 }
 
+String? previewableMessageLink(String? content) {
+  if (content == null) return null;
+  final visibleContent = content.replaceAll(_messageSpoilerRegExp, ' ');
+  for (final match in _urlPattern.allMatches(visibleContent)) {
+    final raw = match.group(0)!.replaceFirst(RegExp(r'[),.!?:;\]}]+$'), '');
+    final uri = Uri.tryParse(raw);
+    if (uri == null ||
+        !const <String>{'http', 'https'}.contains(uri.scheme) ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.pathSegments.firstOrNull == 'invite') {
+      continue;
+    }
+    if (previewMediaUrl(raw) != null) continue;
+    return uri.toString();
+  }
+  return null;
+}
+
 String spoilerSafeReplyPreview(String content) =>
     content.replaceAll(_messageSpoilerRegExp, 'Spoiler');
 
@@ -564,6 +608,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
   var _automaticHistoryCheckScheduled = false;
   var _automaticHistoryLoadInFlight = false;
   String? _mentionQuery;
+  String? _commandQuery;
+  EntityRef? _commandsGuild;
+  List<MobileApplicationCommand> _applicationCommands = const [];
   int? _handledJumpGeneration;
   EntityRef? _highlightedMessage;
   Timer? _highlightTimer;
@@ -631,6 +678,13 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       _showJumpToPresent = false;
       _initialScrollPending = !_savedOffsets.containsKey(channel.ref);
       _scheduleRestore(channel.ref);
+      if (_commandsGuild != channel.guildRef) {
+        _commandsGuild = channel.guildRef;
+        _applicationCommands = const [];
+        if (channel.guildRef case final guild?) {
+          unawaited(_loadApplicationCommands(guild));
+        }
+      }
     } else if (_initialScrollPending &&
         lastMessage != null &&
         !state.loadingMessages) {
@@ -923,6 +977,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
               users: _mentionCandidates(state, _mentionQuery!),
               onSelected: _insertMention,
             ),
+          if (_commandQuery != null)
+            _CommandSuggestions(
+              commands: _commandCandidates(_commandQuery!),
+              onSelected: _insertCommand,
+            ),
           if (!canSend)
             _PermissionNotice(
               message: encryptedPaused
@@ -990,8 +1049,15 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         : _composer.text;
     final match = RegExp(r'(?:^|\s)@([^\s@<>]*)$').firstMatch(beforeCursor);
     final nextMention = match?.group(1);
-    if (_mentionQuery != nextMention && mounted) {
-      setState(() => _mentionQuery = nextMention);
+    final commandMatch = RegExp(r'^/([a-z0-9_-]*)$', caseSensitive: false)
+        .firstMatch(beforeCursor);
+    final nextCommand = commandMatch?.group(1);
+    if ((_mentionQuery != nextMention || _commandQuery != nextCommand) &&
+        mounted) {
+      setState(() {
+        _mentionQuery = nextMention;
+        _commandQuery = nextCommand;
+      });
     }
     final channel = _composerChannel;
     if (channel == null) return;
@@ -1004,6 +1070,45 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           );
     });
     _publishTyping(channel);
+  }
+
+  Future<void> _loadApplicationCommands(EntityRef guild) async {
+    try {
+      final raw = await ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .applicationCommands(guild);
+      final commands = raw
+          .map(MobileApplicationCommand.fromJson)
+          .where((command) =>
+              const {'chat_input', 'message', 'user'}.contains(command.type))
+          .toList(growable: false);
+      if (mounted && _commandsGuild == guild) {
+        setState(() => _applicationCommands = commands);
+      }
+    } on Object {
+      // Messaging remains usable when an optional integration is unavailable.
+    }
+  }
+
+  List<MobileApplicationCommand> _commandCandidates(String query) {
+    final needle = query.toLowerCase();
+    return _applicationCommands
+        .where((command) => command.type == 'chat_input')
+        .where((command) =>
+            command.name.toLowerCase().contains(needle) ||
+            command.applicationName.toLowerCase().contains(needle))
+        .take(6)
+        .toList(growable: false);
+  }
+
+  void _insertCommand(MobileApplicationCommand command) {
+    _composer.value = TextEditingValue(
+      text: '/${command.name} ',
+      selection: TextSelection.collapsed(offset: command.name.length + 2),
+    );
+    setState(() => _commandQuery = null);
+    _composerFocus.requestFocus();
   }
 
   List<KaedeUser> _mentionCandidates(MobileState state, String query) {
@@ -1469,6 +1574,53 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     setState(() => _sending = true);
     try {
       final controller = ref.read(mobileControllerProvider.notifier);
+      final commandMatch = RegExp(r'^/([a-z0-9_-]{1,32})(?:\s+([\s\S]*))?$',
+              caseSensitive: false)
+          .firstMatch(content.trim());
+      final matchingCommands = commandMatch == null
+          ? const <MobileApplicationCommand>[]
+          : _applicationCommands
+              .where((command) =>
+                  command.type == 'chat_input' &&
+                  command.name == commandMatch.group(1))
+              .toList(growable: false);
+      if (matchingCommands.length == 1) {
+        if (channel.encryptionMode == 'e2ee') {
+          throw const UserInputException(
+            'Bot commands are unavailable in end-to-end encrypted channels.',
+          );
+        }
+        if (pendingUploads.isNotEmpty || reply != null) {
+          throw const UserInputException(
+            'Send commands without attachments or a message reply.',
+          );
+        }
+        final command = matchingCommands.single;
+        final raw = commandMatch!.group(2)?.trim() ?? '';
+        await controller.repository.invokeApplicationCommand(
+          channel: channel.ref,
+          application: command.application,
+          name: command.name,
+          type: command.type,
+          options: raw.isEmpty
+              ? const <String, Object?>{}
+              : <String, Object?>{'raw': raw},
+        );
+        controller.setDraft(channel.ref, '');
+        if (_composerChannel == channel.ref) {
+          _updatingComposer = true;
+          _composer.clear();
+          _updatingComposer = false;
+          setState(() => _commandQuery = null);
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content:
+                Text('/${command.name} sent to ${command.applicationName}.'),
+          ));
+        }
+        return;
+      }
       final uploaded = <EntityRef>[];
       final encryptedAttachments = <Map<String, Object?>>[];
       for (final item in pendingUploads) {
@@ -1718,6 +1870,15 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     final canManage = channel.type == ChannelType.dm ||
         channel.allows(Permission.manageMessages);
     final recent = canReact ? await _recentReactions(me) : const <String>[];
+    final sentGif = composerGifFromMessage(message.content);
+    final gifFavorite = sentGif == null
+        ? false
+        : (await loadComposerGifFavorites()).any((item) =>
+            item.id == sentGif.id ||
+            item.url.toString() == sentGif.url.toString());
+    final contextCommands = _applicationCommands
+        .where((command) => command.type == 'message' || command.type == 'user')
+        .toList(growable: false);
     if (!mounted) return;
     final action = await showModalBottomSheet<String>(
       context: context,
@@ -1787,6 +1948,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                   leading: const Icon(Icons.link_rounded),
                   title: const Text('Copy message link'),
                   onTap: () => Navigator.pop(context, 'copy-link')),
+              if (sentGif != null)
+                ListTile(
+                  leading: Icon(gifFavorite
+                      ? Icons.star_rounded
+                      : Icons.star_border_rounded),
+                  title: Text(gifFavorite
+                      ? 'Remove from GIF favorites'
+                      : 'Add to GIF favorites'),
+                  onTap: () => Navigator.pop(context, 'gif-favorite'),
+                ),
               if (canReact)
                 ListTile(
                     leading: const Icon(Icons.add_reaction_outlined),
@@ -1799,6 +1970,13 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                     title: const Text('View reactions'),
                     trailing: const Icon(Icons.chevron_right_rounded),
                     onTap: () => Navigator.pop(context, 'view-reactions')),
+              if (contextCommands.isNotEmpty && message.e2ee == null)
+                ListTile(
+                  leading: const Icon(Icons.apps_rounded),
+                  title: const Text('Apps'),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.pop(context, 'app-command'),
+                ),
               if (canManage)
                 ListTile(
                     leading: Icon(message.pinned
@@ -1871,6 +2049,70 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         case 'react-picker':
           final emoji = await _showReactionPicker(me);
           if (emoji != null) await _toggleReaction(message, emoji);
+          break;
+        case 'gif-favorite':
+          if (sentGif != null) {
+            await toggleComposerGifFavorite(sentGif);
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text(gifFavorite
+                    ? 'GIF removed from favorites.'
+                    : 'GIF added to favorites.'),
+              ));
+            }
+          }
+          break;
+        case 'app-command':
+          final selected = await showModalBottomSheet<int>(
+            context: context,
+            showDragHandle: true,
+            builder: (sheetContext) => SafeArea(
+              child: ListView(
+                shrinkWrap: true,
+                padding: const EdgeInsets.only(bottom: 12),
+                children: [
+                  const ListTile(
+                    title: Text('Run an app command',
+                        style: TextStyle(fontWeight: FontWeight.w800)),
+                  ),
+                  for (var index = 0; index < contextCommands.length; index++)
+                    ListTile(
+                      leading: Icon(contextCommands[index].type == 'message'
+                          ? Icons.chat_bubble_outline_rounded
+                          : Icons.person_outline_rounded),
+                      title: Text(contextCommands[index].name),
+                      subtitle: Text([
+                        if (contextCommands[index].description.isNotEmpty)
+                          contextCommands[index].description,
+                        contextCommands[index].applicationName,
+                      ].join(' · ')),
+                      onTap: () => Navigator.pop(sheetContext, index),
+                    ),
+                ],
+              ),
+            ),
+          );
+          if (selected != null) {
+            final command = contextCommands[selected];
+            await controller.repository.invokeApplicationCommand(
+              channel: channel.ref,
+              application: command.application,
+              name: command.name,
+              type: command.type,
+              options: <String, Object?>{
+                if (command.type == 'message')
+                  'target_ref': message.ref.wire
+                else
+                  'target_ref': message.authorRef.wire,
+              },
+            );
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content:
+                    Text('${command.name} sent to ${command.applicationName}.'),
+              ));
+            }
+          }
           break;
         case 'view-reactions':
           await showModalBottomSheet<void>(
@@ -3055,6 +3297,7 @@ final class _MessageTile extends StatelessWidget {
     final author = message.author;
     final deleted = message.deletedAt != null;
     final mediaPreview = previewMediaUrl(message.content ?? '');
+    final linkPreview = previewableMessageLink(message.content);
     final failed = message.deliveryStatus == 'failed';
     return InkWell(
       onLongPress: _openMenu,
@@ -3158,6 +3401,11 @@ final class _MessageTile extends StatelessWidget {
                       state: state,
                       omitMediaUrl: mediaPreview,
                     ),
+                  if (!deleted &&
+                      message.e2ee == null &&
+                      mediaPreview == null &&
+                      linkPreview != null)
+                    _LinkPreviewCard(url: linkPreview),
                   if (!deleted && mediaPreview != null)
                     _RemoteMediaPreview(uri: mediaPreview),
                   for (final attachment in deleted
@@ -3230,6 +3478,168 @@ final class _MessageTile extends StatelessWidget {
       ),
     );
   }
+}
+
+final class _LinkPreviewCard extends ConsumerStatefulWidget {
+  const _LinkPreviewCard({required this.url});
+  final String url;
+
+  @override
+  ConsumerState<_LinkPreviewCard> createState() => _LinkPreviewCardState();
+}
+
+final class _LinkPreviewCardState extends ConsumerState<_LinkPreviewCard> {
+  static final _cache = <String, Future<Map<String, Object?>>>{};
+  late Future<Map<String, Object?>> _preview;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LinkPreviewCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.url != widget.url) _load();
+  }
+
+  void _load({bool retry = false}) {
+    if (retry) _cache.remove(widget.url);
+    _preview = _cache.putIfAbsent(
+      widget.url,
+      () => ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .linkPreview(widget.url),
+    );
+  }
+
+  Future<void> _open(Object? raw) async {
+    final uri = Uri.tryParse('${raw ?? widget.url}');
+    if (uri != null && const {'https', 'http'}.contains(uri.scheme)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<Map<String, Object?>>(
+        future: _preview,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: LinearProgressIndicator(minHeight: 2),
+            );
+          }
+          if (snapshot.hasError) {
+            return Container(
+              margin: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+              decoration: BoxDecoration(
+                color: KaedeColors.raised,
+                borderRadius: BorderRadius.circular(KaedeRadius.medium),
+                border: Border.all(color: KaedeColors.border),
+              ),
+              child: Row(children: [
+                const Expanded(
+                  child: Text('Link preview unavailable',
+                      style: TextStyle(color: KaedeColors.muted, fontSize: 12)),
+                ),
+                TextButton(
+                    onPressed: () => _open(widget.url),
+                    child: const Text('Open')),
+                TextButton(
+                  onPressed: () => setState(() => _load(retry: true)),
+                  child: const Text('Retry'),
+                ),
+              ]),
+            );
+          }
+          final preview = snapshot.data!;
+          final rawMedia = '${preview['media_url'] ?? ''}';
+          final session =
+              ref.read(mobileControllerProvider.notifier).api.tokens;
+          final safeMediaPath = RegExp(
+            r'^/api/v1/link-previews/media/[0-9a-f]{48}$',
+          ).hasMatch(rawMedia);
+          final media = safeMediaPath && session != null
+              ? Uri.https(session.instance.value, rawMedia)
+              : null;
+          final mediaHeaders = media == null || session == null
+              ? const <String, String>{}
+              : <String, String>{
+                  'Authorization': 'Bearer ${session.accessToken}'
+                };
+          final mediaIsImage = preview['media_type'] == 'image' &&
+              media != null &&
+              media.scheme == 'https';
+          final title = '${preview['title'] ?? ''}'.trim();
+          final description = '${preview['description'] ?? ''}'.trim();
+          final site = '${preview['site_name'] ?? ''}'.trim();
+          if (!mediaIsImage &&
+              title.isEmpty &&
+              description.isEmpty &&
+              site.isEmpty) {
+            return const SizedBox.shrink();
+          }
+          return Card(
+            margin: const EdgeInsets.only(top: 8),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: () => _open(preview['url']),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (mediaIsImage)
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 240),
+                      child: CachedNetworkImage(
+                        imageUrl: media.toString(),
+                        httpHeaders: mediaHeaders,
+                        fit: BoxFit.cover,
+                        errorWidget: (_, __, ___) => const SizedBox.shrink(),
+                      ),
+                    ),
+                  if (title.isNotEmpty ||
+                      description.isNotEmpty ||
+                      site.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (site.isNotEmpty)
+                            Text(site.toUpperCase(),
+                                style: const TextStyle(
+                                    color: KaedeColors.muted,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700)),
+                          if (title.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text(title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w800)),
+                          ],
+                          if (description.isNotEmpty) ...[
+                            const SizedBox(height: 5),
+                            Text(description,
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    color: KaedeColors.muted, fontSize: 12)),
+                          ],
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
 }
 
 /// Join, leave and removal notices, kept visually quieter than real messages.
@@ -4473,6 +4883,44 @@ final class _MentionSuggestions extends StatelessWidget {
                 ? user.handle
                 : 'Profile unavailable · refreshes automatically'),
             onTap: () => onSelected(user),
+          );
+        },
+      ),
+    );
+  }
+}
+
+final class _CommandSuggestions extends StatelessWidget {
+  const _CommandSuggestions({required this.commands, required this.onSelected});
+
+  final List<MobileApplicationCommand> commands;
+  final ValueChanged<MobileApplicationCommand> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    if (commands.isEmpty) return const SizedBox.shrink();
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 230),
+      margin: const EdgeInsets.fromLTRB(8, 2, 8, 4),
+      decoration: BoxDecoration(
+        color: KaedeColors.panel,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: KaedeColors.border),
+      ),
+      child: ListView.builder(
+        shrinkWrap: true,
+        itemCount: commands.length,
+        itemBuilder: (context, index) {
+          final command = commands[index];
+          return ListTile(
+            dense: true,
+            leading: const Icon(Icons.terminal_rounded),
+            title: Text('/${command.name}'),
+            subtitle: Text([
+              if (command.description.isNotEmpty) command.description,
+              command.applicationName,
+            ].join(' · ')),
+            onTap: () => onSelected(command),
           );
         },
       ),

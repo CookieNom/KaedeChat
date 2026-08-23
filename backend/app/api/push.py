@@ -723,6 +723,26 @@ async def redeem_push_notification(
     if device is None:
         raise _push_event_not_found()
 
+    if event.kind in {"call", "moderation", "relationship"}:
+        preferences_row = await session.get(
+            UserSettings,
+            (auth.user.id, auth.user.origin_domain),
+        )
+        preferences = preferences_row.notification_settings if preferences_row is not None else {}
+        if preferences.get("presence_preference") == "dnd":
+            return await _suppress_push(redis, body.event_token, encoded)
+        if not event.title or not event.body or not event.event_ref:
+            return await _suppress_push(redis, body.event_token, encoded)
+        await _claim_or_not_found(redis, body.event_token, encoded)
+        return PushNotificationResponse(
+            kind=cast(Literal["call", "moderation", "relationship"], event.kind),
+            title=event.title[:160],
+            body=event.body[:500],
+            channel_ref=event.channel_ref,
+            event_ref=event.event_ref,
+            sent_at=event.sent_at or datetime.now(UTC).isoformat(),
+        )
+
     message = await session.get(Message, (event.message_id, event.message_domain))
     if (
         message is None

@@ -79,11 +79,19 @@ class PushNotificationRedeem(BaseModel):
 
 
 class PushNotificationResponse(BaseModel):
-    kind: Literal["direct_message", "mention", "guild_message"]
+    kind: Literal[
+        "direct_message",
+        "mention",
+        "guild_message",
+        "call",
+        "moderation",
+        "relationship",
+    ]
     title: str
     body: str
-    channel_ref: str
-    message_ref: str
+    channel_ref: str | None = None
+    message_ref: str | None = None
+    event_ref: str | None = None
     sender_name: str | None = None
     sender_ref: str | None = None
     sender_avatar_hash: str | None = Field(

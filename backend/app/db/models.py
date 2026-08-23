@@ -381,7 +381,11 @@ class PushWakeOutbox(Base):
             "device_id", "message_id", "message_domain", "kind", name="uq_push_wake_event"
         ),
         CheckConstraint("attempts >= 0", name="nonnegative_attempts"),
-        CheckConstraint("kind IN ('direct_message','mention','guild_message')", name="kind_value"),
+        CheckConstraint(
+            "kind IN ('direct_message','mention','guild_message',"
+            "'call','moderation','relationship')",
+            name="kind_value",
+        ),
         Index("ix_push_wake_outbox_due", "next_attempt_at", "expires_at"),
     )
 

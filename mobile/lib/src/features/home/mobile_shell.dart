@@ -274,6 +274,12 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<IncomingCall?>(
+      mobileControllerProvider.select((state) => state.pendingCallJoin),
+      (_, call) {
+        if (call != null) unawaited(_joinAnsweredCall(call));
+      },
+    );
     // Only the open conversation belongs to this build. Banners and the voice
     // strip watch their own slices, so an arriving message or presence update
     // cannot rebuild the page view while a swipe is still in flight.
@@ -284,6 +290,7 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
       bottom: false,
       child: Column(
         children: [
+          const _IncomingCallBanner(),
           _ShellBanners(
             onOpenSettings: () => _showSection(_ShellSection.settings),
           ),
@@ -351,6 +358,31 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
     );
   }
 
+  Future<void> _joinAnsweredCall(IncomingCall call) async {
+    final controller = ref.read(mobileControllerProvider.notifier);
+    controller.clearPendingCallJoin();
+    KaedeChannel? channel;
+    for (final candidate in ref.read(mobileControllerProvider).dms) {
+      if (candidate.ref == call.channel) channel = candidate;
+    }
+    if (channel == null) {
+      await controller.refreshNavigation();
+      for (final candidate in ref.read(mobileControllerProvider).dms) {
+        if (candidate.ref == call.channel) channel = candidate;
+      }
+    }
+    if (!mounted || channel == null) return;
+    await controller.selectDm(channel);
+    if (!mounted) return;
+    if (_section != _ShellSection.messages) {
+      setState(() => _section = _ShellSection.messages);
+    }
+    _openConversation();
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _DmCallRoom(channel: channel!, callRef: call.call),
+    ));
+  }
+
   void _onPageChanged(int page) {
     _messagePage.value = page;
     _conversationVisible.value = page == 1;
@@ -399,6 +431,61 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
 }
 
 enum _ShellSection { messages, friends, settings }
+
+final class _IncomingCallBanner extends ConsumerWidget {
+  const _IncomingCallBanner();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final call = ref.watch(
+      mobileControllerProvider.select((state) => state.incomingCall),
+    );
+    if (call == null) return const SizedBox.shrink();
+    final controller = ref.read(mobileControllerProvider.notifier);
+    return SafeArea(
+      bottom: false,
+      child: Material(
+        color: KaedeColors.sidebar,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 8, 10, 8),
+          child: Row(
+            children: [
+              const Icon(Icons.call_rounded, color: KaedeColors.mint),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      call.callerName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                    const Text('Incoming call'),
+                  ],
+                ),
+              ),
+              IconButton.filledTonal(
+                tooltip: 'Decline',
+                onPressed: controller.declineIncomingCall,
+                icon: const Icon(Icons.call_end_rounded,
+                    color: KaedeColors.coral),
+              ),
+              const SizedBox(width: 6),
+              IconButton.filled(
+                tooltip: 'Answer',
+                onPressed: controller.answerIncomingCall,
+                icon: const Icon(Icons.call_rounded),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 final class _SectionScreen extends StatelessWidget {
   const _SectionScreen({
@@ -4348,9 +4435,13 @@ Future<void> _showGuildActions(BuildContext context, WidgetRef ref) async {
 
 Future<void> _createAndShowInvite(BuildContext context,
     MobileController controller, KaedeGuild guild, KaedeChannel channel) async {
+  final restrictions = await showInviteRestrictions(context);
+  if (restrictions == null || !context.mounted) return;
   try {
     final result = await controller.repository.createInvite(guild.ref, {
       'channel_id': channel.ref.id.value,
+      'max_age_seconds': restrictions.$1,
+      'max_uses': restrictions.$2,
     });
     if (!context.mounted) return;
     final code = '${result['code'] ?? ''}';

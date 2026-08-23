@@ -134,16 +134,18 @@ final class PushNotificationEnvelope {
     this.senderRef,
     this.senderAvatarHash,
     this.sentAt,
+    this.eventRef,
   });
 
   final NotificationKind kind;
   final String title;
   final String body;
-  final PushDestination destination;
+  final PushDestination? destination;
   final String? senderName;
   final EntityRef? senderRef;
   final String? senderAvatarHash;
   final DateTime? sentAt;
+  final String? eventRef;
 
   Uri? get senderAvatarUri => senderRef == null
       ? null
@@ -159,6 +161,9 @@ final class PushNotificationEnvelope {
         'direct_message' => NotificationKind.directMessage,
         'mention' => NotificationKind.mention,
         'guild_message' => NotificationKind.guildMessage,
+        'call' => NotificationKind.call,
+        'moderation' => NotificationKind.moderation,
+        'relationship' => NotificationKind.activity,
         _ => null,
       };
       final title = json['title'];
@@ -179,13 +184,17 @@ final class PushNotificationEnvelope {
               ? avatarHash
               : null;
       final sentAt = DateTime.tryParse('${json['sent_at'] ?? ''}')?.toUtc();
+      final rawEventRef = '${json['event_ref'] ?? ''}'.trim();
+      final messageKind = kind == NotificationKind.directMessage ||
+          kind == NotificationKind.mention ||
+          kind == NotificationKind.guildMessage;
       if (kind == null ||
           title is! String ||
           title.isEmpty ||
           body is! String ||
           body.isEmpty ||
-          destination == null ||
-          destination.message == null ||
+          (messageKind && destination?.message == null) ||
+          (!messageKind && rawEventRef.isEmpty) ||
           (senderName != null && senderRef == null)) {
         return null;
       }
@@ -198,6 +207,7 @@ final class PushNotificationEnvelope {
         senderRef: senderRef,
         senderAvatarHash: senderAvatarHash,
         sentAt: sentAt,
+        eventRef: rawEventRef.isEmpty ? null : rawEventRef,
       );
     } on Object {
       return null;
@@ -540,7 +550,8 @@ final class PushService {
       final notification = redemption.notification;
       if (notification != null) {
         _reportHealth(null);
-        if (_appActive && notification.destination.channel == _visibleChannel) {
+        if (_appActive &&
+            notification.destination?.channel == _visibleChannel) {
           return;
         }
         await _displayRedeemedNotification(_local, notification);
@@ -703,8 +714,13 @@ Future<void> _displayRedeemedNotification(
   FlutterLocalNotificationsPlugin local,
   PushNotificationEnvelope notification,
 ) async {
-  final id = stableNotificationId(notification.destination.message!.wire);
-  final payload = notification.destination.encode();
+  final id = stableNotificationId(
+    notification.eventRef ??
+        notification.destination?.message?.wire ??
+        notification.destination?.channel.wire ??
+        '${notification.kind}:${notification.title}:${notification.sentAt}',
+  );
+  final payload = notification.destination?.encode();
   await _showLocalNotification(
     local,
     id: id,

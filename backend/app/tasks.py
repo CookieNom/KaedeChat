@@ -756,6 +756,160 @@ async def mobile_push_message(
     return delivered
 
 
+@broker.task(task_name="mobile.push_activity")
+@observed_job("mobile.push_activity")
+async def mobile_push_activity(
+    user_id: int,
+    user_domain: str,
+    event_id: int,
+    event_domain: str,
+    kind: str,
+    title: str,
+    body: str,
+    event_ref: str,
+    channel_ref: str | None = None,
+) -> int:
+    """Deliver one server-authored, content-free wake for non-message activity."""
+
+    settings = get_settings()
+    if not (settings.push_enabled or settings.push_relay_enabled):
+        return 0
+    if kind not in {"call", "moderation", "relationship"}:
+        raise ValueError("unsupported activity push kind")
+    user_domain = normalize_domain(user_domain)
+    event_domain = normalize_domain(event_domain)
+    if user_domain != settings.domain or not 0 <= user_id <= (1 << 63) - 1:
+        return 0
+    if not 0 <= event_id <= (1 << 63) - 1:
+        raise ValueError("invalid activity event identity")
+
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    delivered = 0
+    invalid_device_ids: list[str] = []
+    try:
+        async with sessionmaker() as session:
+            devices = list(
+                await session.scalars(
+                    select(PushDevice).where(
+                        PushDevice.user_id == user_id,
+                        PushDevice.user_domain == user_domain,
+                        PushDevice.enabled.is_(True),
+                    )
+                )
+            )
+            now = datetime.now(UTC)
+            direct: list[PushDevice] = []
+            for device in devices:
+                if device.transport != "relay":
+                    if settings.push_enabled:
+                        direct.append(device)
+                    continue
+                token = await issue_push_sync(
+                    redis,
+                    PushSyncEvent(
+                        device_id=device.id,
+                        user_id=user_id,
+                        user_domain=user_domain,
+                        message_id=event_id,
+                        message_domain=event_domain,
+                        kind=kind,
+                        title=title[:160],
+                        body=body[:500],
+                        channel_ref=channel_ref,
+                        event_ref=event_ref[:286],
+                        sent_at=now.isoformat(),
+                    ),
+                )
+                inserted = await session.scalar(
+                    pg_insert(PushWakeOutbox)
+                    .values(
+                        request_id=stable_wake_identifier(
+                            settings,
+                            purpose="request",
+                            device_id=device.id,
+                            message_id=event_id,
+                            message_domain=event_domain,
+                            kind=kind,
+                        ),
+                        device_id=device.id,
+                        message_id=event_id,
+                        message_domain=event_domain,
+                        kind=kind,
+                        event_token=token,
+                        delivery_id=stable_wake_identifier(
+                            settings,
+                            purpose="delivery",
+                            device_id=device.id,
+                            message_id=event_id,
+                            message_domain=event_domain,
+                            kind=kind,
+                        ),
+                        expires_at=now + timedelta(seconds=PUSH_WAKE_TTL_SECONDS),
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            PushWakeOutbox.device_id,
+                            PushWakeOutbox.message_id,
+                            PushWakeOutbox.message_domain,
+                            PushWakeOutbox.kind,
+                        ]
+                    )
+                    .returning(PushWakeOutbox.request_id)
+                )
+                if inserted is None:
+                    await discard_push_sync(redis, token)
+            await session.commit()
+            if any(device.transport == "relay" for device in devices):
+                await enqueue_best_effort(push_relay_outbox_sweep)
+
+            if direct:
+                client = fcm_client(settings)
+            for device in direct:
+                token = await issue_push_sync(
+                    redis,
+                    PushSyncEvent(
+                        device_id=device.id,
+                        user_id=user_id,
+                        user_domain=user_domain,
+                        message_id=event_id,
+                        message_domain=event_domain,
+                        kind=kind,
+                        title=title[:160],
+                        body=body[:500],
+                        channel_ref=channel_ref,
+                        event_ref=event_ref[:286],
+                        sent_at=now.isoformat(),
+                    ),
+                )
+                try:
+                    result = await client.send_sync(
+                        decrypt_device_token(device, settings),
+                        event_token=token,
+                        platform=device.platform,
+                    )
+                except httpx.HTTPError:
+                    await discard_push_sync(redis, token)
+                    continue
+                if result.delivered:
+                    delivered += 1
+                else:
+                    await discard_push_sync(redis, token)
+                    if result.token_invalid:
+                        invalid_device_ids.append(device.id)
+            if invalid_device_ids:
+                await session.execute(
+                    update(PushDevice)
+                    .where(PushDevice.id.in_(invalid_device_ids))
+                    .values(enabled=False, updated_at=func.now())
+                )
+                await session.commit()
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+    return delivered
+
+
 @broker.task(task_name="mobile.push_relay_outbox", schedule=[{"cron": "* * * * *"}])
 @observed_job("mobile.push_relay_outbox")
 async def push_relay_outbox_sweep() -> int:
@@ -811,7 +965,7 @@ async def push_relay_outbox_sweep() -> int:
                             "event_token": row.event_token,
                             "delivery_id": row.delivery_id,
                             "expires_at": expires,
-                            "priority": "normal",
+                            "priority": "urgent" if row.kind == "call" else "normal",
                             "wake_mac": wake_mac(
                                 decrypt_wake_secret(device.relay_wake_secret_encrypted, settings),
                                 route_id=device.relay_route_id,

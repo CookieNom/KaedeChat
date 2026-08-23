@@ -136,6 +136,7 @@ final class KaedeChannel {
     this.permissionsSynced = false,
     this.historyTruncated = false,
     this.historyRetention,
+    this.federatedHistoryPolicy = 'inherit',
     this.historyRemoteAvailable = false,
     this.oldestAvailableMessageRef,
     this.historyDegradedCode,
@@ -187,6 +188,8 @@ final class KaedeChannel {
       permissionsSynced: _boolean(json['permissions_synced']),
       historyTruncated: _boolean(json['history_truncated']),
       historyRetention: _string(json['history_retention']),
+      federatedHistoryPolicy:
+          _string(json['federated_history_policy']) ?? 'inherit',
       historyRemoteAvailable: _boolean(json['history_remote_available']),
       oldestAvailableMessageRef:
           _entityRefOrNull(json['oldest_available_message_ref']),
@@ -223,6 +226,7 @@ final class KaedeChannel {
   final bool permissionsSynced;
   final bool historyTruncated;
   final String? historyRetention;
+  final String federatedHistoryPolicy;
   final bool historyRemoteAvailable;
   final EntityRef? oldestAvailableMessageRef;
   final String? historyDegradedCode;
@@ -268,6 +272,7 @@ final class KaedeChannel {
         'permissions_synced': permissionsSynced,
         'history_truncated': historyTruncated,
         'history_retention': historyRetention,
+        'federated_history_policy': federatedHistoryPolicy,
         'history_remote_available': historyRemoteAvailable,
         'oldest_available_message_ref': oldestAvailableMessageRef == null
             ? null
@@ -315,6 +320,7 @@ final class KaedeChannel {
         permissionsSynced: permissionsSynced,
         historyTruncated: historyTruncated,
         historyRetention: historyRetention,
+        federatedHistoryPolicy: federatedHistoryPolicy,
         historyRemoteAvailable: historyRemoteAvailable,
         oldestAvailableMessageRef: oldestAvailableMessageRef,
         historyDegradedCode: historyDegradedCode,

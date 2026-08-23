@@ -114,11 +114,26 @@ async def notify_call(
     record: dict[str, Any],
     settings: Settings,
 ) -> None:
+    from app.tasks import mobile_push_activity
+
     for identity in participants:
         try:
             user_id, domain = parse_participant_identity(identity)
             if domain == settings.domain:
                 await publish_dispatch(redis, user_topic(domain, user_id), event, record)
+                if event == "CALL_RING":
+                    await enqueue_best_effort(
+                        mobile_push_activity,
+                        user_id,
+                        domain,
+                        int(record["id"]),
+                        str(record["authority_domain"]),
+                        "call",
+                        "Incoming Kaede call",
+                        "Answer or decline the call.",
+                        f"call:{record['id']}@{record['authority_domain']}",
+                        f"{record['channel_id']}@{record['channel_domain']}",
+                    )
         except Exception:
             # Call state is authoritative; gateway delivery is a recoverable
             # projection and must not turn a committed transition into a 5xx.

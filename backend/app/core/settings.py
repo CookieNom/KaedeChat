@@ -325,6 +325,9 @@ class Settings(BaseSettings):
     push_relay_fcm_service_account_b64: SecretStr | None = None
     push_enabled: bool = False
     push_fcm_service_account_b64: SecretStr | None = None
+    mobile_android_package: str = "chat.kaede.mobile"
+    mobile_android_sha256_cert_fingerprints: str = ""
+    mobile_ios_app_ids: str = ""
 
     # Observability and retention
     audit_retention_days: int = Field(default=90, ge=90)

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/features/auth/auth_screen.dart';
+import 'package:kaede_mobile/src/features/auth/deep_link_screen.dart';
 import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
 import 'package:kaede_mobile/src/features/voice/voice_session.dart';
 import 'package:kaede_mobile/src/platform/push_service.dart';
@@ -37,6 +38,24 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
           path: '/',
           builder: (context, state) => const _SessionGate(),
         ),
+        for (final path in <String>[
+          '/invite/:code',
+          '/verify',
+          '/verify-email',
+          '/reset-password',
+          '/verify-email-change',
+          '/g/:guildId/:channelId',
+          '/home/:dmId',
+        ])
+          GoRoute(
+            path: path,
+            builder: (context, state) {
+              final link = MobileDeepLink.parse(state.uri);
+              return link == null
+                  ? const _InvalidLinkScreen()
+                  : _DeepLinkGate(link: link);
+            },
+          ),
         GoRoute(
           path: '/open',
           builder: (context, state) => _SessionGate(
@@ -126,6 +145,53 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
       ),
     );
   }
+}
+
+final class _DeepLinkGate extends ConsumerWidget {
+  const _DeepLinkGate({required this.link});
+  final MobileDeepLink link;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final phase = ref.watch(mobileControllerProvider).phase;
+    if (phase == SessionPhase.restoring) return const _LaunchScreen();
+    if (phase == SessionPhase.locked) return const _LockScreen();
+    if ((phase == SessionPhase.signedOut ||
+            phase == SessionPhase.authenticating) &&
+        link.requiresSession) {
+      return AuthScreen(
+        initialInstance: link.instance.value,
+        notice: link.signInNotice,
+      );
+    }
+    return DeepLinkActionScreen(link: link);
+  }
+}
+
+final class _InvalidLinkScreen extends StatelessWidget {
+  const _InvalidLinkScreen();
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Invalid link')),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.link_off_rounded, size: 42),
+                const SizedBox(height: 12),
+                const Text('This Kaede link is incomplete or malformed.'),
+                const SizedBox(height: 16),
+                FilledButton(
+                  onPressed: () => context.go('/'),
+                  child: const Text('Open Kaede'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
 }
 
 final class _SessionGate extends ConsumerWidget {

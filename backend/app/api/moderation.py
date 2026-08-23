@@ -80,6 +80,30 @@ from app.media.tombstones import lock_media_tombstone_ref, queue_terminal_attach
 router = APIRouter(prefix="/api/v1/guilds", tags=["moderation"])
 
 
+async def queue_moderation_push(
+    *,
+    user_id: int,
+    user_domain: str,
+    guild: Guild,
+    event_id: int,
+    title: str,
+    body: str,
+) -> None:
+    from app.tasks import mobile_push_activity
+
+    await enqueue_best_effort(
+        mobile_push_activity,
+        user_id,
+        user_domain,
+        event_id,
+        guild.origin_domain,
+        "moderation",
+        title,
+        body,
+        f"moderation:{guild.id}@{guild.origin_domain}:{event_id}",
+    )
+
+
 def audit_reason(value: str | None) -> str | None:
     if value is not None and len(value) > 512:
         raise HTTPException(status_code=400, detail={"code": "AUDIT_REASON_TOO_LONG"})
@@ -389,6 +413,15 @@ async def update_member(
                 "user_domain": user_domain,
             },
         )
+        if timeout_changed:
+            await queue_moderation_push(
+                user_id=user_number,
+                user_domain=user_domain,
+                guild=guild,
+                event_id=await snowflake.mint(),
+                title="Guild timeout updated",
+                body=f"Your messaging restrictions in {guild.name} changed.",
+            )
     target_user = await session.scalar(
         select(User).where(User.id == user_number, User.origin_domain == user_domain)
     )
@@ -495,6 +528,14 @@ async def kick_member(
             "GUILD_DELETE",
             {"id": str(guild.id), "origin_domain": guild.origin_domain},
         )
+    await queue_moderation_push(
+        user_id=user_number,
+        user_domain=user_domain,
+        guild=guild,
+        event_id=await snowflake.mint(),
+        title="Removed from guild",
+        body=f"You were removed from {guild.name}.",
+    )
     return Response(status_code=204)
 
 
@@ -741,6 +782,14 @@ async def ban_member(
                 "GUILD_DELETE",
                 {"id": str(guild.id), "origin_domain": guild.origin_domain},
             )
+    await queue_moderation_push(
+        user_id=user_number,
+        user_domain=user_domain,
+        guild=guild,
+        event_id=await snowflake.mint(),
+        title="Banned from guild",
+        body=f"You were banned from {guild.name}.",
+    )
     return Response(status_code=204)
 
 

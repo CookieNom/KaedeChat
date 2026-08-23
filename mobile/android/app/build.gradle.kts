@@ -41,6 +41,8 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["kaedeAppLinkHost"] =
+            providers.gradleProperty("kaedeAppLinkHost").orElse("kaede.chat").get()
     }
 
     signingConfigs {

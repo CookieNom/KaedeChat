@@ -1988,8 +1988,8 @@ void main() {
       });
 
       expect(envelope?.kind, NotificationKind.mention);
-      expect(envelope?.destination.channel.wire, '42@chat.example');
-      expect(envelope?.destination.message?.wire, '73@remote.example');
+      expect(envelope?.destination?.channel.wire, '42@chat.example');
+      expect(envelope?.destination?.message?.wire, '73@remote.example');
       expect(envelope?.senderName, 'Turtle');
       expect(envelope?.senderRef?.wire, '9@remote.example');
       expect(

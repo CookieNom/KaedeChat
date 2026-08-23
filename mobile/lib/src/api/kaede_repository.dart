@@ -624,6 +624,9 @@ final class KaedeRepository {
           disclosureAcknowledged: disclosureAcknowledged,
         ),
       );
+
+  Future<List<Map<String, Object?>>> myReports() =>
+      api.getList('/api/v1/reports/@me');
   Future<void> react(EntityRef channel, EntityRef message, String emoji) =>
       api.sendJson(
         'POST',
@@ -716,9 +719,20 @@ final class KaedeRepository {
           .map(GuildMember.fromJson)
           .toList();
   Future<void> updateMember(
-          EntityRef guild, EntityRef user, Map<String, Object?> patch) =>
-      api.sendJson('PATCH', '/api/v1/guilds/${guild.wire}/members/${user.wire}',
-          data: patch);
+    EntityRef guild,
+    EntityRef user,
+    Map<String, Object?> patch, {
+    String? reason,
+  }) =>
+      api.sendJson(
+        'PATCH',
+        '/api/v1/guilds/${guild.wire}/members/${user.wire}',
+        data: patch,
+        headers: <String, String>{
+          if (reason?.trim().isNotEmpty == true)
+            'X-Audit-Log-Reason': reason!.trim(),
+        },
+      );
   Future<void> kick(EntityRef guild, EntityRef user, {String? reason}) =>
       api.sendJson(
         'DELETE',
@@ -728,7 +742,9 @@ final class KaedeRepository {
         },
       );
   Future<void> ban(EntityRef guild, EntityRef user,
-          {DateTime? expiresAt, String? reason}) =>
+          {DateTime? expiresAt,
+          String? reason,
+          int deleteMessageSeconds = 0}) =>
       api.sendJson(
         'PUT',
         '/api/v1/guilds/${guild.wire}/bans/${user.wire}',
@@ -736,6 +752,7 @@ final class KaedeRepository {
           if (reason?.isNotEmpty == true) 'reason': reason,
           if (expiresAt != null)
             'expires_at': expiresAt.toUtc().toIso8601String(),
+          'delete_message_seconds': deleteMessageSeconds,
         },
         headers: <String, String>{
           if (reason != null) 'X-Audit-Log-Reason': reason
@@ -1389,6 +1406,44 @@ final class KaedeRepository {
         'page': page,
         'limit': 30,
       });
+
+  Future<List<Map<String, Object?>>> applicationCommands(EntityRef guild) =>
+      api.getList('/api/v1/guilds/${guild.wire}/application-commands');
+
+  Future<void> invokeApplicationCommand({
+    required EntityRef channel,
+    required EntityRef application,
+    required String name,
+    required String type,
+    Map<String, Object?> options = const <String, Object?>{},
+  }) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/interactions',
+        data: <String, Object?>{
+          'application_ref': application.wire,
+          'command_name': name,
+          'command_type': type,
+          'options': options,
+        },
+      );
+
+  Future<List<Map<String, Object?>>> botIntegrations(EntityRef guild) =>
+      api.getList('/api/v1/guilds/${guild.wire}/integrations/bots');
+
+  Future<void> removeBotIntegration(
+    EntityRef guild,
+    EntityRef application, {
+    String? reason,
+  }) =>
+      api.sendJson(
+        'DELETE',
+        '/api/v1/guilds/${guild.wire}/integrations/bots/${application.wire}',
+        headers: <String, String>{
+          if (reason?.trim().isNotEmpty == true)
+            'X-Audit-Log-Reason': reason!.trim(),
+        },
+      );
 
   Future<Map<String, Object?>> registerPushDevice({
     required String installationId,

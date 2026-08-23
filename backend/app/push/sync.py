@@ -20,6 +20,11 @@ class PushSyncEvent:
     message_id: int
     message_domain: str
     kind: str
+    title: str | None = None
+    body: str | None = None
+    channel_ref: str | None = None
+    event_ref: str | None = None
+    sent_at: str | None = None
 
 
 def push_sync_key(token: str) -> str:
@@ -40,6 +45,13 @@ def _decode_event(value: str | bytes) -> PushSyncEvent:
         message_id=int(document["message_id"]),
         message_domain=str(document["message_domain"]),
         kind=str(document["kind"]),
+        title=str(document["title"]) if document.get("title") is not None else None,
+        body=str(document["body"]) if document.get("body") is not None else None,
+        channel_ref=(
+            str(document["channel_ref"]) if document.get("channel_ref") is not None else None
+        ),
+        event_ref=(str(document["event_ref"]) if document.get("event_ref") is not None else None),
+        sent_at=str(document["sent_at"]) if document.get("sent_at") is not None else None,
     )
 
 

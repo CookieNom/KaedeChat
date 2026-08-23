@@ -186,6 +186,16 @@ final class _GuildManagementScreenState
             canManage: isOwner || _guild.allows(Permission.manageWebhooks),
           )
         ),
+      if (canManageGuild)
+        (
+          label: 'Bots',
+          description: 'Installed bots, grants and automation access.',
+          icon: Icons.smart_toy_outlined,
+          page: _BotIntegrationsTab(
+            guild: _guild,
+            repository: _repository,
+          ),
+        ),
       if (isOwner || _guild.allows(Permission.viewAuditLog))
         (
           label: 'Audit',
@@ -1352,6 +1362,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
         permissionsSynced: channel.permissionsSynced,
         historyTruncated: channel.historyTruncated,
         historyRetention: channel.historyRetention,
+        federatedHistoryPolicy: channel.federatedHistoryPolicy,
         historyRemoteAvailable: channel.historyRemoteAvailable,
         oldestAvailableMessageRef: channel.oldestAvailableMessageRef,
         historyDegradedCode: channel.historyDegradedCode,
@@ -2157,26 +2168,27 @@ final class _MembersTabState extends State<_MembersTab> {
               {'nickname': nickname.isEmpty ? null : nickname});
           break;
         case 'timeout':
-          final minutes = await _prompt(context, 'Timeout ${member.user.name}',
-              'Duration in minutes (0 removes timeout)',
-              warning:
-                  'Timed-out members can read history but cannot interact.');
-          if (minutes == null) return;
-          final value = int.tryParse(minutes);
-          if (value == null || value < 0) {
-            throw const UserInputException(
-              'Enter a whole number of minutes, or 0 to remove the timeout.',
-            );
-          }
-          await widget.repository
-              .updateMember(widget.guild.ref, member.user.ref, {
-            'timeout_until': value <= 0
-                ? null
-                : DateTime.now()
-                    .toUtc()
-                    .add(Duration(minutes: value))
-                    .toIso8601String()
-          });
+          final choice = await showModerationOptions(
+            context,
+            title: 'Timeout ${member.user.name}',
+            timeout: true,
+          );
+          if (choice == null) return;
+          final indefinite = choice.durationSeconds < 0;
+          await widget.repository.updateMember(
+            widget.guild.ref,
+            member.user.ref,
+            <String, Object?>{
+              'timeout_until': indefinite
+                  ? null
+                  : DateTime.now()
+                      .toUtc()
+                      .add(Duration(seconds: choice.durationSeconds))
+                      .toIso8601String(),
+              'timeout_indefinite': indefinite,
+            },
+            reason: choice.reason,
+          );
           break;
         case 'kick':
           final reason = await _prompt(
@@ -2186,13 +2198,23 @@ final class _MembersTabState extends State<_MembersTab> {
               .kick(widget.guild.ref, member.user.ref, reason: reason);
           break;
         case 'ban':
-          final reason = await _prompt(
-              context, 'Ban ${member.user.name}?', 'Reason (optional)',
-              warning:
-                  'The user will be removed and unable to rejoin until unbanned.');
-          if (reason == null) return;
-          await widget.repository
-              .ban(widget.guild.ref, member.user.ref, reason: reason);
+          final choice = await showModerationOptions(
+            context,
+            title: 'Ban ${member.user.name}?',
+            includeDeleteHistory: true,
+          );
+          if (choice == null) return;
+          await widget.repository.ban(
+            widget.guild.ref,
+            member.user.ref,
+            reason: choice.reason,
+            expiresAt: choice.durationSeconds == 0
+                ? null
+                : DateTime.now()
+                    .toUtc()
+                    .add(Duration(seconds: choice.durationSeconds)),
+            deleteMessageSeconds: choice.deleteMessageSeconds,
+          );
           break;
       }
       await _load(reset: true);
@@ -2315,9 +2337,17 @@ final class _BansTabState extends State<_BansTab> {
                           onPressed: widget.canBanMembers
                               ? () async {
                                   try {
+                                    final reason = await _prompt(
+                                      context,
+                                      'Unban ${_mapName(ban)}?',
+                                      'Audit reason (optional)',
+                                    );
+                                    if (reason == null) return;
                                     await widget.repository.unban(
-                                        widget.guild.ref,
-                                        _mapRef(ban, widget.guild.ref.domain));
+                                      widget.guild.ref,
+                                      _mapRef(ban, widget.guild.ref.domain),
+                                      reason: reason,
+                                    );
                                     await _load();
                                   } on Object catch (error) {
                                     if (mounted) {
@@ -2365,8 +2395,17 @@ final class _BansTabState extends State<_BansTab> {
                             onPressed: widget.canBanInstances
                                 ? () async {
                                     try {
+                                      final reason = await _prompt(
+                                        context,
+                                        'Remove ${domain.value} ban?',
+                                        'Audit reason (optional)',
+                                      );
+                                      if (reason == null) return;
                                       await widget.repository.unbanInstance(
-                                          widget.guild.ref, domain);
+                                        widget.guild.ref,
+                                        domain,
+                                        reason: reason,
+                                      );
                                       await _load();
                                     } on Object catch (error) {
                                       if (mounted) {
@@ -2406,11 +2445,16 @@ final class _BansTabState extends State<_BansTab> {
               ])),
         ]);
   Future<void> _addInstance() async {
-    final value = await _prompt(
-        context, 'Ban an entire instance?', 'example.net',
-        warning:
-            'All users from this domain will be unable to join. Use this only for severe, instance-wide abuse.');
-    if (value == null) return;
+    final domainInput = TextEditingController();
+    final choice = await showModerationOptions(
+      context,
+      title: 'Ban an entire instance?',
+      leadingField: domainInput,
+      leadingLabel: 'Instance domain',
+    );
+    final value = domainInput.text.trim();
+    domainInput.dispose();
+    if (choice == null || value.isEmpty) return;
     try {
       late final Domain domain;
       try {
@@ -2420,7 +2464,16 @@ final class _BansTabState extends State<_BansTab> {
           'Enter a valid instance hostname, such as chat.example.',
         );
       }
-      await widget.repository.banInstance(widget.guild.ref, domain);
+      await widget.repository.banInstance(
+        widget.guild.ref,
+        domain,
+        reason: choice.reason,
+        expiresAt: choice.durationSeconds == 0
+            ? null
+            : DateTime.now()
+                .toUtc()
+                .add(Duration(seconds: choice.durationSeconds)),
+      );
       await _load();
     } on Object catch (error) {
       if (mounted) _tabError(context, 'Could not ban instance', error);
@@ -2589,17 +2642,76 @@ final class _InvitesTabState extends State<_InvitesTab> {
       title: 'Invite people to…',
     );
     if (channel == null || !mounted) return;
+    final restrictions = await showInviteRestrictions(context);
+    if (restrictions == null || !mounted) return;
     try {
       await widget.repository.createInvite(widget.guild.ref, {
         'channel_id': channel.ref.id.value,
-        'max_age_seconds': 604800,
-        'max_uses': 100,
+        'max_age_seconds': restrictions.$1,
+        'max_uses': restrictions.$2,
       });
       await _load();
     } on Object catch (error) {
       if (mounted) _tabError(context, 'Could not create invite', error);
     }
   }
+}
+
+Future<(int?, int?)?> showInviteRestrictions(BuildContext context) async {
+  var age = 604800;
+  var uses = 100;
+  return showDialog<(int?, int?)>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: const Text('Invite limits'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            DropdownButtonFormField<int>(
+              initialValue: age,
+              decoration: const InputDecoration(labelText: 'Expires after'),
+              items: const [
+                DropdownMenuItem(value: 1800, child: Text('30 minutes')),
+                DropdownMenuItem(value: 21600, child: Text('6 hours')),
+                DropdownMenuItem(value: 86400, child: Text('1 day')),
+                DropdownMenuItem(value: 604800, child: Text('7 days')),
+                DropdownMenuItem(value: 0, child: Text('Never')),
+              ],
+              onChanged: (value) => setDialogState(() => age = value ?? age),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<int>(
+              initialValue: uses,
+              decoration: const InputDecoration(labelText: 'Maximum uses'),
+              items: const [
+                DropdownMenuItem(value: 1, child: Text('1 use')),
+                DropdownMenuItem(value: 5, child: Text('5 uses')),
+                DropdownMenuItem(value: 10, child: Text('10 uses')),
+                DropdownMenuItem(value: 25, child: Text('25 uses')),
+                DropdownMenuItem(value: 100, child: Text('100 uses')),
+                DropdownMenuItem(value: 0, child: Text('Unlimited')),
+              ],
+              onChanged: (value) => setDialogState(() => uses = value ?? uses),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(
+              dialogContext,
+              (age == 0 ? null : age, uses == 0 ? null : uses),
+            ),
+            child: const Text('Create invite'),
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 final class _EmojiTab extends StatefulWidget {
@@ -2745,6 +2857,206 @@ final class _EmojiTabState extends State<_EmojiTab> {
       if (mounted) _tabError(context, 'Could not upload emoji', error);
     }
   }
+}
+
+final class _BotIntegrationsTab extends StatefulWidget {
+  const _BotIntegrationsTab({required this.guild, required this.repository});
+
+  final KaedeGuild guild;
+  final KaedeRepository repository;
+
+  @override
+  State<_BotIntegrationsTab> createState() => _BotIntegrationsTabState();
+}
+
+final class _BotIntegrationsTabState extends State<_BotIntegrationsTab> {
+  List<Map<String, Object?>> _items = const [];
+  var _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  @override
+  void didUpdateWidget(covariant _BotIntegrationsTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.guild.ref != widget.guild.ref) {
+      setState(() => _loading = true);
+      unawaited(_load());
+    }
+  }
+
+  Future<void> _load() async {
+    try {
+      final items = await widget.repository.botIntegrations(widget.guild.ref);
+      if (mounted) {
+        setState(() {
+          _items = items;
+          _loading = false;
+        });
+      }
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      _tabError(context, 'Could not load bot integrations', error);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: kSettingsSurface,
+        body: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : RefreshIndicator(
+                onRefresh: _load,
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 24),
+                  children: [
+                    const _TabHint(
+                      'Bots keep only the scopes, live-event intents and guild permissions approved during installation. Removing one immediately revokes future access.',
+                    ),
+                    if (_items.isEmpty)
+                      const _TabEmpty(
+                        icon: Icons.smart_toy_outlined,
+                        title: 'No bots installed',
+                        body:
+                            'Open a bot invite link to review and install an automation.',
+                      ),
+                    for (final item in _items) _integrationCard(item),
+                  ],
+                ),
+              ),
+      );
+
+  Widget _integrationCard(Map<String, Object?> item) {
+    final application = item['application'] is Map
+        ? Map<String, Object?>.from(item['application']! as Map)
+        : const <String, Object?>{};
+    final name = '${application['name'] ?? 'Bot'}';
+    final bot = application['bot_user'] is Map
+        ? Map<String, Object?>.from(application['bot_user']! as Map)
+        : const <String, Object?>{};
+    final scopes =
+        (item['scopes'] as List? ?? const []).map((e) => '$e').toList();
+    final intents =
+        (item['intents'] as List? ?? const []).map((e) => '$e').toList();
+    return Card(
+      margin: const EdgeInsets.only(top: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              CircleAvatar(
+                backgroundColor: KaedeColors.coralSoft,
+                foregroundColor: KaedeColors.coralText,
+                child: Text(name.characters.first.toUpperCase()),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                  child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(name,
+                      style: const TextStyle(fontWeight: FontWeight.w800)),
+                  Text('${bot['handle'] ?? application['origin_domain'] ?? ''}',
+                      style: const TextStyle(
+                          color: KaedeColors.muted, fontSize: 12)),
+                ],
+              )),
+              IconButton(
+                tooltip: 'Remove bot',
+                color: KaedeColors.danger,
+                onPressed: () => _remove(item, application, name),
+                icon: const Icon(Icons.delete_outline_rounded),
+              ),
+            ]),
+            if ('${application['description'] ?? ''}'.trim().isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text('${application['description']}',
+                  style: const TextStyle(color: KaedeColors.textSoft)),
+            ],
+            const SizedBox(height: 10),
+            Wrap(spacing: 6, runSpacing: 6, children: [
+              _Tag('${item['status'] ?? 'unknown'}'),
+              _Tag('${item['e2ee_mode'] ?? 'disabled'} E2EE'),
+              _Tag('${scopes.length} scopes'),
+              _Tag('${intents.length} intents'),
+            ]),
+            if (scopes.isNotEmpty || intents.isNotEmpty)
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: const Text('Approved access'),
+                children: [
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      [...scopes, ...intents].join('\n'),
+                      style: const TextStyle(
+                          color: KaedeColors.muted, height: 1.45),
+                    ),
+                  ),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _remove(Map<String, Object?> item,
+      Map<String, Object?> application, String name) async {
+    if (!await _confirm(
+      context,
+      'Remove $name?',
+      'Future API and realtime access for this guild will be revoked.',
+      destructive: true,
+    )) {
+      return;
+    }
+    if (!mounted) return;
+    final reason =
+        await _prompt(context, 'Removal audit reason', 'Reason (optional)');
+    if (reason == null) return;
+    try {
+      final rawRef = '${application['ref'] ?? ''}';
+      final applicationRef = rawRef.isNotEmpty
+          ? EntityRef.parse(rawRef)
+          : EntityRef(
+              Snowflake('${application['id']}'),
+              Domain('${application['origin_domain']}'),
+            );
+      await widget.repository.removeBotIntegration(
+        widget.guild.ref,
+        applicationRef,
+        reason: reason,
+      );
+      if (mounted) {
+        setState(() => _items = _items.where((e) => e != item).toList());
+      }
+    } on Object catch (error) {
+      if (mounted) _tabError(context, 'Could not remove the bot', error);
+    }
+  }
+}
+
+final class _Tag extends StatelessWidget {
+  const _Tag(this.label);
+  final String label;
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: KaedeColors.raised,
+          borderRadius: BorderRadius.circular(99),
+          border: Border.all(color: KaedeColors.border),
+        ),
+        child: Text(label.replaceAll('_', ' '),
+            style: const TextStyle(color: KaedeColors.muted, fontSize: 11)),
+      );
 }
 
 final class _WebhooksTab extends StatefulWidget {
@@ -4602,6 +4914,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
   late final _topic = TextEditingController(text: widget.channel?.topic ?? '');
   late ChannelType _type = widget.channel?.type ?? ChannelType.text;
   late int _slow = widget.channel?.slowModeSeconds ?? 0;
+  late String _history = widget.channel?.federatedHistoryPolicy ?? 'inherit';
   late String _parent =
       (widget.channel?.parentRef ?? widget.initialParent)?.wire ?? '';
 
@@ -4858,6 +5171,34 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                 setState(() => _slow = value ?? 0),
                           ),
                         ],
+                        if (_type == ChannelType.text ||
+                            _type == ChannelType.announcement) ...[
+                          const SizedBox(height: 14),
+                          DropdownButtonFormField<String>(
+                            key: const ValueKey('channel-history-policy-field'),
+                            initialValue: _history,
+                            isExpanded: true,
+                            decoration: const InputDecoration(
+                              labelText: 'Federated history',
+                              helperText:
+                                  'Override how remote instances retain this channel.',
+                              prefixIcon: Icon(Icons.history_rounded),
+                            ),
+                            items: const [
+                              DropdownMenuItem(
+                                  value: 'inherit',
+                                  child: Text('Use guild setting')),
+                              DropdownMenuItem(
+                                  value: 'disabled',
+                                  child: Text('Recent messages only')),
+                              DropdownMenuItem(
+                                  value: 'full_retained',
+                                  child: Text('Retain full history')),
+                            ],
+                            onChanged: (value) =>
+                                setState(() => _history = value ?? 'inherit'),
+                          ),
+                        ],
                       ],
                       if (compactKeyboardLayout) saveButton,
                     ],
@@ -4889,6 +5230,10 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                 ? 0
                 : _slow,
         parentRef: _type == ChannelType.category ? null : parent,
+        federatedHistoryPolicy:
+            _type == ChannelType.text || _type == ChannelType.announcement
+                ? _history
+                : null,
       ),
     );
   }
@@ -4956,6 +5301,7 @@ final class GuildChannelDraft {
     required this.type,
     required this.slowModeSeconds,
     this.parentRef,
+    this.federatedHistoryPolicy,
   });
 
   final String name;
@@ -4963,6 +5309,7 @@ final class GuildChannelDraft {
   final ChannelType type;
   final int slowModeSeconds;
   final EntityRef? parentRef;
+  final String? federatedHistoryPolicy;
 
   Map<String, Object?> get json => {
         'name': name,
@@ -4971,6 +5318,8 @@ final class GuildChannelDraft {
         'rate_limit_per_user':
             type == ChannelType.category ? 0 : slowModeSeconds,
         'parent_id': type == ChannelType.category ? null : parentRef?.id.value,
+        if (federatedHistoryPolicy != null)
+          'federated_history_policy': federatedHistoryPolicy,
       };
 }
 
@@ -5309,6 +5658,141 @@ final class _Panel extends StatelessWidget {
           ],
         ),
       );
+}
+
+final class ModerationOptions {
+  const ModerationOptions({
+    required this.reason,
+    required this.durationSeconds,
+    required this.deleteMessageSeconds,
+  });
+
+  final String reason;
+  final int durationSeconds;
+  final int deleteMessageSeconds;
+}
+
+Future<ModerationOptions?> showModerationOptions(
+  BuildContext context, {
+  required String title,
+  bool timeout = false,
+  bool includeDeleteHistory = false,
+  TextEditingController? leadingField,
+  String? leadingLabel,
+}) async {
+  final reason = TextEditingController();
+  var duration = timeout ? 3600 : 0;
+  var deleteSeconds = 0;
+  try {
+    return await showDialog<ModerationOptions>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(title),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (leadingField != null) ...[
+                  TextField(
+                    controller: leadingField,
+                    autofocus: true,
+                    keyboardType: TextInputType.url,
+                    autocorrect: false,
+                    decoration: InputDecoration(labelText: leadingLabel),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                DropdownButtonFormField<int>(
+                  initialValue: duration,
+                  decoration: InputDecoration(
+                    labelText: timeout ? 'Timeout duration' : 'Ban duration',
+                  ),
+                  items: timeout
+                      ? const [
+                          DropdownMenuItem(
+                              value: 600, child: Text('10 minutes')),
+                          DropdownMenuItem(value: 3600, child: Text('1 hour')),
+                          DropdownMenuItem(value: 86400, child: Text('1 day')),
+                          DropdownMenuItem(
+                              value: 604800, child: Text('7 days')),
+                          DropdownMenuItem(
+                              value: -1, child: Text('Indefinite')),
+                        ]
+                      : const [
+                          DropdownMenuItem(
+                              value: 0, child: Text('Until removed')),
+                          DropdownMenuItem(value: 86400, child: Text('1 day')),
+                          DropdownMenuItem(
+                              value: 604800, child: Text('7 days')),
+                          DropdownMenuItem(
+                              value: 2592000, child: Text('30 days')),
+                        ],
+                  onChanged: (value) =>
+                      setDialogState(() => duration = value ?? duration),
+                ),
+                if (includeDeleteHistory) ...[
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<int>(
+                    initialValue: deleteSeconds,
+                    decoration: const InputDecoration(
+                        labelText: 'Delete message history'),
+                    items: const [
+                      DropdownMenuItem(value: 0, child: Text('Do not delete')),
+                      DropdownMenuItem(value: 3600, child: Text('Past hour')),
+                      DropdownMenuItem(value: 86400, child: Text('Past day')),
+                      DropdownMenuItem(
+                          value: 604800, child: Text('Past 7 days')),
+                    ],
+                    onChanged: (value) => setDialogState(
+                        () => deleteSeconds = value ?? deleteSeconds),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                TextField(
+                  controller: reason,
+                  maxLength: 512,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: 'Audit reason (optional)',
+                    alignLabelWithHint: true,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                if (leadingField != null && leadingField.text.trim().isEmpty) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(
+                    SnackBar(
+                        content: Text('Enter ${leadingLabel ?? 'a value'}.')),
+                  );
+                  return;
+                }
+                Navigator.pop(
+                  dialogContext,
+                  ModerationOptions(
+                    reason: reason.text.trim(),
+                    durationSeconds: duration,
+                    deleteMessageSeconds: deleteSeconds,
+                  ),
+                );
+              },
+              child: Text(timeout ? 'Apply timeout' : 'Ban'),
+            ),
+          ],
+        ),
+      ),
+    );
+  } finally {
+    reason.dispose();
+  }
 }
 
 Future<String?> _prompt(BuildContext context, String title, String label,

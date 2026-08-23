@@ -37,6 +37,7 @@ from app.api.invites import router as invites_router
 from app.api.link_previews import router as link_previews_router
 from app.api.management import router as management_router
 from app.api.media import router as media_router
+from app.api.mobile_links import router as mobile_links_router
 from app.api.moderation import router as moderation_router
 from app.api.push import relay_router as push_relay_router
 from app.api.push import router as push_router
@@ -138,6 +139,7 @@ app.include_router(interaction_federation_router)
 app.include_router(link_previews_router)
 app.include_router(management_router)
 app.include_router(media_router)
+app.include_router(mobile_links_router)
 app.include_router(moderation_router)
 app.include_router(push_router)
 app.include_router(push_relay_router)

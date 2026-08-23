@@ -10,5 +10,9 @@
 	<array>
 		<string>group.chat.kaede.mobile</string>
 	</array>
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:$(KAEDE_APP_LINK_HOST)</string>
+	</array>
 </dict>
 </plist>
