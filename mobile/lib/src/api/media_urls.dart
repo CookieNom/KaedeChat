@@ -7,6 +7,15 @@ const _supportedImageUploadTypes = <String>{
   'image/webp',
 };
 
+final _assetHashPattern = RegExp(r'^[0-9a-f]{64}$');
+const _assetVariants = <String>{
+  'original',
+  'thumbnail_128',
+  'thumbnail_512',
+  'thumbnail_1024',
+  'poster',
+};
+
 /// Uses the picker-reported MIME type when it is supported, then falls back to
 /// a known extension. Unknown formats must not be mislabeled as JPEG because
 /// media processing validates the uploaded bytes.
@@ -57,14 +66,8 @@ Uri? publicAssetUri(
   String? hash, {
   String variant = 'original',
 }) {
-  if (hash == null || !RegExp(r'^[0-9a-f]{64}$').hasMatch(hash)) return null;
-  if (!const <String>{
-    'original',
-    'thumbnail_128',
-    'thumbnail_512',
-    'thumbnail_1024',
-    'poster',
-  }.contains(variant)) {
+  if (hash == null || !_assetHashPattern.hasMatch(hash)) return null;
+  if (!_assetVariants.contains(variant)) {
     return null;
   }
   return Uri.https(

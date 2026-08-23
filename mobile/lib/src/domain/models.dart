@@ -288,6 +288,47 @@ final class KaedeChannel {
         'search_available': searchAvailable,
         'version': version,
       };
+
+  /// Returns a copy with the [user] replacing the recipient whose ref equals
+  /// [userRef]. Cheaper than a JSON round-trip for a single-field profile
+  /// update and keeps every other channel instance untouched.
+  KaedeChannel withRecipientReplaced(EntityRef userRef, KaedeUser user) =>
+      KaedeChannel(
+        ref: ref,
+        type: type,
+        position: position,
+        permissions: permissions,
+        guildRef: guildRef,
+        name: name,
+        topic: topic,
+        parentRef: parentRef,
+        lastMessageRef: lastMessageRef,
+        recipients: List.unmodifiable(
+          [
+            for (final recipient in recipients)
+              recipient.ref == userRef ? user : recipient,
+          ],
+        ),
+        conversationType: conversationType,
+        ownerRef: ownerRef,
+        slowModeSeconds: slowModeSeconds,
+        permissionsSynced: permissionsSynced,
+        historyTruncated: historyTruncated,
+        historyRetention: historyRetention,
+        historyRemoteAvailable: historyRemoteAvailable,
+        oldestAvailableMessageRef: oldestAvailableMessageRef,
+        historyDegradedCode: historyDegradedCode,
+        encryptionMode: encryptionMode,
+        encryptionState: encryptionState,
+        encryptionPolicyGeneration: encryptionPolicyGeneration,
+        encryptionProtocol: encryptionProtocol,
+        encryptionSuite: encryptionSuite,
+        encryptionGroupId: encryptionGroupId,
+        encryptionEpoch: encryptionEpoch,
+        encryptionActivatedAt: encryptionActivatedAt,
+        searchAvailable: searchAvailable,
+        version: version,
+      );
 }
 
 final class MessageSearchResult {
@@ -503,6 +544,63 @@ final class KaedeGuild {
         'history_sync_resource': historySyncResource,
         'version': version,
       };
+
+  /// Returns a copy carrying the [status] history-sync projection. Mirrors
+  /// what the gateway `GUILD_HISTORY_SYNC_UPDATE` JSON patch produced, but
+  /// without serializing the whole guild.
+  KaedeGuild withHistorySyncStatus(
+    String status, {
+    required Object? code,
+    required Object? retryAfterMs,
+    required Object? resource,
+  }) =>
+      KaedeGuild(
+        ref: ref,
+        name: name,
+        description: description,
+        iconHash: iconHash,
+        bannerHash: bannerHash,
+        ownerRef: ownerRef,
+        permissions: permissions,
+        unavailable: unavailable,
+        channels: channels,
+        roles: roles,
+        federatedHistoryPolicy: federatedHistoryPolicy,
+        actorHighestRoleId: actorHighestRoleId,
+        syncStatus: syncStatus,
+        syncErrorCode: syncErrorCode,
+        historySyncStatus: status,
+        historySyncErrorCode: status == 'ready' ? null : _string(code),
+        historySyncRetryAfterMs:
+            status == 'retrying' ? _nullableInteger(retryAfterMs) : null,
+        historySyncResource: status == 'failed' ? _string(resource) : null,
+        version: version,
+      );
+
+  /// Returns a copy carrying [channels] instead of the current channel list.
+  /// Used to reconcile a locally created channel without re-parsing the whole
+  /// guild projection.
+  KaedeGuild withChannels(List<KaedeChannel> channels) => KaedeGuild(
+        ref: ref,
+        name: name,
+        description: description,
+        iconHash: iconHash,
+        bannerHash: bannerHash,
+        ownerRef: ownerRef,
+        permissions: permissions,
+        unavailable: unavailable,
+        channels: channels,
+        roles: roles,
+        federatedHistoryPolicy: federatedHistoryPolicy,
+        actorHighestRoleId: actorHighestRoleId,
+        syncStatus: syncStatus,
+        syncErrorCode: syncErrorCode,
+        historySyncStatus: historySyncStatus,
+        historySyncErrorCode: historySyncErrorCode,
+        historySyncRetryAfterMs: historySyncRetryAfterMs,
+        historySyncResource: historySyncResource,
+        version: version,
+      );
 }
 
 final class KaedeAttachment {

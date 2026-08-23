@@ -26,3 +26,38 @@ List<KaedeMessage> mergeMessages(Iterable<KaedeMessage> messages) {
     });
   return List<KaedeMessage>.unmodifiable(result);
 }
+
+/// Fast path of [mergeMessages] for the single newest incoming message.
+///
+/// Returns the merged list in O(n) when [incoming] would sort to the end of
+/// [current] under the [mergeMessages] comparator and would replace nothing
+/// (no ref or nonce collision). Returns null when the full merge is required
+/// to preserve replacement and ordering semantics.
+List<KaedeMessage>? appendNewestMessage(
+  List<KaedeMessage> current,
+  KaedeMessage incoming,
+) {
+  if (current.isEmpty) {
+    return List.unmodifiable(<KaedeMessage>[incoming]);
+  }
+  final nonce = incoming.clientNonce;
+  final hasNonce = nonce != null && nonce.isNotEmpty;
+  var maxCreated = current.first.createdAt;
+  var maxWire = current.first.ref.wire;
+  for (final candidate in current) {
+    if (candidate.ref == incoming.ref) return null;
+    if (hasNonce && candidate.clientNonce == nonce) return null;
+    final created = candidate.createdAt;
+    if (created.isAfter(maxCreated) ||
+        (created == maxCreated && candidate.ref.wire.compareTo(maxWire) > 0)) {
+      maxCreated = created;
+      maxWire = candidate.ref.wire;
+    }
+  }
+  final created = incoming.createdAt;
+  if (created.isBefore(maxCreated) ||
+      (created == maxCreated && incoming.ref.wire.compareTo(maxWire) < 0)) {
+    return null;
+  }
+  return List.unmodifiable([...current, incoming]);
+}

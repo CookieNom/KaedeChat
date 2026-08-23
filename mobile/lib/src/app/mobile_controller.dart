@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer';
 import 'dart:io';
 import 'dart:math';
 
@@ -542,6 +543,45 @@ final class MobileController extends StateNotifier<MobileState> {
   var _navigationRefreshQueued = false;
   Future<void>? _notificationActivation;
   Future<void> _cacheWriteTail = Future<void>.value();
+
+  /// Snapshot groups that changed since the last flush. A flush rewrites only
+  /// the dirty groups, so the frequent unread/mention/presence updates stop
+  /// re-serializing (and re-encrypting) every guild, DM and relationship.
+  final Set<String> _dirtyCacheGroups = <String>{};
+  static const _allCacheGroups = <String>{
+    'identity',
+    'guilds',
+    'dms',
+    'relationships',
+    'preferences',
+  };
+
+  /// Per-channel message wires whose on-disk row must be rewritten by the
+  /// next [_cacheMessages] flush. Full loads mark every retained row; a
+  /// single-row patch marks just that row, so steady-state traffic on a busy
+  /// channel is one upsert plus an index-only trim instead of re-encrypting
+  /// and reinserting the whole 250-row window.
+  final Map<EntityRef, Set<String>> _dirtyMessageRows =
+      <EntityRef, Set<String>>{};
+
+  /// Memoized user display names (see [_displayName]). Cleared on sign-in so
+  /// a new account never resolves names from the previous one.
+  final Map<EntityRef, String> _displayNameIndex = <EntityRef, String>{};
+
+  /// Gateway events waiting for the next batched reduction. Events are
+  /// applied in arrival order; the batch exists so a burst of events costs
+  /// one notification to the whole widget tree instead of one per event per
+  /// state slice.
+  final List<GatewayEvent> _gatewayEventQueue = <GatewayEvent>[];
+  var _gatewayBatchScheduled = false;
+  var _notificationsSuppressed = false;
+
+  void _markMessageRowsDirty(EntityRef channel, Iterable<String> wires) {
+    if (wires.isEmpty) return;
+    final marked = _dirtyMessageRows.putIfAbsent(channel, () => <String>{});
+    marked.addAll(wires);
+  }
+
   String? _activeAccountKey;
   final Map<EntityRef, _PendingAcknowledgement> _pendingAcknowledgements =
       <EntityRef, _PendingAcknowledgement>{};
@@ -1098,6 +1138,7 @@ final class MobileController extends StateNotifier<MobileState> {
           authConfiguration['e2ee_activation_enabled'] == true,
       offline: false,
     );
+    _displayNameIndex.clear();
     push.setAppVisibility(
       active: _appActive,
       visibleChannel:
@@ -1109,6 +1150,7 @@ final class MobileController extends StateNotifier<MobileState> {
         unawaited(refreshSelfModeration(guild));
       }
     }
+    _dirtyCacheGroups.addAll(_allCacheGroups);
     await _cacheLists();
     await _startSessionServices(resolved.accountKey, generation);
   }
@@ -1123,7 +1165,7 @@ final class MobileController extends StateNotifier<MobileState> {
     if (!_sessionReadyIsCurrent(accountKey, generation)) return;
     _gatewayHealthSubscription = gateway.health.listen(_applyGatewayHealth);
     state = state.copyWith(gatewayHealth: gateway.currentHealth);
-    _gatewaySubscription = gateway.events.listen(_reduceGateway);
+    _gatewaySubscription = gateway.events.listen(_onGatewayEvent);
     try {
       final tokens = api.tokens;
       if (tokens == null || tokens.accountKey != accountKey) return;
@@ -1194,20 +1236,21 @@ final class MobileController extends StateNotifier<MobileState> {
     final created = await repository.createChannel(guild, request);
     final guilds = state.guilds.map((candidate) {
       if (candidate.ref != guild) return candidate;
-      return KaedeGuild.fromJson(<String, Object?>{
-        ...candidate.toJson(),
-        'channels': <Object?>[
-          for (final channel in candidate.channels)
-            if (channel.ref != created.ref) channel.toJson(),
-          created.toJson(),
-        ],
-      });
+      return candidate.withChannels(
+        List.unmodifiable(
+          <KaedeChannel>[
+            for (final channel in candidate.channels)
+              if (channel.ref != created.ref) channel,
+            created,
+          ],
+        ),
+      );
     }).toList(growable: false);
     state = state.copyWith(
       guilds: List.unmodifiable(guilds),
       clearError: true,
     );
-    _scheduleMetadataCache();
+    _scheduleMetadataCache(const <String>{'guilds'});
     _scheduleNavigationRefresh();
     return created;
   }
@@ -1256,7 +1299,13 @@ final class MobileController extends StateNotifier<MobileState> {
         offline: false,
         clearError: true,
       );
+      for (final dm in state.dms) {
+        for (final recipient in dm.recipients) {
+          _displayNameIndex[recipient.ref] = recipient.name;
+        }
+      }
       _setDegradedWarning(DegradedFeature.readStates, null);
+      _dirtyCacheGroups.addAll(_allCacheGroups);
       await _cacheLists();
       unawaited(_refreshRelationships());
       unawaited(_retryGuildNavigation());
@@ -1279,6 +1328,7 @@ final class MobileController extends StateNotifier<MobileState> {
         return;
       }
       state = state.copyWith(relationships: relationships);
+      _dirtyCacheGroups.add('relationships');
       await _cacheLists();
     } on Object {
       // Relationships are optional navigation metadata. A temporary outage
@@ -1323,7 +1373,7 @@ final class MobileController extends StateNotifier<MobileState> {
   Future<void> _retryAccountSettings() async {
     try {
       applySettings(await repository.settings());
-      _scheduleMetadataCache();
+      _scheduleMetadataCache(const <String>{'preferences'});
     } on Object catch (error) {
       _setDegradedWarning(
         DegradedFeature.accountSettings,
@@ -1386,7 +1436,7 @@ final class MobileController extends StateNotifier<MobileState> {
       );
       state = state.copyWith(guildNotificationLevels: levels);
       _setDegradedWarning(DegradedFeature.guildNotifications, null);
-      _scheduleMetadataCache();
+      _scheduleMetadataCache(const <String>{'preferences'});
     } on Object catch (error) {
       _setDegradedWarning(
         DegradedFeature.guildNotifications,
@@ -1407,7 +1457,7 @@ final class MobileController extends StateNotifier<MobileState> {
         <String, Object?>{'presence_preference': presence.name},
       );
       applySettings(settings);
-      _scheduleMetadataCache();
+      _scheduleMetadataCache(const <String>{'preferences'});
     } on Object catch (error) {
       state = state.copyWith(
         presencePreference: previous,
@@ -1705,6 +1755,10 @@ final class MobileController extends StateNotifier<MobileState> {
             : null,
         clearError: !authorityHistoryUnavailable,
       );
+      _markMessageRowsDirty(
+        channelRef,
+        nextMessages.map((message) => message.ref.wire),
+      );
       await _cacheMessages(channelRef);
       if (!older && ordered.isNotEmpty && _isChannelVisible(channelRef)) {
         unawaited(_acknowledge(channelRef, ordered.last.ref));
@@ -1892,6 +1946,7 @@ final class MobileController extends StateNotifier<MobileState> {
             .map((item) => item.ref == updated.ref ? updated : item)
             .toList(),
       );
+      _markMessageRowsDirty(message.channelRef, {updated.ref.wire});
     }
     await _cacheMessages(message.channelRef);
   }
@@ -1929,6 +1984,7 @@ final class MobileController extends StateNotifier<MobileState> {
               item.ref == message.ref ? item.copyWith(pinned: pinned) : item)
           .toList(growable: false),
     );
+    _markMessageRowsDirty(message.channelRef, {message.ref.wire});
     await _cacheMessages(message.channelRef);
   }
 
@@ -1959,6 +2015,10 @@ final class MobileController extends StateNotifier<MobileState> {
         sessionGeneration,
       )) {
         _setChannelMessages(channelRef, page.reversed.toList());
+        _markMessageRowsDirty(
+          channelRef,
+          page.map((message) => message.ref.wire),
+        );
         await _cacheMessages(channelRef);
         if (page.isNotEmpty && _isChannelVisible(channelRef)) {
           unawaited(_acknowledge(channelRef, page.first.ref));
@@ -2143,54 +2203,82 @@ final class MobileController extends StateNotifier<MobileState> {
     if (tokens == null) return;
     final generation = _sessionLoadGeneration;
     final accountKey = tokens.accountKey;
-    final user = state.user;
-    final guilds = List<KaedeGuild>.of(state.guilds);
-    final dms = List<KaedeChannel>.of(state.dms);
-    final relationships = List<Map<String, Object?>>.of(state.relationships);
-    final presence = state.presencePreference.name;
-    final notifications = Map<String, bool>.of(state.notificationSettings);
-    final guildNotifications =
-        Map<String, String>.of(state.guildNotificationLevels);
-    final unreadCounts = <String, int>{
-      for (final entry in state.unreadCounts.entries)
-        entry.key.wire: entry.value,
-    };
-    final mentionCounts = <String, int>{
-      for (final entry in state.mentionCounts.entries)
-        entry.key.wire: entry.value,
-    };
+    final dirty = Set<String>.of(_dirtyCacheGroups);
+    _dirtyCacheGroups.clear();
+    if (dirty.isEmpty) return;
+    final groups = <String, Map<String, Object?>>{};
+    if (dirty.contains('identity')) {
+      final user = state.user;
+      groups['identity'] = <String, Object?>{
+        if (user != null) user.ref.wire: user.toJson(),
+      };
+    }
+    if (dirty.contains('guilds')) {
+      final guilds = List<KaedeGuild>.of(state.guilds);
+      groups['guilds'] = <String, Object?>{
+        for (final guild in guilds) guild.ref.wire: guild.toJson(),
+      };
+    }
+    if (dirty.contains('dms')) {
+      final dms = List<KaedeChannel>.of(state.dms);
+      groups['dms'] = <String, Object?>{
+        for (final dm in dms) dm.ref.wire: dm.toJson(),
+      };
+    }
+    if (dirty.contains('relationships')) {
+      final relationships = List<Map<String, Object?>>.of(state.relationships);
+      groups['relationships'] = <String, Object?>{
+        for (var index = 0; index < relationships.length; index++)
+          '$index': relationships[index],
+      };
+    }
+    if (dirty.contains('preferences')) {
+      groups['preferences'] = <String, Object?>{
+        'current': <String, Object?>{
+          'presence': state.presencePreference.name,
+          'notifications': Map<String, bool>.of(state.notificationSettings),
+          'guild_notifications':
+              Map<String, String>.of(state.guildNotificationLevels),
+          'unread_counts': <String, int>{
+            for (final entry in state.unreadCounts.entries)
+              entry.key.wire: entry.value,
+          },
+          'mention_counts': <String, int>{
+            for (final entry in state.mentionCounts.entries)
+              entry.key.wire: entry.value,
+          },
+          'e2ee_activation_enabled': state.e2eeActivationEnabled,
+        },
+      };
+    }
     await _queueCacheWrite(() async {
       if (!_cacheSessionIsCurrent(accountKey, generation)) return;
-      await database.replaceSnapshotGroups(accountKey, {
-        'identity': {
-          if (user != null) user.ref.wire: user.toJson(),
-        },
-        'guilds': {
-          for (final guild in guilds) guild.ref.wire: guild.toJson(),
-        },
-        'dms': {
-          for (final dm in dms) dm.ref.wire: dm.toJson(),
-        },
-        'relationships': {
-          for (var index = 0; index < relationships.length; index++)
-            '$index': relationships[index],
-        },
-        'preferences': {
-          'current': {
-            'presence': presence,
-            'notifications': notifications,
-            'guild_notifications': guildNotifications,
-            'unread_counts': unreadCounts,
-            'mention_counts': mentionCounts,
-            'e2ee_activation_enabled': state.e2eeActivationEnabled,
-          },
-        },
-      });
+      final profiled = kProfileMode ? TimelineTask() : null;
+      profiled?.start(
+        'kaede.cache.metadata',
+        arguments: {'groups': groups.keys.join(',')},
+      );
+      try {
+        await database.replaceSnapshotGroups(accountKey, groups);
+      } finally {
+        profiled?.finish();
+      }
     });
   }
 
-  void _scheduleMetadataCache() {
+  /// Debounces a metadata flush and records which snapshot groups changed.
+  ///
+  /// Pass the groups touched by the mutation so the flush only re-serializes
+  /// and re-encrypts them. Omit the argument for mutations that replace
+  /// several groups at once (sign-in, full navigation refresh); that marks
+  /// everything and preserves the original whole-snapshot behavior.
+  void _scheduleMetadataCache([Set<String>? groups]) {
     if (state.phase != SessionPhase.ready || api.tokens == null) return;
+    if (groups == null) {
+      _dirtyCacheGroups.addAll(_allCacheGroups);
+    } else {
+      _dirtyCacheGroups.addAll(groups);
+    }
     _metadataCacheTimer?.cancel();
     _metadataCacheTimer = Timer(const Duration(milliseconds: 300), () {
       _metadataCacheTimer = null;
@@ -2322,12 +2410,32 @@ final class MobileController extends StateNotifier<MobileState> {
     final retained = messages.length <= 250
         ? messages
         : messages.sublist(messages.length - 250);
+    // Rows the caller marked dirty get rewritten; callers that marked
+    // nothing (a plain refresh of unchanged rows) fall back to rewriting
+    // the whole retained window, matching the previous behavior.
+    final marked = _dirtyMessageRows.remove(channel);
     final values = <String, Object?>{
-      for (final message in retained) message.ref.wire: message.toJson(),
+      for (final message in retained)
+        if (marked == null || marked.contains(message.ref.wire))
+          message.ref.wire: message.toJson(),
     };
+    final keepKeys =
+        retained.map((message) => message.ref.wire).toList(growable: false);
     await _queueCacheWrite(() async {
       if (!_cacheSessionIsCurrent(accountKey, generation)) return;
-      await database.replaceSnapshots(accountKey, kind, values);
+      final profiled = kProfileMode ? TimelineTask() : null;
+      profiled?.start(
+        'kaede.cache.messages',
+        arguments: {'channel': channel.wire, 'rows': values.length},
+      );
+      try {
+        if (values.isNotEmpty) {
+          await database.upsertSnapshots(accountKey, kind, values);
+        }
+        await database.trimSnapshotRows(accountKey, kind, keepKeys);
+      } finally {
+        profiled?.finish();
+      }
     });
   }
 
@@ -2336,20 +2444,33 @@ final class MobileController extends StateNotifier<MobileState> {
     if (tokens == null) return;
     final generation = _sessionLoadGeneration;
     final accountKey = tokens.accountKey;
+    final kind = 'messages:${message.channelRef.wire}';
     final payload = message.toJson();
+    final messages = state.messageStore[message.channelRef];
+    final retainWires = (messages != null && messages.length > 250)
+        ? messages
+            .skip(messages.length - 250)
+            .map((item) => item.ref.wire)
+            .toList(growable: false)
+        : null;
     await _queueCacheWrite(() async {
       if (!_cacheSessionIsCurrent(accountKey, generation)) return;
-      await database.putSnapshot(
-        accountKey,
-        'messages:${message.channelRef.wire}',
-        message.ref.wire,
-        payload,
-      );
+      final profiled = kProfileMode ? TimelineTask() : null;
+      profiled?.start('kaede.cache.message');
+      try {
+        await database.putSnapshot(
+          accountKey,
+          kind,
+          message.ref.wire,
+          payload,
+        );
+        if (retainWires != null) {
+          await database.trimSnapshotRows(accountKey, kind, retainWires);
+        }
+      } finally {
+        profiled?.finish();
+      }
     });
-    final messages = state.messageStore[message.channelRef];
-    if (messages != null && messages.length > 250) {
-      await _cacheMessages(message.channelRef);
-    }
   }
 
   Future<void> _decryptIncoming(
@@ -2398,6 +2519,56 @@ final class MobileController extends StateNotifier<MobileState> {
     _setChannelMessages(channel, cached.map(KaedeMessage.fromJson).toList());
     return true;
   }
+
+  void _onGatewayEvent(GatewayEvent event) {
+    _gatewayEventQueue.add(event);
+    if (_gatewayBatchScheduled) return;
+    _gatewayBatchScheduled = true;
+    scheduleMicrotask(_flushGatewayBatch);
+  }
+
+  /// Applies every queued gateway event, in order, with state notifications
+  /// suppressed, then notifies once. Widgets that watch any slice of the
+  /// monolithic state therefore rebuild at most once per microtask of
+  /// traffic instead of once per copyWith.
+  void _flushGatewayBatch() {
+    _gatewayBatchScheduled = false;
+    if (_gatewayEventQueue.isEmpty) return;
+    if (!mounted) {
+      // The microtask outlived the session; drop the queued events.
+      _gatewayEventQueue.clear();
+      return;
+    }
+    final before = state;
+    final profiled = kProfileMode ? TimelineTask() : null;
+    profiled?.start(
+      'kaede.gateway.batch',
+      arguments: {'events': _gatewayEventQueue.length},
+    );
+    _notificationsSuppressed = true;
+    try {
+      do {
+        final batch = _gatewayEventQueue.toList(growable: false);
+        _gatewayEventQueue.clear();
+        for (final event in batch) {
+          _reduceGateway(event);
+        }
+      } while (_gatewayEventQueue.isNotEmpty);
+    } finally {
+      _notificationsSuppressed = false;
+      profiled?.finish();
+    }
+    if (!identical(before, state)) {
+      // Force exactly one notification with the final batched state. The
+      // no-op copyWith produces a non-identical instance so the
+      // updateShouldNotify check above lets it through.
+      state = state.copyWith();
+    }
+  }
+
+  @override
+  bool updateShouldNotify(MobileState old, MobileState current) =>
+      !_notificationsSuppressed && !identical(old, current);
 
   void _reduceGateway(GatewayEvent event) {
     try {
@@ -2471,7 +2642,7 @@ final class MobileController extends StateNotifier<MobileState> {
             mentionCounts: Map.unmodifiable(counts),
             unreadCounts: Map.unmodifiable(unread),
           );
-          _scheduleMetadataCache();
+          _scheduleMetadataCache(const <String>{'preferences'});
         }
         break;
       case 'RESUMED':
@@ -2484,9 +2655,13 @@ final class MobileController extends StateNotifier<MobileState> {
             KaedeMessage.fromJson(Map<String, Object?>.from(raw as Map));
         final existing = state.messageStore[message.channelRef];
         if (existing != null || message.channelRef == state.selectedChannel) {
+          final fast = appendNewestMessage(
+            existing ?? const <KaedeMessage>[],
+            message,
+          );
           _setChannelMessages(
             message.channelRef,
-            mergeMessages(<KaedeMessage>[...?existing, message]),
+            fast ?? mergeMessages(<KaedeMessage>[...?existing, message]),
           );
           unawaited(_cacheMessage(message));
         }
@@ -2604,7 +2779,7 @@ final class MobileController extends StateNotifier<MobileState> {
             mentionCounts: Map.unmodifiable(mentions),
             unreadCounts: Map.unmodifiable(unread),
           );
-          _scheduleMetadataCache();
+          _scheduleMetadataCache(const <String>{'preferences'});
         }
         break;
       case 'TYPING_START':
@@ -2644,22 +2819,16 @@ final class MobileController extends StateNotifier<MobileState> {
                 .map(
                   (guild) => guild.ref != guildRef
                       ? guild
-                      : KaedeGuild.fromJson(<String, Object?>{
-                          ...guild.toJson(),
-                          'history_sync_status': status,
-                          'history_sync_error_code':
-                              status == 'ready' ? null : event.data['code'],
-                          'history_sync_retry_after_ms': status == 'retrying'
-                              ? event.data['retry_after_ms']
-                              : null,
-                          'history_sync_resource': status == 'failed'
-                              ? event.data['resource']
-                              : null,
-                        }),
+                      : guild.withHistorySyncStatus(
+                          status,
+                          code: event.data['code'],
+                          retryAfterMs: event.data['retry_after_ms'],
+                          resource: event.data['resource'],
+                        ),
                 )
                 .toList(growable: false);
             state = state.copyWith(guilds: List.unmodifiable(guilds));
-            _scheduleMetadataCache();
+            _scheduleMetadataCache(const <String>{'guilds'});
           }
         } on FormatException {
           // Ignore a malformed projection without disrupting other events.
@@ -2766,7 +2935,9 @@ final class MobileController extends StateNotifier<MobileState> {
                 ? accountPreference
                 : state.presencePreference,
           );
-          if (user == state.user?.ref) _scheduleMetadataCache();
+          if (user == state.user?.ref) {
+            _scheduleMetadataCache(const <String>{'preferences'});
+          }
         }
         break;
       case 'FEDERATION_PEER_STATUS':
@@ -2877,11 +3048,15 @@ final class MobileController extends StateNotifier<MobileState> {
   void _applyUserProfileUpdate(KaedeUser user) {
     final store = <EntityRef, List<KaedeMessage>>{};
     final changedChannels = <EntityRef>[];
+    final changedRows = <EntityRef, Set<String>>{};
     for (final entry in state.messageStore.entries) {
       var changed = false;
       final messages = entry.value.map((message) {
         if (message.authorRef != user.ref) return message;
         changed = true;
+        changedRows
+            .putIfAbsent(entry.key, () => <String>{})
+            .add(message.ref.wire);
         return message.copyWith(author: user);
       }).toList(growable: false);
       store[entry.key] =
@@ -2890,14 +3065,7 @@ final class MobileController extends StateNotifier<MobileState> {
     }
     final dms = state.dms
         .map(
-          (channel) => KaedeChannel.fromJson(<String, Object?>{
-            ...channel.toJson(),
-            'recipients': channel.recipients
-                .map((recipient) => recipient.ref == user.ref
-                    ? user.toJson()
-                    : recipient.toJson())
-                .toList(growable: false),
-          }),
+          (channel) => channel.withRecipientReplaced(user.ref, user),
         )
         .toList(growable: false);
     final relationships = state.relationships.map((relationship) {
@@ -2923,10 +3091,12 @@ final class MobileController extends StateNotifier<MobileState> {
         <EntityRef, KaedeUser>{...state.userProfiles, user.ref: user},
       ),
     );
+    _displayNameIndex[user.ref] = user.name;
     for (final channel in changedChannels) {
+      _markMessageRowsDirty(channel, changedRows[channel]!);
       unawaited(_cacheMessages(channel));
     }
-    _scheduleMetadataCache();
+    _scheduleMetadataCache(const <String>{'dms', 'relationships'});
   }
 
   void _tombstoneMessage(EntityRef target) {
@@ -3062,7 +3232,7 @@ final class MobileController extends StateNotifier<MobileState> {
       unreadCounts: Map.unmodifiable(unread),
       mentionCounts: Map.unmodifiable(mentions),
     );
-    _scheduleMetadataCache();
+    _scheduleMetadataCache(const <String>{'preferences'});
   }
 
   void _clearUnread(EntityRef channel) {
@@ -3077,7 +3247,7 @@ final class MobileController extends StateNotifier<MobileState> {
       unreadCounts: Map.unmodifiable(unread),
       mentionCounts: Map.unmodifiable(mentions),
     );
-    _scheduleMetadataCache();
+    _scheduleMetadataCache(const <String>{'preferences'});
   }
 
   Future<void> _acknowledge(EntityRef channel, EntityRef message) async {
@@ -3165,7 +3335,7 @@ final class MobileController extends StateNotifier<MobileState> {
       unreadCounts: Map.unmodifiable(unread),
       mentionCounts: Map.unmodifiable(mentions),
     );
-    _scheduleMetadataCache();
+    _scheduleMetadataCache(const <String>{'preferences'});
   }
 
   Future<void> _reconcileAcknowledgedChannel(
@@ -3194,7 +3364,7 @@ final class MobileController extends StateNotifier<MobileState> {
         mentionCounts: reconciled.mentions,
       );
       _setDegradedWarning(DegradedFeature.readStates, null);
-      _scheduleMetadataCache();
+      _scheduleMetadataCache(const <String>{'preferences'});
     } on Object catch (error) {
       if (!_sessionIsCurrent(accountKey, generation) ||
           !identical(_pendingAcknowledgements[channel], pending)) {
@@ -3310,14 +3480,28 @@ final class MobileController extends StateNotifier<MobileState> {
 
   String _displayName(EntityRef user) {
     if (state.user?.ref == user) return state.user!.name;
+    // Typing events fire often, so resolved names are memoized. Authoritative
+    // sources (profile updates and navigation refreshes) override stale
+    // entries; the fallback scan fills the cache on first sight.
+    final known = _displayNameIndex[user];
+    if (known != null) return known;
+    final profile = state.userProfiles[user];
+    if (profile != null) {
+      _displayNameIndex[user] = profile.name;
+      return profile.name;
+    }
     for (final dm in state.dms) {
       for (final recipient in dm.recipients) {
-        if (recipient.ref == user) return recipient.name;
+        if (recipient.ref == user) {
+          _displayNameIndex[user] = recipient.name;
+          return recipient.name;
+        }
       }
     }
     for (final messages in state.messageStore.values) {
       for (final message in messages) {
         if (message.authorRef == user && message.author != null) {
+          _displayNameIndex[user] = message.author!.name;
           return message.author!.name;
         }
       }
@@ -3373,7 +3557,7 @@ final class MobileController extends StateNotifier<MobileState> {
       );
     }
     _scheduleNavigationRefresh();
-    _scheduleMetadataCache();
+    _scheduleMetadataCache(const <String>{'preferences'});
   }
 
   Future<void> _notifyFor(KaedeMessage message) async {
@@ -3673,7 +3857,7 @@ final class MobileController extends StateNotifier<MobileState> {
         mentionCounts: Map.unmodifiable(mentions),
       );
       _setDegradedWarning(DegradedFeature.readStates, null);
-      _scheduleMetadataCache();
+      _scheduleMetadataCache(const <String>{'preferences'});
     } on Object catch (error) {
       _setDegradedWarning(
         DegradedFeature.readStates,
@@ -3850,10 +4034,12 @@ final class MobileController extends StateNotifier<MobileState> {
       if (result['id'] != null) {
         final message = KaedeMessage.fromJson(result);
         final existing = state.messageStore[channel] ?? const <KaedeMessage>[];
+        final fast = appendNewestMessage(existing, message);
         _setChannelMessages(
           channel,
-          mergeMessages(<KaedeMessage>[...existing, message]),
+          fast ?? mergeMessages(<KaedeMessage>[...existing, message]),
         );
+        _markMessageRowsDirty(channel, {message.ref.wire});
         await _cacheMessages(channel);
       }
     } on KaedeException catch (error) {

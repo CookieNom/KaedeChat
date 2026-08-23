@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:kaede_mobile/src/storage/crypto_worker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
@@ -21,7 +22,7 @@ final class LocalDatabase {
   static Future<LocalDatabase> openWithDatabase(Database database) async {
     final random = Random.secure();
     final key = List<int>.generate(32, (_) => random.nextInt(256));
-    return LocalDatabase._(database, _LocalCipher(SecretKey(key)));
+    return LocalDatabase._(database, _LocalCipher(key));
   }
 
   static Future<LocalDatabase> open() async {
@@ -32,6 +33,7 @@ final class LocalDatabase {
     final legacyPath = p.join(directory.path, 'kaede-mobile.db');
     if (await databaseExists(legacyPath)) await deleteDatabase(legacyPath);
     final cipher = await _LocalCipher.create();
+    final worker = await CacheCryptoWorker.start(cipher.keyBytes);
     final db = await openDatabase(
       p.join(directory.path, 'kaede-mobile-secure.db'),
       version: 2,
@@ -99,7 +101,10 @@ final class LocalDatabase {
         }
       },
     );
-    return LocalDatabase._(db, cipher);
+    return LocalDatabase._(
+      db,
+      _LocalCipher(cipher._keyBytes, worker),
+    );
   }
 
   Future<void> putSnapshot(
@@ -129,8 +134,8 @@ final class LocalDatabase {
       whereArgs: <Object?>[accountKey, kind],
       orderBy: 'updated_at ASC',
     );
-    final values = await Future.wait(
-      rows.map((row) => _cipher.decryptJson(row['payload']! as String)),
+    final values = await _cipher.decryptJsonBatch(
+      rows.map((row) => row['payload']! as String).toList(),
     );
     return values.whereType<Map<Object?, Object?>>().map((value) {
       return value.map((key, item) => MapEntry('$key', item));
@@ -158,10 +163,11 @@ final class LocalDatabase {
     Map<String, Object?> values,
   ) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    final encrypted = <String, String>{};
-    for (final entry in values.entries) {
-      encrypted[entry.key] = await _cipher.encryptJson(entry.value);
-    }
+    final keys = values.keys.toList();
+    final encrypted = Map<String, String>.fromIterables(
+      keys,
+      await _cipher.encryptJsonBatch(values.values.toList()),
+    );
     await database.transaction((transaction) async {
       await transaction.delete(
         'snapshots',
@@ -190,11 +196,16 @@ final class LocalDatabase {
     Map<String, Map<String, Object?>> groups,
   ) async {
     final now = DateTime.now().millisecondsSinceEpoch;
+    final flatValues = <Object?>[
+      for (final group in groups.values) ...group.values,
+    ];
+    final flatEncrypted = await _cipher.encryptJsonBatch(flatValues);
     final encrypted = <String, Map<String, String>>{};
+    var offset = 0;
     for (final group in groups.entries) {
       final values = <String, String>{};
       for (final entry in group.value.entries) {
-        values[entry.key] = await _cipher.encryptJson(entry.value);
+        values[entry.key] = flatEncrypted[offset++];
       }
       encrypted[group.key] = values;
     }
@@ -227,6 +238,61 @@ final class LocalDatabase {
           '${prefix.replaceAll(r'\\', r'\\\\').replaceAll('%', r'\\%').replaceAll('_', r'\\_')}%',
         ],
       );
+
+  /// Deletes the rows of [kind] whose [entityKey] is not in [keepKeys].
+  ///
+  /// Used as the steady-state alternative to rewriting the whole
+  /// newest-250 window on every incoming message: a single indexed
+  /// `DELETE ... NOT IN` removes only the rows that fell out of the window.
+  Future<void> trimSnapshotRows(
+    String accountKey,
+    String kind,
+    List<String> keepKeys,
+  ) {
+    if (keepKeys.isEmpty) {
+      return clearSnapshots(accountKey, kind);
+    }
+    final placeholders = List<String>.filled(keepKeys.length, '?').join(', ');
+    return database.delete(
+      'snapshots',
+      where:
+          'account_key = ? AND kind = ? AND entity_key NOT IN ($placeholders)',
+      whereArgs: <Object?>[accountKey, kind, ...keepKeys],
+    );
+  }
+
+  /// Inserts or replaces the [values] rows of [kind] in one batch.
+  ///
+  /// The encrypted-payload equivalent of a partial rewrite: rows that are
+  /// untouched on disk keep their rowid and are not re-encrypted or
+  /// reinserted.
+  Future<void> upsertSnapshots(
+    String accountKey,
+    String kind,
+    Map<String, Object?> values,
+  ) async {
+    if (values.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final keys = values.keys.toList();
+    final encrypted = Map<String, String>.fromIterables(
+      keys,
+      await _cipher.encryptJsonBatch(values.values.toList()),
+    );
+    await database.transaction((transaction) async {
+      for (final entry in encrypted.entries) {
+        await transaction.insert(
+            'snapshots',
+            <String, Object?>{
+              'account_key': accountKey,
+              'kind': kind,
+              'entity_key': entry.key,
+              'payload': entry.value,
+              'updated_at': now,
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
 
   Future<void> purgeAccount(String accountKey) async {
     await database.transaction((transaction) async {
@@ -371,7 +437,7 @@ final class OutboxItem {
 }
 
 final class _LocalCipher {
-  const _LocalCipher(this._key);
+  _LocalCipher(this._keyBytes, [this._worker]) : _key = SecretKey(_keyBytes);
 
   static const _storage = FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
@@ -384,6 +450,14 @@ final class _LocalCipher {
   static final _algorithm = AesGcm.with256bits();
 
   final SecretKey _key;
+  final List<int> _keyBytes;
+
+  /// When present, the AES-GCM primitive runs on a background isolate. All
+  /// envelope formatting and validation still happen here so the on-disk
+  /// format and error behavior are identical to the direct path.
+  final CacheCryptoWorker? _worker;
+
+  List<int> get keyBytes => _keyBytes;
 
   static Future<_LocalCipher> create() async {
     final stored = await _storage.read(key: _storageKey);
@@ -398,7 +472,7 @@ final class _LocalCipher {
         throw StateError('The protected local cache key is invalid.');
       }
     }
-    return _LocalCipher(SecretKey(bytes));
+    return _LocalCipher(bytes);
   }
 
   Future<String> encryptJson(Object? value) => encryptString(jsonEncode(value));
@@ -407,7 +481,70 @@ final class _LocalCipher {
     return jsonDecode(await decryptString(value));
   }
 
+  /// Encrypts every payload in one background-isolate round-trip. The
+  /// results line up with the input order.
+  Future<List<String>> encryptJsonBatch(List<Object?> values) async {
+    final worker = _worker;
+    if (worker == null) {
+      final results = <String>[];
+      for (final value in values) {
+        results.add(await encryptJson(value));
+      }
+      return results;
+    }
+    final encoded = values
+        .map((value) => utf8.encode(jsonEncode(value)))
+        .toList(growable: false);
+    final triples = await worker.encryptBatch(encoded);
+    return triples
+        .map(
+          (triple) => 'v1:${base64UrlEncode(triple.$1)}:'
+              '${base64UrlEncode(triple.$2)}:'
+              '${base64UrlEncode(triple.$3)}',
+        )
+        .toList(growable: false);
+  }
+
+  /// Decrypts every value in one background-isolate round-trip. Results line
+  /// up with the input order; a malformed envelope throws before any AES is
+  /// attempted, matching the single-value path.
+  Future<List<Object?>> decryptJsonBatch(List<String> values) async {
+    final worker = _worker;
+    if (worker == null) {
+      final results = <Object?>[];
+      for (final value in values) {
+        results.add(await decryptJson(value));
+      }
+      return results;
+    }
+    final rows = <(List<int>, List<int>, List<int>)>[];
+    for (final value in values) {
+      rows.add(_envelopeTriple(value));
+    }
+    final plains = await worker.decryptBatch(rows);
+    return plains.map(utf8.decode).map(jsonDecode).toList(growable: false);
+  }
+
+  (List<int>, List<int>, List<int>) _envelopeTriple(String value) {
+    final pieces = value.split(':');
+    if (pieces.length != 4 || pieces.first != 'v1') {
+      throw const FormatException('Unsupported encrypted cache value.');
+    }
+    return (
+      base64Url.decode(pieces[1]),
+      base64Url.decode(pieces[2]),
+      base64Url.decode(pieces[3]),
+    );
+  }
+
   Future<String> encryptString(String value) async {
+    final worker = _worker;
+    if (worker != null) {
+      final (nonce, cipherText, mac) = await worker.encrypt(utf8.encode(value));
+      return 'v1:${base64UrlEncode(nonce)}:'
+          '${base64UrlEncode(cipherText)}:'
+          '${base64UrlEncode(mac)}';
+    }
     final box = await _algorithm.encrypt(
       utf8.encode(value),
       secretKey: _key,
@@ -418,15 +555,12 @@ final class _LocalCipher {
   }
 
   Future<String> decryptString(String value) async {
-    final pieces = value.split(':');
-    if (pieces.length != 4 || pieces.first != 'v1') {
-      throw const FormatException('Unsupported encrypted cache value.');
+    final (nonce, cipherText, mac) = _envelopeTriple(value);
+    final worker = _worker;
+    if (worker != null) {
+      return utf8.decode(await worker.decrypt(nonce, cipherText, mac));
     }
-    final box = SecretBox(
-      base64Url.decode(pieces[2]),
-      nonce: base64Url.decode(pieces[1]),
-      mac: Mac(base64Url.decode(pieces[3])),
-    );
+    final box = SecretBox(cipherText, nonce: nonce, mac: Mac(mac));
     return utf8.decode(await _algorithm.decrypt(box, secretKey: _key));
   }
 }

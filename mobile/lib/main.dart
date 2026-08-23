@@ -18,8 +18,12 @@ Future<void> main() async {
     );
   });
   try {
-    final database = await LocalDatabase.open();
-    final pushService = await PushService.create();
+    final bootstrap = await Future.wait<Object?>([
+      LocalDatabase.open(),
+      PushService.create(),
+    ]);
+    final database = bootstrap[0]! as LocalDatabase;
+    final pushService = bootstrap[1]! as PushService;
     runApp(
       ProviderScope(
         overrides: [

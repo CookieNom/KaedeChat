@@ -930,7 +930,9 @@ final class _ChannelDetailsSheetState
   @override
   Widget build(BuildContext context) {
     final channel = _channel;
-    final state = ref.watch(mobileControllerProvider);
+    ref.watch(mobileControllerProvider
+        .select((state) => state.e2eeActivationEnabled));
+    final state = ref.read(mobileControllerProvider);
     final showEncryption =
         channel.encryptionMode == 'e2ee' || state.e2eeActivationEnabled;
     final topic = channel.topic?.trim();
@@ -1037,7 +1039,12 @@ final class _DirectMessageDetailsSheet extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(mobileControllerProvider);
+    ref.watch(mobileControllerProvider.select((state) => (
+          state.dms,
+          state.user,
+          state.e2eeActivationEnabled,
+        )));
+    final state = ref.read(mobileControllerProvider);
     var current = channel;
     for (final candidate in state.dms) {
       if (candidate.ref == channel.ref) {
@@ -1511,7 +1518,12 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
 
   @override
   Widget build(BuildContext context) {
-    final mobile = ref.watch(mobileControllerProvider);
+    ref.watch(mobileControllerProvider.select((state) => (
+          state.dms,
+          state.user,
+          state.e2eeActivationEnabled,
+        )));
+    final mobile = ref.read(mobileControllerProvider);
     var channel = widget.channel;
     for (final candidate in mobile.dms) {
       if (candidate.ref == widget.channel.ref) {
@@ -1891,7 +1903,14 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
 
   @override
   Widget build(BuildContext context) {
-    final mobile = ref.watch(mobileControllerProvider);
+    ref.watch(mobileControllerProvider.select((state) => (
+          state.gatewayHealth.isConnected,
+          state.userProfiles,
+          state.user,
+          state.presenceByUser,
+          state.presencePreference,
+        )));
+    final mobile = ref.read(mobileControllerProvider);
     if (mobile.gatewayHealth.isConnected &&
         _rosterRequestedFor != widget.guild.ref) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2240,7 +2259,27 @@ final class _ChatBrowser extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(mobileControllerProvider);
+    // Rebuild only when a slice the rail or conversation list actually
+    // renders changes (guilds, DMs, selection, badges, presence, profiles).
+    // High-frequency updates that don't affect this browser — composer
+    // drafts, typing indicators, gateway health, per-channel message lists —
+    // no longer tear down and rebuild the server rail and conversation rows.
+    ref.watch(mobileControllerProvider.select((state) => (
+          state.activeGuild,
+          state.guilds,
+          state.guildNavigation,
+          state.selectedGuild,
+          state.selectedChannel,
+          state.dms,
+          state.user,
+          state.userProfiles,
+          state.presenceByUser,
+          state.presencePreference,
+          state.relationships,
+          state.unreadCounts,
+          state.mentionCounts,
+        )));
+    final state = ref.read(mobileControllerProvider);
     return Row(
       children: [
         _ServerRail(
@@ -3869,7 +3908,18 @@ final class _ShellBanners extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(mobileControllerProvider);
+    // Rebuild only when a banner-relevant field changes. copyWith preserves
+    // the previous instance of every field it does not replace, so the tuple
+    // below is stable across message, cache, and composer updates.
+    ref.watch(mobileControllerProvider.select((state) => (
+          state.offline,
+          state.phase,
+          state.gatewayHealth,
+          state.gatewayProtocolWarning,
+          state.degradedWarnings,
+          state.pushWarning,
+        )));
+    final state = ref.read(mobileControllerProvider);
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -3880,9 +3930,8 @@ final class _ShellBanners extends ConsumerWidget {
             foreground: KaedeColors.coralText,
             title: 'Offline · showing saved conversations',
             actionLabel: 'Retry',
-            onAction: () => ref
-                .read(mobileControllerProvider.notifier)
-                .refreshNavigation(),
+            onAction: () =>
+                ref.read(mobileControllerProvider.notifier).refreshNavigation(),
           ),
         if (state.phase == SessionPhase.ready &&
             !state.gatewayHealth.isConnected)
@@ -3918,9 +3967,8 @@ final class _ShellBanners extends ConsumerWidget {
                     'resync.'
                 : null,
             actionLabel: 'Retry',
-            onAction: () => ref
-                .read(mobileControllerProvider.notifier)
-                .retryDegradedData(),
+            onAction: () =>
+                ref.read(mobileControllerProvider.notifier).retryDegradedData(),
           ),
         if (state.pushWarning case final warning?)
           _StatusBanner(
@@ -4616,7 +4664,8 @@ final class _FriendsPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(mobileControllerProvider);
+    ref.watch(mobileControllerProvider.select((state) => state.relationships));
+    final state = ref.read(mobileControllerProvider);
     final sections = <String, List<Map<String, Object?>>>{
       'friend': <Map<String, Object?>>[],
       'pending_in': <Map<String, Object?>>[],
@@ -4739,10 +4788,17 @@ final class _RelationshipTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final snapshot = _relationshipUser(relationship);
     if (snapshot == null) return const SizedBox.shrink();
-    final state = ref.watch(mobileControllerProvider);
-    final user = state.userProfiles[snapshot.ref] ?? snapshot;
-    final presence =
-        ref.read(mobileControllerProvider.notifier).presenceFor(user);
+    // Rebuild only when this relationship's profile or presence changes;
+    // unrelated profile and presence updates leave this row untouched.
+    final projection = ref.watch(mobileControllerProvider.select((state) {
+      final user = state.userProfiles[snapshot.ref] ?? snapshot;
+      final presence = user.ref == state.user?.ref
+          ? state.presencePreference
+          : state.presenceByUser[user.ref] ?? user.presence;
+      return (user: user, presence: presence);
+    }));
+    final user = projection.user;
+    final presence = projection.presence;
     final type = '${relationship['type']}';
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),

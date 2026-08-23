@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:developer';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -451,6 +453,36 @@ final class KaedeMessageMarkdown extends StatelessWidget {
   final MobileState state;
   final Uri? omitMediaUrl;
 
+  // Single shared instance: the markdown body re-parses when the style sheet
+  // is not equal, and value-comparing this on every row rebuild would be
+  // wasted work. Identity-equal instances short-circuit the check.
+  static final _styleSheet = MarkdownStyleSheet(
+    p: const TextStyle(
+      color: KaedeColors.text,
+      fontSize: 16,
+      height: 1.24,
+    ),
+    pPadding: EdgeInsets.zero,
+    code: const TextStyle(
+      color: KaedeColors.text,
+      backgroundColor: KaedeColors.rail,
+      fontSize: 14,
+    ),
+    codeblockDecoration: BoxDecoration(
+      color: KaedeColors.rail,
+      borderRadius: BorderRadius.circular(6),
+      border: Border.all(color: KaedeColors.border),
+    ),
+    blockquoteDecoration: const BoxDecoration(
+      border: Border(
+        left: BorderSide(
+          color: KaedeColors.muted,
+          width: 3,
+        ),
+      ),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
     final data = (omitMediaUrl == null
@@ -490,32 +522,7 @@ final class KaedeMessageMarkdown extends StatelessWidget {
       // 'Copy text' and 'Copy message link' instead.
       selectable: false,
       softLineBreak: true,
-      styleSheet: MarkdownStyleSheet(
-        p: const TextStyle(
-          color: KaedeColors.text,
-          fontSize: 16,
-          height: 1.24,
-        ),
-        pPadding: EdgeInsets.zero,
-        code: const TextStyle(
-          color: KaedeColors.text,
-          backgroundColor: KaedeColors.rail,
-          fontSize: 14,
-        ),
-        codeblockDecoration: BoxDecoration(
-          color: KaedeColors.rail,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: KaedeColors.border),
-        ),
-        blockquoteDecoration: const BoxDecoration(
-          border: Border(
-            left: BorderSide(
-              color: KaedeColors.muted,
-              width: 3,
-            ),
-          ),
-        ),
-      ),
+      styleSheet: _styleSheet,
       onTapLink: (_, href, __) async {
         final uri = Uri.tryParse(href ?? '');
         if (uri != null && (uri.scheme == 'https' || uri.scheme == 'http')) {
@@ -650,295 +657,318 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       _scheduleAutomaticHistoryCheck();
     }
     final historySyncWarning = _guildHistorySyncWarning(state.activeGuild);
-    return Column(
-      children: [
-        if (state.activeGuild?.syncStatus == 'quota_paused')
-          _FederationStatusStrip(
-            title: 'Guild updates are paused on this instance.',
-            message: switch (state.activeGuild?.syncErrorCode) {
-              'FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED' =>
-                'This instance cannot cache another remote account needed by the guild. Contact your instance administrator; you do not need to delete your own messages.',
-              'FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED' =>
-                'This instance cannot cache another remote server needed by the guild. Contact your instance administrator; you do not need to delete your own messages.',
-              _ =>
-                'Its remote-guild cache is full, so recent messages or changes may be missing. Contact your instance administrator; you do not need to delete your own messages.',
-            },
-          ),
-        if (historySyncWarning != null &&
-            state.activeGuild?.syncStatus != 'quota_paused')
-          _FederationStatusStrip(
-            title: historySyncWarning.$1,
-            message: historySyncWarning.$2,
-          ),
-        if (moderationStatus != null)
-          _FederationStatusStrip(
-            title: moderationStatus.timeoutIndefinite
-                ? 'You are timed out in this guild.'
-                : 'You are timed out until ${_formatTimeout(context, moderationStatus.timeoutUntil!)}.',
-            message: moderationStatus.reason?.isNotEmpty == true
-                ? 'Reason: ${moderationStatus.reason}'
-                : moderationStatus.detailsAvailable
-                    ? 'The guild’s home instance did not provide a reason.'
-                    : 'Kaede is retrieving the reason from the guild’s home instance.',
-          ),
-        if (state.error case final error?)
-          _ChatErrorStrip(
-            message: error,
-            onRetry:
-                error.startsWith('Older messages are temporarily unavailable')
-                    ? () => ref
-                        .read(mobileControllerProvider.notifier)
-                        .loadMessages(older: true)
-                    : ref.read(mobileControllerProvider.notifier).loadMessages,
-          ),
-        Expanded(
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: messages.isEmpty &&
-                        pending.isEmpty &&
-                        !state.loadingMessages &&
-                        !channel.historyTruncated
-                    ? _ConversationStart(channel: channel)
-                    : ListView.builder(
-                        controller: _scroll,
-                        reverse: true,
-                        padding: const EdgeInsets.fromLTRB(0, 6, 0, 12),
-                        // New realtime messages move every visible child by an
-                        // index in this reversed list. Tell the sliver where a
-                        // keyed row moved so it preserves the row (and any
-                        // pointer currently swiping it) instead of disposing it
-                        // midway through the gesture.
-                        findChildIndexCallback: (key) {
-                          String? messageWire;
-                          for (final entry in _messageKeys.entries) {
-                            if (entry.value == key) {
-                              messageWire = entry.key;
-                              break;
-                            }
-                          }
-                          if (messageWire == null) return null;
-                          final chronologicalIndex = messages.indexWhere(
-                            (message) => message.ref.wire == messageWire,
-                          );
-                          if (chronologicalIndex < 0) return null;
-                          return pending.length +
-                              messages.length -
-                              chronologicalIndex -
-                              1;
-                        },
-                        itemCount: messages.length +
-                            pending.length +
-                            (state.channelsWithOlderMessages
-                                        .contains(channel.ref) ||
-                                    (channel.historyTruncated &&
-                                        messages.isEmpty) ||
-                                    (channel.historyTruncated &&
-                                        !channel.historyRemoteAvailable)
-                                ? 1
-                                : 0),
-                        itemBuilder: (context, index) {
-                          if (index < pending.length) {
-                            final item = pending[pending.length - index - 1];
-                            return _PendingMessageTile(
-                              item: item,
-                              onRetry: () => ref
-                                  .read(mobileControllerProvider.notifier)
-                                  .retrySend(item.nonce),
-                              onDiscard: () => ref
-                                  .read(mobileControllerProvider.notifier)
-                                  .discardSend(item.nonce),
-                            );
-                          }
-                          final messageIndex =
-                              messages.length - (index - pending.length) - 1;
-                          if (messageIndex < 0) {
-                            if (!state.channelsWithOlderMessages
-                                .contains(channel.ref)) {
-                              return _HistoryBoundary(
-                                complete: messages.isEmpty
-                                    ? channel.historyRemoteAvailable &&
-                                        !state.loadingMessages &&
-                                        state.error == null
-                                    : messages.first.historyPageComplete,
+    // Per-build lookup indexes for the lazy list. Building them once here
+    // keeps the itemBuilder and the moved-child callback below O(1); without
+    // them every visible row would scan the whole message list for its reply
+    // reference and every moved row for its new index.
+    final messageByWire = <String, KaedeMessage>{
+      for (final message in messages) message.ref.wire: message,
+    };
+    final chronologicalIndex = <String, int>{
+      for (var index = 0; index < messages.length; index++)
+        messages[index].ref.wire: index,
+    };
+    // Drop row identities for messages that left the list (edits, deletions,
+    // retention trims) so the key map stays bounded. Live rows keep their
+    // GlobalKeys so per-row state (spoilers, videos, in-flight swipes)
+    // survives rebuilds.
+    _messageKeys.removeWhere((wire, _) => !messageByWire.containsKey(wire));
+    final indexByKey = <GlobalKey, int>{
+      for (final entry in _messageKeys.entries)
+        if (chronologicalIndex[entry.key] case final index?) entry.value: index,
+    };
+    final profiled = kProfileMode ? TimelineTask() : null;
+    profiled?.start(
+      'kaede.channelview.build',
+      arguments: {'messages': messages.length, 'pending': pending.length},
+    );
+    Widget content;
+    try {
+      content = Column(
+        children: [
+          if (state.activeGuild?.syncStatus == 'quota_paused')
+            _FederationStatusStrip(
+              title: 'Guild updates are paused on this instance.',
+              message: switch (state.activeGuild?.syncErrorCode) {
+                'FEDERATION_IDENTITY_STORAGE_QUOTA_EXCEEDED' =>
+                  'This instance cannot cache another remote account needed by the guild. Contact your instance administrator; you do not need to delete your own messages.',
+                'FEDERATION_INSTANCE_STORAGE_QUOTA_EXCEEDED' =>
+                  'This instance cannot cache another remote server needed by the guild. Contact your instance administrator; you do not need to delete your own messages.',
+                _ =>
+                  'Its remote-guild cache is full, so recent messages or changes may be missing. Contact your instance administrator; you do not need to delete your own messages.',
+              },
+            ),
+          if (historySyncWarning != null &&
+              state.activeGuild?.syncStatus != 'quota_paused')
+            _FederationStatusStrip(
+              title: historySyncWarning.$1,
+              message: historySyncWarning.$2,
+            ),
+          if (moderationStatus != null)
+            _FederationStatusStrip(
+              title: moderationStatus.timeoutIndefinite
+                  ? 'You are timed out in this guild.'
+                  : 'You are timed out until ${_formatTimeout(context, moderationStatus.timeoutUntil!)}.',
+              message: moderationStatus.reason?.isNotEmpty == true
+                  ? 'Reason: ${moderationStatus.reason}'
+                  : moderationStatus.detailsAvailable
+                      ? 'The guild’s home instance did not provide a reason.'
+                      : 'Kaede is retrieving the reason from the guild’s home instance.',
+            ),
+          if (state.error case final error?)
+            _ChatErrorStrip(
+              message: error,
+              onRetry: error
+                      .startsWith('Older messages are temporarily unavailable')
+                  ? () => ref
+                      .read(mobileControllerProvider.notifier)
+                      .loadMessages(older: true)
+                  : ref.read(mobileControllerProvider.notifier).loadMessages,
+            ),
+          Expanded(
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: messages.isEmpty &&
+                          pending.isEmpty &&
+                          !state.loadingMessages &&
+                          !channel.historyTruncated
+                      ? _ConversationStart(channel: channel)
+                      : ListView.builder(
+                          controller: _scroll,
+                          reverse: true,
+                          padding: const EdgeInsets.fromLTRB(0, 6, 0, 12),
+                          // New realtime messages move every visible child by an
+                          // index in this reversed list. Tell the sliver where a
+                          // keyed row moved so it preserves the row (and any
+                          // pointer currently swiping it) instead of disposing it
+                          // midway through the gesture.
+                          findChildIndexCallback: (key) {
+                            final index = indexByKey[key];
+                            if (index == null) return null;
+                            return pending.length + messages.length - index - 1;
+                          },
+                          itemCount: messages.length +
+                              pending.length +
+                              (state.channelsWithOlderMessages
+                                          .contains(channel.ref) ||
+                                      (channel.historyTruncated &&
+                                          messages.isEmpty) ||
+                                      (channel.historyTruncated &&
+                                          !channel.historyRemoteAvailable)
+                                  ? 1
+                                  : 0),
+                          itemBuilder: (context, index) {
+                            if (index < pending.length) {
+                              final item = pending[pending.length - index - 1];
+                              return _PendingMessageTile(
+                                item: item,
+                                onRetry: () => ref
+                                    .read(mobileControllerProvider.notifier)
+                                    .retrySend(item.nonce),
+                                onDiscard: () => ref
+                                    .read(mobileControllerProvider.notifier)
+                                    .discardSend(item.nonce),
                               );
                             }
-                            return Padding(
-                              padding:
-                                  const EdgeInsets.fromLTRB(52, 12, 52, 10),
-                              child: OutlinedButton.icon(
-                                style: OutlinedButton.styleFrom(
-                                  minimumSize: const Size(0, 40),
-                                  foregroundColor: KaedeColors.textSoft,
-                                  side: const BorderSide(
-                                      color: KaedeColors.border),
-                                  backgroundColor: KaedeColors.panel,
-                                  textStyle: const TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
+                            final messageIndex =
+                                messages.length - (index - pending.length) - 1;
+                            if (messageIndex < 0) {
+                              if (!state.channelsWithOlderMessages
+                                  .contains(channel.ref)) {
+                                return _HistoryBoundary(
+                                  complete: messages.isEmpty
+                                      ? channel.historyRemoteAvailable &&
+                                          !state.loadingMessages &&
+                                          state.error == null
+                                      : messages.first.historyPageComplete,
+                                );
+                              }
+                              return Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(52, 12, 52, 10),
+                                child: OutlinedButton.icon(
+                                  style: OutlinedButton.styleFrom(
+                                    minimumSize: const Size(0, 40),
+                                    foregroundColor: KaedeColors.textSoft,
+                                    side: const BorderSide(
+                                        color: KaedeColors.border),
+                                    backgroundColor: KaedeColors.panel,
+                                    textStyle: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                    ),
                                   ),
+                                  onPressed: state.loadingMessages
+                                      ? null
+                                      : _loadEarlier,
+                                  icon: state.loadingMessages
+                                      ? const SizedBox.square(
+                                          dimension: 15,
+                                          child: CircularProgressIndicator(
+                                              strokeWidth: 2))
+                                      : const Icon(Icons.history_rounded,
+                                          size: 17),
+                                  label: Text(state.loadingMessages
+                                      ? 'Loading earlier messages…'
+                                      : 'Load earlier messages'),
                                 ),
-                                onPressed:
-                                    state.loadingMessages ? null : _loadEarlier,
-                                icon: state.loadingMessages
-                                    ? const SizedBox.square(
-                                        dimension: 15,
-                                        child: CircularProgressIndicator(
-                                            strokeWidth: 2))
-                                    : const Icon(Icons.history_rounded,
-                                        size: 17),
-                                label: Text(state.loadingMessages
-                                    ? 'Loading earlier messages…'
-                                    : 'Load earlier messages'),
+                              );
+                            }
+                            final message = messages[messageIndex];
+                            final previous = messageIndex > 0
+                                ? messages[messageIndex - 1]
+                                : null;
+                            final startsNewDay = previous == null ||
+                                !sameCalendarDay(
+                                  previous.createdAt,
+                                  message.createdAt,
+                                );
+                            final compact = previous != null &&
+                                !startsNewDay &&
+                                previous.authorRef == message.authorRef &&
+                                previous.reference == null &&
+                                message.reference == null &&
+                                message.createdAt
+                                        .difference(previous.createdAt)
+                                        .inMinutes <
+                                    7;
+                            final key = _messageKeys.putIfAbsent(
+                                message.ref.wire, GlobalKey.new);
+                            void reply() => setState(() {
+                                  _reply = message;
+                                  _notifyReply =
+                                      message.authorRef != state.user?.ref &&
+                                          channel.type != ChannelType.dm;
+                                });
+                            final tile = _MessageTile(
+                              state: state,
+                              message: message,
+                              compact: compact,
+                              referenced: message.reference == null
+                                  ? null
+                                  : messageByWire[message.reference!.wire],
+                              onReply: reply,
+                              onJump: message.reference == null
+                                  ? null
+                                  : () => _jumpTo(message.reference!),
+                              onMenu: () => _showMessageActions(message),
+                              onReaction: (emoji) =>
+                                  _toggleReaction(message, emoji),
+                              onAddReaction: message.reactionCounts.isEmpty
+                                  ? null
+                                  : () => _addReactionFromPicker(message),
+                              onAuthorTap: message.author == null
+                                  ? null
+                                  : () => showUserProfile(
+                                        context,
+                                        message.author!,
+                                        ref
+                                            .read(mobileControllerProvider
+                                                .notifier)
+                                            .presenceFor(message.author!),
+                                      ),
+                            );
+                            return KeyedSubtree(
+                              key: key,
+                              child: RepaintBoundary(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    if (startsNewDay)
+                                      _DayDivider(day: message.createdAt),
+                                    AnimatedContainer(
+                                      duration:
+                                          const Duration(milliseconds: 240),
+                                      curve: Curves.easeOut,
+                                      color: _highlightedMessage == message.ref
+                                          ? KaedeColors.coral
+                                              .withValues(alpha: .13)
+                                          : Colors.transparent,
+                                      child: SwipeToReply(
+                                        enabled: canSend &&
+                                            message.deletedAt == null,
+                                        onReply: reply,
+                                        child: tile,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             );
-                          }
-                          final message = messages[messageIndex];
-                          final previous = messageIndex > 0
-                              ? messages[messageIndex - 1]
-                              : null;
-                          final startsNewDay = previous == null ||
-                              !sameCalendarDay(
-                                previous.createdAt,
-                                message.createdAt,
-                              );
-                          final compact = previous != null &&
-                              !startsNewDay &&
-                              previous.authorRef == message.authorRef &&
-                              previous.reference == null &&
-                              message.reference == null &&
-                              message.createdAt
-                                      .difference(previous.createdAt)
-                                      .inMinutes <
-                                  7;
-                          final key = _messageKeys.putIfAbsent(
-                              message.ref.wire, GlobalKey.new);
-                          void reply() => setState(() {
-                                _reply = message;
-                                _notifyReply =
-                                    message.authorRef != state.user?.ref &&
-                                        channel.type != ChannelType.dm;
-                              });
-                          final tile = _MessageTile(
-                            state: state,
-                            message: message,
-                            compact: compact,
-                            referenced: message.reference == null
-                                ? null
-                                : messages
-                                    .where((candidate) =>
-                                        candidate.ref == message.reference)
-                                    .firstOrNull,
-                            onReply: reply,
-                            onJump: message.reference == null
-                                ? null
-                                : () => _jumpTo(message.reference!),
-                            onMenu: () => _showMessageActions(message),
-                            onReaction: (emoji) =>
-                                _toggleReaction(message, emoji),
-                            onAddReaction: message.reactionCounts.isEmpty
-                                ? null
-                                : () => _addReactionFromPicker(message),
-                            onAuthorTap: message.author == null
-                                ? null
-                                : () => showUserProfile(
-                                      context,
-                                      message.author!,
-                                      ref
-                                          .read(
-                                              mobileControllerProvider.notifier)
-                                          .presenceFor(message.author!),
-                                    ),
-                          );
-                          return KeyedSubtree(
-                            key: key,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                if (startsNewDay)
-                                  _DayDivider(day: message.createdAt),
-                                AnimatedContainer(
-                                  duration: const Duration(milliseconds: 240),
-                                  curve: Curves.easeOut,
-                                  color: _highlightedMessage == message.ref
-                                      ? KaedeColors.coral.withValues(alpha: .13)
-                                      : Colors.transparent,
-                                  child: SwipeToReply(
-                                    enabled:
-                                        canSend && message.deletedAt == null,
-                                    onReply: reply,
-                                    child: tile,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-              ),
-              Positioned(
-                right: 12,
-                bottom: 10,
-                child: _JumpToPresentButton(
-                  visible: _showJumpToPresent,
-                  unread: state.unreadCounts[channel.ref] ?? 0,
-                  onTap: () {
-                    setState(() => _showJumpToPresent = false);
-                    _scheduleScrollToBottom(animated: true);
-                  },
+                          },
+                        ),
                 ),
-              ),
-            ],
-          ),
-        ),
-        if (state.typingByChannel[channel.ref] case final typing?
-            when typing.isNotEmpty)
-          _TypingIndicator(participants: typing),
-        if (_mentionQuery != null)
-          _MentionSuggestions(
-            users: _mentionCandidates(state, _mentionQuery!),
-            onSelected: _insertMention,
-          ),
-        if (!canSend)
-          _PermissionNotice(
-            message: encryptedPaused
-                ? 'Encrypted messaging is paused while participant device keys are secured. No plaintext will be sent.'
-                : moderationStatus == null
-                    ? 'You do not have permission to send messages here.'
-                    : 'You cannot send messages while timed out.',
-          )
-        else
-          IgnorePointer(
-            ignoring: !composerReady,
-            child: _Composer(
-              controller: _composer,
-              focusNode: _composerFocus,
-              hint: composerHint(channel),
-              reply: _reply,
-              notifyReply: _notifyReply,
-              uploads: _uploads,
-              sending: _sending,
-              slowModeRemaining: _slowModeRemaining(channel.ref),
-              compact: MediaQuery.sizeOf(context).width <= 360,
-              canAttach: channel.type == ChannelType.dm ||
-                  channel.allows(Permission.attachFiles),
-              gifsAllowed: composerAllowsGifs(channel),
-              onNotifyChanged: (value) => setState(() => _notifyReply = value),
-              onCancelReply: () => setState(() => _reply = null),
-              onRemoveUpload: (item) {
-                setState(() => _uploads.remove(item));
-                unawaited(item.deleteIfTemporary());
-              },
-              onMore: () => _showComposerActions(channel),
-              onAttach: () =>
-                  _runComposerAction(channel, ComposerAction.attach),
-              onEmoji: () => _runComposerAction(channel, ComposerAction.emoji),
-              onGif: () => _runComposerAction(channel, ComposerAction.gif),
-              onSend: _send,
+                Positioned(
+                  right: 12,
+                  bottom: 10,
+                  child: _JumpToPresentButton(
+                    visible: _showJumpToPresent,
+                    unread: state.unreadCounts[channel.ref] ?? 0,
+                    onTap: () {
+                      setState(() => _showJumpToPresent = false);
+                      _scheduleScrollToBottom(animated: true);
+                    },
+                  ),
+                ),
+              ],
             ),
           ),
-      ],
-    );
+          if (state.typingByChannel[channel.ref] case final typing?
+              when typing.isNotEmpty)
+            _TypingIndicator(participants: typing),
+          if (_mentionQuery != null)
+            _MentionSuggestions(
+              users: _mentionCandidates(state, _mentionQuery!),
+              onSelected: _insertMention,
+            ),
+          if (!canSend)
+            _PermissionNotice(
+              message: encryptedPaused
+                  ? 'Encrypted messaging is paused while participant device keys are secured. No plaintext will be sent.'
+                  : moderationStatus == null
+                      ? 'You do not have permission to send messages here.'
+                      : 'You cannot send messages while timed out.',
+            )
+          else
+            IgnorePointer(
+              ignoring: !composerReady,
+              child: _Composer(
+                controller: _composer,
+                focusNode: _composerFocus,
+                hint: composerHint(channel),
+                reply: _reply,
+                notifyReply: _notifyReply,
+                uploads: _uploads,
+                sending: _sending,
+                slowModeRemaining: _slowModeRemaining(channel.ref),
+                compact: MediaQuery.sizeOf(context).width <= 360,
+                canAttach: channel.type == ChannelType.dm ||
+                    channel.allows(Permission.attachFiles),
+                gifsAllowed: composerAllowsGifs(channel),
+                onNotifyChanged: (value) =>
+                    setState(() => _notifyReply = value),
+                onCancelReply: () => setState(() => _reply = null),
+                onRemoveUpload: (item) {
+                  setState(() => _uploads.remove(item));
+                  unawaited(item.deleteIfTemporary());
+                },
+                onMore: () => _showComposerActions(channel),
+                onAttach: () =>
+                    _runComposerAction(channel, ComposerAction.attach),
+                onEmoji: () =>
+                    _runComposerAction(channel, ComposerAction.emoji),
+                onGif: () => _runComposerAction(channel, ComposerAction.gif),
+                onSend: _send,
+              ),
+            ),
+        ],
+      );
+    } finally {
+      profiled?.finish();
+    }
+    return content;
   }
 
   String _formatTimeout(BuildContext context, DateTime value) {
@@ -4894,8 +4924,4 @@ String _contentType(String filename) {
     'pdf' => 'application/pdf',
     _ => 'application/octet-stream',
   };
-}
-
-extension _FirstOrNull<T> on Iterable<T> {
-  T? get firstOrNull => isEmpty ? null : first;
 }

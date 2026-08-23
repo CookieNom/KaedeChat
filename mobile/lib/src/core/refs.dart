@@ -3,12 +3,15 @@ final class Snowflake {
 
   final String value;
 
+  static final _pattern = RegExp(r'^[1-9][0-9]{0,18}$');
+  static final _maximum = BigInt.parse('9223372036854775807');
+
   static String _validate(String value) {
-    if (!RegExp(r'^[1-9][0-9]{0,18}$').hasMatch(value)) {
+    if (!_pattern.hasMatch(value)) {
       throw FormatException('Invalid snowflake', value);
     }
     final parsed = BigInt.parse(value);
-    if (parsed > BigInt.parse('9223372036854775807')) {
+    if (parsed > _maximum) {
       throw FormatException('Snowflake exceeds signed BIGINT', value);
     }
     return value;
@@ -29,6 +32,9 @@ final class Domain {
 
   final String value;
 
+  static final _labelPattern =
+      RegExp(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$');
+
   static String _normalize(String input) {
     var value = input.trim().toLowerCase();
     if (value.endsWith('.')) value = value.substring(0, value.length - 1);
@@ -43,9 +49,8 @@ final class Domain {
         value.contains('#')) {
       throw FormatException('Expected a hostname without a URL or port', input);
     }
-    final label = RegExp(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$');
     final labels = value.split('.');
-    if (labels.any((part) => !label.hasMatch(part))) {
+    if (labels.any((part) => !_labelPattern.hasMatch(part))) {
       throw FormatException('Invalid domain', input);
     }
     return value;
@@ -62,7 +67,7 @@ final class Domain {
 }
 
 final class EntityRef {
-  const EntityRef(this.id, this.domain);
+  EntityRef(this.id, this.domain) : key = '${id.value}@${domain.value}';
 
   /// Decodes the two reference shapes used by Kaede's HTTP and gateway APIs.
   ///
@@ -99,8 +104,11 @@ final class EntityRef {
   final Snowflake id;
   final Domain domain;
 
+  /// Precomputed so map-key hashing, equality and wire encoding never pay a
+  /// string-concatenation cost in hot paths.
+  final String key;
+
   String get wire => key;
-  String get key => '${id.value}@${domain.value}';
 
   @override
   bool operator ==(Object other) => other is EntityRef && key == other.key;

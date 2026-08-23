@@ -369,7 +369,6 @@ Future<FlutterLocalNotificationsPlugin>
 final class PushService {
   PushService._(
     this._local,
-    this._firebaseReady,
     this._destinations,
     this._healthEvents,
   );
@@ -379,15 +378,18 @@ final class PushService {
   /// notification or Firebase channels.
   @visibleForTesting
   PushService.test({bool firebaseReady = true})
-      : this._(
-          FlutterLocalNotificationsPlugin(),
-          firebaseReady,
-          StreamController<PushDestination>.broadcast(),
-          StreamController<String?>.broadcast(sync: true),
-        );
+      : _local = FlutterLocalNotificationsPlugin(),
+        _destinations = StreamController<PushDestination>.broadcast(),
+        _healthEvents = StreamController<String?>.broadcast(sync: true) {
+    _firebaseReady = firebaseReady;
+    _firebaseResolved = true;
+  }
 
   final FlutterLocalNotificationsPlugin _local;
-  final bool _firebaseReady;
+  var _firebaseReady = false;
+  var _firebaseResolved = false;
+  Future<void>? _firebaseResolvedFuture;
+  StreamController<String>? _tokenRefreshBridge;
   final StreamController<PushDestination> _destinations;
   final StreamController<String?> _healthEvents;
   final List<StreamSubscription<dynamic>> _subscriptions =
@@ -399,6 +401,15 @@ final class PushService {
   Stream<PushDestination> get destinations => _destinations.stream;
   Stream<String?> get health => _healthEvents.stream;
   bool get remotePushAvailable => _firebaseReady;
+
+  /// Completes once the optional Firebase setup (see [create]) has finished,
+  /// whatever its outcome. Push-token callers await this so a session that
+  /// starts before Firebase finishes behaves exactly as if Firebase had
+  /// been initialized synchronously at launch.
+  Future<void> _ensureFirebaseResolved() {
+    if (_firebaseResolved) return Future<void>.value();
+    return _firebaseResolvedFuture ?? Future<void>.value();
+  }
 
   PushDestination? consumeInitialDestination() {
     final destination = _initialDestination;
@@ -472,28 +483,43 @@ final class PushService {
     for (final channel in _androidChannels) {
       await android?.createNotificationChannel(channel);
     }
-    var firebaseReady = false;
+    service = PushService._(
+      local,
+      destinations,
+      healthEvents,
+    );
+    // The cold-launch deep link must be resolved before the service is
+    // returned so the session restore finds the tapped conversation.
+    final launch = await local.getNotificationAppLaunchDetails();
+    service._initialDestination =
+        PushDestination.parse(launch?.notificationResponse?.payload);
+    // Firebase setup is optional (self-hosters may ship without
+    // credentials) and is slower than the launch-critical path above, so it
+    // runs in the background. Token callers await its outcome via
+    // [_ensureFirebaseResolved].
+    service._firebaseResolvedFuture = service._initializeFirebase();
+    return service;
+  }
+
+  Future<void> _initializeFirebase() async {
+    var ready = false;
     try {
       await Firebase.initializeApp();
       FirebaseMessaging.onBackgroundMessage(
         firebaseMessagingBackgroundHandler,
       );
-      firebaseReady = true;
+      ready = true;
     } on Object {
       // Self-hosters can ship without Firebase credentials. Foreground local
       // notifications continue to work; closed-app push remains unavailable.
+    } finally {
+      _firebaseReady = ready;
+      _firebaseResolved = true;
     }
-    service = PushService._(
-      local,
-      firebaseReady,
-      destinations,
-      healthEvents,
-    );
-    final launch = await local.getNotificationAppLaunchDetails();
-    service._initialDestination =
-        PushDestination.parse(launch?.notificationResponse?.payload);
-    if (firebaseReady) await service._startFirebaseListeners();
-    return service;
+    if (ready) {
+      await _startFirebaseListeners();
+    }
+    _finishTokenRefreshBridge();
   }
 
   Future<void> _startFirebaseListeners() async {
@@ -541,6 +567,7 @@ final class PushService {
   }
 
   Future<bool> requestPermission() async {
+    await _ensureFirebaseResolved();
     var localAllowed = true;
     if (Platform.isAndroid) {
       localAllowed = await _local
@@ -565,6 +592,7 @@ final class PushService {
   }
 
   Future<bool> permissionGranted() async {
+    await _ensureFirebaseResolved();
     final localAllowed = Platform.isAndroid
         ? await _local
                 .resolvePlatformSpecificImplementation<
@@ -589,13 +617,37 @@ final class PushService {
         ? await this.requestPermission()
         : await permissionGranted();
     if (!allowed) return null;
+    await _ensureFirebaseResolved();
     if (!_firebaseReady) return null;
     return FirebaseMessaging.instance.getToken();
   }
 
-  Stream<String> get tokenRefresh => _firebaseReady
-      ? FirebaseMessaging.instance.onTokenRefresh
-      : const Stream<String>.empty();
+  /// Forwards token refreshes to listeners that subscribed before the
+  /// background Firebase setup finished.
+  Stream<String> get tokenRefresh {
+    if (_firebaseReady) return FirebaseMessaging.instance.onTokenRefresh;
+    if (_firebaseResolved) return const Stream<String>.empty();
+    final existing = _tokenRefreshBridge;
+    if (existing != null) return existing.stream;
+    final bridge = StreamController<String>.broadcast();
+    _tokenRefreshBridge = bridge;
+    _firebaseResolvedFuture?.whenComplete(_finishTokenRefreshBridge);
+    return bridge.stream;
+  }
+
+  void _finishTokenRefreshBridge() {
+    final bridge = _tokenRefreshBridge;
+    if (bridge == null) return;
+    _tokenRefreshBridge = null;
+    if (!_firebaseReady) {
+      unawaited(bridge.close());
+      return;
+    }
+    _subscriptions.add(FirebaseMessaging.instance.onTokenRefresh.listen(
+      bridge.add,
+      onError: bridge.addError,
+    ));
+  }
 
   bool get remoteDeliveryAvailable => _firebaseReady;
 
@@ -641,6 +693,7 @@ final class PushService {
     for (final subscription in _subscriptions) {
       await subscription.cancel();
     }
+    await _tokenRefreshBridge?.close();
     await _destinations.close();
     await _healthEvents.close();
   }

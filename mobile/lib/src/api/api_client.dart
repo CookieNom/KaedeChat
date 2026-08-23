@@ -53,6 +53,19 @@ final class KaedeApiClient {
     HttpStatus.permanentRedirect,
   };
 
+  /// Long-lived client for authenticated file transfers. Reuses the TLS
+  /// connection across downloads and uploads instead of paying a fresh
+  /// handshake for every media fetch.
+  HttpClient? _fileClient;
+
+  HttpClient _fileHttpClient() => _fileClient ??= HttpClient()
+    ..connectionTimeout = const Duration(seconds: 12);
+
+  void _closeFileClient() {
+    _fileClient?.close(force: true);
+    _fileClient = null;
+  }
+
   SessionTokens? get tokens => _tokens;
   bool get signedIn => _tokens != null;
   Stream<void> get sessionExpired => _sessionExpired.stream;
@@ -107,6 +120,7 @@ final class KaedeApiClient {
     }
     _sessionGeneration += 1;
     _tokens = null;
+    _closeFileClient();
     await _vault.clear();
   }
 
@@ -267,8 +281,7 @@ final class KaedeApiClient {
     void Function(int sent, int total)? onProgress,
   }) async {
     final uri = _safeExternalUri(url, purpose: 'upload');
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 12);
+    final client = _fileHttpClient();
     try {
       final request = await client.putUrl(uri);
       request.followRedirects = false;
@@ -306,8 +319,6 @@ final class KaedeApiClient {
                 : 'Kaede could not reach attachment storage. Check your connection and try again.',
         status: 502,
       );
-    } finally {
-      client.close(force: true);
     }
   }
 
@@ -339,8 +350,7 @@ final class KaedeApiClient {
         status: 401,
       );
     }
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 12);
+    final client = _fileHttpClient();
     var uri = Uri.https(session.instance.value, path);
     try {
       for (var redirects = 0; redirects <= 5; redirects += 1) {
@@ -446,8 +456,6 @@ final class KaedeApiClient {
                 : 'Kaede could not reach attachment storage. Check your connection and try again.',
         status: 502,
       );
-    } finally {
-      client.close(force: true);
     }
   }
 
