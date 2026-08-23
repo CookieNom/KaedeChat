@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   mentionPresentation,
   roleMentionPresentation,
+  roleMentionTokenFromMailto,
   splitSpoilers,
   tokenizeText,
   tokenKind
@@ -92,5 +93,12 @@ describe('message markdown tokenization', () => {
 
     expect(rendered.text).toBe('@Moderators');
     expect(rendered.color).toBe('#8b5cf6');
+  });
+
+  it('reconstructs role tokens split apart by Markdown email autolinking', () => {
+    expect(roleMentionTokenFromMailto('<@&', '83676044829147136@kaede.chat', '>')).toBe(
+      '<@&83676044829147136@kaede.chat>'
+    );
+    expect(roleMentionTokenFromMailto('<@', '83676044829147136@kaede.chat', '>')).toBeUndefined();
   });
 });

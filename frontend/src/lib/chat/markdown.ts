@@ -146,16 +146,36 @@ function roleMentionSpan(token: string, roles: Role[]): HTMLSpanElement {
   return span;
 }
 
+export function roleMentionTokenFromMailto(
+  previousText: string,
+  address: string,
+  nextText: string
+): string | undefined {
+  if (!previousText.endsWith('<@&') || !nextText.startsWith('>')) return undefined;
+  if (!/^\d+@[a-z0-9.-]+$/i.test(address)) return undefined;
+  return `<@&${address}>`;
+}
+
 function replaceLegacyMentionLinks(
   root: DocumentFragment,
   users: UserSummary[],
-  localDomain: string
+  localDomain: string,
+  roles: Role[]
 ): void {
   for (const anchor of root.querySelectorAll<HTMLAnchorElement>('a[href^="mailto:"]')) {
     const previous = anchor.previousSibling;
     const next = anchor.nextSibling;
     if (!(previous instanceof Text)) continue;
     const address = anchor.textContent?.trim() ?? '';
+    if (next instanceof Text) {
+      const roleToken = roleMentionTokenFromMailto(previous.data, address, next.data);
+      if (roleToken) {
+        previous.data = previous.data.slice(0, -3);
+        next.data = next.data.slice(1);
+        anchor.replaceWith(roleMentionSpan(roleToken, roles));
+        continue;
+      }
+    }
     if (
       previous.data.endsWith('<@') &&
       next instanceof Text &&
@@ -215,7 +235,7 @@ export function renderMessageMarkdown(
   });
   const template = document.createElement('template');
   template.innerHTML = sanitized;
-  replaceLegacyMentionLinks(template.content, users, localDomain);
+  replaceLegacyMentionLinks(template.content, users, localDomain, roles);
   const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
   const nodes: Text[] = [];
   while (walker.nextNode()) nodes.push(walker.currentNode as Text);
