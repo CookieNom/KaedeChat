@@ -5,9 +5,11 @@
   import { loadAuthConfiguration } from '$lib/auth/config';
   import { firstNavigableChannel, groupChannels } from '$lib/chat/channels';
   import { entityKey, entityRef } from '$lib/chat/refs';
+  import { forumDefaultReactionPayload } from '$lib/chat/threads';
   import type {
     Channel,
     CustomEmoji,
+    ForumTag,
     Guild,
     GuildMemberSummary,
     Role,
@@ -90,6 +92,10 @@
     target_type: 'role' | 'member';
     allow: string;
     deny: string;
+  }
+
+  interface EditableForumTag extends Omit<ForumTag, 'id'> {
+    id?: string;
   }
 
   type DestructiveConfirmation =
@@ -215,6 +221,16 @@
   let channelParent = $state('');
   let channelSlowmode = $state(0);
   let channelHistoryPolicy = $state<'inherit' | 'disabled' | 'full_retained'>('inherit');
+  let channelForumTags = $state<EditableForumTag[]>([]);
+  let newForumTagName = $state('');
+  let channelForumSort = $state<0 | 1>(0);
+  let channelForumLayout = $state<0 | 1 | 2>(0);
+  let channelForumArchive = $state<60 | 1440 | 4320 | 10080>(1440);
+  let channelForumSlowmode = $state(0);
+  let channelForumReaction = $state('');
+  let channelForumReactionId = $state<string | null>(null);
+  let channelForumE2EE = $state(false);
+  let channelForumRequireTag = $state(false);
   let newChannelName = $state('');
   let newChannelType = $state(0);
   let newChannelParent = $state('');
@@ -567,6 +583,21 @@
         : '';
     channelSlowmode = channel.rate_limit_per_user;
     channelHistoryPolicy = channel.federated_history_policy ?? 'inherit';
+    channelForumTags = [...(channel.available_tags ?? [])];
+    newForumTagName = '';
+    channelForumSort = channel.default_sort_order === 1 ? 1 : 0;
+    channelForumLayout =
+      typeof channel.default_forum_layout === 'number' ? channel.default_forum_layout : 0;
+    channelForumArchive = [60, 1440, 4320, 10080].includes(
+      channel.default_auto_archive_duration ?? 1440
+    )
+      ? ((channel.default_auto_archive_duration ?? 1440) as 60 | 1440 | 4320 | 10080)
+      : 1440;
+    channelForumSlowmode = channel.default_thread_rate_limit_per_user ?? 0;
+    channelForumReaction = channel.default_reaction_emoji?.emoji_name ?? '';
+    channelForumReactionId = channel.default_reaction_emoji?.emoji_id ?? null;
+    channelForumE2EE = channel.e2ee_required ?? false;
+    channelForumRequireTag = Boolean(Number(channel.flags ?? 0) & (1 << 4));
     channelSafetyNumber = '';
     error = '';
     notice = '';
@@ -575,6 +606,46 @@
     overwriteAllow = '0';
     overwriteDeny = '0';
     if (guild && canEditSelectedPermissions) void loadChannelOverwrites(channel);
+  }
+
+  function addForumTag() {
+    const tagName = newForumTagName.trim();
+    if (
+      !tagName ||
+      channelForumTags.length >= 20 ||
+      channelForumTags.some((tag) => tag.name.toLocaleLowerCase() === tagName.toLocaleLowerCase())
+    )
+      return;
+    channelForumTags = [...channelForumTags, { name: tagName, moderated: false }];
+    newForumTagName = '';
+  }
+
+  function updateForumTag(index: number, patch: Partial<EditableForumTag>) {
+    channelForumTags = channelForumTags.map((tag, tagIndex) =>
+      tagIndex === index ? { ...tag, ...patch } : tag
+    );
+  }
+
+  function removeForumTag(index: number) {
+    channelForumTags = channelForumTags.filter((_, tagIndex) => tagIndex !== index);
+  }
+
+  function editForumDefaultReaction(event: Event) {
+    channelForumReaction = (event.currentTarget as HTMLInputElement).value;
+    channelForumReactionId = null;
+  }
+
+  function changeForumEncryptionRequirement(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    if (!input.checked) {
+      channelForumE2EE = false;
+      return;
+    }
+    const confirmed = window.confirm(
+      'Require end-to-end encryption for replies in future posts? This policy is permanent once saved and affects only posts created afterward; existing posts do not change. Titles, starter messages, title search, and starter previews remain readable to the server. Each future post must activate its own encryption group before replies can be sent. Server reply search, link and GIF previews, bots, webhooks, file previews, malware scanning, and PhotoDNA scanning will stop. Notifications become generic, while participants, timing, and message-size metadata remain visible. Participant identities remain unverified until everyone compares the safety number through a separate trusted channel. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted reply history. Removed members keep content they already received.'
+    );
+    channelForumE2EE = confirmed;
+    if (!confirmed) input.checked = false;
   }
 
   function selectChannelPanel(panel: ChannelSettingsPanel) {
@@ -1273,7 +1344,30 @@
             parent_id: target.type === 4 ? null : (parent?.id ?? null),
             rate_limit_per_user: target.type === 4 ? 0 : channelSlowmode,
             federated_history_policy:
-              target.type === 0 || target.type === 5 ? channelHistoryPolicy : 'inherit'
+              target.type === 0 || target.type === 5 ? channelHistoryPolicy : 'inherit',
+            ...(target.type === 0 || target.type === 5
+              ? {
+                  default_auto_archive_duration: channelForumArchive,
+                  ...(target.type === 0
+                    ? { default_thread_rate_limit_per_user: channelForumSlowmode }
+                    : {})
+                }
+              : {}),
+            ...(target.type === 15
+              ? {
+                  available_tags: channelForumTags,
+                  default_reaction_emoji: forumDefaultReactionPayload(
+                    channelForumReaction,
+                    channelForumReactionId
+                  ),
+                  default_auto_archive_duration: channelForumArchive,
+                  default_thread_rate_limit_per_user: channelForumSlowmode,
+                  default_sort_order: channelForumSort,
+                  default_forum_layout: channelForumLayout,
+                  e2ee_required: target.e2ee_required ? true : channelForumE2EE,
+                  flags: channelForumRequireTag ? 1 << 4 : 0
+                }
+              : {})
           })
         }
       );
@@ -2216,7 +2310,11 @@
         <span>{selectedChannel?.type === 4 ? 'Category' : 'Channel'}</span>
         <strong>
           {#if selectedChannel?.type !== 4}<Icon
-              name={selectedChannel?.type === 2 ? 'volume' : 'hash'}
+              name={selectedChannel?.type === 2
+                ? 'volume'
+                : selectedChannel?.type === 15
+                  ? 'message'
+                  : 'hash'}
               size={16}
             />{/if}
           {selectedChannel?.name ?? 'Loading…'}
@@ -2630,7 +2728,13 @@
                     onclick={() => selectChannel(channel)}
                   >
                     <Icon
-                      name={channel.type === 2 ? 'volume' : channel.type === 5 ? 'bell' : 'hash'}
+                      name={channel.type === 2
+                        ? 'volume'
+                        : channel.type === 5
+                          ? 'bell'
+                          : channel.type === 15
+                            ? 'message'
+                            : 'hash'}
                       size={16}
                     />
                     <span>{channel.name}</span>
@@ -2708,16 +2812,184 @@
                     </label>
                     {#if selectedChannel.type !== 4}
                       <label class="form-field compact-field">
-                        <span>Topic</span>
+                        <span>{selectedChannel.type === 15 ? 'Post Guidelines' : 'Topic'}</span>
                         <textarea
                           bind:value={channelTopic}
-                          maxlength="1024"
+                          maxlength={selectedChannel.type === 15 ? 4096 : 1024}
                           rows="3"
-                          placeholder="What belongs in this channel?"
+                          placeholder={selectedChannel.type === 15
+                            ? 'Help members understand what to post here.'
+                            : 'What belongs in this channel?'}
                           disabled={busy}
                         ></textarea>
                       </label>
+                      {#if selectedChannel.type === 15}
+                        <fieldset class="forum-settings-group">
+                          <legend>Tags</legend>
+                          <small>Members can apply up to five tags to a post.</small>
+                          {#each channelForumTags as tag, index (`${tag.id ?? 'new'}:${index}`)}
+                            <div class="forum-tag-editor">
+                              <input
+                                value={tag.emoji_name ?? ''}
+                                maxlength="64"
+                                aria-label={`Emoji for ${tag.name}`}
+                                placeholder="Emoji"
+                                disabled={busy}
+                                oninput={(event) =>
+                                  updateForumTag(index, {
+                                    emoji_id: null,
+                                    emoji_name: event.currentTarget.value.trim() || null
+                                  })}
+                              />
+                              <input
+                                value={tag.name}
+                                maxlength="20"
+                                aria-label="Tag name"
+                                required
+                                disabled={busy}
+                                oninput={(event) =>
+                                  updateForumTag(index, { name: event.currentTarget.value })}
+                              />
+                              <label>
+                                <input
+                                  type="checkbox"
+                                  checked={tag.moderated ?? false}
+                                  disabled={busy}
+                                  onchange={(event) =>
+                                    updateForumTag(index, {
+                                      moderated: event.currentTarget.checked
+                                    })}
+                                />
+                                Moderators only
+                              </label>
+                              <button
+                                class="quiet-button"
+                                type="button"
+                                disabled={busy}
+                                aria-label={`Remove ${tag.name}`}
+                                onclick={() => removeForumTag(index)}>Remove</button
+                              >
+                            </div>
+                          {/each}
+                          {#if channelForumTags.length < 20}
+                            <div class="forum-tag-add">
+                              <input
+                                bind:value={newForumTagName}
+                                maxlength="20"
+                                placeholder="New tag"
+                                disabled={busy}
+                              />
+                              <button
+                                class="secondary-button"
+                                type="button"
+                                disabled={busy || !newForumTagName.trim()}
+                                onclick={addForumTag}>Add tag</button
+                              >
+                            </div>
+                          {/if}
+                        </fieldset>
+                        <label class="form-field compact-field">
+                          <span>Default reaction emoji</span>
+                          <input
+                            value={channelForumReaction}
+                            maxlength="64"
+                            placeholder="None"
+                            disabled={busy}
+                            oninput={editForumDefaultReaction}
+                          />
+                        </label>
+                        <label class="form-field compact-field">
+                          <span>Default sort order</span>
+                          <select bind:value={channelForumSort} disabled={busy}>
+                            <option value={0}>Recently Active</option>
+                            <option value={1}>Date Posted</option>
+                          </select>
+                        </label>
+                        <label class="form-field compact-field">
+                          <span>Default layout</span>
+                          <select bind:value={channelForumLayout} disabled={busy}>
+                            <option value={0}>Not set</option>
+                            <option value={1}>List View</option>
+                            <option value={2}>Gallery View</option>
+                          </select>
+                        </label>
+                        <label class="form-field compact-field">
+                          <span>Hide posts after inactivity</span>
+                          <select bind:value={channelForumArchive} disabled={busy}>
+                            <option value={60}>1 hour</option>
+                            <option value={1440}>24 hours</option>
+                            <option value={4320}>3 days</option>
+                            <option value={10080}>1 week</option>
+                          </select>
+                        </label>
+                        <label class="form-field compact-field">
+                          <span>Default post slowmode</span>
+                          <select bind:value={channelForumSlowmode} disabled={busy}>
+                            <option value={0}>Off</option>
+                            <option value={5}>5 seconds</option>
+                            <option value={10}>10 seconds</option>
+                            <option value={30}>30 seconds</option>
+                            <option value={60}>1 minute</option>
+                            <option value={300}>5 minutes</option>
+                            <option value={3600}>1 hour</option>
+                          </select>
+                        </label>
+                        <label class="settings-toggle-row">
+                          <span>
+                            <strong>Require people to select tags before posting</strong>
+                            <small>New posts must include at least one tag.</small>
+                          </span>
+                          <input
+                            type="checkbox"
+                            bind:checked={channelForumRequireTag}
+                            disabled={busy}
+                          />
+                        </label>
+                        <label class="settings-toggle-row">
+                          <span>
+                            <strong>Require end-to-end encryption for post replies</strong>
+                            <small>
+                              Titles, starter messages, title search, and starter previews remain
+                              plaintext. This permanent policy applies only to posts created after
+                              it is enabled. Each future post secures its own subsequent replies;
+                              bots, webhooks, reply search and previews, and server scanning are
+                              unavailable there.
+                            </small>
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={channelForumE2EE}
+                            disabled={busy ||
+                              Boolean(selectedChannel.e2ee_required) ||
+                              !e2eeActivationEnabled}
+                            onchange={changeForumEncryptionRequirement}
+                          />
+                        </label>
+                      {/if}
                       {#if selectedChannel.type === 0 || selectedChannel.type === 5}
+                        <label class="form-field compact-field">
+                          <span>Default Auto-Archive Duration</span>
+                          <select bind:value={channelForumArchive} disabled={busy}>
+                            <option value={60}>1 hour</option>
+                            <option value={1440}>24 hours</option>
+                            <option value={4320}>3 days</option>
+                            <option value={10080}>1 week</option>
+                          </select>
+                        </label>
+                        {#if selectedChannel.type === 0}
+                          <label class="form-field compact-field">
+                            <span>Default Thread Slowmode</span>
+                            <select bind:value={channelForumSlowmode} disabled={busy}>
+                              <option value={0}>Off</option>
+                              <option value={5}>5 seconds</option>
+                              <option value={10}>10 seconds</option>
+                              <option value={30}>30 seconds</option>
+                              <option value={60}>1 minute</option>
+                              <option value={300}>5 minutes</option>
+                              <option value={3600}>1 hour</option>
+                            </select>
+                          </label>
+                        {/if}
                         <label class="form-field compact-field">
                           <span>Federated history</span>
                           <small>
@@ -3189,7 +3461,7 @@
           >
             <div>
               <strong>Create a channel</strong>
-              <p>Add a text, voice, announcement channel, or a category.</p>
+              <p>Add a text, voice, announcement, forum channel, or a category.</p>
             </div>
             <label class="form-field compact-field">
               <span>Name</span>
@@ -3202,6 +3474,7 @@
                 <option value={2}>Voice</option>
                 <option value={4}>Category</option>
                 <option value={5}>Announcement</option>
+                <option value={15}>Forum</option>
               </select>
             </label>
             {#if newChannelType !== 4}

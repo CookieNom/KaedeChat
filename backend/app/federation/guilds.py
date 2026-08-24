@@ -28,7 +28,7 @@ from app.chat.e2ee_membership import (
     GUILD_E2EE_ACCESS_MUTATION_EVENTS,
     pause_guild_e2ee_for_membership_change,
 )
-from app.chat.payloads import member_payload
+from app.chat.payloads import member_payload, rich_thread_member_payload
 from app.chat.permissions import calculate_permissions
 from app.core.permissions import ALL_PERMISSIONS, Permission
 from app.core.settings import Settings
@@ -51,6 +51,7 @@ from app.db.models import (
     RemoteMediaCache,
     Role,
     TerminalRoomDeletion,
+    ThreadMember,
     User,
 )
 from app.federation.client import signed_request
@@ -96,6 +97,9 @@ GUILD_MUTATION_EVENT_TYPES = frozenset(
         "guild.channel.create",
         "guild.channel.update",
         "guild.channel.delete",
+        "guild.forum.cursor.update",
+        "guild.thread.member.upsert",
+        "guild.thread.member.delete",
         "guild.role.create",
         "guild.role.update",
         "guild.role.delete",
@@ -126,6 +130,8 @@ HISTORY_ACCESS_MUTATION_EVENT_TYPES = frozenset(
         "guild.channel.create",
         "guild.channel.update",
         "guild.channel.delete",
+        "guild.thread.member.upsert",
+        "guild.thread.member.delete",
         "guild.role.create",
         "guild.role.update",
         "guild.role.delete",
@@ -159,6 +165,7 @@ MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 MAX_SNAPSHOT_MEMBERS = 100_000
 MAX_SNAPSHOT_MEMBER_ROLES = 500_000
 MAX_SNAPSHOT_OVERWRITES = 100_000
+MAX_SNAPSHOT_THREAD_MEMBERS = 100_000
 MAX_ORPHANED_REPLICA_PURGE = 100
 MAX_GUILD_SYNC_PAGES = 100
 MAX_GUILD_SYNC_EVENTS = 100_000
@@ -169,6 +176,18 @@ REMOTE_GUILD_JOINING = "joining"
 REMOTE_GUILD_JOIN_INTENT_LIMIT_PER_USER = 1_000
 REMOTE_GUILD_JOIN_INTENT_TTL_HOURS = 24
 REMOTE_GUILD_JOIN_INTENT_GC_BATCH_SIZE = 10_000
+
+
+def expected_channel_parent_types(channel_type: int) -> frozenset[int]:
+    """Return the only parent channel types accepted by Discord's channel model."""
+
+    if channel_type == 10:
+        return frozenset({5})
+    if channel_type == 11:
+        return frozenset({0, 15})
+    if channel_type == 12:
+        return frozenset({0})
+    return frozenset({4})
 
 
 def local_guild_membership_exists(local_domain: str) -> ColumnElement[bool]:
@@ -938,8 +957,67 @@ async def apply_guild_message_event(
             mention_user_refs=mention_refs,
         )
     )
+    raw_thread_starter = event["content"].get("thread_starter", False)
+    if not isinstance(raw_thread_starter, bool):
+        raise ValueError("guild message thread starter marker is invalid")
+    if channel.type in {10, 11, 12}:
+        if raw_thread_starter:
+            if channel.starter_message_id is not None and (
+                channel.starter_message_id,
+                channel.starter_message_domain,
+            ) != (message.id, message.origin_domain):
+                raise ValueError("thread starter identity conflicts with channel state")
+            channel.starter_message_id = message.id
+            channel.starter_message_domain = message.origin_domain
+        else:
+            channel.message_count = int(channel.message_count or 0) + 1
+            channel.total_message_sent = int(channel.total_message_sent or 0) + 1
+        channel.last_activity_at = created_at
+        thread_member = await session.get(
+            ThreadMember,
+            (channel.id, channel.origin_domain, author.id, author.origin_domain),
+        )
+        if thread_member is None and int(channel.member_count or 0) < 1000:
+            session.add(
+                ThreadMember(
+                    thread_id=channel.id,
+                    thread_domain=channel.origin_domain,
+                    guild_id=guild.id,
+                    guild_domain=guild.origin_domain,
+                    user_id=author.id,
+                    user_domain=author.origin_domain,
+                    joined_at=created_at,
+                    flags=0,
+                    notification_level="inherit",
+                )
+            )
+            channel.member_count = int(channel.member_count or 0) + 1
     await advance_channel_cursor(session, channel, message.id, message.origin_domain)
     return message
+
+
+async def refresh_replicated_thread_cursor(
+    session: AsyncSession,
+    thread: Channel,
+) -> None:
+    latest = await session.scalar(
+        select(Message)
+        .where(
+            Message.channel_id == thread.id,
+            Message.channel_domain == thread.origin_domain,
+            Message.deleted_at.is_(None),
+        )
+        .order_by(Message.created_at.desc(), Message.id.desc(), Message.origin_domain.desc())
+        .limit(1)
+    )
+    if latest is not None:
+        thread.last_message_id = latest.id
+        thread.last_message_domain = latest.origin_domain
+        return
+    # Parent source messages are type-21 projections, never FK-backed child
+    # cursors.
+    thread.last_message_id = None
+    thread.last_message_domain = None
 
 
 async def apply_guild_member_event(
@@ -1109,11 +1187,289 @@ def _event_datetime(raw: object, label: str, *, optional: bool = False) -> datet
     return value
 
 
+def _bounded_event_int(
+    raw: object,
+    label: str,
+    *,
+    minimum: int = 0,
+    maximum: int | None = None,
+    optional: bool = False,
+) -> int | None:
+    if raw is None and optional:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(f"{label} is invalid")
+    if raw < minimum or (maximum is not None and raw > maximum):
+        raise ValueError(f"{label} is invalid")
+    return raw
+
+
+def _validated_channel_extension_state(
+    raw: dict[str, Any], channel_type: int, origin: str
+) -> dict[str, Any]:
+    """Validate channel/thread fields shared by live mutations and snapshots."""
+
+    thread = channel_type in {10, 11, 12}
+    forum = channel_type == 15
+    flags = database_snowflake(raw.get("flags", "0"), "channel flags")
+    if (forum and flags & ~(1 << 4)) or (thread and flags & ~(1 << 1)):
+        raise ValueError("channel flags contain unsupported bits")
+    if not forum and not thread and flags:
+        raise ValueError("channel flags are invalid for its type")
+
+    owner_id_raw = raw.get("owner_id")
+    owner_domain_raw = raw.get("owner_domain")
+    if (owner_id_raw is None) != (owner_domain_raw is None):
+        raise ValueError("channel owner identity is incomplete")
+    owner_id = (
+        database_snowflake(owner_id_raw, "thread owner id") if owner_id_raw is not None else None
+    )
+    owner_domain = normalize_domain(str(owner_domain_raw)) if owner_id is not None else None
+    if thread and (owner_id is None or owner_domain is None or owner_domain == ""):
+        raise ValueError("thread owner identity is missing")
+    if not thread and owner_id is not None:
+        raise ValueError("non-thread channel contains thread owner metadata")
+
+    archived = raw.get("archived")
+    locked = raw.get("locked")
+    invitable = raw.get("invitable")
+    if thread:
+        if not isinstance(archived, bool) or not isinstance(locked, bool):
+            raise ValueError("thread lifecycle flags are invalid")
+        if channel_type == 12:
+            if not isinstance(invitable, bool):
+                raise ValueError("private thread invite policy is invalid")
+        elif invitable is not None:
+            raise ValueError("public thread contains a private invite policy")
+    elif archived is not None or locked is not None or invitable is not None:
+        raise ValueError("non-thread channel contains thread lifecycle metadata")
+
+    auto_archive_duration = _bounded_event_int(
+        raw.get("auto_archive_duration"),
+        "thread auto archive duration",
+        optional=not thread,
+    )
+    if thread and auto_archive_duration not in {60, 1440, 4320, 10080}:
+        raise ValueError("thread auto archive duration is invalid")
+    archive_timestamp = _event_datetime(
+        raw.get("archive_timestamp"), "thread archive", optional=not thread
+    )
+    last_activity_at = _event_datetime(
+        raw.get("last_activity_at"), "thread activity", optional=not thread
+    )
+    message_count = _bounded_event_int(
+        raw.get("message_count"), "thread message count", optional=not thread
+    )
+    total_message_sent = _bounded_event_int(
+        raw.get("total_message_sent"), "thread total messages", optional=not thread
+    )
+    member_count = _bounded_event_int(
+        raw.get("member_count"),
+        "thread member count",
+        maximum=1000,
+        optional=not thread,
+    )
+    if not thread and any(
+        value is not None
+        for value in (
+            auto_archive_duration,
+            archive_timestamp,
+            last_activity_at,
+            message_count,
+            total_message_sent,
+            member_count,
+        )
+    ):
+        raise ValueError("non-thread channel contains thread counters")
+
+    starter_id_raw = raw.get("starter_message_id")
+    starter_domain_raw = raw.get("starter_message_domain")
+    if (starter_id_raw is None) != (starter_domain_raw is None):
+        raise ValueError("thread starter identity is incomplete")
+    starter_message_id = (
+        database_snowflake(starter_id_raw, "thread starter id")
+        if starter_id_raw is not None
+        else None
+    )
+    starter_message_domain = (
+        normalize_domain(str(starter_domain_raw)) if starter_message_id is not None else None
+    )
+    if starter_message_domain is not None and starter_message_domain != origin:
+        raise ValueError("thread starter is not authoritative at the guild home")
+    if not thread and starter_message_id is not None:
+        raise ValueError("non-thread channel contains a starter identity")
+
+    last_thread_id_raw = raw.get("last_thread_id")
+    last_thread_domain_raw = raw.get("last_thread_domain")
+    if (last_thread_id_raw is None) != (last_thread_domain_raw is None):
+        raise ValueError("forum last thread identity is incomplete")
+    last_thread_id = (
+        database_snowflake(last_thread_id_raw, "forum last thread id")
+        if last_thread_id_raw is not None
+        else None
+    )
+    last_thread_domain = (
+        normalize_domain(str(last_thread_domain_raw)) if last_thread_id is not None else None
+    )
+    if last_thread_domain is not None and last_thread_domain != origin:
+        raise ValueError("forum last thread is not authoritative at the guild home")
+    if not forum and last_thread_id is not None:
+        raise ValueError("non-forum channel contains a last thread identity")
+
+    raw_applied_tags = raw.get("applied_tag_ids", [])
+    if not isinstance(raw_applied_tags, list) or len(raw_applied_tags) > 5:
+        raise ValueError("thread applied tags are invalid")
+    applied_tag_ids = [
+        str(database_snowflake(value, "applied tag id")) for value in raw_applied_tags
+    ]
+    if len(set(applied_tag_ids)) != len(applied_tag_ids):
+        raise ValueError("thread applied tags contain duplicates")
+    if not thread and applied_tag_ids:
+        raise ValueError("non-thread channel contains applied tags")
+
+    default_auto_archive_duration = _bounded_event_int(
+        raw.get("default_auto_archive_duration"),
+        "default auto archive duration",
+        optional=True,
+    )
+    if default_auto_archive_duration is not None and default_auto_archive_duration not in {
+        60,
+        1440,
+        4320,
+        10080,
+    }:
+        raise ValueError("default auto archive duration is invalid")
+    if forum and default_auto_archive_duration is None:
+        raise ValueError("forum default auto archive duration is missing")
+    if default_auto_archive_duration is not None and channel_type not in {0, 5, 15}:
+        raise ValueError("default auto archive duration is invalid for its channel type")
+    default_thread_rate = _bounded_event_int(
+        raw.get("default_thread_rate_limit_per_user"),
+        "default thread slowmode",
+        maximum=21_600,
+        optional=True,
+    )
+    if forum and default_thread_rate is None:
+        raise ValueError("forum default thread slowmode is missing")
+    if default_thread_rate is not None and channel_type not in {0, 15}:
+        raise ValueError("default thread slowmode is invalid for its channel type")
+
+    raw_tags = raw.get("available_tags", [])
+    if not isinstance(raw_tags, list) or len(raw_tags) > 20:
+        raise ValueError("forum available tags are invalid")
+    available_tags: list[dict[str, object]] = []
+    tag_ids: set[str] = set()
+    tag_names: set[str] = set()
+    for item in raw_tags:
+        if not isinstance(item, dict):
+            raise ValueError("forum available tag is invalid")
+        tag_id = str(database_snowflake(item.get("id"), "forum tag id"))
+        name = item.get("name")
+        moderated = item.get("moderated")
+        emoji_id_raw = item.get("emoji_id")
+        emoji_name = item.get("emoji_name")
+        if not isinstance(name, str) or len(name) > 20:
+            raise ValueError("forum tag name is invalid")
+        if not isinstance(moderated, bool):
+            raise ValueError("forum tag moderation flag is invalid")
+        if emoji_id_raw is not None and emoji_name is not None:
+            raise ValueError("forum tag emoji identity is ambiguous")
+        emoji_id = (
+            str(database_snowflake(emoji_id_raw, "forum tag emoji id"))
+            if emoji_id_raw is not None
+            else None
+        )
+        if emoji_name is not None and (
+            not isinstance(emoji_name, str) or not 1 <= len(emoji_name) <= 64
+        ):
+            raise ValueError("forum tag emoji name is invalid")
+        if tag_id in tag_ids or name.casefold() in tag_names:
+            raise ValueError("forum tags contain duplicate identities")
+        tag_ids.add(tag_id)
+        tag_names.add(name.casefold())
+        available_tags.append(
+            {
+                "id": tag_id,
+                "name": name,
+                "moderated": moderated,
+                "emoji_id": emoji_id,
+                "emoji_name": emoji_name,
+            }
+        )
+    if not forum and available_tags:
+        raise ValueError("non-forum channel contains available tags")
+
+    default_reaction = raw.get("default_reaction_emoji")
+    if default_reaction is not None:
+        if not forum or not isinstance(default_reaction, dict):
+            raise ValueError("default forum reaction is invalid")
+        reaction_id_raw = default_reaction.get("emoji_id")
+        reaction_name = default_reaction.get("emoji_name")
+        if (reaction_id_raw is None) == (reaction_name is None):
+            raise ValueError("default forum reaction identity is invalid")
+        default_reaction = {
+            "emoji_id": (
+                str(database_snowflake(reaction_id_raw, "default reaction emoji id"))
+                if reaction_id_raw is not None
+                else None
+            ),
+            "emoji_name": reaction_name,
+        }
+        if reaction_name is not None and (
+            not isinstance(reaction_name, str) or not 1 <= len(reaction_name) <= 64
+        ):
+            raise ValueError("default forum reaction name is invalid")
+
+    default_sort_order = raw.get("default_sort_order")
+    if default_sort_order is not None and (
+        isinstance(default_sort_order, bool) or default_sort_order not in {0, 1}
+    ):
+        raise ValueError("forum sort order is invalid")
+    default_forum_layout = raw.get("default_forum_layout")
+    if forum:
+        if isinstance(default_forum_layout, bool) or default_forum_layout not in {0, 1, 2}:
+            raise ValueError("forum layout is invalid")
+    elif default_sort_order is not None or default_forum_layout is not None:
+        raise ValueError("non-forum channel contains forum display defaults")
+    e2ee_required = raw.get("e2ee_required", False)
+    if not isinstance(e2ee_required, bool) or (e2ee_required and not (forum or thread)):
+        raise ValueError("channel E2EE requirement is invalid")
+
+    return {
+        "flags": flags,
+        "owner_id": owner_id,
+        "owner_domain": owner_domain,
+        "archived": archived,
+        "locked": locked,
+        "invitable": invitable,
+        "auto_archive_duration": auto_archive_duration,
+        "archive_timestamp": archive_timestamp,
+        "last_activity_at": last_activity_at,
+        "message_count": message_count,
+        "total_message_sent": total_message_sent,
+        "member_count": member_count,
+        "starter_message_id": starter_message_id,
+        "starter_message_domain": starter_message_domain,
+        "last_thread_id": last_thread_id,
+        "last_thread_domain": last_thread_domain,
+        "default_auto_archive_duration": default_auto_archive_duration,
+        "default_thread_rate_limit_per_user": default_thread_rate,
+        "available_tags": available_tags,
+        "applied_tag_ids": applied_tag_ids,
+        "default_reaction_emoji": default_reaction,
+        "default_sort_order": default_sort_order,
+        "default_forum_layout": default_forum_layout,
+        "e2ee_required": e2ee_required,
+    }
+
+
 async def apply_guild_mutation_event(
     session: AsyncSession,
     settings: Settings,
     guild: Guild,
     event: dict[str, Any],
+    *,
+    e2ee_policy_channels: list[Channel] | None = None,
 ) -> tuple[str, dict[str, object]] | None:
     """Apply one retained granular guild mutation to a remote replica."""
 
@@ -1215,6 +1571,38 @@ async def apply_guild_mutation_event(
                 raw.get("permission_generation"), "permission generation"
             )
         dispatch = {**dispatch, **raw}
+    elif event_type == "guild.forum.cursor.update":
+        forum_ref = _event_ref(content.get("forum"), "forum")
+        forum = await session.get(Channel, forum_ref)
+        if (
+            forum is None
+            or forum.type != 15
+            or (forum.guild_id, forum.guild_domain) != (locked.id, locked.origin_domain)
+        ):
+            raise ValueError("forum cursor mutation is invalid")
+        raw_last_id = content.get("last_thread_id")
+        raw_last_domain = content.get("last_thread_domain")
+        if (raw_last_id is None) != (raw_last_domain is None):
+            raise ValueError("forum cursor identity is incomplete")
+        if raw_last_id is None:
+            forum.last_thread_id = None
+            forum.last_thread_domain = None
+        else:
+            last_ref = (
+                database_snowflake(raw_last_id, "forum cursor thread id"),
+                normalize_domain(str(raw_last_domain)),
+            )
+            last_thread = await session.get(Channel, last_ref)
+            if (
+                last_thread is None
+                or last_thread.type != 11
+                or last_thread.unavailable
+                or (last_thread.parent_id, last_thread.parent_domain) != forum_ref
+            ):
+                raise ValueError("forum cursor thread is invalid")
+            forum.last_thread_id, forum.last_thread_domain = last_ref
+        dispatch_type = "CHANNEL_UPDATE"
+        dispatch = {}
     elif event_type in {"guild.channel.create", "guild.channel.update"}:
         raw = content.get("channel")
         channel_ref = _event_ref(raw, "channel")
@@ -1240,11 +1628,12 @@ async def apply_guild_mutation_event(
                 "generation": "0",
             }
         encryption_policy = validate_channel_encryption_policy(raw_encryption_policy)
-        if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5}:
+        if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5, 10, 11, 12, 15}:
             raise ValueError("channel mutation type is invalid")
         if not isinstance(name, str) or not 1 <= len(name) <= 100:
             raise ValueError("channel mutation name is invalid")
-        if topic is not None and (not isinstance(topic, str) or len(topic) > 1024):
+        topic_limit = 4096 if channel_type == 15 else 1024
+        if topic is not None and (not isinstance(topic, str) or len(topic) > topic_limit):
             raise ValueError("channel mutation topic is invalid")
         if isinstance(position, bool) or not isinstance(position, int) or position < 0:
             raise ValueError("channel mutation position is invalid")
@@ -1268,18 +1657,39 @@ async def apply_guild_mutation_event(
         if (
             not isinstance(permissions_synced, bool)
             or permissions_synced
-            and (parent_id is None or channel_type == 4)
+            and (parent_id is None or channel_type in {4, 10, 11, 12})
+            or channel_type in {10, 11, 12}
+            and permissions_synced
         ):
             raise ValueError("channel permission sync state is invalid")
         if parent_id is not None:
             parent = await session.get(Channel, (parent_id, parent_domain))
-            if parent is None or (parent.guild_id, parent.guild_domain, parent.type) != (
-                locked.id,
-                locked.origin_domain,
-                4,
+            expected_parent_types = expected_channel_parent_types(int(channel_type))
+            if (
+                parent is None
+                or (parent.guild_id, parent.guild_domain) != (locked.id, locked.origin_domain)
+                or parent.type not in expected_parent_types
             ):
                 raise ValueError("channel mutation parent is invalid")
+        elif channel_type in {10, 11, 12}:
+            raise ValueError("thread mutation is missing its parent")
         created_floor_id = database_snowflake(raw.get("created_floor_id"), "channel history floor")
+        created_at = _event_datetime(raw.get("created_at"), "channel creation", optional=True)
+        extension_state = _validated_channel_extension_state(
+            raw, int(channel_type), locked.origin_domain
+        )
+        last_thread_id = extension_state.get("last_thread_id")
+        last_thread_domain = extension_state.get("last_thread_domain")
+        if last_thread_id is not None and last_thread_domain is not None:
+            last_thread = await session.get(Channel, (last_thread_id, last_thread_domain))
+            if (
+                last_thread is None
+                or last_thread.type not in {10, 11, 12}
+                or (last_thread.parent_id, last_thread.parent_domain) != channel_ref
+                or (last_thread.guild_id, last_thread.guild_domain)
+                != (locked.id, locked.origin_domain)
+            ):
+                raise ValueError("forum last thread identity is invalid")
         channel = await session.get(Channel, channel_ref)
         if channel is None:
             channel = Channel(
@@ -1304,7 +1714,10 @@ async def apply_guild_mutation_event(
                 encryption_group_id=encryption_policy["group_id"],
                 encryption_epoch=encryption_policy["epoch"],
                 created_floor_id=created_floor_id,
+                **extension_state,
             )
+            if created_at is not None:
+                channel.created_at = created_at
             session.add(channel)
         elif (channel.guild_id, channel.guild_domain) != (locked.id, locked.origin_domain):
             raise ValueError("channel mutation conflicts with another channel")
@@ -1332,20 +1745,239 @@ async def apply_guild_mutation_event(
             channel.encryption_group_id = encryption_policy["group_id"]
             channel.encryption_epoch = encryption_policy["epoch"]
             channel.unavailable = False
-        dispatch_type = "CHANNEL_CREATE" if event_type.endswith("create") else "CHANNEL_UPDATE"
+            if created_at is not None and channel.created_at != created_at:
+                # Creation time is immutable. A replica learned before this
+                # field was federated must refresh from a snapshot rather than
+                # accept a mutable Date Posted cursor from a later update.
+                raise ValueError("channel mutation changed its creation timestamp")
+            for field, value in extension_state.items():
+                setattr(channel, field, value)
+        if channel.type in {10, 11, 12} and event_type.endswith("create"):
+            owner_member = await session.get(
+                GuildMember,
+                (
+                    locked.id,
+                    locked.origin_domain,
+                    channel.owner_id,
+                    channel.owner_domain,
+                ),
+            )
+            owner_user = await session.get(User, (channel.owner_id, channel.owner_domain))
+            if owner_member is None or owner_user is None:
+                raise ValueError("thread owner is not a known guild member")
+            await session.execute(
+                pg_insert(ThreadMember)
+                .values(
+                    thread_id=channel.id,
+                    thread_domain=channel.origin_domain,
+                    guild_id=locked.id,
+                    guild_domain=locked.origin_domain,
+                    user_id=channel.owner_id,
+                    user_domain=channel.owner_domain,
+                    joined_at=channel.archive_timestamp,
+                    flags=0,
+                    notification_level="inherit",
+                )
+                .on_conflict_do_nothing()
+            )
+        if channel.type in {10, 11, 12}:
+            dispatch_type = "THREAD_CREATE" if event_type.endswith("create") else "THREAD_UPDATE"
+        else:
+            dispatch_type = "CHANNEL_CREATE" if event_type.endswith("create") else "CHANNEL_UPDATE"
         dispatch = dict(raw)
+        if dispatch_type == "THREAD_CREATE":
+            dispatch["newly_created"] = True
     elif event_type == "guild.channel.delete":
-        channel_ref = _event_ref(content.get("channel"), "channel")
+        raw_deleted_channel = content.get("channel")
+        if not isinstance(raw_deleted_channel, dict):
+            raise ValueError("channel deletion payload is invalid")
+        channel_ref = _event_ref(raw_deleted_channel, "channel")
         channel = await session.get(Channel, channel_ref)
+        raw_deleted_type = raw_deleted_channel.get("type")
+        if raw_deleted_type is not None and (
+            isinstance(raw_deleted_type, bool)
+            or raw_deleted_type not in {0, 2, 4, 5, 10, 11, 12, 15}
+        ):
+            raise ValueError("channel deletion type is invalid")
+        raw_guild_id = raw_deleted_channel.get("guild_id")
+        raw_guild_domain = raw_deleted_channel.get("guild_domain")
+        if (raw_guild_id is not None or raw_guild_domain is not None) and (
+            database_snowflake(raw_guild_id, "deleted channel guild id"),
+            normalize_domain(str(raw_guild_domain)),
+        ) != (locked.id, locked.origin_domain):
+            raise ValueError("channel deletion references the wrong guild")
+        raw_parent_id = raw_deleted_channel.get("parent_id")
+        raw_parent_domain = raw_deleted_channel.get("parent_domain")
+        if (raw_parent_id is None) != (raw_parent_domain is None):
+            raise ValueError("deleted channel parent identity is incomplete")
+        deleted_parent_ref = (
+            (
+                database_snowflake(raw_parent_id, "deleted channel parent id"),
+                normalize_domain(str(raw_parent_domain)),
+            )
+            if raw_parent_id is not None
+            else None
+        )
+        deleted_type = channel.type if channel is not None else raw_deleted_type
         if channel is not None:
             if (channel.guild_id, channel.guild_domain) != (locked.id, locked.origin_domain):
                 raise ValueError("channel deletion references the wrong guild")
+            if raw_deleted_type is not None and raw_deleted_type != channel.type:
+                raise ValueError("channel deletion type conflicts with replica state")
+            if deleted_parent_ref is not None and deleted_parent_ref != (
+                channel.parent_id,
+                channel.parent_domain,
+            ):
+                raise ValueError("channel deletion parent conflicts with replica state")
+            if (
+                deleted_parent_ref is None
+                and channel.parent_id is not None
+                and channel.parent_domain is not None
+            ):
+                deleted_parent_ref = (channel.parent_id, channel.parent_domain)
             await purge_replicated_channel_cache(session, settings, channel)
-        dispatch_type = "CHANNEL_DELETE"
+        dispatch_type = "THREAD_DELETE" if deleted_type in {10, 11, 12} else "CHANNEL_DELETE"
         dispatch = {
             **dispatch,
             "id": str(channel_ref[0]),
             "origin_domain": channel_ref[1],
+            "guild_id": str(locked.id),
+            "guild_domain": locked.origin_domain,
+            "type": deleted_type,
+            "parent_id": (str(deleted_parent_ref[0]) if deleted_parent_ref is not None else None),
+            "parent_domain": (deleted_parent_ref[1] if deleted_parent_ref is not None else None),
+        }
+    elif event_type in {"guild.thread.member.upsert", "guild.thread.member.delete"}:
+        raw_member = content.get("member")
+        if event_type.endswith("upsert"):
+            if not isinstance(raw_member, dict):
+                raise ValueError("thread member mutation is invalid")
+            thread_ref = (
+                database_snowflake(raw_member.get("id"), "thread id"),
+                normalize_domain(str(raw_member.get("thread_domain", ""))),
+            )
+            user_ref = (
+                database_snowflake(raw_member.get("user_id"), "thread member user id"),
+                normalize_domain(str(raw_member.get("user_domain", ""))),
+            )
+            if (
+                database_snowflake(raw_member.get("guild_id"), "thread member guild id"),
+                normalize_domain(str(raw_member.get("guild_domain", ""))),
+            ) != (locked.id, locked.origin_domain):
+                raise ValueError("thread member mutation references the wrong guild")
+            joined_at = _event_datetime(raw_member.get("join_timestamp"), "thread member join")
+            flags = _bounded_event_int(raw_member.get("flags", 0), "thread member flags")
+            notification_level = raw_member.get("notification_level", "inherit")
+            if notification_level not in {"inherit", "all", "mentions", "none"}:
+                raise ValueError("thread member notification level is invalid")
+        else:
+            thread_ref = (
+                database_snowflake(content.get("thread_id"), "thread id"),
+                normalize_domain(str(content.get("thread_domain", ""))),
+            )
+            user_ref = (
+                database_snowflake(content.get("user_id"), "thread member user id"),
+                normalize_domain(str(content.get("user_domain", ""))),
+            )
+            joined_at = None
+            flags = 0
+            notification_level = "inherit"
+        thread_channel = await session.get(Channel, thread_ref)
+        guild_member = await session.get(
+            GuildMember,
+            (locked.id, locked.origin_domain, user_ref[0], user_ref[1]),
+        )
+        if (
+            thread_channel is None
+            or thread_channel.type not in {10, 11, 12}
+            or (thread_channel.guild_id, thread_channel.guild_domain)
+            != (locked.id, locked.origin_domain)
+            or (event_type.endswith("upsert") and guild_member is None)
+        ):
+            raise ValueError("thread member mutation is invalid")
+        if event_type.endswith("upsert"):
+            await session.execute(
+                pg_insert(ThreadMember)
+                .values(
+                    thread_id=thread_ref[0],
+                    thread_domain=thread_ref[1],
+                    guild_id=locked.id,
+                    guild_domain=locked.origin_domain,
+                    user_id=user_ref[0],
+                    user_domain=user_ref[1],
+                    joined_at=joined_at,
+                    flags=flags,
+                    notification_level=notification_level,
+                )
+                .on_conflict_do_update(
+                    index_elements=[
+                        "thread_id",
+                        "thread_domain",
+                        "user_id",
+                        "user_domain",
+                    ],
+                    set_={
+                        "flags": flags,
+                        "notification_level": notification_level,
+                    },
+                )
+            )
+        else:
+            await session.execute(
+                delete(ThreadMember).where(
+                    ThreadMember.thread_id == thread_ref[0],
+                    ThreadMember.thread_domain == thread_ref[1],
+                    ThreadMember.user_id == user_ref[0],
+                    ThreadMember.user_domain == user_ref[1],
+                )
+            )
+        await session.flush()
+        reported_member_count = _bounded_event_int(
+            content.get("member_count"),
+            "thread member count",
+            maximum=1000,
+            optional=True,
+        )
+        thread_channel.member_count = (
+            reported_member_count
+            if reported_member_count is not None
+            else int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ThreadMember)
+                    .where(
+                        ThreadMember.thread_id == thread_ref[0],
+                        ThreadMember.thread_domain == thread_ref[1],
+                    )
+                )
+                or 0
+            )
+        )
+        if thread_channel.type == 12:
+            locked.permission_generation += 1
+        added_members: list[dict[str, object]] = []
+        if event_type.endswith("upsert"):
+            persisted_member = await session.get(
+                ThreadMember,
+                (thread_ref[0], thread_ref[1], user_ref[0], user_ref[1]),
+            )
+            if persisted_member is None:
+                raise ValueError("thread member mutation did not persist")
+            added_members.append(await rich_thread_member_payload(session, persisted_member))
+        dispatch_type = "THREAD_MEMBERS_UPDATE"
+        dispatch = {
+            "id": str(thread_ref[0]),
+            "thread_domain": thread_ref[1],
+            "guild_id": str(locked.id),
+            "guild_domain": locked.origin_domain,
+            "member_count": min(50, thread_channel.member_count),
+            "added_members": added_members,
+            "removed_member_ids": [str(user_ref[0])] if event_type.endswith("delete") else [],
+            "removed_member_refs": (
+                [{"id": str(user_ref[0]), "origin_domain": user_ref[1]}]
+                if event_type.endswith("delete")
+                else []
+            ),
         }
     elif event_type in {"guild.role.create", "guild.role.update"}:
         raw = content.get("role")
@@ -1775,47 +2407,101 @@ async def apply_guild_mutation_event(
                 raw_message = content.get("message")
                 if not isinstance(raw_message, dict):
                     raise ValueError("message update is invalid")
-                value = raw_message.get("content")
-                e2ee = validate_e2ee_envelope(raw_message.get("e2ee"))
-                if value is not None and (
-                    not isinstance(value, str) or not 1 <= len(value) <= 4000
+                thread_attached = content.get("thread_attached", False)
+                thread_detached = content.get("thread_detached", False)
+                if (
+                    not isinstance(thread_attached, bool)
+                    or not isinstance(thread_detached, bool)
+                    or thread_attached
+                    and thread_detached
                 ):
-                    raise ValueError("message update content is invalid")
-                if (value is None) == (e2ee is None):
-                    raise ValueError("message update must contain one plaintext or encrypted body")
-                validate_message_encryption_policy(
-                    channel.encryption_mode,
-                    content=value,
-                    e2ee=e2ee,
-                    policy_generation=channel.encryption_policy_generation,
-                    policy_epoch=channel.encryption_epoch,
-                    policy_group_id=channel.encryption_group_id,
-                )
-                validate_e2ee_message_projection(
-                    e2ee,
-                    message_id=message_ref[0],
-                    message_domain=message_ref[1],
-                    edited=True,
-                )
-                edited_at = _event_datetime(raw_message.get("edited_at"), "message edit")
-                if edited_at is None:
-                    raise ValueError("message edit timestamp is invalid")
-                if message.deleted_at is not None or (
-                    message.edited_at is not None and edited_at < message.edited_at
-                ):
-                    raise ValueError("message edit regressed authoritative state")
-                message.content = value
-                message.e2ee = e2ee
-                message.encryption_policy_generation = channel.encryption_policy_generation
-                message.encryption_epoch = channel.encryption_epoch
-                message.edited_at = edited_at
+                    raise ValueError("message thread attachment marker is invalid")
+                if thread_attached:
+                    incoming_flags = _bounded_event_int(raw_message.get("flags"), "message flags")
+                    attached_thread = await session.get(Channel, message_ref)
+                    if (
+                        incoming_flags is None
+                        or not incoming_flags & (1 << 5)
+                        or incoming_flags & ~(message.flags | (1 << 5))
+                        or attached_thread is None
+                        or attached_thread.type not in {10, 11, 12}
+                        or (attached_thread.parent_id, attached_thread.parent_domain)
+                        != (message.channel_id, message.channel_domain)
+                    ):
+                        raise ValueError("message thread attachment is invalid")
+                    message.flags = incoming_flags
+                elif thread_detached:
+                    incoming_flags = _bounded_event_int(raw_message.get("flags"), "message flags")
+                    if (
+                        incoming_flags is None
+                        or incoming_flags & (1 << 5)
+                        or not message.flags & (1 << 5)
+                        or incoming_flags & ~message.flags
+                    ):
+                        raise ValueError("message thread detachment is invalid")
+                    message.flags = incoming_flags
+                else:
+                    value = raw_message.get("content")
+                    e2ee = validate_e2ee_envelope(raw_message.get("e2ee"))
+                    if value is not None and (
+                        not isinstance(value, str) or not 1 <= len(value) <= 4000
+                    ):
+                        raise ValueError("message update content is invalid")
+                    if (value is None) == (e2ee is None):
+                        raise ValueError(
+                            "message update must contain one plaintext or encrypted body"
+                        )
+                    validate_message_encryption_policy(
+                        channel.encryption_mode,
+                        content=value,
+                        e2ee=e2ee,
+                        policy_generation=channel.encryption_policy_generation,
+                        policy_epoch=channel.encryption_epoch,
+                        policy_group_id=channel.encryption_group_id,
+                    )
+                    validate_e2ee_message_projection(
+                        e2ee,
+                        message_id=message_ref[0],
+                        message_domain=message_ref[1],
+                        edited=True,
+                    )
+                    edited_at = _event_datetime(raw_message.get("edited_at"), "message edit")
+                    if edited_at is None:
+                        raise ValueError("message edit timestamp is invalid")
+                    if message.deleted_at is not None or (
+                        message.edited_at is not None and edited_at < message.edited_at
+                    ):
+                        raise ValueError("message edit regressed authoritative state")
+                    message.content = value
+                    message.e2ee = e2ee
+                    message.encryption_policy_generation = channel.encryption_policy_generation
+                    message.encryption_epoch = channel.encryption_epoch
+                    message.edited_at = edited_at
             else:
                 deleted_at = _event_datetime(content.get("deleted_at"), "message deletion")
                 if deleted_at is None:
                     raise ValueError("message deletion timestamp is invalid")
+                was_counted_thread_reply = (
+                    message.deleted_at is None
+                    and channel.type in {10, 11, 12}
+                    and (channel.starter_message_id, channel.starter_message_domain)
+                    != (message.id, message.origin_domain)
+                )
                 message.content = None
                 message.e2ee = None
                 message.deleted_at = deleted_at
+                if was_counted_thread_reply:
+                    channel.message_count = max(0, int(channel.message_count or 0) - 1)
+                if (
+                    channel.type in {10, 11, 12}
+                    and (
+                        channel.last_message_id,
+                        channel.last_message_domain,
+                    )
+                    == message_ref
+                ):
+                    await session.flush()
+                    await refresh_replicated_thread_cursor(session, channel)
         dispatch_type = "MESSAGE_UPDATE" if event_type.endswith("update") else "MESSAGE_DELETE"
         dispatch = {
             "id": str(message_ref[0]),
@@ -1834,6 +2520,50 @@ async def apply_guild_mutation_event(
         channel_ids = select(Channel.id).where(
             Channel.guild_id == locked.id, Channel.guild_domain == locked.origin_domain
         )
+        affected_threads = list(
+            await session.scalars(
+                select(Channel)
+                .join(
+                    Message,
+                    (Message.channel_id == Channel.id)
+                    & (Message.channel_domain == Channel.origin_domain),
+                )
+                .where(
+                    Channel.guild_id == locked.id,
+                    Channel.guild_domain == locked.origin_domain,
+                    Channel.type.in_({10, 11, 12}),
+                    Message.author_id == author_ref[0],
+                    Message.author_domain == author_ref[1],
+                    Message.created_at >= cutoff,
+                    Message.deleted_at.is_(None),
+                )
+                .distinct()
+            )
+        )
+        purged_thread_counts = list(
+            await session.execute(
+                select(Channel, func.count(Message.id))
+                .join(
+                    Message,
+                    (Message.channel_id == Channel.id)
+                    & (Message.channel_domain == Channel.origin_domain),
+                )
+                .where(
+                    Channel.guild_id == locked.id,
+                    Channel.guild_domain == locked.origin_domain,
+                    Channel.type.in_({10, 11, 12}),
+                    Message.author_id == author_ref[0],
+                    Message.author_domain == author_ref[1],
+                    Message.created_at >= cutoff,
+                    Message.deleted_at.is_(None),
+                    ~(
+                        (Message.id == Channel.starter_message_id)
+                        & (Message.origin_domain == Channel.starter_message_domain)
+                    ),
+                )
+                .group_by(Channel.id, Channel.origin_domain)
+            )
+        )
         await session.execute(
             update(Message)
             .where(
@@ -1846,6 +2576,18 @@ async def apply_guild_mutation_event(
             )
             .values(content=None, e2ee=None, deleted_at=deleted_at)
         )
+        await session.flush()
+        purged_count_by_ref = {
+            (thread.id, thread.origin_domain): int(purged_count)
+            for thread, purged_count in purged_thread_counts
+        }
+        for thread in affected_threads:
+            thread.message_count = max(
+                0,
+                int(thread.message_count or 0)
+                - purged_count_by_ref.get((thread.id, thread.origin_domain), 0),
+            )
+            await refresh_replicated_thread_cursor(session, thread)
         dispatch_type = "MESSAGE_DELETE"
         dispatch = {
             **dispatch,
@@ -1968,9 +2710,34 @@ async def apply_guild_mutation_event(
         from app.federation.history import purge_ineligible_federated_history
 
         await purge_ineligible_federated_history(session, settings, locked)
-    if event_type in GUILD_E2EE_ACCESS_MUTATION_EVENTS:
-        await pause_guild_e2ee_for_membership_change(session, locked)
-    return dispatch_type, dispatch
+    pause_e2ee = event_type in GUILD_E2EE_ACCESS_MUTATION_EVENTS
+    if pause_e2ee and event_type in {
+        "guild.member.remove",
+        "guild.member.role.add",
+        "guild.member.role.remove",
+    }:
+        raw_user = content.get("user")
+        if isinstance(raw_user, dict):
+            try:
+                changed_user = await session.get(
+                    User,
+                    (
+                        database_snowflake(raw_user.get("id"), "member user id"),
+                        normalize_domain(str(raw_user.get("origin_domain", ""))),
+                    ),
+                )
+            except ValueError:
+                changed_user = None
+            if changed_user is not None and changed_user.account_type == "bot":
+                pause_e2ee = False
+    if pause_e2ee:
+        paused = await pause_guild_e2ee_for_membership_change(session, locked)
+        if e2ee_policy_channels is not None:
+            known = {(item.id, item.origin_domain) for item in e2ee_policy_channels}
+            e2ee_policy_channels.extend(
+                item for item in paused if (item.id, item.origin_domain) not in known
+            )
+    return None if event_type == "guild.forum.cursor.update" else (dispatch_type, dispatch)
 
 
 async def lock_proxy_nonce(
@@ -2409,6 +3176,7 @@ def validate_guild_snapshot(
     member_roles = snapshot.get("member_roles")
     overwrites = snapshot.get("overwrites")
     emojis = snapshot.get("emojis", [])
+    thread_members = snapshot.get("thread_members", [])
     if (
         not isinstance(roles, list)
         or not isinstance(channels, list)
@@ -2416,6 +3184,7 @@ def validate_guild_snapshot(
         or not isinstance(member_roles, list)
         or not isinstance(overwrites, list)
         or not isinstance(emojis, list)
+        or not isinstance(thread_members, list)
     ):
         raise ValueError("guild snapshot collections are invalid")
     if (
@@ -2425,6 +3194,7 @@ def validate_guild_snapshot(
         or len(member_roles) > MAX_SNAPSHOT_MEMBER_ROLES
         or len(overwrites) > MAX_SNAPSHOT_OVERWRITES
         or len(emojis) > 1000
+        or len(thread_members) > MAX_SNAPSHOT_THREAD_MEMBERS
     ):
         raise ValueError("guild snapshot collection exceeds its protocol bound")
     role_refs: set[tuple[int, str]] = set()
@@ -2450,6 +3220,8 @@ def validate_guild_snapshot(
             raise ValueError("guild snapshot role flags are invalid")
         role_refs.add(ref)
     channel_refs: set[tuple[int, str]] = set()
+    channel_types: dict[tuple[int, str], int] = {}
+    channels_by_ref: dict[tuple[int, str], dict[str, Any]] = {}
     for raw in channels:
         if not isinstance(raw, dict):
             raise ValueError("guild snapshot channel is invalid")
@@ -2476,11 +3248,12 @@ def validate_guild_snapshot(
         validate_channel_encryption_policy(raw_encryption_policy)
         parent_id = raw.get("parent_id")
         permissions_synced = raw.get("permissions_synced", parent_id is not None)
-        if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5}:
+        if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5, 10, 11, 12, 15}:
             raise ValueError("guild snapshot channel type is invalid")
         if not isinstance(name, str) or not 1 <= len(name) <= 100:
             raise ValueError("guild snapshot channel name is invalid")
-        if topic is not None and (not isinstance(topic, str) or len(topic) > 1024):
+        topic_limit = 4096 if channel_type == 15 else 1024
+        if topic is not None and (not isinstance(topic, str) or len(topic) > topic_limit):
             raise ValueError("guild snapshot channel topic is invalid")
         if isinstance(position, bool) or not isinstance(position, int) or position < 0:
             raise ValueError("guild snapshot channel position is invalid")
@@ -2495,11 +3268,17 @@ def validate_guild_snapshot(
         if (
             not isinstance(permissions_synced, bool)
             or permissions_synced
-            and (parent_id is None or channel_type == 4)
+            and (parent_id is None or channel_type in {4, 10, 11, 12})
         ):
             raise ValueError("guild snapshot channel permission sync state is invalid")
+        if channel_type in {10, 11, 12} and (parent_id is None or permissions_synced):
+            raise ValueError("guild snapshot thread parent state is invalid")
+        _validated_channel_extension_state(raw, int(channel_type), origin)
+        _event_datetime(raw.get("created_at"), "channel creation", optional=True)
         database_snowflake(raw.get("created_floor_id"), "channel history floor")
         channel_refs.add(ref)
+        channel_types[ref] = int(channel_type)
+        channels_by_ref[ref] = raw
     for raw in channels:
         parent_id = raw.get("parent_id")
         if parent_id is not None:
@@ -2509,6 +3288,33 @@ def validate_guild_snapshot(
             )
             if parent_ref not in channel_refs:
                 raise ValueError("guild snapshot channel parent is outside the guild")
+            expected_parent_types = expected_channel_parent_types(
+                channel_types[(int(raw["id"]), str(raw["origin_domain"]))]
+            )
+            if channel_types[parent_ref] not in expected_parent_types:
+                raise ValueError("guild snapshot channel parent type is invalid")
+        if raw.get("last_thread_id") is not None:
+            last_thread_ref = (
+                database_snowflake(raw.get("last_thread_id"), "forum last thread id"),
+                str(raw.get("last_thread_domain")),
+            )
+            current_ref = (int(raw["id"]), str(raw["origin_domain"]))
+            if channel_types.get(current_ref) != 15 or channel_types.get(last_thread_ref) not in {
+                10,
+                11,
+                12,
+            }:
+                raise ValueError("guild snapshot forum last thread is invalid")
+            target = channels_by_ref.get(last_thread_ref)
+            if (
+                target is None
+                or (
+                    database_snowflake(target.get("parent_id"), "forum post parent id"),
+                    str(target.get("parent_domain")),
+                )
+                != current_ref
+            ):
+                raise ValueError("guild snapshot forum last thread parent is invalid")
     member_refs: set[tuple[int, str]] = set()
     for raw in members:
         if not isinstance(raw, dict) or not isinstance(raw.get("user"), dict):
@@ -2593,6 +3399,8 @@ def validate_guild_snapshot(
         )
         if channel_ref not in channel_refs or target_type not in {"role", "member"}:
             raise ValueError("guild snapshot overwrite is outside the guild")
+        if channel_types[channel_ref] in {10, 11, 12}:
+            raise ValueError("guild snapshot thread contains a local overwrite")
         expected_targets = role_refs if target_type == "role" else member_refs
         if target_ref not in expected_targets:
             raise ValueError("guild snapshot overwrite target is outside the guild")
@@ -2604,6 +3412,43 @@ def validate_guild_snapshot(
         if overwrite_ref in overwrite_refs:
             raise ValueError("guild snapshot contains a duplicate overwrite")
         overwrite_refs.add(overwrite_ref)
+    thread_member_refs: set[tuple[tuple[int, str], tuple[int, str]]] = set()
+    for raw in thread_members:
+        if not isinstance(raw, dict):
+            raise ValueError("guild snapshot thread member is invalid")
+        thread_ref = (
+            database_snowflake(raw.get("id"), "thread id"),
+            normalize_domain(str(raw.get("thread_domain", ""))),
+        )
+        user_ref = (
+            database_snowflake(raw.get("user_id"), "thread member user id"),
+            normalize_domain(str(raw.get("user_domain", ""))),
+        )
+        if (
+            thread_ref not in channel_refs
+            or channel_types[thread_ref] not in {10, 11, 12}
+            or user_ref not in member_refs
+            or (
+                database_snowflake(raw.get("guild_id"), "thread member guild id"),
+                normalize_domain(str(raw.get("guild_domain", ""))),
+            )
+            != (guild_id, origin)
+        ):
+            raise ValueError("guild snapshot thread member reference is invalid")
+        if _event_datetime(raw.get("join_timestamp"), "thread member join") is None:
+            raise ValueError("guild snapshot thread member join timestamp is invalid")
+        _bounded_event_int(raw.get("flags", 0), "thread member flags")
+        if raw.get("notification_level", "inherit") not in {
+            "inherit",
+            "all",
+            "mentions",
+            "none",
+        }:
+            raise ValueError("guild snapshot thread member notification level is invalid")
+        thread_membership_ref = (thread_ref, user_ref)
+        if thread_membership_ref in thread_member_refs:
+            raise ValueError("guild snapshot contains a duplicate thread member")
+        thread_member_refs.add(thread_membership_ref)
     emoji_refs: set[tuple[int, str]] = set()
     emoji_names: set[str] = set()
     for raw in emojis:
@@ -2637,6 +3482,12 @@ def tombstone_omitted_replicated_channel(channel: Channel) -> None:
     """Keep only the channel identity needed to restore a later snapshot."""
 
     channel.unavailable = True
+    if channel.type in {10, 11, 12}:
+        channel.parent_id = None
+        channel.parent_domain = None
+        channel.last_message_id = None
+        channel.last_message_domain = None
+        return
     channel.name = None
     channel.topic = None
     channel.position = 0
@@ -2956,6 +3807,7 @@ def guild_snapshot_payload(
     overwrites: list[ChannelOverwrite],
     *,
     emojis: list[Emoji] | None = None,
+    thread_members: list[ThreadMember] | None = None,
     member_snapshot_at: datetime,
     next_member_cursor: tuple[str, int] | None = None,
     snapshot_seq: int | None = None,
@@ -3028,6 +3880,45 @@ def guild_snapshot_payload(
                     and (channel.parent_id, channel.parent_domain) in visible_channel_refs
                 ),
                 "rate_limit_per_user": channel.rate_limit_per_user,
+                "flags": str(channel.flags),
+                "owner_id": str(channel.owner_id) if channel.owner_id is not None else None,
+                "owner_domain": channel.owner_domain,
+                "archived": channel.archived,
+                "locked": channel.locked,
+                "invitable": channel.invitable,
+                "auto_archive_duration": channel.auto_archive_duration,
+                "archive_timestamp": (
+                    channel.archive_timestamp.isoformat()
+                    if channel.archive_timestamp is not None
+                    else None
+                ),
+                "last_activity_at": (
+                    channel.last_activity_at.isoformat()
+                    if channel.last_activity_at is not None
+                    else None
+                ),
+                "message_count": channel.message_count,
+                "total_message_sent": channel.total_message_sent,
+                "member_count": channel.member_count,
+                "starter_message_id": (
+                    str(channel.starter_message_id)
+                    if channel.starter_message_id is not None
+                    else None
+                ),
+                "starter_message_domain": channel.starter_message_domain,
+                "last_thread_id": (
+                    str(channel.last_thread_id) if channel.last_thread_id is not None else None
+                ),
+                "last_thread_domain": channel.last_thread_domain,
+                "default_auto_archive_duration": channel.default_auto_archive_duration,
+                "default_thread_rate_limit_per_user": (channel.default_thread_rate_limit_per_user),
+                "available_tags": channel.available_tags,
+                "applied_tag_ids": channel.applied_tag_ids,
+                "default_reaction_emoji": channel.default_reaction_emoji,
+                "default_sort_order": channel.default_sort_order,
+                "default_forum_layout": channel.default_forum_layout,
+                "e2ee_required": channel.e2ee_required,
+                "created_at": channel.created_at.isoformat(),
                 "federated_history_policy": channel.federated_history_policy,
                 "encryption_mode": getattr(channel, "encryption_mode", "plaintext"),
                 "encryption_policy": channel_encryption_policy_payload(channel),
@@ -3074,6 +3965,21 @@ def guild_snapshot_payload(
                 "deny": str(item.deny),
             }
             for item in overwrites
+        ],
+        "thread_members": [
+            {
+                "id": str(item.thread_id),
+                "thread_domain": item.thread_domain,
+                "guild_id": str(item.guild_id),
+                "guild_domain": item.guild_domain,
+                "user_id": str(item.user_id),
+                "user_domain": item.user_domain,
+                "join_timestamp": item.joined_at.isoformat(),
+                "flags": item.flags,
+                "notification_level": item.notification_level,
+            }
+            for item in (thread_members or [])
+            if (item.thread_id, item.thread_domain) in visible_channel_refs
         ],
         "emojis": [
             {
@@ -3211,6 +4117,11 @@ async def apply_guild_snapshot(
     member_refs = {
         (int(raw["user"]["id"]), str(raw["user"]["origin_domain"])) for raw in snapshot_members
     }
+    snapshot_thread_members = [
+        raw
+        for raw in snapshot.get("thread_members", [])
+        if (int(raw["user_id"]), str(raw["user_domain"])) in member_refs
+    ]
     existing_roles = list(
         await session.scalars(
             select(Role).where(Role.guild_id == guild.id, Role.guild_domain == origin)
@@ -3304,6 +4215,9 @@ async def apply_guild_snapshot(
         loaded_channel.unavailable = False
         loaded_channel.type = int(raw["type"])
         loaded_channel.created_floor_id = int(raw["created_floor_id"])
+        created_at = _event_datetime(raw.get("created_at"), "channel creation", optional=True)
+        if created_at is not None:
+            loaded_channel.created_at = created_at
         loaded_channel.name = raw.get("name")
         loaded_channel.topic = raw.get("topic")
         loaded_channel.position = int(raw["position"])
@@ -3336,6 +4250,9 @@ async def apply_guild_snapshot(
         loaded_channel.encryption_suite = encryption_policy["suite"]
         loaded_channel.encryption_group_id = encryption_policy["group_id"]
         loaded_channel.encryption_epoch = encryption_policy["epoch"]
+        extension_state = _validated_channel_extension_state(raw, loaded_channel.type, origin)
+        for field, value in extension_state.items():
+            setattr(loaded_channel, field, value)
     for raw in snapshot.get("emojis", []):
         loaded_emoji = await session.get(Emoji, (int(raw["id"]), str(raw["origin_domain"])))
         if loaded_emoji is None:
@@ -3401,6 +4318,56 @@ async def apply_guild_snapshot(
         loaded_member.voice_flags = 0
         loaded_member.member_version = int(raw.get("member_version", 1))
     await session.flush()
+    if member_refs:
+        incoming_thread_member_refs = {
+            (
+                int(raw["id"]),
+                str(raw["thread_domain"]),
+                int(raw["user_id"]),
+                str(raw["user_domain"]),
+            )
+            for raw in snapshot_thread_members
+        }
+        existing_page_thread_members = list(
+            await session.scalars(
+                select(ThreadMember).where(
+                    ThreadMember.guild_id == guild.id,
+                    ThreadMember.guild_domain == origin,
+                    tuple_(ThreadMember.user_id, ThreadMember.user_domain).in_(member_refs),
+                )
+            )
+        )
+        for loaded_thread_member in existing_page_thread_members:
+            ref = (
+                loaded_thread_member.thread_id,
+                loaded_thread_member.thread_domain,
+                loaded_thread_member.user_id,
+                loaded_thread_member.user_domain,
+            )
+            if ref not in incoming_thread_member_refs:
+                await session.delete(loaded_thread_member)
+        for raw in snapshot_thread_members:
+            key = (
+                int(raw["id"]),
+                str(raw["thread_domain"]),
+                int(raw["user_id"]),
+                str(raw["user_domain"]),
+            )
+            current_thread_member = await session.get(ThreadMember, key)
+            if current_thread_member is None:
+                current_thread_member = ThreadMember(
+                    thread_id=key[0],
+                    thread_domain=key[1],
+                    guild_id=guild.id,
+                    guild_domain=origin,
+                    user_id=key[2],
+                    user_domain=key[3],
+                    joined_at=datetime.fromisoformat(str(raw["join_timestamp"])),
+                )
+                session.add(current_thread_member)
+            current_thread_member.flags = int(raw.get("flags", 0))
+            current_thread_member.notification_level = str(raw.get("notification_level", "inherit"))
+        await session.flush()
     await session.execute(
         delete(MemberRole).where(MemberRole.guild_id == guild.id, MemberRole.guild_domain == origin)
     )

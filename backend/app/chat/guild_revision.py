@@ -11,6 +11,7 @@ from app.chat.e2ee_membership import (
     GUILD_E2EE_ACCESS_MUTATION_EVENTS,
     pause_guild_e2ee_for_membership_change,
 )
+from app.chat.payloads import materialize_channel_created_at
 from app.core.settings import Settings
 from app.core.task_wake import enqueue_best_effort
 from app.db.models import Channel, Guild, GuildMember, User
@@ -74,6 +75,39 @@ def federation_channel_state(channel: Channel) -> dict[str, object]:
         "parent_domain": channel.parent_domain,
         "permissions_synced": bool(channel.permissions_synced),
         "rate_limit_per_user": channel.rate_limit_per_user,
+        "flags": str(channel.flags),
+        "owner_id": str(channel.owner_id) if channel.owner_id is not None else None,
+        "owner_domain": channel.owner_domain,
+        "archived": channel.archived,
+        "locked": channel.locked,
+        "invitable": channel.invitable,
+        "auto_archive_duration": channel.auto_archive_duration,
+        "archive_timestamp": (
+            channel.archive_timestamp.isoformat() if channel.archive_timestamp is not None else None
+        ),
+        "last_activity_at": (
+            channel.last_activity_at.isoformat() if channel.last_activity_at is not None else None
+        ),
+        "message_count": channel.message_count,
+        "total_message_sent": channel.total_message_sent,
+        "member_count": channel.member_count,
+        "starter_message_id": (
+            str(channel.starter_message_id) if channel.starter_message_id is not None else None
+        ),
+        "starter_message_domain": channel.starter_message_domain,
+        "last_thread_id": (
+            str(channel.last_thread_id) if channel.last_thread_id is not None else None
+        ),
+        "last_thread_domain": channel.last_thread_domain,
+        "default_auto_archive_duration": channel.default_auto_archive_duration,
+        "default_thread_rate_limit_per_user": channel.default_thread_rate_limit_per_user,
+        "available_tags": channel.available_tags,
+        "applied_tag_ids": channel.applied_tag_ids,
+        "default_reaction_emoji": channel.default_reaction_emoji,
+        "default_sort_order": channel.default_sort_order,
+        "default_forum_layout": channel.default_forum_layout,
+        "e2ee_required": channel.e2ee_required,
+        "created_at": materialize_channel_created_at(channel).isoformat(),
         # Server defaults are populated during flush, but channel-create events
         # are rendered before queue_guild_mutation performs that flush.
         "federated_history_policy": channel.federated_history_policy or "inherit",
@@ -93,6 +127,8 @@ async def queue_guild_mutation(
     channel: Channel | None = None,
     snapshot_required: bool = False,
     extra_destinations: Iterable[str] = (),
+    e2ee_policy_channels: list[Channel] | None = None,
+    pause_e2ee: bool = True,
 ) -> int:
     """Sequence, retain, and durably fan out one authoritative guild mutation.
 
@@ -103,10 +139,16 @@ async def queue_guild_mutation(
     the retried event.
     """
 
-    if guild.origin_domain != settings.domain or actor.origin_domain != settings.domain:
-        raise RuntimeError("only a guild home and local actor may emit guild mutations")
-    if event_type in GUILD_E2EE_ACCESS_MUTATION_EVENTS:
-        await pause_guild_e2ee_for_membership_change(session, guild)
+    if guild.origin_domain != settings.domain:
+        raise RuntimeError("only a guild home may emit guild mutations")
+    signer = await guild_mutation_signer(session, settings, guild, actor)
+    if pause_e2ee and event_type in GUILD_E2EE_ACCESS_MUTATION_EVENTS:
+        paused = await pause_guild_e2ee_for_membership_change(session, guild)
+        if e2ee_policy_channels is not None:
+            known = {(item.id, item.origin_domain) for item in e2ee_policy_channels}
+            e2ee_policy_channels.extend(
+                item for item in paused if (item.id, item.origin_domain) not in known
+            )
     snapshot_changed = event_type not in SNAPSHOT_NEUTRAL_GUILD_EVENTS
     if snapshot_changed:
         guild.snapshot_generation = int(getattr(guild, "snapshot_generation", 1) or 1) + 1
@@ -136,7 +178,7 @@ async def queue_guild_mutation(
         session,
         settings,
         event_type,
-        actor,
+        signer,
         content,
         context=context,
     )
@@ -183,6 +225,31 @@ async def queue_guild_mutation(
             )
     remember_guild_delivery_wakes(guild, destinations)
     return seq
+
+
+async def guild_mutation_signer(
+    session: AsyncSession,
+    settings: Settings,
+    guild: Guild,
+    actor: User,
+) -> User:
+    """Return the local signer for an authoritative guild mutation.
+
+    Ordinary mutations are signed by their local actor. A signed federation
+    proxy may act for a remote guild member, but an instance must never sign as
+    that remote identity. In that case the local guild owner attests the
+    authoritative result while the service keeps the remote actor for
+    permission checks and audit attribution.
+    """
+
+    if guild.origin_domain != settings.domain:
+        raise RuntimeError("only a guild home may sign guild mutations")
+    if actor.is_local and actor.origin_domain == settings.domain:
+        return actor
+    owner = await session.get(User, (guild.owner_id, guild.owner_domain))
+    if owner is None or not owner.is_local or owner.origin_domain != settings.domain:
+        raise RuntimeError("local guild owner cannot sign a proxied mutation")
+    return owner
 
 
 async def queue_guild_access_revocation(

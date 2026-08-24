@@ -380,6 +380,9 @@ Supported resource operations include:
   presence hydration.
 - Guild update; channel and role create/update/reorder/delete; and member role
   assignment, removal, and atomic replacement.
+- Forum channel policy, atomic forum-post creation, public/private/announcement
+  threads, active and archived thread listing, lifecycle updates, and thread
+  membership.
 - Cursor-paginated message history when every required grant allows it.
 - Message send and edit/delete-own operations, plus message moderation behind
   its own scope.
@@ -397,6 +400,7 @@ The principal runtime routes are:
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | Guild management   | `PATCH /api/v1/bots/guilds/{guild}`                                                                                                      |
 | Channel management | `POST/PATCH /api/v1/bots/guilds/{guild}/channels`; `PATCH/DELETE /api/v1/bots/guilds/{guild}/channels/{channel}`                         |
+| Forums and threads | create/list below `/api/v1/bots/channels/{parent}/threads`; existing-message create below `.../messages/{message}/threads`; lifecycle and membership below `/api/v1/bots/channels/{thread}` |
 | Role management    | `POST/PATCH /api/v1/bots/guilds/{guild}/roles`; `PATCH/DELETE /api/v1/bots/guilds/{guild}/roles/{role}`; member-role `PUT/DELETE` routes |
 | Attachments        | `POST /api/v1/bots/channels/{channel}/attachments`; `GET /api/v1/bots/attachments/{attachment}` and `/{variant}`                         |
 | Invites            | `POST/GET /api/v1/bots/guilds/{guild}/invites`; `DELETE .../invites/{code}`                                                              |
@@ -532,6 +536,13 @@ Bot authorization is already fail-closed for E2EE. Servers never expose
 plaintext content or plaintext history from an encrypted channel. Message
 responses use `content: null`, retain the encrypted envelope when authorized,
 and mark unavailable content explicitly.
+
+The same rule applies to forums and threads. Their titles, tags, counts,
+membership, and archive/lock state are ordinary metadata, but post and reply
+content follows the child thread's encryption mode. A bot cannot create a post
+in an E2EE-required forum or write to an active E2EE thread until a verified
+bot-device MLS participant protocol exists; those requests fail instead of
+falling back to plaintext.
 
 Install templates support three E2EE modes:
 

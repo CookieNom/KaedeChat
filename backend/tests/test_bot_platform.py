@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from starlette.requests import Request
 
+import app.api.bots as bots_api
 import app.api.moderation as moderation_api
 import app.gateway as gateway
 from app.admin.auth import ROLE_CAPABILITIES, AdminPrincipal
@@ -49,7 +50,7 @@ from app.api.bot_gateway import (
     normalized_bot_event_type,
     replay_topic,
 )
-from app.api.bots import exact_installation_by_id
+from app.api.bots import exact_installation_by_id, redact_bot_message_payload
 from app.api.interactions import (
     InteractionCreate,
     InteractionResponse,
@@ -726,9 +727,11 @@ async def test_instance_ban_endpoint_revokes_installations_in_member_delete_tran
     monkeypatch.setattr(moderation_api, "revoke_installations_for_guild_instance", revoke)
     monkeypatch.setattr(moderation_api, "cleanup_installation_roles", cleanup)
     monkeypatch.setattr(moderation_api, "publish_deleted_installation_roles", publish_roles)
+    monkeypatch.setattr(moderation_api, "cleanup_guild_member_threads", AsyncMock(return_value=[]))
+    monkeypatch.setattr(moderation_api, "publish_guild_thread_member_cleanup", AsyncMock())
+    monkeypatch.setattr(moderation_api, "publish_e2ee_policy_updates", AsyncMock())
     for name in (
         "add_audit_entry",
-        "pause_guild_e2ee_for_membership_change",
         "queue_guild_instance_access_revocation",
         "queue_guild_mutation",
         "wake_queued_guild_federation",
@@ -740,7 +743,18 @@ async def test_instance_ban_endpoint_revokes_installations_in_member_delete_tran
             side_effect=[
                 Mock(),
                 Mock(),
-                [(installed.bot_user_id, installed.bot_user_domain)],
+                Mock(
+                    all=Mock(
+                        return_value=[
+                            (
+                                installed.bot_user_id,
+                                installed.bot_user_domain,
+                                "bot",
+                            )
+                        ]
+                    )
+                ),
+                Mock(),
             ]
         ),
         commit=AsyncMock(),
@@ -915,8 +929,10 @@ def patch_moderation_side_effects(
     for name in (
         "add_audit_entry",
         "cleanup_installation_roles",
-        "pause_guild_e2ee_for_membership_change",
+        "cleanup_guild_member_threads",
         "publish_deleted_installation_roles",
+        "publish_e2ee_policy_updates",
+        "publish_guild_thread_member_cleanup",
         "queue_guild_access_revocation",
         "queue_guild_mutation",
         "wake_queued_guild_federation",
@@ -934,9 +950,11 @@ async def test_generic_kick_atomically_revokes_bot_installation(
     installed.status = "suspended"
     patch_moderation_side_effects(monkeypatch, guild, member)
     settings = SimpleNamespace(domain="guild.example")
+    target = principal(scopes=set(), intents=set()).user
     session = SimpleNamespace(
         scalar=AsyncMock(return_value=None),
         scalars=AsyncMock(return_value=[installed]),
+        get=AsyncMock(return_value=target),
         delete=AsyncMock(),
         commit=AsyncMock(),
     )
@@ -947,7 +965,7 @@ async def test_generic_kick_atomically_revokes_bot_installation(
         auth,
         session,
         SimpleNamespace(),
-        SimpleNamespace(),
+        SimpleNamespace(mint=AsyncMock(return_value=123)),
         settings,
         None,
     )
@@ -988,7 +1006,7 @@ async def test_generic_ban_revokes_bot_and_unban_never_reactivates_it(
         auth,
         session,
         SimpleNamespace(),
-        SimpleNamespace(),
+        SimpleNamespace(mint=AsyncMock(return_value=123)),
         settings,
         None,
     )
@@ -1509,9 +1527,10 @@ async def test_federated_uninstall_preserves_human_shared_role_and_uses_owner_si
         cleanup_mutation,
     )
     monkeypatch.setattr(
-        "app.api.applications.pause_guild_e2ee_for_membership_change",
-        AsyncMock(),
+        "app.api.applications.cleanup_guild_member_threads",
+        AsyncMock(return_value=[]),
     )
+    monkeypatch.setattr("app.api.applications.publish_guild_thread_member_cleanup", AsyncMock())
     monkeypatch.setattr("app.api.applications.wake_queued_guild_federation", AsyncMock())
     monkeypatch.setattr(
         "app.api.applications.publish_deleted_installation_roles",
@@ -1885,6 +1904,149 @@ def test_message_gateway_requires_intent_and_both_content_scopes() -> None:
         )
         is None
     )
+
+
+def test_message_content_redaction_covers_resolved_thread_source() -> None:
+    payload = {
+        "content": None,
+        "attachments": [],
+        "message_type": 21,
+        "referenced_message": {
+            "content": "retained source secret",
+            "e2ee": None,
+            "attachments": [{"id": "9", "filename": "secret.png"}],
+        },
+    }
+    redacted = redact_bot_message_payload(
+        payload,
+        can_read_content=False,
+        can_read_attachments=False,
+    )
+    source = redacted["referenced_message"]
+    assert isinstance(source, dict)
+    assert source["content"] is None
+    assert source["content_unavailable"] is True
+    assert source["attachments"] == []
+    assert source["attachments_unavailable"] is True
+
+    bot = principal(
+        scopes={"messages.metadata", "messages.content"},
+        intents={"guild_messages", "message_content"},
+    )
+    event = {"t": "MESSAGE_CREATE", "topic_seq": 8, "d": payload}
+    gateway_projection = filtered_event(
+        bot,
+        event,
+        {"guild_messages", "message_content"},
+        {"messages.metadata"},
+    )
+    assert gateway_projection is not None
+    nested = gateway_projection["d"]["referenced_message"]
+    assert nested["content"] is None
+    assert nested["attachments"] == []
+
+
+def test_thread_gateway_starter_requires_history_and_metadata_grants() -> None:
+    payload = {
+        "id": "8",
+        "type": 11,
+        "encryption_mode": "plaintext",
+        "e2ee_required": False,
+        "starter_message": {
+            "content": "historical secret",
+            "e2ee": None,
+            "attachments": [{"id": "9", "filename": "secret.png"}],
+        },
+    }
+    content_scopes = {
+        "channels.read",
+        "messages.metadata",
+        "messages.content",
+        "attachments.read",
+    }
+    content_bot = principal(
+        scopes=content_scopes,
+        intents={"guilds", "message_content"},
+    )
+    event = {"t": "THREAD_LIST_SYNC", "topic_seq": 9, "d": {"threads": [payload]}}
+    redacted = filtered_event(
+        content_bot,
+        event,
+        {"guilds", "message_content"},
+        content_scopes,
+    )
+    assert redacted is not None
+    redacted_starter = redacted["d"]["threads"][0]["starter_message"]
+    assert redacted_starter["content"] is None
+    assert redacted_starter["attachments"] == []
+    assert redacted_starter["content_unavailable"] is True
+    assert redacted_starter["attachments_unavailable"] is True
+
+    history_scopes = content_scopes | {"messages.history"}
+    history_bot = principal(
+        scopes=history_scopes,
+        intents={"guilds", "message_content"},
+    )
+    visible = filtered_event(
+        history_bot,
+        event,
+        {"guilds", "message_content"},
+        history_scopes,
+    )
+    assert visible is not None
+    visible_starter = visible["d"]["threads"][0]["starter_message"]
+    assert visible_starter["content"] == "historical secret"
+    assert visible_starter["attachments"] == [{"id": "9", "filename": "secret.png"}]
+
+
+@pytest.mark.asyncio
+async def test_bot_pin_listing_applies_content_and_attachment_grants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = SimpleNamespace(granted_scopes=["messages.history"])
+    monkeypatch.setattr(
+        bots_api,
+        "installation_for_channel",
+        AsyncMock(return_value=(SimpleNamespace(), installation)),
+    )
+    monkeypatch.setattr(
+        bots_api,
+        "list_pins",
+        AsyncMock(
+            return_value=[
+                {
+                    "content": "pinned secret",
+                    "e2ee": None,
+                    "attachments": [{"id": "9"}],
+                    "referenced_message": {
+                        "content": "source secret",
+                        "e2ee": None,
+                        "attachments": [{"id": "10"}],
+                    },
+                }
+            ]
+        ),
+    )
+    bot = SimpleNamespace(
+        user=SimpleNamespace(id=10, origin_domain="apps.example"),
+        scopes=["messages.history"],
+    )
+
+    pins = await bots_api.bot_list_pins(
+        EntityRef("8@guild.example"),
+        bot,
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(domain="guild.example"),
+    )
+
+    assert pins[0]["content"] is None
+    assert pins[0]["attachments"] == []
+    assert pins[0]["content_unavailable"] is True
+    assert pins[0]["attachments_unavailable"] is True
+    source = pins[0]["referenced_message"]
+    assert source["content"] is None
+    assert source["attachments"] == []
 
 
 def test_gateway_intent_mapping_orders_reactions_before_messages() -> None:

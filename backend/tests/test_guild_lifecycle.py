@@ -238,9 +238,15 @@ async def test_local_bot_leave_cleans_installation_role_and_publishes_after_comm
     monkeypatch.setattr(guild_lifecycle, "_locked_guild", AsyncMock(return_value=guild))
     monkeypatch.setattr(guild_lifecycle, "revoke_installations_for_guild_member", revoke)
     monkeypatch.setattr(guild_lifecycle, "cleanup_installation_roles", cleanup)
-    monkeypatch.setattr(guild_lifecycle, "pause_guild_e2ee_for_membership_change", AsyncMock())
+    monkeypatch.setattr(
+        guild_lifecycle,
+        "cleanup_guild_member_threads",
+        AsyncMock(return_value=[]),
+    )
     monkeypatch.setattr(guild_lifecycle, "queue_guild_mutation", AsyncMock())
     monkeypatch.setattr(guild_lifecycle, "wake_queued_guild_federation", AsyncMock())
+    monkeypatch.setattr(guild_lifecycle, "publish_e2ee_policy_updates", AsyncMock())
+    monkeypatch.setattr(guild_lifecycle, "publish_guild_thread_member_cleanup", AsyncMock())
     monkeypatch.setattr(
         guild_lifecycle,
         "publish_deleted_installation_roles",
@@ -328,6 +334,11 @@ async def test_authority_applies_durable_leave_request_idempotently(monkeypatch)
     monkeypatch.setattr(federation, "queue_guild_mutation", queue_mutation)
     monkeypatch.setattr(federation, "revoke_installations_for_guild_member", revoke)
     monkeypatch.setattr(federation, "cleanup_installation_roles", cleanup)
+    monkeypatch.setattr(
+        federation,
+        "cleanup_guild_member_threads",
+        AsyncMock(return_value=[]),
+    )
 
     assert await federation._apply_authoritative_guild_leave(
         session,
@@ -336,7 +347,7 @@ async def test_authority_applies_durable_leave_request_idempotently(monkeypatch)
         user_id=remote.id,
         user_domain=remote.origin_domain,
         missing_ok=False,
-    ) == (True, [(90, guild.origin_domain)])
+    ) == (True, [(90, guild.origin_domain)], [])
     session.delete.assert_awaited_once_with(member)
     revoke.assert_awaited_once()
     cleanup.assert_awaited_once_with(
@@ -358,7 +369,7 @@ async def test_authority_applies_durable_leave_request_idempotently(monkeypatch)
         user_id=remote.id,
         user_domain=remote.origin_domain,
         missing_ok=True,
-    ) == (False, [])
+    ) == (False, [], [])
     session.delete.assert_not_awaited()
 
 
@@ -385,7 +396,7 @@ async def test_direct_authoritative_leave_publishes_role_cleanup_only_after_comm
         scalar=AsyncMock(return_value=guild),
         commit=AsyncMock(side_effect=commit),
     )
-    applied = AsyncMock(return_value=(True, [(90, guild.origin_domain)]))
+    applied = AsyncMock(return_value=(True, [(90, guild.origin_domain)], []))
     monkeypatch.setattr(federation, "require_guild_federation_access", Mock())
     monkeypatch.setattr(federation, "enforce_federation_route_rate_limit", AsyncMock())
     monkeypatch.setattr(federation, "_apply_authoritative_guild_leave", applied)
@@ -404,6 +415,8 @@ async def test_direct_authoritative_leave_publishes_role_cleanup_only_after_comm
         "publish_dispatch",
         AsyncMock(side_effect=publish_member),
     )
+    monkeypatch.setattr(federation, "publish_e2ee_policy_updates", AsyncMock())
+    monkeypatch.setattr(federation, "publish_guild_thread_member_cleanup", AsyncMock())
 
     response = await federation.federation_guild_leave(
         guild.id,
@@ -423,6 +436,7 @@ async def test_direct_authoritative_leave_publishes_role_cleanup_only_after_comm
         user_id=2,
         user_domain="remote.example",
         missing_ok=False,
+        e2ee_policy_channels=[],
     )
 
 

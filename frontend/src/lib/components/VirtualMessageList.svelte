@@ -5,6 +5,7 @@
     items,
     renderItem,
     empty,
+    header,
     historyStart,
     hasEarlier = false,
     loadingEarlier = false,
@@ -19,6 +20,8 @@
     items: T[];
     renderItem: Snippet<[item: T, index: number]>;
     empty?: Snippet;
+    /** Optional non-history content pinned above the currently loaded items. */
+    header?: Snippet;
     /** Optional explanation shown at the oldest retained history boundary. */
     historyStart?: Snippet;
     hasEarlier?: boolean;
@@ -178,6 +181,7 @@
       {:else if items.length && historyStart}
         {@render historyStart()}
       {/if}
+      {#if header}{@render header()}{/if}
       {#if !items.length && empty}{@render empty()}{/if}
       {#each items as item, index (item.key)}
         <div class="virtual-message-item" data-virtual-key={item.key}>

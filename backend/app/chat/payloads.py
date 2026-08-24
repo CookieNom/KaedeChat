@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.e2ee import channel_encryption_policy_payload
+from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
 from app.db.models import (
     Attachment,
     AuditLogEntry,
@@ -13,9 +16,11 @@ from app.db.models import (
     Guild,
     GuildInstanceBan,
     GuildMember,
+    MemberRole,
     Message,
     Relationship,
     Role,
+    ThreadMember,
     User,
 )
 from app.media.payloads import attachment_payload as media_attachment_payload
@@ -24,6 +29,24 @@ from app.media.payloads import attachment_payload as media_attachment_payload
 def resource_version(value: object) -> str | None:
     updated_at = getattr(value, "updated_at", None)
     return updated_at.isoformat() if updated_at is not None else None
+
+
+def materialize_channel_created_at(channel: Channel) -> datetime:
+    """Give pre-flush channels the same immutable time on every instance.
+
+    ``created_at`` is database-defaulted, but channel payloads and federation
+    mutations are deliberately rendered before the flush that allocates that
+    default. Channel IDs already carry the authoritative millisecond, so use it
+    once and persist the value on the model instead of publishing a receipt-time
+    timestamp that could make forum Date Posted ordering diverge.
+    """
+
+    created_at = channel.created_at
+    if created_at is None:
+        timestamp_ms = EPOCH_MS + (channel.id >> (WORKER_BITS + SEQUENCE_BITS))
+        created_at = datetime.fromtimestamp(timestamp_ms / 1000, UTC)
+        channel.created_at = created_at
+    return created_at
 
 
 def public_user_display_name(user: User) -> str:
@@ -90,12 +113,13 @@ def emoji_payload(emoji: Emoji) -> dict[str, object]:
 
 
 def channel_payload(channel: Channel) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "id": str(channel.id),
         "origin_domain": channel.origin_domain,
         "guild_id": str(channel.guild_id) if channel.guild_id is not None else None,
         "guild_domain": channel.guild_domain,
         "type": channel.type,
+        "created_at": materialize_channel_created_at(channel).isoformat(),
         "name": channel.name,
         "topic": channel.topic,
         "position": channel.position,
@@ -103,6 +127,36 @@ def channel_payload(channel: Channel) -> dict[str, object]:
         "parent_domain": channel.parent_domain,
         "permissions_synced": channel.permissions_synced,
         "rate_limit_per_user": channel.rate_limit_per_user,
+        "flags": channel.flags,
+        "owner_id": str(channel.owner_id) if channel.owner_id is not None else None,
+        "owner_domain": channel.owner_domain,
+        "archived": channel.archived,
+        "locked": channel.locked,
+        "invitable": channel.invitable,
+        "auto_archive_duration": channel.auto_archive_duration,
+        "archive_timestamp": (
+            channel.archive_timestamp.isoformat() if channel.archive_timestamp is not None else None
+        ),
+        "message_count": channel.message_count,
+        "total_message_sent": channel.total_message_sent,
+        "member_count": (
+            min(50, channel.member_count) if channel.member_count is not None else None
+        ),
+        "starter_message_id": (
+            str(channel.starter_message_id) if channel.starter_message_id is not None else None
+        ),
+        "starter_message_domain": channel.starter_message_domain,
+        "default_auto_archive_duration": channel.default_auto_archive_duration,
+        "default_thread_rate_limit_per_user": channel.default_thread_rate_limit_per_user,
+        "available_tags": channel.available_tags,
+        "applied_tag_ids": channel.applied_tag_ids,
+        # Discord calls the request field ``applied_tags``. Return both during
+        # the compatibility window; both contain IDs, never duplicate state.
+        "applied_tags": channel.applied_tag_ids,
+        "default_reaction_emoji": channel.default_reaction_emoji,
+        "default_sort_order": channel.default_sort_order,
+        "default_forum_layout": channel.default_forum_layout,
+        "e2ee_required": channel.e2ee_required,
         "federated_history_policy": channel.federated_history_policy,
         "encryption_mode": channel.encryption_mode,
         "encryption_state": channel.encryption_state,
@@ -121,10 +175,138 @@ def channel_payload(channel: Channel) -> dict[str, object]:
         "encryption_policy": channel_encryption_policy_payload(channel),
         "search_available": channel.encryption_mode == "plaintext",
         "last_message_id": (
-            str(channel.last_message_id) if channel.last_message_id is not None else None
+            str(channel.last_thread_id)
+            if channel.type == 15 and channel.last_thread_id is not None
+            else str(channel.last_message_id)
+            if channel.last_message_id is not None
+            else str(channel.starter_message_id)
+            if channel.type in {10, 11, 12}
+            and channel.starter_message_id == channel.id
+            and channel.starter_message_domain == channel.origin_domain
+            else None
         ),
-        "last_message_domain": channel.last_message_domain,
+        "last_message_domain": (
+            channel.last_thread_domain
+            if channel.type == 15
+            else channel.last_message_domain
+            if channel.last_message_id is not None
+            else channel.starter_message_domain
+            if channel.type in {10, 11, 12}
+            and channel.starter_message_id == channel.id
+            and channel.starter_message_domain == channel.origin_domain
+            else None
+        ),
         "version": resource_version(channel),
+    }
+    if channel.type in {10, 11, 12}:
+        payload["thread_metadata"] = {
+            "archived": bool(channel.archived),
+            "auto_archive_duration": channel.auto_archive_duration,
+            "archive_timestamp": (
+                channel.archive_timestamp.isoformat()
+                if channel.archive_timestamp is not None
+                else None
+            ),
+            "locked": bool(channel.locked),
+            "invitable": channel.invitable,
+            "create_timestamp": channel.created_at.isoformat(),
+        }
+    return payload
+
+
+def thread_member_payload(member: ThreadMember) -> dict[str, object]:
+    return {
+        "id": str(member.thread_id),
+        "thread_domain": member.thread_domain,
+        "guild_id": str(member.guild_id),
+        "guild_domain": member.guild_domain,
+        "user_id": str(member.user_id),
+        "user_domain": member.user_domain,
+        "join_timestamp": member.joined_at.isoformat(),
+        "flags": member.flags,
+        "notification_level": member.notification_level,
+    }
+
+
+async def rich_thread_member_payload(
+    session: AsyncSession,
+    member: ThreadMember,
+) -> dict[str, object]:
+    """Render a thread member with Discord's optional guild member envelope."""
+
+    rendered = thread_member_payload(member)
+    guild_member = await session.get(
+        GuildMember,
+        (member.guild_id, member.guild_domain, member.user_id, member.user_domain),
+    )
+    user = await session.get(User, (member.user_id, member.user_domain))
+    if guild_member is not None and user is not None:
+        role_ids = list(
+            await session.scalars(
+                select(MemberRole.role_id).where(
+                    MemberRole.guild_id == member.guild_id,
+                    MemberRole.guild_domain == member.guild_domain,
+                    MemberRole.user_id == member.user_id,
+                    MemberRole.user_domain == member.user_domain,
+                )
+            )
+        )
+        rendered["member"] = member_payload(guild_member, user, role_ids)
+    else:
+        rendered["member"] = None
+    # Presence is nullable even for GUILD_MEMBERS deliveries and Kaede does not
+    # synthesize presence from durable membership state.
+    rendered["presence"] = None
+    return rendered
+
+
+def thread_source_starter_payload(
+    thread: Channel,
+    source: dict[str, object],
+) -> dict[str, object]:
+    """Project a parent source message as Discord's type-21 child starter."""
+
+    # Type 21 is a system wrapper, not a second copy of the source body. Keep
+    # stable identity/attribution/time fields on top and resolve the actual
+    # source only through referenced_message when history policy permits it.
+    return {
+        "id": str(source["id"]),
+        "origin_domain": source["origin_domain"],
+        "channel_id": str(thread.id),
+        "channel_domain": thread.origin_domain,
+        "author_id": source.get("author_id"),
+        "author_domain": source.get("author_domain"),
+        "author": source.get("author"),
+        "content": None,
+        "e2ee": None,
+        "encryption_policy_generation": str(thread.encryption_policy_generation),
+        "encryption_epoch": None,
+        "message_type": 21,
+        "flags": 0,
+        "client_nonce": None,
+        "referenced_message_id": None,
+        "referenced_message_domain": None,
+        "message_reference": {
+            "type": 0,
+            "message_id": str(source["id"]),
+            "message_domain": source["origin_domain"],
+            "channel_id": source["channel_id"],
+            "channel_domain": source["channel_domain"],
+            "guild_id": str(thread.guild_id),
+            "guild_domain": thread.guild_domain,
+        },
+        "referenced_message": None if source.get("deleted_at") is not None else source,
+        "mention_user_refs": [],
+        "attachments": [],
+        "embeds": [],
+        "components": [],
+        "reaction_counts": {},
+        "reacted_emoji": [],
+        "webhook_id": None,
+        "webhook": None,
+        "edited_at": None,
+        "deleted_at": None,
+        "created_at": source.get("created_at") or thread.created_at.isoformat(),
     }
 
 
@@ -313,4 +495,19 @@ async def render_message_payload(
             .order_by(Attachment.id)
         )
     )
-    return message_payload(message, author, attachments)
+    rendered = message_payload(message, author, attachments)
+    if message.flags & (1 << 5) or message.message_type == 18:
+        thread = await session.get(Channel, (message.id, message.origin_domain))
+        if thread is not None and thread.type in {10, 11, 12} and not thread.unavailable:
+            rendered["thread"] = channel_payload(thread)
+            if message.message_type == 18:
+                rendered["message_reference"] = {
+                    "type": 0,
+                    "message_id": None,
+                    "message_domain": None,
+                    "channel_id": str(thread.id),
+                    "channel_domain": thread.origin_domain,
+                    "guild_id": str(thread.guild_id),
+                    "guild_domain": thread.guild_domain,
+                }
+    return rendered

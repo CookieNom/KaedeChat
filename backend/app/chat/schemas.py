@@ -67,18 +67,54 @@ class GuildOwnershipTransfer(RequestModel):
     owner_id: EntityRef
 
 
+class ForumTag(RequestModel):
+    id: WireSnowflake | None = None
+    # Discord's Available Tag structure specifies only a 20-character maximum.
+    name: str = Field(max_length=20)
+    moderated: bool = False
+    emoji_id: WireSnowflake | None = None
+    emoji_name: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def one_emoji(self) -> ForumTag:
+        if self.emoji_id is not None and self.emoji_name is not None:
+            raise ValueError("forum tag emoji_id and emoji_name are mutually exclusive")
+        return self
+
+
+class DefaultReactionEmoji(RequestModel):
+    emoji_id: WireSnowflake | None = None
+    emoji_name: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def exactly_one_emoji(self) -> DefaultReactionEmoji:
+        if (self.emoji_id is None) == (self.emoji_name is None):
+            raise ValueError("exactly one default reaction emoji is required")
+        return self
+
+
 class ChannelCreate(RequestModel):
     name: str = Field(min_length=1, max_length=100)
     type: int = Field(default=0)
-    topic: str | None = Field(default=None, max_length=1024)
+    topic: str | None = Field(default=None, max_length=4096)
     parent_id: WireSnowflake | None = None
     rate_limit_per_user: int = Field(default=0, ge=0, le=21_600)
+    available_tags: list[ForumTag] = Field(default_factory=list, max_length=20)
+    default_reaction_emoji: DefaultReactionEmoji | None = None
+    default_auto_archive_duration: Literal[60, 1440, 4320, 10080] = 1440
+    default_thread_rate_limit_per_user: int = Field(default=0, ge=0, le=21_600)
+    default_sort_order: Literal[0, 1] | None = None
+    default_forum_layout: Literal[0, 1, 2] = 0
+    e2ee_required: bool = False
+    flags: Literal[0, 16] = 0
 
     @field_validator("type")
     @classmethod
     def supported_guild_type(cls, value: int) -> int:
-        if value not in {0, 2, 4, 5}:
-            raise ValueError("must be a guild text, voice, category, or announcement channel")
+        if value not in {0, 2, 4, 5, 15}:
+            raise ValueError(
+                "must be a guild text, voice, category, announcement, or forum channel"
+            )
         return value
 
     @field_validator("name")
@@ -86,15 +122,44 @@ class ChannelCreate(RequestModel):
     def clean_name(cls, value: str) -> str:
         return cleaned_nonempty(value)
 
+    @model_validator(mode="after")
+    def valid_forum_fields(self) -> ChannelCreate:
+        if self.type != 15 and (
+            self.available_tags
+            or self.default_reaction_emoji is not None
+            or self.default_sort_order is not None
+            or self.e2ee_required
+            or self.flags
+            or self.default_forum_layout != 0
+        ):
+            raise ValueError("forum defaults are only valid for forum channels")
+        if self.type not in {0, 15} and self.default_thread_rate_limit_per_user != 0:
+            raise ValueError("default thread slowmode is only valid for text and forum channels")
+        if self.type != 15 and self.topic is not None and len(self.topic) > 1024:
+            raise ValueError("non-forum channel topics are limited to 1024 characters")
+        names = [tag.name.casefold() for tag in self.available_tags]
+        ids = [tag.id for tag in self.available_tags if tag.id is not None]
+        if len(names) != len(set(names)) or len(ids) != len(set(ids)):
+            raise ValueError("forum tags must have unique names and IDs")
+        return self
+
 
 class ChannelUpdate(RequestModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
-    topic: str | None = Field(default=None, max_length=1024)
+    topic: str | None = Field(default=None, max_length=4096)
     position: int | None = Field(default=None, ge=0)
     parent_id: WireSnowflake | None = None
     rate_limit_per_user: int | None = Field(default=None, ge=0, le=21_600)
     federated_history_policy: Literal["inherit", "disabled", "full_retained"] | None = None
     sync_permissions: bool | None = None
+    available_tags: list[ForumTag] | None = Field(default=None, max_length=20)
+    default_reaction_emoji: DefaultReactionEmoji | None = None
+    default_auto_archive_duration: Literal[60, 1440, 4320, 10080] | None = None
+    default_thread_rate_limit_per_user: int | None = Field(default=None, ge=0, le=21_600)
+    default_sort_order: Literal[0, 1] | None = None
+    default_forum_layout: Literal[0, 1, 2] | None = None
+    e2ee_required: bool | None = None
+    flags: Literal[0, 16] | None = None
 
     @field_validator("name")
     @classmethod
@@ -111,9 +176,20 @@ class ChannelUpdate(RequestModel):
             "rate_limit_per_user",
             "federated_history_policy",
             "sync_permissions",
+            "available_tags",
+            "default_auto_archive_duration",
+            "default_thread_rate_limit_per_user",
+            "default_forum_layout",
+            "e2ee_required",
+            "flags",
         ):
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError(f"channel {field} cannot be null")
+        if self.available_tags is not None:
+            names = [tag.name.casefold() for tag in self.available_tags]
+            ids = [tag.id for tag in self.available_tags if tag.id is not None]
+            if len(names) != len(set(names)) or len(ids) != len(set(ids)):
+                raise ValueError("forum tags must have unique names and IDs")
         return self
 
 

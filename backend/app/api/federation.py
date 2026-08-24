@@ -31,6 +31,14 @@ from sqlalchemy import and_, delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.api.channels import (
+    MESSAGE_FLAG_FAILED_TO_MENTION_SOME_ROLES_IN_THREAD,
+    admit_thread_message_members,
+    capture_thread_message_projection,
+    publish_current_thread_member_updates,
+    require_message_encryption_policy,
+    thread_structural_state_before_message,
+)
 from app.api.dependencies import AuthenticatedUser, get_redis, get_session, get_snowflake
 from app.api.e2ee import (
     RoomActivationRequest,
@@ -52,12 +60,10 @@ from app.bots.installations import (
 )
 from app.chat.custom_emojis import validate_custom_emoji_use
 from app.chat.e2ee import (
-    MessageEncryptionPolicyError,
     channel_encryption_policy_payload,
     validate_channel_encryption_policy,
     validate_channel_encryption_policy_transition,
     validate_e2ee_envelope,
-    validate_message_encryption_policy,
 )
 from app.chat.e2ee_controls import (
     authority_attested_direct_dm_control,
@@ -94,6 +100,8 @@ from app.chat.payloads import (
     guild_payload,
     message_payload,
     render_message_payload,
+    rich_thread_member_payload,
+    thread_member_payload,
     user_payload,
 )
 from app.chat.permissions import (
@@ -102,6 +110,12 @@ from app.chat.permissions import (
     resolve_permissions,
 )
 from app.chat.privacy import require_can_direct_message
+from app.chat.thread_limits import require_active_thread_capacity
+from app.chat.thread_membership import (
+    RemovedThreadMembers,
+    cleanup_guild_member_threads,
+    publish_guild_thread_member_cleanup,
+)
 from app.core.dm import dm_authority_domain, dm_pair_key
 from app.core.federation import (
     FEDERATION_CAPABILITIES,
@@ -150,6 +164,7 @@ from app.db.models import (
     Role,
     RoomFederationRecipient,
     TerminalRoomDeletion,
+    ThreadMember,
     User,
 )
 from app.federation.client import signed_request
@@ -852,7 +867,8 @@ async def _apply_authoritative_guild_leave(
     user_id: int,
     user_domain: str,
     missing_ok: bool,
-) -> tuple[bool, list[tuple[int, str]]]:
+    e2ee_policy_channels: list[Channel] | None = None,
+) -> tuple[bool, list[tuple[int, str]], list[RemovedThreadMembers]]:
     """Apply an idempotent remote leave at the guild authority."""
 
     member = await session.get(
@@ -861,7 +877,7 @@ async def _apply_authoritative_guild_leave(
     )
     if member is None:
         if missing_ok:
-            return False, []
+            return False, [], []
         raise HTTPException(status_code=404, detail={"code": "NOT_A_GUILD_MEMBER"})
     if (guild.owner_id, guild.owner_domain) == (user_id, user_domain):
         raise HTTPException(
@@ -885,6 +901,13 @@ async def _apply_authoritative_guild_leave(
         owner,
         revoked_installations,
     )
+    removed_thread_members = await cleanup_guild_member_threads(
+        session,
+        settings,
+        guild,
+        owner,
+        [(user_id, user_domain)],
+    )
     await session.delete(member)
     await queue_guild_access_revocation(
         session,
@@ -894,6 +917,7 @@ async def _apply_authoritative_guild_leave(
         user_domain=user_domain,
         reason="member_left",
     )
+    leaving_user = await session.get(User, (user_id, user_domain))
     await queue_guild_mutation(
         session,
         settings,
@@ -902,8 +926,10 @@ async def _apply_authoritative_guild_leave(
         "guild.member.remove",
         {"user": {"id": str(user_id), "origin_domain": user_domain}},
         snapshot_required=True,
+        e2ee_policy_channels=e2ee_policy_channels,
+        pause_e2ee=leaving_user is None or leaving_user.account_type != "bot",
     )
-    return True, deleted_role_refs
+    return True, deleted_role_refs, removed_thread_members
 
 
 async def remote_guild_snapshot_is_pending(
@@ -1587,12 +1613,17 @@ async def process_event(
         raise RuntimeError("federation inbox claim disappeared")
     replicated_message = None
     replicated_guild_message = None
+    replicated_thread_message: Channel | None = None
     replicated_guild = None
     replicated_guild_member: User | None = None
     replicated_guild_dispatch: tuple[str, dict[str, object]] | None = None
     home_message = None
     home_message_attachments: list[Attachment] = []
     home_message_created = False
+    home_thread: Channel | None = None
+    home_thread_members_added: list[ThreadMember] = []
+    home_thread_updated = False
+    home_thread_was_unarchived = False
     delivery_wakes: set[str] = set()
     rejection_target: tuple[int, str] | None = None
     rejection_payload: dict[str, object] | None = None
@@ -1622,6 +1653,7 @@ async def process_event(
     authoritative_leave_guild: Guild | None = None
     authoritative_leave_target: tuple[int, str] | None = None
     authoritative_leave_role_refs: list[tuple[int, str]] = []
+    authoritative_leave_thread_removals: list[RemovedThreadMembers] = []
     replicated_group_call: dict[str, Any] | None = None
     e2ee_policy_channels: list[Channel] = []
     durably_committed = False
@@ -2337,6 +2369,19 @@ async def process_event(
                 )
             if replicated_guild_message is None:
                 raise RuntimeError("replicated guild message disappeared")
+            replicated_message_channel = await session.get(
+                Channel,
+                (
+                    replicated_guild_message.channel_id,
+                    replicated_guild_message.channel_domain,
+                ),
+            )
+            if (
+                replicated_message_channel is not None
+                and replicated_message_channel.type in {10, 11, 12}
+                and envelope.content.get("thread_starter") is not True
+            ):
+                replicated_thread_message = replicated_message_channel
             terminal_attachment_refs = await terminal_attachment_refs_for_messages(
                 session,
                 settings,
@@ -2385,7 +2430,12 @@ async def process_event(
                 raise FederationResyncRetry from exc
             if applied_member is not None and applied_member[1]:
                 replicated_guild_member = applied_member[0]
-                await pause_guild_e2ee_for_membership_change(session, replicated_guild)
+                if replicated_guild_member.account_type != "bot":
+                    paused = await pause_guild_e2ee_for_membership_change(session, replicated_guild)
+                    known = {(item.id, item.origin_domain) for item in e2ee_policy_channels}
+                    e2ee_policy_channels.extend(
+                        item for item in paused if (item.id, item.origin_domain) not in known
+                    )
         elif envelope.type == "guild.leave.request":
             guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
             guild_domain = normalize_domain(str(envelope.context.get("guild_domain", "")))
@@ -2405,18 +2455,24 @@ async def process_event(
             if home_leave_guild is None:
                 raise ValueError("guild leave request references an unknown guild")
             leave_user_id = database_snowflake(envelope.actor.id, "guild leave user id")
-            leave_applied, deleted_role_refs = await _apply_authoritative_guild_leave(
+            (
+                leave_applied,
+                deleted_role_refs,
+                thread_removals,
+            ) = await _apply_authoritative_guild_leave(
                 session,
                 settings,
                 home_leave_guild,
                 user_id=leave_user_id,
                 user_domain=envelope.actor.domain,
                 missing_ok=True,
+                e2ee_policy_channels=e2ee_policy_channels,
             )
             if leave_applied:
                 authoritative_leave_guild = home_leave_guild
                 authoritative_leave_target = (leave_user_id, envelope.actor.domain)
                 authoritative_leave_role_refs = deleted_role_refs
+                authoritative_leave_thread_removals = thread_removals
         elif envelope.type in GUILD_MUTATION_EVENT_TYPES | {"guild.event.redacted"}:
             guild_id = database_snowflake(envelope.context.get("guild_id"), "guild id")
             guild_domain = normalize_domain(str(envelope.context.get("guild_domain", "")))
@@ -2459,6 +2515,7 @@ async def process_event(
                         settings,
                         replicated_guild,
                         envelope.model_dump(mode="json"),
+                        e2ee_policy_channels=e2ee_policy_channels,
                     )
                     history_access_changed = envelope.type in HISTORY_ACCESS_MUTATION_EVENT_TYPES
                 except GuildSequenceGap as exc:
@@ -2606,14 +2663,18 @@ async def process_event(
             if (
                 loaded_proxy_channel is None
                 or loaded_proxy_channel.guild_id != guild.id
-                or loaded_proxy_channel.type not in {0, 5}
+                or loaded_proxy_channel.type not in {0, 5, 10, 11, 12}
             ):
                 raise ValueError("proxy channel is not in the guild")
             channel = loaded_proxy_channel
             raw_attachments = envelope.content.get("attachments", [])
             if not isinstance(raw_attachments, list) or len(raw_attachments) > 10:
                 raise ValueError("proxy write attachment list is invalid")
-            needed = Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES
+            needed = Permission.VIEW_CHANNEL | (
+                Permission.SEND_MESSAGES_IN_THREADS
+                if channel.type in {10, 11, 12}
+                else Permission.SEND_MESSAGES
+            )
             if raw_attachments:
                 needed |= Permission.ATTACH_FILES
             actor_permissions = await require_permissions(
@@ -2624,6 +2685,21 @@ async def process_event(
                 needed,
                 channel=channel,
             )
+            if (
+                channel.type in {10, 11, 12}
+                and channel.locked
+                and not actor_permissions & Permission.MANAGE_THREADS
+            ):
+                raise HTTPException(status_code=403, detail={"code": "THREAD_LOCKED"})
+            if (
+                channel.type in {10, 11, 12}
+                and actor.account_type == "bot"
+                and (channel.e2ee_required or channel.encryption_mode == "e2ee")
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "BOT_THREAD_E2EE_UNSUPPORTED"},
+                )
             await validate_custom_emoji_use(
                 session,
                 actor,
@@ -2654,6 +2730,12 @@ async def process_event(
                 raise ValueError(
                     "proxy write requires content, encrypted content, or an attachment"
                 )
+            require_message_encryption_policy(
+                channel,
+                content=proxy_content,
+                e2ee=proxy_e2ee,
+                attachment_count=len(raw_attachments),
+            )
             raw_mention_refs = envelope.content.get("mention_user_refs", [])
             if not isinstance(raw_mention_refs, list) or len(raw_mention_refs) > 5_000:
                 raise ValueError("proxy write mention list is invalid")
@@ -2667,9 +2749,12 @@ async def process_event(
                         str(ref.get("origin_domain")),
                     )
                 )
+            role_mention_refs = set(
+                await role_mention_recipients(session, guild, proxy_content, actor_permissions)
+            )
             parsed_mention_refs = merge_mention_recipients(
                 parsed_mention_refs,
-                await role_mention_recipients(session, guild, proxy_content, actor_permissions),
+                list(role_mention_refs),
             )
             mention_refs = await validated_guild_mentions(session, guild, parsed_mention_refs)
             raw_reference = envelope.content.get("referenced_message_ref")
@@ -2695,7 +2780,28 @@ async def process_event(
                 )
             )
             if home_message is None:
-                if channel.rate_limit_per_user:
+                prior_thread_message_projection = (
+                    capture_thread_message_projection(channel)
+                    if channel.type in {10, 11, 12}
+                    else None
+                )
+                thread_was_unarchived = False
+                if channel.type in {10, 11, 12} and channel.archived:
+                    if channel.locked and not actor_permissions & Permission.MANAGE_THREADS:
+                        raise HTTPException(status_code=403, detail={"code": "THREAD_LOCKED"})
+                    await require_active_thread_capacity(
+                        session,
+                        guild,
+                        excluding=(channel.id, channel.origin_domain),
+                    )
+                    channel.archived = False
+                    channel.archive_timestamp = datetime.now(UTC)
+                    thread_was_unarchived = True
+                if (
+                    channel.rate_limit_per_user
+                    and actor.account_type != "bot"
+                    and not actor_permissions & Permission.BYPASS_SLOWMODE
+                ):
                     allowed = await redis.set(
                         (
                             f"slowmode:{channel.origin_domain}:{channel.id}:"
@@ -2740,6 +2846,50 @@ async def process_event(
                 )
                 session.add(home_message)
                 await session.flush()
+                if channel.type in {10, 11, 12}:
+                    channel.last_message_id = home_message.id
+                    channel.last_message_domain = home_message.origin_domain
+                    channel.message_count = int(channel.message_count or 0) + 1
+                    channel.total_message_sent = int(channel.total_message_sent or 0) + 1
+                    channel.last_activity_at = home_message.created_at
+                    (
+                        home_thread_members_added,
+                        thread_rekeyed,
+                        failed_role_mentions,
+                    ) = await admit_thread_message_members(
+                        session,
+                        redis,
+                        settings,
+                        guild,
+                        channel,
+                        actor,
+                        actor_permissions,
+                        parsed_mention_refs,
+                        role_mention_refs,
+                    )
+                    if failed_role_mentions:
+                        home_message.flags |= MESSAGE_FLAG_FAILED_TO_MENTION_SOME_ROLES_IN_THREAD
+                    home_thread = channel
+                    # Activity/count projections change on every real reply.
+                    home_thread_updated = True
+                    home_thread_was_unarchived = thread_was_unarchived
+                    if thread_was_unarchived or thread_rekeyed:
+                        if prior_thread_message_projection is None:
+                            raise RuntimeError("thread message projection was not captured")
+                        await queue_guild_mutation(
+                            session,
+                            settings,
+                            guild,
+                            actor,
+                            "guild.channel.update",
+                            {
+                                "channel": thread_structural_state_before_message(
+                                    channel,
+                                    prior_thread_message_projection,
+                                )
+                            },
+                            channel=channel,
+                        )
                 session.add(
                     MessageProjection(
                         message_id=home_message.id,
@@ -2773,6 +2923,7 @@ async def process_event(
                     {
                         "message": message_payload(home_message, actor, home_message_attachments),
                         "author": profile_from_user(actor),
+                        "thread_starter": False,
                     },
                     context={
                         "guild_id": str(guild.id),
@@ -3346,6 +3497,13 @@ async def process_event(
                 },
             )
         if replicated_guild_message is not None and replicated_guild is not None:
+            if replicated_thread_message is not None:
+                await publish_dispatch(
+                    redis,
+                    guild_topic(replicated_guild.origin_domain, replicated_guild.id),
+                    "THREAD_UPDATE",
+                    channel_payload(replicated_thread_message),
+                )
             await publish_dispatch(
                 redis,
                 guild_topic(replicated_guild.origin_domain, replicated_guild.id),
@@ -3373,6 +3531,11 @@ async def process_event(
                 redis,
                 authoritative_leave_guild,
                 authoritative_leave_role_refs,
+            )
+            await publish_guild_thread_member_cleanup(
+                redis,
+                authoritative_leave_guild,
+                authoritative_leave_thread_removals,
             )
             await publish_dispatch(
                 redis,
@@ -3433,6 +3596,68 @@ async def process_event(
                     {
                         "id": str(replicated_guild.id),
                         "origin_domain": replicated_guild.origin_domain,
+                    },
+                )
+        if home_thread is not None:
+            if home_thread.guild_domain is None or home_thread.guild_id is None:
+                raise RuntimeError("thread lost its guild reference after commit")
+            thread_topic = guild_topic(home_thread.guild_domain, int(home_thread.guild_id))
+            if home_thread_updated:
+                await publish_dispatch(
+                    redis,
+                    thread_topic,
+                    "THREAD_UPDATE",
+                    channel_payload(home_thread),
+                )
+            if home_thread_was_unarchived:
+                home_thread_guild = await session.get(
+                    Guild,
+                    (home_thread.guild_id, home_thread.guild_domain),
+                )
+                if home_thread_guild is None:
+                    raise RuntimeError("thread guild disappeared after unarchive")
+                await publish_current_thread_member_updates(
+                    session,
+                    redis,
+                    home_thread_guild,
+                    home_thread,
+                )
+            if home_thread_members_added:
+                rendered_members = [
+                    thread_member_payload(member) for member in home_thread_members_added
+                ]
+                rich_rendered_members = [
+                    await rich_thread_member_payload(session, member)
+                    for member in home_thread_members_added
+                ]
+                for rendered_member in rendered_members:
+                    target_ref = f"{rendered_member['user_id']}@{rendered_member['user_domain']}"
+                    await publish_dispatch(
+                        redis,
+                        thread_topic,
+                        "THREAD_CREATE",
+                        channel_payload(home_thread) | {"member": rendered_member},
+                        audience_user_refs=[target_ref],
+                    )
+                    await publish_dispatch(
+                        redis,
+                        thread_topic,
+                        "THREAD_MEMBER_UPDATE",
+                        rendered_member,
+                        audience_user_refs=[target_ref],
+                    )
+                await publish_dispatch(
+                    redis,
+                    thread_topic,
+                    "THREAD_MEMBERS_UPDATE",
+                    {
+                        "id": str(home_thread.id),
+                        "thread_domain": home_thread.origin_domain,
+                        "guild_id": str(home_thread.guild_id),
+                        "guild_domain": home_thread.guild_domain,
+                        "member_count": min(50, int(home_thread.member_count or 0)),
+                        "added_members": rich_rendered_members,
+                        "removed_member_ids": [],
                     },
                 )
         if home_message is not None and home_message_created:
@@ -5394,6 +5619,7 @@ async def federation_guild_join(
         redis, principal.origin, "guild-join", capacity=10, refill_per_minute=10
     )
     delivery_destinations: set[str] = set()
+    e2ee_policy_channels: list[Channel] = []
     if payload.user.origin_domain != principal.origin:
         raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
     user = await upsert_remote_user(session, settings, payload.user)
@@ -5459,7 +5685,10 @@ async def federation_guild_join(
             joined_at=datetime.now(UTC),
         )
         session.add(member)
-        await pause_guild_e2ee_for_membership_change(session, guild)
+        if user.account_type != "bot":
+            e2ee_policy_channels.extend(
+                await pause_guild_e2ee_for_membership_change(session, guild)
+            )
         invite.uses += 1
         guild.snapshot_generation += 1
         seq = await assign_guild_sequence(session, guild)
@@ -5503,6 +5732,7 @@ async def federation_guild_join(
         for destination in delivery_destinations:
             await queue_event(session, settings, destination, member_event)
         await session.commit()
+        await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
         await publish_dispatch(
             redis,
             guild_topic(guild.origin_domain, guild.id),
@@ -5545,17 +5775,21 @@ async def federation_guild_leave(
     if guild is None:
         raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
     user_id = database_snowflake(payload.user.id, "guild leave user id")
-    _, deleted_role_refs = await _apply_authoritative_guild_leave(
+    e2ee_policy_channels: list[Channel] = []
+    _, deleted_role_refs, removed_thread_members = await _apply_authoritative_guild_leave(
         session,
         settings,
         guild,
         user_id=user_id,
         user_domain=payload.user.domain,
         missing_ok=False,
+        e2ee_policy_channels=e2ee_policy_channels,
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
     await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
+    await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
     await publish_dispatch(
         redis,
         guild_topic(guild.origin_domain, guild.id),
@@ -6262,6 +6496,28 @@ async def federation_guild_snapshot(
     )
     if len(overwrites) > MAX_SNAPSHOT_VISIBILITY_OVERWRITES:
         raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+    thread_members = (
+        list(
+            await session.scalars(
+                select(ThreadMember)
+                .where(
+                    ThreadMember.thread_id.in_([ref[0] for ref in channel_refs]),
+                    ThreadMember.thread_domain == guild.origin_domain,
+                    tuple_(ThreadMember.user_id, ThreadMember.user_domain).in_(page_member_refs),
+                )
+                .order_by(
+                    ThreadMember.thread_id,
+                    ThreadMember.user_domain,
+                    ThreadMember.user_id,
+                )
+                .limit(100_001)
+            )
+        )
+        if channel_refs and page_member_refs
+        else []
+    )
+    if len(thread_members) > 100_000:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
     emojis = list(
         await session.scalars(
             select(Emoji)
@@ -6280,6 +6536,7 @@ async def federation_guild_snapshot(
         member_roles,
         overwrites,
         emojis=emojis,
+        thread_members=thread_members,
         member_snapshot_at=snapshot_at,
         next_member_cursor=next_member_cursor,
         snapshot_seq=snapshot_seq,
@@ -6474,22 +6731,20 @@ async def federation_guild_proxy(
         channel is None
         or channel.unavailable
         or channel.guild_id != guild.id
-        or channel.type not in {0, 5}
+        or channel.type not in {0, 5, 10, 11, 12}
     ):
         raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
-    try:
-        validate_message_encryption_policy(
-            channel.encryption_mode,
-            content=payload.content,
-            e2ee=payload.e2ee,
-            attachment_count=len(payload.attachments),
-            policy_generation=channel.encryption_policy_generation,
-            policy_epoch=channel.encryption_epoch,
-            policy_group_id=channel.encryption_group_id,
-        )
-    except MessageEncryptionPolicyError as exc:
-        raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
-    needed = Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES
+    require_message_encryption_policy(
+        channel,
+        content=payload.content,
+        e2ee=payload.e2ee,
+        attachment_count=len(payload.attachments),
+    )
+    needed = Permission.VIEW_CHANNEL | (
+        Permission.SEND_MESSAGES_IN_THREADS
+        if channel.type in {10, 11, 12}
+        else Permission.SEND_MESSAGES
+    )
     if payload.attachments:
         needed |= Permission.ATTACH_FILES
     actor_permissions = await require_permissions(
@@ -6500,6 +6755,18 @@ async def federation_guild_proxy(
         needed,
         channel=channel,
     )
+    if (
+        channel.type in {10, 11, 12}
+        and channel.locked
+        and not actor_permissions & Permission.MANAGE_THREADS
+    ):
+        raise HTTPException(status_code=403, detail={"code": "THREAD_LOCKED"})
+    if (
+        channel.type in {10, 11, 12}
+        and actor.account_type == "bot"
+        and (channel.e2ee_required or channel.encryption_mode == "e2ee")
+    ):
+        raise HTTPException(status_code=409, detail={"code": "BOT_THREAD_E2EE_UNSUPPORTED"})
     await record_room_federation_recipient(
         session,
         ("guild", guild.id, guild.origin_domain),
@@ -6556,6 +6823,21 @@ async def federation_guild_proxy(
             "seq": str(existing_event.seq),
             "event": existing_event.envelope,
         }
+    prior_thread_message_projection = (
+        capture_thread_message_projection(channel) if channel.type in {10, 11, 12} else None
+    )
+    thread_was_unarchived = False
+    if channel.type in {10, 11, 12} and channel.archived:
+        if channel.locked and not actor_permissions & Permission.MANAGE_THREADS:
+            raise HTTPException(status_code=403, detail={"code": "THREAD_LOCKED"})
+        await require_active_thread_capacity(
+            session,
+            guild,
+            excluding=(channel.id, channel.origin_domain),
+        )
+        channel.archived = False
+        channel.archive_timestamp = datetime.now(UTC)
+        thread_was_unarchived = True
     referenced_message: Message | None = None
     if payload.referenced_message_id is not None:
         reference = payload.referenced_message_id.resolve(settings.domain)
@@ -6565,7 +6847,11 @@ async def federation_guild_proxy(
             referenced_message.channel_domain,
         ) != (channel.id, channel.origin_domain):
             raise HTTPException(status_code=400, detail={"code": "INVALID_MESSAGE_REFERENCE"})
-    if channel.rate_limit_per_user:
+    if (
+        channel.rate_limit_per_user
+        and actor.account_type != "bot"
+        and not actor_permissions & Permission.BYPASS_SLOWMODE
+    ):
         slowmode_key = (
             f"slowmode:{channel.origin_domain}:{channel.id}:{actor.origin_domain}:{actor.id}"
         )
@@ -6583,6 +6869,14 @@ async def federation_guild_proxy(
                     "retry_after_ms": max(1000, await redis.pttl(slowmode_key)),
                 },
             )
+    role_mention_refs = set(
+        await role_mention_recipients(session, guild, payload.content, actor_permissions)
+    )
+    parsed_mention_refs = merge_mention_recipients(
+        [item.resolve(principal.origin) for item in payload.mention_user_ids],
+        list(role_mention_refs),
+    )
+    mention_refs = await validated_guild_mentions(session, guild, parsed_mention_refs)
     message = Message(
         id=await snowflake.mint(),
         origin_domain=settings.domain,
@@ -6599,18 +6893,51 @@ async def federation_guild_proxy(
         referenced_message_domain=(
             referenced_message.origin_domain if referenced_message is not None else None
         ),
-        mention_user_refs=await validated_guild_mentions(
-            session,
-            guild,
-            merge_mention_recipients(
-                [item.resolve(principal.origin) for item in payload.mention_user_ids],
-                await role_mention_recipients(session, guild, payload.content, actor_permissions),
-            ),
-        ),
+        mention_user_refs=mention_refs,
         flags=(0 if actor_permissions & Permission.EMBED_LINKS else 4),
     )
     session.add(message)
     await session.flush()
+    added_thread_members: list[ThreadMember] = []
+    thread_rekeyed = False
+    if channel.type in {10, 11, 12}:
+        channel.message_count = int(channel.message_count or 0) + 1
+        channel.total_message_sent = int(channel.total_message_sent or 0) + 1
+        channel.last_activity_at = message.created_at
+        (
+            added_thread_members,
+            thread_rekeyed,
+            failed_role_mentions,
+        ) = await admit_thread_message_members(
+            session,
+            redis,
+            settings,
+            guild,
+            channel,
+            actor,
+            actor_permissions,
+            parsed_mention_refs,
+            role_mention_refs,
+        )
+        if failed_role_mentions:
+            message.flags |= MESSAGE_FLAG_FAILED_TO_MENTION_SOME_ROLES_IN_THREAD
+        if thread_was_unarchived or thread_rekeyed:
+            if prior_thread_message_projection is None:
+                raise RuntimeError("thread message projection was not captured")
+            await queue_guild_mutation(
+                session,
+                settings,
+                guild,
+                actor,
+                "guild.channel.update",
+                {
+                    "channel": thread_structural_state_before_message(
+                        channel,
+                        prior_thread_message_projection,
+                    )
+                },
+                channel=channel,
+            )
     session.add(
         MessageProjection(
             message_id=message.id,
@@ -6634,7 +6961,11 @@ async def federation_guild_proxy(
         settings,
         "guild.message.committed",
         owner,
-        {"message": rendered, "author": profile_from_user(actor)},
+        {
+            "message": rendered,
+            "author": profile_from_user(actor),
+            "thread_starter": False,
+        },
         context={
             "guild_id": str(guild.id),
             "guild_domain": guild.origin_domain,
@@ -6648,6 +6979,51 @@ async def federation_guild_proxy(
     for destination in remote_destinations:
         await queue_event(session, settings, destination, committed)
     await session.commit()
+    if channel.type in {10, 11, 12}:
+        thread_topic = guild_topic(guild.origin_domain, guild.id)
+        await publish_dispatch(
+            redis,
+            thread_topic,
+            "THREAD_UPDATE",
+            channel_payload(channel),
+        )
+        if thread_was_unarchived:
+            await publish_current_thread_member_updates(session, redis, guild, channel)
+        if added_thread_members:
+            rendered_members = [thread_member_payload(member) for member in added_thread_members]
+            rich_rendered_members = [
+                await rich_thread_member_payload(session, member) for member in added_thread_members
+            ]
+            for rendered_member in rendered_members:
+                target_ref = f"{rendered_member['user_id']}@{rendered_member['user_domain']}"
+                await publish_dispatch(
+                    redis,
+                    thread_topic,
+                    "THREAD_CREATE",
+                    channel_payload(channel) | {"member": rendered_member},
+                    audience_user_refs=[target_ref],
+                )
+                await publish_dispatch(
+                    redis,
+                    thread_topic,
+                    "THREAD_MEMBER_UPDATE",
+                    rendered_member,
+                    audience_user_refs=[target_ref],
+                )
+            await publish_dispatch(
+                redis,
+                thread_topic,
+                "THREAD_MEMBERS_UPDATE",
+                {
+                    "id": str(channel.id),
+                    "thread_domain": channel.origin_domain,
+                    "guild_id": str(guild.id),
+                    "guild_domain": guild.origin_domain,
+                    "member_count": min(50, int(channel.member_count or 0)),
+                    "added_members": rich_rendered_members,
+                    "removed_member_ids": [],
+                },
+            )
     await publish_dispatch(
         redis, guild_topic(guild.origin_domain, guild.id), "MESSAGE_CREATE", rendered
     )
@@ -6677,15 +7053,17 @@ async def federation_guild_pin_proxy(
         channel is None
         or channel.unavailable
         or channel.guild_id != guild.id
-        or channel.type not in {0, 5}
+        or channel.type not in {0, 5, 10, 11, 12}
     ):
         raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+    if channel.type in {10, 11, 12} and channel.archived:
+        raise HTTPException(status_code=409, detail={"code": "THREAD_ARCHIVED"})
     await require_permissions(
         session,
         redis,
         guild,
         actor,
-        Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY | Permission.MANAGE_MESSAGES,
+        Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY | Permission.PIN_MESSAGES,
         channel=channel,
     )
     message_id, message_domain = payload.message_id.resolve(settings.domain)
@@ -6781,12 +7159,12 @@ async def federation_guild_reaction_proxy(
         channel is None
         or channel.unavailable
         or channel.guild_id != guild.id
-        or channel.type not in {0, 5}
+        or channel.type not in {0, 5, 10, 11, 12}
     ):
         raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+    if channel.type in {10, 11, 12} and channel.archived:
+        raise HTTPException(status_code=409, detail={"code": "THREAD_ARCHIVED"})
     needed = Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY
-    if not payload.remove:
-        needed |= Permission.ADD_REACTIONS
     actor_permissions = await require_permissions(
         session,
         redis,
@@ -6811,6 +7189,20 @@ async def federation_guild_reaction_proxy(
         or (message.channel_id, message.channel_domain) != (channel.id, channel.origin_domain)
     ):
         raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
+    if not payload.remove:
+        emoji_exists = bool(
+            await session.scalar(
+                select(
+                    exists().where(
+                        Reaction.message_id == message.id,
+                        Reaction.message_domain == message.origin_domain,
+                        Reaction.emoji_key == payload.emoji,
+                    )
+                )
+            )
+        )
+        if not emoji_exists and not actor_permissions & Permission.ADD_REACTIONS:
+            raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
     changed = False
     if payload.remove:
         removed = await session.scalar(

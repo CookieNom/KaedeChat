@@ -20,7 +20,7 @@ from app.api.dependencies import (
 )
 from app.api.guilds import local_guild
 from app.chat.audit import add_audit_entry
-from app.chat.e2ee_membership import pause_guild_e2ee_for_membership_change
+from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import (
     queue_guild_mutation,
@@ -637,7 +637,7 @@ async def accept_invite(
             joined_at=now,
         )
         session.add(member)
-        await pause_guild_e2ee_for_membership_change(session, guild)
+        e2ee_policy_channels: list[Channel] = []
         invite.uses += 1
         owner = await session.get(User, (guild.owner_id, guild.owner_domain))
         if owner is None or not owner.is_local:
@@ -649,12 +649,14 @@ async def accept_invite(
             owner,
             "guild.member.add",
             {"user": profile_from_user(auth.user), "joined_at": now.isoformat()},
+            e2ee_policy_channels=e2ee_policy_channels,
         )
         await session.commit()
         # Guild sequence assignment updates the server-managed resource
         # version; reload it before synchronous dispatch serialization.
         await session.refresh(guild)
         await wake_queued_guild_federation(guild)
+        await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
         await publish_dispatch(
             redis,
             guild_topic(guild.origin_domain, guild.id),

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
+from app.api.channels import refresh_thread_last_message_after_delete
 from app.api.dependencies import (
     AuthenticatedUser,
     get_redis,
@@ -26,9 +27,10 @@ from app.bots.installations import (
     revoke_installations_for_guild_member,
 )
 from app.chat.audit import add_audit_entry
-from app.chat.e2ee_membership import pause_guild_e2ee_for_membership_change
+from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import (
+    federation_channel_state,
     queue_guild_access_revocation,
     queue_guild_instance_access_revocation,
     queue_guild_mutation,
@@ -41,9 +43,19 @@ from app.chat.hierarchy import (
     role_rank,
 )
 from app.chat.moderation_status import guild_self_moderation_status, sanitize_timeout_reason
-from app.chat.payloads import audit_payload, ban_payload, instance_ban_payload, member_payload
+from app.chat.payloads import (
+    audit_payload,
+    ban_payload,
+    channel_payload,
+    instance_ban_payload,
+    member_payload,
+)
 from app.chat.permissions import require_permissions
 from app.chat.schemas import BanCreate, InstanceBanCreate, MemberUpdate
+from app.chat.thread_membership import (
+    cleanup_guild_member_threads,
+    publish_guild_thread_member_cleanup,
+)
 from app.core.permission_contract import required_permissions
 from app.core.permissions import Permission
 from app.core.rate_limits import CLIENT_RATE_LIMITS, enforce_client_rate_limit
@@ -464,6 +476,9 @@ async def kick_member(
     user_number, user_domain = user_id.resolve(settings.domain)
     await require_permissions(session, redis, guild, auth.user, required_permissions("member.kick"))
     member = await require_can_manage_member(session, guild, auth.user, user_number, user_domain)
+    target_user = await session.get(User, (user_number, user_domain))
+    if target_user is None:
+        raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
     revoked_installations = await revoke_installations_for_guild_member(
         session,
         guild_id=guild.id,
@@ -488,8 +503,15 @@ async def kick_member(
         target_ref={"id": str(user_number), "origin_domain": user_domain},
         reason=audit_reason(reason),
     )
+    removed_thread_members = await cleanup_guild_member_threads(
+        session,
+        settings,
+        guild,
+        auth.user,
+        [(user_number, user_domain)],
+    )
     await session.delete(member)
-    await pause_guild_e2ee_for_membership_change(session, guild)
+    e2ee_policy_channels: list[Channel] = []
     await queue_guild_access_revocation(
         session,
         settings,
@@ -506,10 +528,14 @@ async def kick_member(
         "guild.member.remove",
         {"user": {"id": str(user_number), "origin_domain": user_domain}},
         snapshot_required=True,
+        e2ee_policy_channels=e2ee_policy_channels,
+        pause_e2ee=target_user.account_type != "bot",
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
     await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
+    await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
     await publish_dispatch(
         redis,
         guild_topic(guild.origin_domain, guild.id),
@@ -571,6 +597,7 @@ async def ban_member(
             GuildMember.user_domain == user_domain,
         )
     )
+    e2ee_policy_channels: list[Channel] = []
     if member is not None:
         await require_can_manage_member(session, guild, auth.user, user_number, user_domain)
     elif (user_number, user_domain) == (guild.owner_id, guild.owner_domain):
@@ -593,6 +620,8 @@ async def ban_member(
     )
     purged_local_attachments: list[Attachment] = []
     media_delivery_wakes: set[str] = set()
+    purged_threads: list[Channel] = []
+    removed_thread_members = []
     await session.execute(
         pg_insert(Ban)
         .values(
@@ -670,6 +699,42 @@ async def ban_member(
             message.content = None
             message.e2ee = None
             message.deleted_at = deleted_at
+        await session.flush()
+        affected_thread_refs = {
+            (message.channel_id, message.channel_domain) for message in affected_messages
+        }
+        if affected_thread_refs:
+            affected_threads = list(
+                await session.scalars(
+                    select(Channel)
+                    .where(
+                        tuple_(Channel.id, Channel.origin_domain).in_(affected_thread_refs),
+                        Channel.type.in_({10, 11, 12}),
+                    )
+                    .with_for_update()
+                )
+            )
+            messages_by_thread: dict[tuple[int, str], list[Message]] = {}
+            for message in affected_messages:
+                messages_by_thread.setdefault(
+                    (message.channel_id, message.channel_domain), []
+                ).append(message)
+            for thread in affected_threads:
+                deleted_replies = sum(
+                    (message.id, message.origin_domain)
+                    != (thread.starter_message_id, thread.starter_message_domain)
+                    for message in messages_by_thread.get((thread.id, thread.origin_domain), [])
+                )
+                thread.message_count = max(
+                    0,
+                    int(thread.message_count or 0) - deleted_replies,
+                )
+                if (thread.last_message_id, thread.last_message_domain) in {
+                    (message.id, message.origin_domain)
+                    for message in messages_by_thread.get((thread.id, thread.origin_domain), [])
+                }:
+                    await refresh_thread_last_message_after_delete(session, thread)
+            purged_threads = affected_threads
         for message_ref, attachments in affected_attachments.items():
             affected_message = affected_by_ref.get(message_ref)
             if affected_message is None:
@@ -719,9 +784,27 @@ async def ban_member(
                 "deleted_at": deleted_at.isoformat(),
             },
         )
+        for thread in purged_threads:
+            # The purge event performs the replica-side decrement first; this
+            # complete state then fences counters and the surviving cursor.
+            await queue_guild_mutation(
+                session,
+                settings,
+                guild,
+                auth.user,
+                "guild.channel.update",
+                {"channel": federation_channel_state(thread)},
+                channel=thread,
+            )
     if member is not None:
+        removed_thread_members = await cleanup_guild_member_threads(
+            session,
+            settings,
+            guild,
+            auth.user,
+            [(user_number, user_domain)],
+        )
         await session.delete(member)
-        await pause_guild_e2ee_for_membership_change(session, guild)
         await queue_guild_access_revocation(
             session,
             settings,
@@ -738,6 +821,8 @@ async def ban_member(
             "guild.member.remove",
             {"user": {"id": str(user_number), "origin_domain": user_domain}},
             snapshot_required=True,
+            e2ee_policy_channels=e2ee_policy_channels,
+            pause_e2ee=user.account_type != "bot",
         )
     await add_audit_entry(
         session,
@@ -751,6 +836,7 @@ async def ban_member(
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
     if purged_local_attachments or media_delivery_wakes:
         from app.tasks import federation_deliver, media_local_purge
 
@@ -763,6 +849,14 @@ async def ban_member(
         for destination in sorted(media_delivery_wakes):
             await enqueue_best_effort(federation_deliver, destination)
     await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
+    await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
+    for thread in purged_threads:
+        await publish_dispatch(
+            redis,
+            guild_topic(guild.origin_domain, guild.id),
+            "THREAD_UPDATE",
+            channel_payload(thread),
+        )
     if member is not None:
         await publish_dispatch(
             redis,
@@ -1009,19 +1103,40 @@ async def ban_instance(
         auth.user,
         revoked_installations,
     )
-    removed_refs = list(
-        await session.execute(
-            delete(GuildMember)
-            .where(
-                GuildMember.guild_id == guild.id,
-                GuildMember.guild_domain == guild.origin_domain,
-                GuildMember.user_domain == domain,
+    removed_rows = list(
+        (
+            await session.execute(
+                select(GuildMember.user_id, GuildMember.user_domain, User.account_type)
+                .join(
+                    User,
+                    (User.id == GuildMember.user_id)
+                    & (User.origin_domain == GuildMember.user_domain),
+                )
+                .where(
+                    GuildMember.guild_id == guild.id,
+                    GuildMember.guild_domain == guild.origin_domain,
+                    GuildMember.user_domain == domain,
+                )
             )
-            .returning(GuildMember.user_id, GuildMember.user_domain)
+        ).all()
+    )
+    removed_refs = [(int(row[0]), str(row[1])) for row in removed_rows]
+    removed_human = any(str(row[2]) != "bot" for row in removed_rows)
+    removed_thread_members = await cleanup_guild_member_threads(
+        session,
+        settings,
+        guild,
+        auth.user,
+        removed_refs,
+    )
+    await session.execute(
+        delete(GuildMember).where(
+            GuildMember.guild_id == guild.id,
+            GuildMember.guild_domain == guild.origin_domain,
+            GuildMember.user_domain == domain,
         )
     )
-    if removed_refs:
-        await pause_guild_e2ee_for_membership_change(session, guild)
+    e2ee_policy_channels: list[Channel] = []
     await queue_guild_mutation(
         session,
         settings,
@@ -1030,6 +1145,8 @@ async def ban_instance(
         "guild.members.origin.remove",
         {"origin_domain": domain},
         snapshot_required=True,
+        e2ee_policy_channels=e2ee_policy_channels,
+        pause_e2ee=removed_human,
     )
     await queue_guild_instance_access_revocation(
         session,
@@ -1064,7 +1181,9 @@ async def ban_instance(
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
     await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
+    await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
     for user_id, user_domain in removed_refs:
         await publish_dispatch(
             redis,

@@ -142,6 +142,58 @@ Fetched guilds, channels, and roles keep their server `version`, and their
 `edit()` methods send it as `If-Match` for you. A stale resource fails instead
 of overwriting another moderator's update.
 
+Forums and threads use the same `Channel` and `Message` resources as ordinary
+chat. A forum post is created atomically with its starter message, while a
+thread attached to an existing message uses the message-scoped route:
+
+```python
+forum = next(channel for channel in channels if channel.is_forum)
+post = await forum.create_post(
+    "Release 2.1 feedback",
+    "Please keep one issue per reply.",
+    applied_tag_ids=[forum.available_tags[0].id],
+)
+
+page = await forum.threads(tag_id=forum.available_tags[0].id, sort_order=0)
+await page.threads[0].join()
+members = await page.threads[0].members(limit=100, with_member=True)
+creator = await page.threads[0].fetch_member(
+    members[0].user_ref,
+    with_member=True,
+)
+
+# Pagination cursors are opaque and already bind the sort/filter boundary.
+if page.next_cursor:
+    next_page = await forum.threads(
+        tag_id=forum.available_tags[0].id,
+        sort_order=0,
+        cursor=page.next_cursor,
+    )
+
+thread = await message.start_thread("Investigate this report")
+await thread.send("I can reproduce it.")
+await thread.edit_thread(archived=True)
+```
+
+Creating a forum post uses `SEND_MESSAGES`; public and announcement threads in
+ordinary channels use `CREATE_PUBLIC_THREADS`, and private threads use
+`CREATE_PRIVATE_THREADS`. Those creation permissions do not imply or require
+parent-channel `SEND_MESSAGES`. A supplied first message and later replies use
+`SEND_MESSAGES_IN_THREADS`; moderating another member's thread uses
+`MANAGE_THREADS`. The SDK exposes active/archived listing, join/leave, member
+management, tags, pin/close state, and typed thread Gateway events without a
+separate bot-only thread model.
+
+Pass `ThreadPage.next_cursor` back unchanged. The older timestamp-based
+`before` argument remains available for compatibility, but cannot be combined
+with `cursor`.
+
+Joining a thread can set the bot's own Kaede notification preference. Adding
+another member never changes that member's preference; they control it through
+their own `@me` membership operation. Member listing is capped at 100 per page;
+continue with the last `user_ref` as `after`. `with_member=True` includes the
+typed guild-member projection when the installation may read it.
+
 File uploads require `attachments.write` and an authoritative guild
 installation. Bytes are charged to that exact installation, never to a fake
 local-human account:
@@ -187,6 +239,9 @@ Supported listener aliases follow the event families:
 - `on_member_join`, `on_member_update`, `on_member_remove`
 - `on_guild_join`, `on_guild_update`, `on_guild_remove`, plus channel and role
   create/update/delete listeners
+- `on_thread_create`, `on_thread_update`, `on_thread_delete`,
+  `on_thread_list_sync`, `on_thread_member_update`, and
+  `on_thread_members_update`
 - `on_presence`, `on_typing`, `on_voice_state`, and `on_interaction`
 
 `Client.listen()` registers additional listeners, and `Client.wait_for()`
@@ -204,3 +259,9 @@ guild permission. Deleting another author's message and bulk deletion use
 `messages.manage`. Voice mute/deafen, disconnect, and move operations need
 `voice.moderate`. Every one of these still enforces live permissions,
 hierarchy, audit logs, and the authoritative guild/federation target.
+
+Bots fail closed in E2EE-required forums and active E2EE threads. They cannot
+create or reply to an encrypted post until Kaede has a verified bot-device MLS
+participant protocol; plaintext fallback is never attempted. Forum/thread
+titles, tags, counts, membership, and archive/lock state remain visible
+metadata when the installation otherwise has access.

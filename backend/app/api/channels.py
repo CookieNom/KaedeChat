@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
 
@@ -29,17 +30,26 @@ from app.chat.channel_access import (
 from app.chat.custom_emojis import validate_custom_emoji_use
 from app.chat.e2ee import MessageEncryptionPolicyError, validate_message_encryption_policy
 from app.chat.events import guild_topic, publish_dispatch, user_topic
-from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
+from app.chat.guild_revision import (
+    federation_channel_state,
+    guild_mutation_signer,
+    queue_guild_mutation,
+    wake_queued_guild_federation,
+)
 from app.chat.mentions import merge_mention_recipients, role_mention_recipients
 from app.chat.payloads import (
     attachment_payload,
+    channel_payload,
     dm_channel_payload,
     guild_payload,
     message_payload,
     render_message_payload,
+    rich_thread_member_payload,
+    thread_member_payload,
+    thread_source_starter_payload,
     user_payload,
 )
-from app.chat.permissions import require_permissions
+from app.chat.permissions import get_permissions, require_permissions
 from app.chat.privacy import blocked_between, lock_relationship_pair, require_can_direct_message
 from app.chat.reaction_payloads import reaction_payloads_for_messages
 from app.chat.schemas import (
@@ -49,6 +59,7 @@ from app.chat.schemas import (
     ReactionCreate,
     ReadStateUpdate,
 )
+from app.chat.thread_limits import require_active_thread_capacity
 from app.core.errors import parse_upstream_error
 from app.core.permission_contract import required_permissions
 from app.core.permissions import Permission
@@ -74,6 +85,7 @@ from app.db.models import (
     Reaction,
     ReadState,
     TerminalRoomDeletion,
+    ThreadMember,
     User,
 )
 from app.federation.client import signed_request
@@ -116,7 +128,7 @@ from app.federation.replica_storage import (
     admit_replica_storage,
     mark_replica_quota_paused,
 )
-from app.federation.replication import profile_from_user
+from app.federation.replication import profile_from_user, replicate_message_attachments
 from app.federation.security import validated_event_envelope
 from app.federation.terminal_rooms import lock_terminal_room
 from app.media.service import attachments_for_messages, finalize_attachment
@@ -151,7 +163,55 @@ async def require_owned_e2ee_sender_device(
 
 
 DM_REACTIONS_PER_MESSAGE_LIMIT = 100
+THREAD_CHANNEL_TYPES = frozenset({10, 11, 12})
+MESSAGE_FLAG_FAILED_TO_MENTION_SOME_ROLES_IN_THREAD = 1 << 8
+MAX_THREAD_MEMBERS = 1000
 log = structlog.get_logger()
+
+
+@dataclass(frozen=True, slots=True)
+class MessageAdmissionOptions:
+    """Internal admission switches used by atomic thread creation.
+
+    The dependency keeps these switches out of the public message-create body.
+    Direct service reuse may pass an explicit instance; ordinary HTTP and bot
+    callers receive the fail-closed defaults.
+    """
+
+    allow_required_e2ee_starter: bool = False
+    mark_thread_starter: bool = False
+    queue_thread_create: bool = False
+    defer_dispatch: bool = False
+    forum_starter_permissions_checked: bool = False
+    forced_message_id: int | None = None
+    replicated_attachments: tuple[dict[str, object], ...] = ()
+
+
+def default_message_admission_options() -> MessageAdmissionOptions:
+    return MessageAdmissionOptions()
+
+
+def require_unarchived_thread(channel: Channel) -> None:
+    if channel.type in THREAD_CHANNEL_TYPES and bool(channel.archived):
+        raise HTTPException(status_code=409, detail={"code": "THREAD_ARCHIVED"})
+
+
+def require_thread_message_delete_state(channel: Channel, permissions: int) -> None:
+    """Enforce Discord's locked-and-archived deletion boundary.
+
+    Message deletion is the one ordinary mutation allowed in an archived
+    thread. A locked thread narrows that exception: non-moderators may delete
+    only while the thread is active. MANAGE_THREADS holders retain moderation
+    access in either lifecycle state.
+    """
+
+    if (
+        channel.type in THREAD_CHANNEL_TYPES
+        and bool(channel.archived)
+        and bool(channel.locked)
+        and not permissions & Permission.MANAGE_THREADS
+    ):
+        raise HTTPException(status_code=403, detail={"code": "THREAD_LOCKED"})
 
 
 def require_message_encryption_policy(
@@ -160,7 +220,15 @@ def require_message_encryption_policy(
     content: object,
     e2ee: object,
     attachment_count: int = 0,
+    allow_required_e2ee_starter: bool = False,
 ) -> None:
+    if (
+        channel.type in THREAD_CHANNEL_TYPES
+        and bool(getattr(channel, "e2ee_required", False))
+        and channel.encryption_mode != "e2ee"
+        and not allow_required_e2ee_starter
+    ):
+        raise HTTPException(status_code=409, detail={"code": "THREAD_E2EE_ACTIVATION_REQUIRED"})
     if channel.encryption_mode == "e2ee" and channel.encryption_state != "active":
         raise HTTPException(status_code=409, detail={"code": "E2EE_REKEY_REQUIRED"})
     try:
@@ -175,6 +243,199 @@ def require_message_encryption_policy(
         )
     except MessageEncryptionPolicyError as exc:
         raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+
+
+async def admit_thread_message_members(
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+    guild: Guild,
+    thread: Channel,
+    actor: User,
+    actor_permissions: int,
+    mention_pairs: list[tuple[int, str]],
+    role_mention_pairs: set[tuple[int, str]],
+) -> tuple[list[ThreadMember], bool, bool]:
+    """Auto-join a sender and eligible mentions without a second message transaction."""
+
+    ordered_refs = list(dict.fromkeys([(actor.id, actor.origin_domain), *mention_pairs]))
+    existing_members = {
+        (member.user_id, member.user_domain): member
+        for member in await session.scalars(
+            select(ThreadMember).where(
+                ThreadMember.thread_id == thread.id,
+                ThreadMember.thread_domain == thread.origin_domain,
+                tuple_(ThreadMember.user_id, ThreadMember.user_domain).in_(ordered_refs),
+            )
+        )
+    }
+    missing_refs = [ref for ref in ordered_refs if ref not in existing_members]
+    if not missing_refs:
+        return [], False, False
+
+    users = {
+        (user.id, user.origin_domain): user
+        for user in await session.scalars(
+            select(User).where(tuple_(User.id, User.origin_domain).in_(missing_refs))
+        )
+    }
+    parent = await session.get(Channel, (thread.parent_id, thread.parent_domain))
+    if parent is None or parent.type not in {0, 5, 15}:
+        raise HTTPException(status_code=409, detail={"code": "THREAD_PARENT_INVALID"})
+
+    may_invite_private = bool(
+        thread.type != 12 or thread.invitable or actor_permissions & Permission.MANAGE_THREADS
+    )
+    added: list[ThreadMember] = []
+    failed_role_mentions = False
+    for user_ref in missing_refs:
+        user = users.get(user_ref)
+        is_actor = user_ref == (actor.id, actor.origin_domain)
+        eligible = user is not None
+        if not is_actor:
+            eligible = eligible and may_invite_private
+            if eligible and user is not None:
+                # Bots are deliberately outside Kaede MLS groups. They remain
+                # valid members of plaintext threads only.
+                eligible = not (
+                    user.account_type == "bot"
+                    and (thread.e2ee_required or thread.encryption_mode == "e2ee")
+                )
+            if eligible and user is not None:
+                target_permissions = await get_permissions(
+                    session, redis, guild, user, channel=parent
+                )
+                eligible = bool(target_permissions & Permission.VIEW_CHANNEL)
+        if not eligible:
+            failed_role_mentions |= user_ref in role_mention_pairs
+            continue
+        if int(thread.member_count or 0) + len(added) >= MAX_THREAD_MEMBERS:
+            if is_actor:
+                raise HTTPException(status_code=409, detail={"code": "THREAD_MEMBER_LIMIT"})
+            failed_role_mentions |= user_ref in role_mention_pairs
+            continue
+        member = ThreadMember(
+            thread_id=thread.id,
+            thread_domain=thread.origin_domain,
+            guild_id=guild.id,
+            guild_domain=guild.origin_domain,
+            user_id=user_ref[0],
+            user_domain=user_ref[1],
+            flags=0,
+            notification_level="inherit",
+        )
+        session.add(member)
+        added.append(member)
+
+    if not added:
+        return [], False, failed_role_mentions
+    thread.member_count = int(thread.member_count or 0) + len(added)
+    private_access_changed = thread.type == 12 and any(
+        (member.user_id, member.user_domain) != (actor.id, actor.origin_domain) for member in added
+    )
+    thread_rekeyed = False
+    if private_access_changed:
+        guild.permission_generation += 1
+        if thread.encryption_mode == "e2ee" and thread.encryption_state == "active":
+            thread.encryption_state = "rekeying"
+            thread_rekeyed = True
+    await session.flush()
+    for index, member in enumerate(added):
+        await queue_guild_mutation(
+            session,
+            settings,
+            guild,
+            actor,
+            "guild.thread.member.upsert",
+            {
+                "member": thread_member_payload(member),
+                "member_count": thread.member_count,
+            },
+            channel=thread,
+            snapshot_required=private_access_changed and index == len(added) - 1,
+        )
+    return added, thread_rekeyed, failed_role_mentions
+
+
+def capture_thread_message_projection(channel: Channel) -> dict[str, object]:
+    """Capture fields advanced exclusively by the next message delta."""
+
+    return {
+        "message_count": channel.message_count,
+        "total_message_sent": channel.total_message_sent,
+        "last_activity_at": (
+            channel.last_activity_at.isoformat() if channel.last_activity_at is not None else None
+        ),
+    }
+
+
+def thread_structural_state_before_message(
+    channel: Channel,
+    prior_message_projection: dict[str, object],
+) -> dict[str, object]:
+    """Render lifecycle/MLS changes without pre-applying the next message."""
+
+    state = federation_channel_state(channel)
+    state.update(prior_message_projection)
+    return state
+
+
+async def publish_current_thread_member_updates(
+    session: AsyncSession,
+    redis: Redis,
+    guild: Guild,
+    thread: Channel,
+) -> None:
+    """Hydrate every joined client after an unarchive transition.
+
+    Discord follows THREAD_UPDATE with each recipient's current membership.
+    Audience-targeting keeps private membership metadata from becoming a
+    guild-wide event while retaining deterministic event ordering.
+    """
+
+    members = list(
+        await session.scalars(
+            select(ThreadMember)
+            .where(
+                ThreadMember.thread_id == thread.id,
+                ThreadMember.thread_domain == thread.origin_domain,
+            )
+            .order_by(ThreadMember.user_domain, ThreadMember.user_id)
+        )
+    )
+    topic = guild_topic(guild.origin_domain, guild.id)
+    for member in members:
+        await publish_dispatch(
+            redis,
+            topic,
+            "THREAD_MEMBER_UPDATE",
+            thread_member_payload(member),
+            audience_user_refs=[f"{member.user_id}@{member.user_domain}"],
+        )
+
+
+async def refresh_thread_last_message_after_delete(
+    session: AsyncSession,
+    thread: Channel,
+) -> None:
+    latest = await session.scalar(
+        select(Message)
+        .where(
+            Message.channel_id == thread.id,
+            Message.channel_domain == thread.origin_domain,
+            Message.deleted_at.is_(None),
+        )
+        .order_by(Message.created_at.desc(), Message.id.desc(), Message.origin_domain.desc())
+        .limit(1)
+    )
+    if latest is None:
+        # A source-backed starter lives in the parent and cannot satisfy the
+        # FK-backed child cursor.
+        thread.last_message_id = None
+        thread.last_message_domain = None
+        return
+    thread.last_message_id = latest.id
+    thread.last_message_domain = latest.origin_domain
 
 
 async def publish_replica_guild_status(redis: Redis, guild: Guild) -> None:
@@ -218,6 +479,11 @@ async def require_channel_permissions(
     permissions: Permission,
 ) -> int:
     if access.guild is not None:
+        if access.channel.type in THREAD_CHANNEL_TYPES and permissions & Permission.SEND_MESSAGES:
+            permissions = Permission(
+                (int(permissions) & ~int(Permission.SEND_MESSAGES))
+                | int(Permission.SEND_MESSAGES_IN_THREADS)
+            )
         return await require_permissions(
             session,
             redis,
@@ -552,6 +818,51 @@ async def list_messages(
         )
         if after is not None:
             messages.reverse()
+    parent_starter_ref: tuple[int, str] | None = None
+    if (
+        channel.type in THREAD_CHANNEL_TYPES
+        and channel.starter_message_id == channel.id
+        and channel.starter_message_domain == channel.origin_domain
+        and channel.parent_id is not None
+        and channel.parent_domain is not None
+    ):
+        parent_starter = await session.scalar(
+            select(Message).where(
+                Message.id == channel.starter_message_id,
+                Message.origin_domain == channel.starter_message_domain,
+                Message.channel_id == channel.parent_id,
+                Message.channel_domain == channel.parent_domain,
+            )
+        )
+        if parent_starter is not None:
+            parent_starter_ref = (parent_starter.id, parent_starter.origin_domain)
+            include_parent_starter = False
+            if before is not None:
+                include_parent_starter = parent_starter_ref < before.resolve(settings.domain)
+            elif after is not None:
+                include_parent_starter = parent_starter_ref > after.resolve(settings.domain)
+            elif around is not None:
+                around_ref = around.resolve(settings.domain)
+                newer_limit = (limit + 1) // 2
+                older_limit = limit - newer_limit
+                if parent_starter_ref >= around_ref:
+                    include_parent_starter = (
+                        sum((item.id, item.origin_domain) >= around_ref for item in messages)
+                        < newer_limit
+                    )
+                else:
+                    include_parent_starter = (
+                        sum((item.id, item.origin_domain) < around_ref for item in messages)
+                        < older_limit
+                    )
+            else:
+                include_parent_starter = len(messages) < limit
+            if include_parent_starter:
+                messages.append(parent_starter)
+                messages.sort(
+                    key=lambda item: (item.id, item.origin_domain),
+                    reverse=True,
+                )
     author_refs = {(item.author_id, item.author_domain) for item in messages}
     authors: dict[tuple[int, str], User] = {}
     if author_refs:
@@ -582,8 +893,15 @@ async def list_messages(
             authors.get((item.author_id, item.author_domain)),
             attachments.get((item.id, item.origin_domain), []),
         )
-        payload["reaction_counts"] = reaction_counts
-        payload["reacted_emoji"] = reacted_emoji
+        source_starter_projection = parent_starter_ref == (item.id, item.origin_domain) and (
+            item.channel_id,
+            item.channel_domain,
+        ) == (channel.parent_id, channel.parent_domain)
+        if source_starter_projection:
+            payload = thread_source_starter_payload(channel, payload)
+        else:
+            payload["reaction_counts"] = reaction_counts
+            payload["reacted_emoji"] = reacted_emoji
         delivery = delivery_statuses.get((item.id, item.origin_domain))
         if delivery is not None:
             payload["delivery_status"] = delivery[0]
@@ -870,7 +1188,11 @@ async def create_message(
     redis: Redis = Depends(get_redis),
     snowflake: SnowflakeGenerator = Depends(get_snowflake),
     settings: Settings = Depends(get_settings),
+    admission_options: MessageAdmissionOptions = Depends(default_message_admission_options),
 ) -> dict[str, object]:
+    if not isinstance(admission_options, MessageAdmissionOptions):
+        # Direct service callers omit FastAPI-resolved dependency defaults.
+        admission_options = default_message_admission_options()
     await enforce_client_rate_limit(
         redis,
         response_status,
@@ -971,7 +1293,12 @@ async def create_message(
         await lock_media_tombstone_ref(session, attachment_id, settings.domain)
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
+    prior_thread_message_projection = (
+        capture_thread_message_projection(channel) if channel.type in THREAD_CHANNEL_TYPES else None
+    )
     needed = required_permissions("message.create")
+    if admission_options.forum_starter_permissions_checked:
+        needed = Permission.VIEW_CHANNEL
     if payload.attachment_ids:
         needed |= Permission.ATTACH_FILES
     actor_permissions = await require_channel_permissions(
@@ -981,6 +1308,12 @@ async def create_message(
         auth.user,
         needed,
     )
+    if (
+        channel.type in THREAD_CHANNEL_TYPES
+        and bool(channel.locked)
+        and not actor_permissions & Permission.MANAGE_THREADS
+    ):
+        raise HTTPException(status_code=403, detail={"code": "THREAD_LOCKED"})
     await validate_custom_emoji_use(
         session,
         auth.user,
@@ -989,8 +1322,24 @@ async def create_message(
         target_permissions=actor_permissions,
     )
     await require_dm_send(session, access, auth.user)
-    if channel.type not in {0, 1, 5}:
+    if channel.type not in {0, 1, 5, *THREAD_CHANNEL_TYPES}:
         raise HTTPException(status_code=400, detail={"code": "NOT_TEXT_CHANNEL"})
+    thread_was_unarchived = False
+    if channel.type in THREAD_CHANNEL_TYPES and bool(getattr(channel, "archived", False)):
+        if bool(getattr(channel, "locked", False)) and not (
+            actor_permissions & Permission.MANAGE_THREADS
+        ):
+            raise HTTPException(status_code=403, detail={"code": "THREAD_LOCKED"})
+        if access.guild is None:
+            raise RuntimeError("guild thread has no guild")
+        await require_active_thread_capacity(
+            session,
+            access.guild,
+            excluding=(channel.id, channel.origin_domain),
+        )
+        channel.archived = False
+        channel.archive_timestamp = datetime.now(UTC)
+        thread_was_unarchived = True
     dm_conversation = prelock_conversation if access.guild is None else None
     if dm_conversation is not None:
         # Serialize validation with rolling eviction so a reply target cannot
@@ -1048,12 +1397,14 @@ async def create_message(
         dict.fromkeys(item.resolve(settings.domain) for item in payload.mention_user_ids)
     )
     mention_pairs = explicit_mention_pairs
+    role_mention_pairs: set[tuple[int, str]] = set()
     if access.guild is not None:
+        role_mention_pairs = set(
+            await role_mention_recipients(session, access.guild, payload.content, actor_permissions)
+        )
         mention_pairs = merge_mention_recipients(
             mention_pairs,
-            await role_mention_recipients(
-                session, access.guild, payload.content, actor_permissions
-            ),
+            list(role_mention_pairs),
         )
     allowed_mentions = {
         (participant.id, participant.origin_domain) for participant in access.participants
@@ -1071,23 +1422,49 @@ async def create_message(
         allowed_mentions = {(user_id, domain) for user_id, domain in mention_rows}
     if any(item not in allowed_mentions for item in mention_pairs):
         raise HTTPException(status_code=400, detail={"code": "INVALID_MENTION"})
+    replicated_attachment_payloads = list(admission_options.replicated_attachments)
     message_attachments: list[Attachment] = []
-    for attachment_id in payload.attachment_ids:
-        attachment = await finalize_attachment(
-            session,
-            settings,
-            auth.user,
-            int(attachment_id),
-            required_purpose="attachment",
-        )
-        if attachment.message_id is not None or attachment.message_domain is not None:
-            raise HTTPException(status_code=409, detail={"code": "ATTACHMENT_ALREADY_USED"})
-        message_attachments.append(attachment)
+    if replicated_attachment_payloads:
+        try:
+            replicated_ids = [
+                int(str(item["id"]))
+                for item in replicated_attachment_payloads
+                if isinstance(item, dict)
+            ]
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(
+                status_code=400, detail={"code": "FEDERATED_ATTACHMENT_INVALID"}
+            ) from None
+        if len(replicated_ids) != len(replicated_attachment_payloads) or replicated_ids != [
+            int(item) for item in payload.attachment_ids
+        ]:
+            raise HTTPException(status_code=400, detail={"code": "FEDERATED_ATTACHMENT_INVALID"})
+    else:
+        for attachment_id in payload.attachment_ids:
+            attachment = await finalize_attachment(
+                session,
+                settings,
+                auth.user,
+                int(attachment_id),
+                required_purpose="attachment",
+            )
+            if attachment.message_id is not None or attachment.message_domain is not None:
+                raise HTTPException(status_code=409, detail={"code": "ATTACHMENT_ALREADY_USED"})
+            message_attachments.append(attachment)
     require_message_encryption_policy(
         channel,
         content=payload.content,
         e2ee=payload.e2ee,
-        attachment_count=len(message_attachments),
+        attachment_count=(
+            len(replicated_attachment_payloads)
+            if replicated_attachment_payloads
+            else len(message_attachments)
+        ),
+        allow_required_e2ee_starter=(
+            admission_options.allow_required_e2ee_starter
+            and channel.type in THREAD_CHANNEL_TYPES
+            and int(getattr(channel, "message_count", 0) or 0) == 0
+        ),
     )
     if channel.encryption_mode == "e2ee":
         await require_owned_e2ee_sender_device(session, auth.user, payload.e2ee)
@@ -1098,12 +1475,22 @@ async def create_message(
     ):
         raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_INVALID"})
     expected_attachment_mode = "e2ee" if channel.encryption_mode == "e2ee" else "plaintext"
-    if any(item.encryption_mode != expected_attachment_mode for item in message_attachments):
+    attachment_modes = (
+        [item.get("encryption_mode", "plaintext") for item in replicated_attachment_payloads]
+        if replicated_attachment_payloads
+        else [item.encryption_mode for item in message_attachments]
+    )
+    if any(mode != expected_attachment_mode for mode in attachment_modes):
         raise HTTPException(
             status_code=409,
             detail={"code": "MESSAGE_ENCRYPTION_POLICY_INVALID"},
         )
-    if access.guild is not None and channel.rate_limit_per_user:
+    if (
+        access.guild is not None
+        and channel.rate_limit_per_user
+        and auth.user.account_type != "bot"
+        and not actor_permissions & Permission.BYPASS_SLOWMODE
+    ):
         slowmode_key = (
             f"slowmode:{channel.origin_domain}:{channel.id}:"
             f"{auth.user.origin_domain}:{auth.user.id}"
@@ -1412,7 +1799,15 @@ async def create_message(
         result = message_payload(replicated, auth.user, message_attachments)
         await publish_channel_dispatch(redis, access, "MESSAGE_CREATE", result)
         return result
-    message_id = await snowflake.mint()
+    message_id = (
+        admission_options.forced_message_id
+        if admission_options.forced_message_id is not None
+        else await snowflake.mint()
+    )
+    if admission_options.forced_message_id is not None:
+        existing_forced_message = await session.get(Message, (message_id, settings.domain))
+        if existing_forced_message is not None:
+            raise HTTPException(status_code=409, detail={"code": "MESSAGE_ID_CONFLICT"})
     if referenced_ref is not None and referenced_ref >= (message_id, settings.domain):
         raise HTTPException(status_code=400, detail={"code": "INVALID_MESSAGE_REFERENCE"})
     mention_refs = [
@@ -1484,6 +1879,77 @@ async def create_message(
             .returning(Message)
         )
     ).one()
+    if replicated_attachment_payloads:
+        try:
+            message_attachments = await replicate_message_attachments(
+                session,
+                settings,
+                message,
+                auth.user,
+                replicated_attachment_payloads,
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail={"code": "FEDERATED_ATTACHMENT_INVALID"}
+            ) from None
+        if len(message_attachments) != len(replicated_attachment_payloads):
+            raise HTTPException(status_code=410, detail={"code": "ATTACHMENT_DELETED"})
+    added_thread_members: list[ThreadMember] = []
+    thread_rekeyed = False
+    if channel.type in THREAD_CHANNEL_TYPES:
+        channel.last_message_id = message.id
+        channel.last_message_domain = message.origin_domain
+        if not admission_options.mark_thread_starter:
+            channel.message_count = int(getattr(channel, "message_count", 0) or 0) + 1
+            channel.total_message_sent = int(getattr(channel, "total_message_sent", 0) or 0) + 1
+        channel.last_activity_at = message.created_at
+        if access.guild is None:
+            raise RuntimeError("guild thread has no guild")
+        (
+            added_thread_members,
+            thread_rekeyed,
+            failed_role_mentions,
+        ) = await admit_thread_message_members(
+            session,
+            redis,
+            settings,
+            access.guild,
+            channel,
+            auth.user,
+            actor_permissions,
+            mention_pairs,
+            role_mention_pairs,
+        )
+        if failed_role_mentions:
+            message.flags |= MESSAGE_FLAG_FAILED_TO_MENTION_SOME_ROLES_IN_THREAD
+        if admission_options.mark_thread_starter:
+            channel.starter_message_id = message.id
+            channel.starter_message_domain = message.origin_domain
+        if admission_options.queue_thread_create:
+            if access.guild is None or access.guild.origin_domain != settings.domain:
+                raise RuntimeError("thread creation must be committed by its guild home")
+            initial_thread_state = federation_channel_state(channel)
+            # The starter message is the next ordered guild event and may not
+            # exist on a replica yet. Publish a valid empty thread first; the
+            # message event binds the starter identity atomically at ingest.
+            if admission_options.mark_thread_starter:
+                initial_thread_state.update(
+                    {
+                        "starter_message_id": None,
+                        "starter_message_domain": None,
+                        "message_count": 0,
+                        "total_message_sent": 0,
+                    }
+                )
+            await queue_guild_mutation(
+                session,
+                settings,
+                access.guild,
+                auth.user,
+                "guild.channel.create",
+                {"channel": initial_thread_state},
+                channel=channel,
+            )
     for attachment in message_attachments:
         attachment.message_id = message.id
         attachment.message_domain = message.origin_domain
@@ -1539,6 +2005,24 @@ async def create_message(
         for destination in remote_destinations:
             await queue_event(session, settings, destination, envelope)
     elif access.guild.origin_domain == settings.domain:
+        guild_event_signer = await guild_mutation_signer(session, settings, access.guild, auth.user)
+        if thread_was_unarchived or thread_rekeyed:
+            if prior_thread_message_projection is None:
+                raise RuntimeError("thread message projection was not captured")
+            await queue_guild_mutation(
+                session,
+                settings,
+                access.guild,
+                auth.user,
+                "guild.channel.update",
+                {
+                    "channel": thread_structural_state_before_message(
+                        channel,
+                        prior_thread_message_projection,
+                    )
+                },
+                channel=channel,
+            )
         remote_destinations = await remote_destinations_with_channel_access(
             session, settings, access.guild, channel
         )
@@ -1548,10 +2032,11 @@ async def create_message(
                 session,
                 settings,
                 "guild.message.create",
-                auth.user,
+                guild_event_signer,
                 {
                     "message": message_payload(message, auth.user, message_attachments),
                     "author": profile_from_user(auth.user),
+                    "thread_starter": admission_options.mark_thread_starter,
                 },
                 context={
                     "guild_id": str(access.guild.id),
@@ -1592,7 +2077,61 @@ async def create_message(
                 message.origin_domain,
             ),
         )
-        await publish_channel_dispatch(redis, access, "MESSAGE_CREATE", result)
+        publish_thread_activity = (
+            channel.type in THREAD_CHANNEL_TYPES and not admission_options.mark_thread_starter
+        )
+        if publish_thread_activity:
+            await publish_channel_dispatch(
+                redis,
+                access,
+                "THREAD_UPDATE",
+                channel_payload(channel),
+            )
+        if thread_was_unarchived and access.guild is not None:
+            await publish_current_thread_member_updates(
+                session,
+                redis,
+                access.guild,
+                channel,
+            )
+        if added_thread_members and access.guild is not None:
+            rendered_members = [thread_member_payload(member) for member in added_thread_members]
+            rich_rendered_members = [
+                await rich_thread_member_payload(session, member) for member in added_thread_members
+            ]
+            topic = guild_topic(access.guild.origin_domain, access.guild.id)
+            for rendered_member in rendered_members:
+                target_ref = f"{rendered_member['user_id']}@{rendered_member['user_domain']}"
+                await publish_dispatch(
+                    redis,
+                    topic,
+                    "THREAD_CREATE",
+                    channel_payload(channel) | {"member": rendered_member},
+                    audience_user_refs=[target_ref],
+                )
+                await publish_dispatch(
+                    redis,
+                    topic,
+                    "THREAD_MEMBER_UPDATE",
+                    rendered_member,
+                    audience_user_refs=[target_ref],
+                )
+            await publish_dispatch(
+                redis,
+                topic,
+                "THREAD_MEMBERS_UPDATE",
+                {
+                    "id": str(channel.id),
+                    "thread_domain": channel.origin_domain,
+                    "guild_id": str(access.guild.id),
+                    "guild_domain": access.guild.origin_domain,
+                    "member_count": min(50, int(channel.member_count or 0)),
+                    "added_members": rich_rendered_members,
+                    "removed_member_ids": [],
+                },
+            )
+        if not admission_options.defer_dispatch:
+            await publish_channel_dispatch(redis, access, "MESSAGE_CREATE", result)
         if access.guild is None and dm_history_changed and dm_conversation is not None:
             history = dm_history_metadata(
                 dm_conversation,
@@ -1659,6 +2198,7 @@ async def edit_message(
         )
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
+    require_unarchived_thread(channel)
     actor_permissions = await require_channel_permissions(
         session,
         redis,
@@ -1666,6 +2206,12 @@ async def edit_message(
         auth.user,
         required_permissions("message.edit.self"),
     )
+    if (
+        channel.type in THREAD_CHANNEL_TYPES
+        and bool(channel.locked)
+        and not actor_permissions & Permission.MANAGE_THREADS
+    ):
+        raise HTTPException(status_code=403, detail={"code": "THREAD_LOCKED"})
     await require_dm_send(session, access, auth.user)
     message = await channel_message(
         session,
@@ -1745,9 +2291,10 @@ async def delete_message(
         )
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
-    await require_channel_permissions(
+    actor_permissions = await require_channel_permissions(
         session, redis, access, auth.user, required_permissions("message.delete.self")
     )
+    require_thread_message_delete_state(channel, actor_permissions)
     unlocked_message = await channel_message(
         session,
         settings,
@@ -1781,6 +2328,16 @@ async def delete_message(
         message.content = None
         message.e2ee = None
         message.deleted_at = datetime.now(UTC)
+        if channel.type in THREAD_CHANNEL_TYPES and (
+            message.id,
+            message.origin_domain,
+        ) != (channel.starter_message_id, channel.starter_message_domain):
+            channel.message_count = max(0, int(getattr(channel, "message_count", 0) or 0) - 1)
+        if channel.type in THREAD_CHANNEL_TYPES and (
+            channel.last_message_id,
+            channel.last_message_domain,
+        ) == (message.id, message.origin_domain):
+            await refresh_thread_last_message_after_delete(session, channel)
         deleted_attachments, media_destinations = await queue_attachment_tombstones(
             session, settings, access, auth.user, [message]
         )
@@ -1800,6 +2357,18 @@ async def delete_message(
                 },
                 channel=channel,
             )
+            if channel.type in THREAD_CHANNEL_TYPES:
+                # Replicas apply the message delta first, then this complete
+                # projection is an exact convergence fence.
+                await queue_guild_mutation(
+                    session,
+                    settings,
+                    access.guild,
+                    auth.user,
+                    "guild.channel.update",
+                    {"channel": federation_channel_state(channel)},
+                    channel=channel,
+                )
     else:
         deleted_attachments, media_destinations = [], set()
     await session.commit()
@@ -1821,6 +2390,8 @@ async def delete_message(
                 "channel_domain": channel.origin_domain,
             },
         )
+        if channel.type in THREAD_CHANNEL_TYPES:
+            await publish_channel_dispatch(redis, access, "THREAD_UPDATE", channel_payload(channel))
     return Response(status_code=204)
 
 
@@ -1847,9 +2418,10 @@ async def bulk_delete_messages(
         raise HTTPException(status_code=400, detail={"code": "BULK_DELETE_NOT_SUPPORTED"})
     if access.guild.origin_domain != settings.domain:
         raise HTTPException(status_code=409, detail={"code": "FEDERATED_WRITE_UNSUPPORTED"})
-    await require_channel_permissions(
+    actor_permissions = await require_channel_permissions(
         session, redis, access, auth.user, required_permissions("message.bulk_delete")
     )
+    require_thread_message_delete_state(access.channel, actor_permissions)
     message_refs = [item.resolve(settings.domain) for item in payload.message_ids]
     predelete_attachment_refs = set(
         (
@@ -1885,14 +2457,38 @@ async def bulk_delete_messages(
     )
     if len(messages) != len(message_refs):
         raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
+    active_deleted_count = sum(
+        message.deleted_at is None
+        and (message.id, message.origin_domain)
+        != (
+            access.channel.starter_message_id,
+            access.channel.starter_message_domain,
+        )
+        for message in messages
+    )
     deleted_at = datetime.now(UTC)
     for deleted_message in messages:
         deleted_message.content = None
         deleted_message.e2ee = None
         deleted_message.deleted_at = deleted_at
+    # The next-last-message query must never consider one of this batch.
+    await session.flush()
     deleted_attachments, media_destinations = await queue_attachment_tombstones(
         session, settings, access, auth.user, messages
     )
+    thread_projection_changed = False
+    if access.channel.type in THREAD_CHANNEL_TYPES:
+        if active_deleted_count:
+            access.channel.message_count = max(
+                0,
+                int(getattr(access.channel, "message_count", 0) or 0) - active_deleted_count,
+            )
+            thread_projection_changed = True
+        if (access.channel.last_message_id, access.channel.last_message_domain) in {
+            (message.id, message.origin_domain) for message in messages
+        }:
+            await refresh_thread_last_message_after_delete(session, access.channel)
+            thread_projection_changed = True
     await session.execute(
         update(Message)
         .where(
@@ -1918,6 +2514,16 @@ async def bulk_delete_messages(
             },
             channel=access.channel,
         )
+    if thread_projection_changed:
+        await queue_guild_mutation(
+            session,
+            settings,
+            access.guild,
+            auth.user,
+            "guild.channel.update",
+            {"channel": federation_channel_state(access.channel)},
+            channel=access.channel,
+        )
     await session.commit()
     await wake_queued_guild_federation(access.guild)
     for attachment in deleted_attachments:
@@ -1935,6 +2541,10 @@ async def bulk_delete_messages(
                 "channel_id": str(access.channel.id),
                 "channel_domain": access.channel.origin_domain,
             },
+        )
+    if thread_projection_changed:
+        await publish_channel_dispatch(
+            redis, access, "THREAD_UPDATE", channel_payload(access.channel)
         )
     return Response(status_code=204)
 
@@ -1958,6 +2568,7 @@ async def add_reaction(
         user_domain=auth.user.origin_domain,
     )
     access = await load_channel_access(session, settings, auth.user, channel_id)
+    require_unarchived_thread(access.channel)
     if access.guild is not None and access.guild.origin_domain != settings.domain:
         await require_channel_permissions(
             session, redis, access, auth.user, required_permissions("reaction.create")
@@ -1997,6 +2608,23 @@ async def add_reaction(
         for_update=True,
         require_active=True,
     )
+    emoji_exists = bool(
+        await session.scalar(
+            select(
+                exists().where(
+                    Reaction.message_id == message.id,
+                    Reaction.message_domain == message.origin_domain,
+                    Reaction.emoji_key == payload.emoji,
+                )
+            )
+        )
+    )
+    if (
+        access.guild is not None
+        and not emoji_exists
+        and not actor_permissions & Permission.ADD_REACTIONS
+    ):
+        raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
     if access.guild is None:
         existing_reaction = await session.get(
             Reaction,
@@ -2160,6 +2788,7 @@ async def remove_own_reaction(
         user_domain=auth.user.origin_domain,
     )
     access = await load_channel_access(session, settings, auth.user, channel_id)
+    require_unarchived_thread(access.channel)
     if access.guild is not None and access.guild.origin_domain != settings.domain:
         await require_channel_permissions(
             session, redis, access, auth.user, required_permissions("reaction.delete.self")
@@ -2239,6 +2868,7 @@ async def remove_user_reaction(
     settings: Settings = Depends(get_settings),
 ) -> Response:
     access = await load_channel_access(session, settings, auth.user, channel_id)
+    require_unarchived_thread(access.channel)
     require_local_mutation_authority(access, settings)
     access = await lock_local_channel_mutation(session, settings, access)
     user_number, user_domain = user_id.resolve(settings.domain)
@@ -2310,6 +2940,7 @@ async def pin_message(
     settings: Settings = Depends(get_settings),
 ) -> Response:
     access = await load_channel_access(session, settings, auth.user, channel_id)
+    require_unarchived_thread(access.channel)
     if access.guild is not None and access.guild.origin_domain != settings.domain:
         await require_channel_permissions(
             session, redis, access, auth.user, required_permissions("pin.update")
@@ -2325,6 +2956,7 @@ async def pin_message(
         require_local_mutation_authority(access, settings)
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
+    require_unarchived_thread(channel)
     if access.guild is not None:
         await require_channel_permissions(
             session, redis, access, auth.user, required_permissions("pin.update")
@@ -2462,6 +3094,7 @@ async def unpin_message(
     settings: Settings = Depends(get_settings),
 ) -> Response:
     access = await load_channel_access(session, settings, auth.user, channel_id)
+    require_unarchived_thread(access.channel)
     if access.guild is not None and access.guild.origin_domain != settings.domain:
         await require_channel_permissions(
             session, redis, access, auth.user, required_permissions("pin.update")
@@ -2472,6 +3105,7 @@ async def unpin_message(
     if access.guild is not None:
         require_local_mutation_authority(access, settings)
     access = await lock_local_channel_mutation(session, settings, access)
+    require_unarchived_thread(access.channel)
     if access.guild is not None:
         await require_channel_permissions(
             session, redis, access, auth.user, required_permissions("pin.update")
@@ -2627,6 +3261,7 @@ async def typing(
     access = await load_channel_access(session, settings, auth.user, channel_id)
     access = await lock_local_channel_mutation(session, settings, access)
     channel = access.channel
+    require_unarchived_thread(channel)
     await require_channel_permissions(
         session,
         redis,
@@ -2634,7 +3269,6 @@ async def typing(
         auth.user,
         required_permissions("typing.publish"),
     )
-    await require_dm_send(session, access, auth.user)
     await publish_channel_dispatch(
         redis,
         access,

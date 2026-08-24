@@ -16,10 +16,12 @@ from app.api.e2ee import (
     room_encryption_control_log,
     validate_remote_room_commit_response,
 )
+from app.chat import e2ee_membership, guild_revision
 from app.chat.e2ee_membership import (
     GUILD_E2EE_ACCESS_MUTATION_EVENTS,
     e2ee_policy_destinations,
     pause_guild_e2ee_for_membership_change,
+    publish_e2ee_policy_updates,
     remote_e2ee_authorities_for_user,
 )
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
@@ -206,6 +208,98 @@ async def test_every_guild_access_change_pauses_all_active_encrypted_channels() 
         "guild.overwrite.upsert",
         "guild.overwrite.delete",
     } == GUILD_E2EE_ACCESS_MUTATION_EVENTS
+
+
+@pytest.mark.asyncio
+async def test_policy_updates_use_thread_events_for_encrypted_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = SimpleNamespace(
+        id=10,
+        origin_domain="alpha.localhost",
+        guild_id=20,
+        guild_domain="alpha.localhost",
+        type=12,
+    )
+    publish = AsyncMock()
+    redis = SimpleNamespace()
+    monkeypatch.setattr(e2ee_membership, "channel_payload", lambda item: {"id": str(item.id)})
+    monkeypatch.setattr(e2ee_membership, "publish_dispatch", publish)
+
+    await publish_e2ee_policy_updates(
+        cast(Any, SimpleNamespace()),
+        cast(Any, redis),
+        cast(Any, _settings()),
+        cast(list[Channel], [channel]),
+    )
+
+    publish.assert_awaited_once()
+    assert publish.await_args.args[0] is redis
+    assert publish.await_args.args[2:] == ("THREAD_UPDATE", {"id": "10"})
+
+
+@pytest.mark.asyncio
+async def test_guild_mutation_returns_paused_policy_channels_to_postcommit_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread = SimpleNamespace(id=10, origin_domain="alpha.localhost")
+    actor = SimpleNamespace(id=7, origin_domain="alpha.localhost")
+    guild = SimpleNamespace(
+        id=20,
+        origin_domain="alpha.localhost",
+        snapshot_generation=1,
+        permission_generation=2,
+    )
+    session = SimpleNamespace(flush=AsyncMock())
+    monkeypatch.setattr(
+        guild_revision,
+        "guild_mutation_signer",
+        AsyncMock(return_value=actor),
+    )
+    pause = AsyncMock(side_effect=[[thread], []])
+    monkeypatch.setattr(guild_revision, "pause_guild_e2ee_for_membership_change", pause)
+    monkeypatch.setattr(guild_revision, "assign_guild_sequence", AsyncMock(side_effect=[1, 2, 3]))
+    monkeypatch.setattr(
+        guild_revision,
+        "build_envelope",
+        AsyncMock(
+            side_effect=[
+                {"event_id": "one"},
+                {"event_id": "two"},
+                {"event_id": "three"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(guild_revision, "store_guild_event", MagicMock())
+    monkeypatch.setattr(guild_revision, "remote_guild_destinations", AsyncMock(return_value=set()))
+    monkeypatch.setattr(guild_revision, "remember_guild_delivery_wakes", MagicMock())
+    paused: list[Channel] = []
+
+    for event_type in ("guild.role.update", "guild.member.role.add"):
+        await guild_revision.queue_guild_mutation(
+            cast(Any, session),
+            cast(Any, _settings()),
+            cast(Any, guild),
+            cast(Any, actor),
+            event_type,
+            {},
+            e2ee_policy_channels=paused,
+        )
+
+    assert paused == [thread]
+    assert pause.await_count == 2
+
+    await guild_revision.queue_guild_mutation(
+        cast(Any, session),
+        cast(Any, _settings()),
+        cast(Any, guild),
+        cast(Any, actor),
+        "guild.member.remove",
+        {},
+        e2ee_policy_channels=paused,
+        pause_e2ee=False,
+    )
+    assert pause.await_count == 2
 
 
 @pytest.mark.parametrize("actor_home", ["beta.localhost", "gamma.localhost"])

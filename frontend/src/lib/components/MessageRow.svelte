@@ -13,7 +13,14 @@
 
 <script lang="ts">
   import { userErrorMessage } from '$lib/api/client';
-  import type { Attachment, Message, PresenceStatus, Role, UserSummary } from '$lib/chat/types';
+  import type {
+    Attachment,
+    Channel,
+    Message,
+    PresenceStatus,
+    Role,
+    UserSummary
+  } from '$lib/chat/types';
   import type { CustomEmojiOption } from '$lib/chat/emojis';
   import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import { entityRef } from '$lib/chat/refs';
@@ -49,6 +56,7 @@
     message,
     compact = false,
     canEdit = false,
+    canDelete = false,
     presence = 'offline',
     authorColor,
     mentionUsers = [],
@@ -57,6 +65,7 @@
     pinned = false,
     onEdit,
     canReact = false,
+    canReactToExisting = false,
     customEmojis = [],
     reactionUserKey = '',
     onToggleReaction,
@@ -65,6 +74,9 @@
     onRetry,
     onViewProfile,
     onReply,
+    onCreateThread,
+    onOpenThread,
+    onOpenThreads,
     onJumpToReference,
     onTogglePin,
     moderationActions = [],
@@ -76,6 +88,7 @@
     message: Message;
     compact?: boolean;
     canEdit?: boolean;
+    canDelete?: boolean;
     presence?: PresenceStatus;
     authorColor?: string;
     mentionUsers?: UserSummary[];
@@ -85,6 +98,7 @@
     onEdit?: (message: Message) => void;
     onDelete?: (message: Message) => void;
     canReact?: boolean;
+    canReactToExisting?: boolean;
     customEmojis?: CustomEmojiOption[];
     reactionUserKey?: string;
     onToggleReaction?: (message: Message, emoji: string, remove: boolean) => void;
@@ -92,6 +106,9 @@
     onRetry?: (message: Message) => void;
     onViewProfile?: (message: Message, event: MouseEvent) => void;
     onReply?: (message: Message) => void;
+    onCreateThread?: (message: Message) => void;
+    onOpenThread?: (thread: Channel) => void;
+    onOpenThreads?: () => void;
     onJumpToReference?: (message: Message) => void;
     onTogglePin?: (message: Message, pinned: boolean) => void;
     moderationActions?: Array<{ id: 'kick' | 'timeout' | 'ban'; label: string }>;
@@ -123,21 +140,46 @@
   let attachmentActionError = $state('');
   let menuListenersActive = false;
   const closeExclusiveMenu = (restoreFocus: boolean) => closeMenu(restoreFocus);
-  const groupSystemNotice = $derived([3, 4, 5].includes(message.message_type));
+  const groupSystemNotice = $derived([3, 4, 5, 18].includes(message.message_type));
+  const threadCreatedNotice = $derived(message.message_type === 18);
+  const resolvedReference = $derived(referencedMessage ?? message.referenced_message ?? null);
+  const presentedMessage = $derived(
+    message.message_type === 21 && resolvedReference ? resolvedReference : message
+  );
   const renderedContent = $derived(
-    message.e2ee ? (message.decrypted_content ?? null) : message.content
+    presentedMessage.e2ee ? (presentedMessage.decrypted_content ?? null) : presentedMessage.content
+  );
+  const hasMessageReference = $derived(
+    message.message_type !== 21 &&
+      Boolean(
+        message.referenced_message_id ||
+        message.message_reference?.message_id ||
+        message.referenced_message
+      )
   );
 
   const editAvailable = $derived(
     !groupSystemNotice && canEdit && !message.deleted_at && !message.pending && !message.queued
   );
+  const deleteAvailable = $derived(
+    !groupSystemNotice &&
+      Boolean(onDelete) &&
+      (editAvailable || canDelete) &&
+      !message.deleted_at &&
+      !message.pending &&
+      !message.queued
+  );
   const menuAvailable = $derived(
-    !groupSystemNotice && actionsEnabled && !message.pending && !message.queued
+    !groupSystemNotice &&
+      !presentedMessage.content_unavailable &&
+      actionsEnabled &&
+      !message.pending &&
+      !message.queued
   );
   // Content-derived network requests are intentionally disabled for E2EE.
   // A manual, disclosed preview flow may be added later, but decrypted URLs
   // must never be submitted to the server implicitly.
-  const previewableContent = $derived(message.e2ee ? null : renderedContent);
+  const previewableContent = $derived(presentedMessage.e2ee ? null : renderedContent);
   const inviteReferences = $derived(
     previewableContent ? inviteReferencesInMessage(previewableContent) : []
   );
@@ -210,6 +252,7 @@
   }
 
   function authorName(): string {
+    if (message.content_unavailable) return 'Original message';
     return (
       message.webhook?.name ??
       (message.author ? userDisplayName(message.author) : null) ??
@@ -217,8 +260,19 @@
     );
   }
 
+  function openProjectedThread(event: MouseEvent) {
+    event.stopPropagation();
+    if (message.thread) onOpenThread?.(message.thread);
+  }
+
+  function openThreadDirectory(event: MouseEvent) {
+    event.stopPropagation();
+    onOpenThreads?.();
+  }
+
   function visibleTime(): string {
-    const createdAt = new Date(message.created_at);
+    const createdAt = new Date(message.created_at ?? '');
+    if (Number.isNaN(createdAt.getTime())) return '';
     if (timestampFormat === 'date-time') {
       return createdAt.toLocaleString(preferredLocale(), {
         dateStyle: 'medium',
@@ -232,7 +286,9 @@
   }
 
   function accessibleTime(): string {
-    return new Date(message.created_at).toLocaleString(preferredLocale(), {
+    const createdAt = new Date(message.created_at ?? '');
+    if (Number.isNaN(createdAt.getTime())) return 'Time unavailable';
+    return createdAt.toLocaleString(preferredLocale(), {
       dateStyle: 'long',
       timeStyle: 'short'
     });
@@ -297,6 +353,12 @@
     onReply?.(message);
   }
 
+  function createThread(event: MouseEvent) {
+    event.stopPropagation();
+    closeMenu(false);
+    onCreateThread?.(message);
+  }
+
   function jumpToReference(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
@@ -322,7 +384,8 @@
     event?.stopPropagation();
     if (!onToggleReaction || reactionBusy) return;
     const remove = message.reacted_emoji?.includes(value) ?? false;
-    if (!remove && !canReact) return;
+    const exists = Number(message.reaction_counts?.[value] ?? 0) > 0;
+    if (!remove && !canReact && !(canReactToExisting && exists)) return;
     reactionBusy = true;
     if (!remove) rememberReaction(reactionUserKey, value);
     closeMenu(false);
@@ -584,7 +647,7 @@
     {/if}
   </button>
   <div class="message-body">
-    {#if message.referenced_message_id}
+    {#if hasMessageReference}
       <button
         class="message-reply-reference"
         type="button"
@@ -593,18 +656,20 @@
         onclick={jumpToReference}
       >
         <span aria-hidden="true">↪</span>
-        {#if referencedMessage}
+        {#if resolvedReference}
           <strong
-            >{referencedMessage.author
-              ? userDisplayName(referencedMessage.author)
+            >{resolvedReference.author
+              ? userDisplayName(resolvedReference.author)
               : 'Unknown author'}</strong
           >
           <span
-            >{referencedMessage.deleted_at
+            >{resolvedReference.deleted_at
               ? 'Message removed'
-              : referencedMessage.decrypted_content ||
-                referencedMessage.content ||
-                'Attachment'}</span
+              : resolvedReference.content_unavailable
+                ? 'Original message unavailable'
+                : resolvedReference.decrypted_content ||
+                  resolvedReference.content ||
+                  'Attachment'}</span
           >
         {:else}
           <span>Referenced message</span>
@@ -625,20 +690,43 @@
         {/if}
         {#if message.webhook}<small class="webhook-badge">WEBHOOK</small>{/if}
         {#if message.author?.bot}<small class="bot-badge">BOT</small>{/if}
-        <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
+        {#if !presentedMessage.content_unavailable}<time
+            datetime={message.created_at}
+            title={accessibleTime()}>{visibleTime()}</time
+          >{/if}
       </header>
     {:else}
       <span class="visually-hidden">{authorName()}, {accessibleTime()}</span>
     {/if}
-    {#if groupSystemNotice}
+    {#if presentedMessage.content_unavailable}
+      <p class="message-removed">Original message is no longer available.</p>
+    {:else if threadCreatedNotice}
+      <div class="group-system-message thread-created-message">
+        <span class="group-system-icon" aria-hidden="true">🧵</span>
+        <span>
+          <strong>{authorName()}</strong> started a thread:
+          {#if message.thread && onOpenThread}
+            <button type="button" onclick={openProjectedThread}
+              >{message.thread.name ?? renderedContent ?? 'Thread'}</button
+            >
+          {:else}
+            <strong>{message.thread?.name ?? renderedContent ?? 'Thread'}</strong>
+          {/if}.
+          {#if onOpenThreads}
+            <button type="button" onclick={openThreadDirectory}>See all threads.</button>
+          {/if}
+        </span>
+        <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
+      </div>
+    {:else if groupSystemNotice}
       <div class="group-system-message">
         <span class="group-system-icon" aria-hidden="true">✦</span>
         <span>{renderedContent}</span>
         <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
       </div>
-    {:else if message.deleted_at}
+    {:else if presentedMessage.deleted_at}
       <p class="message-removed">Message removed</p>
-    {:else if message.e2ee && !renderedContent}
+    {:else if presentedMessage.e2ee && !renderedContent}
       <div class="encrypted-message-unavailable" role="status">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <rect x="5" y="10" width="14" height="10" rx="2" />
@@ -673,13 +761,32 @@
       {#each botInviteReferences as reference (`${reference.applicationRef}/${reference.templateSlug}`)}
         <BotInviteEmbed {reference} />
       {/each}
-      {#if linkPreviewUrl && (message.flags & 4) === 0}
+      {#if linkPreviewUrl && (presentedMessage.flags & 4) === 0}
         <LinkPreview url={linkPreviewUrl} />
       {/if}
     {/if}
-    {#if !message.deleted_at && message.attachments?.length}
+    {#if message.thread && !threadCreatedNotice}
+      <button class="thread-preview-card" type="button" onclick={openProjectedThread}>
+        <span>
+          <strong>{message.thread.name ?? 'Thread'}</strong>
+          <b>
+            {message.thread.message_count ?? 0}
+            {(message.thread.message_count ?? 0) === 1 ? 'Message' : 'Messages'} ›
+          </b>
+        </span>
+        <small>
+          {#if message.thread.last_message?.author}
+            <strong>{userDisplayName(message.thread.last_message.author)}</strong>
+          {/if}
+          {message.thread.last_message?.e2ee
+            ? 'Encrypted message'
+            : (message.thread.last_message?.content ?? 'Open thread')}
+        </small>
+      </button>
+    {/if}
+    {#if !presentedMessage.deleted_at && presentedMessage.attachments?.length}
       <div class="message-attachments">
-        {#each message.attachments as attachment (`${attachment.id}@${attachment.origin_domain}`)}
+        {#each presentedMessage.attachments as attachment (`${attachment.id}@${attachment.origin_domain}`)}
           {#if attachment.encryption_mode === 'e2ee'}
             <!-- The authenticated decrypted manifest below supplies the real name, type, and key. -->
           {:else if attachment.scan_status === 'pending'}
@@ -768,9 +875,9 @@
         <p class="form-error" role="alert">{attachmentActionError}</p>
       {/if}
     {/if}
-    {#if !message.deleted_at && message.decrypted_attachments?.length}
+    {#if !presentedMessage.deleted_at && presentedMessage.decrypted_attachments?.length}
       <div class="message-attachments encrypted-attachments">
-        {#each message.decrypted_attachments as manifest (manifest.file_id)}
+        {#each presentedMessage.decrypted_attachments as manifest (manifest.file_id)}
           <button
             type="button"
             class="attachment-file"
@@ -792,7 +899,7 @@
             type="button"
             disabled={!onToggleReaction ||
               reactionBusy ||
-              (!canReact && !message.reacted_emoji?.includes(emoji))}
+              (!canReact && !canReactToExisting && !message.reacted_emoji?.includes(emoji))}
             aria-label={`${message.reacted_emoji?.includes(emoji) ? 'Remove' : 'Add'} ${emoji} reaction, ${count}`}
             onclick={(event) => void toggleReaction(emoji, event)}
           >
@@ -887,6 +994,14 @@
               <path d="m9 8-5 4 5 4v-3h4c3.5 0 5.8 1.4 7 4-.2-5.8-3.3-9-9-9H9Z" />
             </svg>
             <span>Reply</span>
+          </button>
+        {/if}
+        {#if onCreateThread && !message.deleted_at}
+          <button type="button" role="menuitem" tabindex="-1" onclick={createThread}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 3v12a4 4 0 0 0 4 4h8M3 7h8M15 15l4 4-4 4" />
+            </svg>
+            <span>Create Thread</span>
           </button>
         {/if}
         {#if onTogglePin && !message.deleted_at}
@@ -990,40 +1105,40 @@
             <span>Edit message</span>
             <kbd>↑</kbd>
           </button>
-          {#if onDelete}
-            {#if confirmingDelete}
-              <div class="message-delete-confirmation" role="group" aria-label="Confirm deletion">
-                <p>Delete this message?</p>
-                <div>
-                  <button type="button" role="menuitem" tabindex="-1" onclick={cancelDelete}>
-                    Cancel
-                  </button>
-                  <button
-                    bind:this={deleteConfirmationButton}
-                    class="danger-item"
-                    type="button"
-                    role="menuitem"
-                    tabindex="-1"
-                    onclick={deleteMessage}
-                  >
-                    Delete
-                  </button>
-                </div>
+        {/if}
+        {#if deleteAvailable}
+          {#if confirmingDelete}
+            <div class="message-delete-confirmation" role="group" aria-label="Confirm deletion">
+              <p>Delete this message?</p>
+              <div>
+                <button type="button" role="menuitem" tabindex="-1" onclick={cancelDelete}>
+                  Cancel
+                </button>
+                <button
+                  bind:this={deleteConfirmationButton}
+                  class="danger-item"
+                  type="button"
+                  role="menuitem"
+                  tabindex="-1"
+                  onclick={deleteMessage}
+                >
+                  Delete
+                </button>
               </div>
-            {:else}
-              <button
-                class="danger-item"
-                type="button"
-                role="menuitem"
-                tabindex="-1"
-                onclick={requestDelete}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6" />
-                </svg>
-                <span>Delete message</span>
-              </button>
-            {/if}
+            </div>
+          {:else}
+            <button
+              class="danger-item"
+              type="button"
+              role="menuitem"
+              tabindex="-1"
+              onclick={requestDelete}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6" />
+              </svg>
+              <span>Delete message</span>
+            </button>
           {/if}
         {/if}
         {#if renderedContent && !message.deleted_at}

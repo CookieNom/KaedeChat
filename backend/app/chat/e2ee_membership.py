@@ -120,11 +120,12 @@ async def publish_e2ee_policy_updates(
 ) -> None:
     for channel in channels:
         rendered = channel_payload(channel)
+        event_type = "THREAD_UPDATE" if channel.type in {10, 11, 12} else "CHANNEL_UPDATE"
         if channel.guild_id is not None and channel.guild_domain is not None:
             await publish_dispatch(
                 redis,
                 guild_topic(channel.guild_domain, channel.guild_id),
-                "CHANNEL_UPDATE",
+                event_type,
                 rendered,
             )
             continue
@@ -141,7 +142,7 @@ async def publish_e2ee_policy_updates(
             await publish_dispatch(
                 redis,
                 user_topic(settings.domain, user_id),
-                "CHANNEL_UPDATE",
+                event_type,
                 rendered,
             )
 

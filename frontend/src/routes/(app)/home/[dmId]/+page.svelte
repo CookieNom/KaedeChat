@@ -21,7 +21,9 @@
     compareMessages,
     failPendingMessage,
     mergeMessageSnapshot,
+    messageReferenceTarget,
     reconcileMessage,
+    resolvedReferencedMessage,
     type MessageDeliveryUpdate
   } from '$lib/chat/reconcile';
   import { applyReactionUpdate, type ReactionUpdate } from '$lib/chat/reaction-state';
@@ -298,14 +300,7 @@
   });
 
   function referencedMessage(message: Message): Message | null {
-    if (!message.referenced_message_id) return null;
-    return (
-      messages.find(
-        (candidate) =>
-          candidate.id === message.referenced_message_id &&
-          candidate.origin_domain === message.referenced_message_domain
-      ) ?? null
-    );
+    return resolvedReferencedMessage(message, messages);
   }
 
   function reachesRetainedHistoryStart(
@@ -1787,8 +1782,9 @@
   }
 
   function jumpToReply(message: Message) {
-    if (!message.referenced_message_id || !message.referenced_message_domain) return;
-    jumpToMessageReference(`${message.referenced_message_id}@${message.referenced_message_domain}`);
+    const target = messageReferenceTarget(message);
+    if (!target) return;
+    jumpToMessageReference(entityRef(target));
   }
 
   function finishEditing() {

@@ -1174,6 +1174,9 @@ def test_complete_guild_mutation_registry_and_snapshot_fences() -> None:
         "guild.channel.create",
         "guild.channel.update",
         "guild.channel.delete",
+        "guild.forum.cursor.update",
+        "guild.thread.member.upsert",
+        "guild.thread.member.delete",
         "guild.role.create",
         "guild.role.update",
         "guild.role.delete",
@@ -1673,6 +1676,9 @@ def test_local_silence_blocks_symmetric_guild_federation_surfaces() -> None:
     assert silence_blocks_path("/_kaede/v1/guilds/123/snapshot")
     assert silence_blocks_path("/_kaede/v1/guilds/123/events")
     assert silence_blocks_path("/_kaede/v1/guilds/123/proxy")
+    assert silence_blocks_path("/_kaede/v1/guilds/123/proxy-pin")
+    assert silence_blocks_path("/_kaede/v1/guilds/123/proxy-reaction")
+    assert silence_blocks_path("/_kaede/v1/guilds/123/proxy-thread")
     assert silence_blocks_path("/_kaede/v1/guilds/123/join")
     assert not silence_blocks_path("/_kaede/v1/inbox")
     assert not silence_blocks_path("/_kaede/v1/dms/open")
@@ -3077,6 +3083,32 @@ def test_guild_snapshot_flattens_child_of_hidden_category() -> None:
         federated_history_policy="inherit",
         created_floor_id=12,
         permissions_synced=False,
+        flags=0,
+        owner_id=None,
+        owner_domain=None,
+        archived=False,
+        locked=False,
+        invitable=True,
+        auto_archive_duration=None,
+        archive_timestamp=None,
+        last_activity_at=None,
+        message_count=0,
+        total_message_sent=0,
+        member_count=0,
+        starter_message_id=None,
+        starter_message_domain=None,
+        last_thread_id=None,
+        last_thread_domain=None,
+        default_auto_archive_duration=None,
+        default_thread_rate_limit_per_user=None,
+        available_tags=[],
+        applied_tag_ids=[],
+        default_reaction_emoji=None,
+        default_sort_order=None,
+        default_forum_layout=None,
+        e2ee_required=False,
+        encryption_mode="plaintext",
+        created_at=datetime(2026, 7, 18, 11, 0, tzinfo=UTC),
     )
 
     snapshot_at = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)

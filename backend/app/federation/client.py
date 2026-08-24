@@ -64,6 +64,9 @@ def silence_blocks_path(path: str) -> bool:
         "snapshot",
         "events",
         "proxy",
+        "proxy-pin",
+        "proxy-reaction",
+        "proxy-thread",
         "join",
     }
 

@@ -18,6 +18,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/role_colors.dart';
+import 'package:kaede_mobile/src/domain/thread_permissions.dart';
 import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
@@ -63,6 +64,55 @@ final class MobileApplicationCommand {
   final String name;
   final String type;
   final String description;
+}
+
+final class NativeThreadCommand {
+  const NativeThreadCommand({required this.name, required this.message});
+
+  final String name;
+  final String message;
+}
+
+/// Text representation used by the mobile composer for Discord's native
+/// `/thread name message` command options.
+NativeThreadCommand? parseNativeThreadCommand(String input) {
+  final match = RegExp(
+    r'^/thread\s+name:(?:"([^"]+)"|(.+?))\s+message:(?:"([\s\S]*)"|([\s\S]+))$',
+    caseSensitive: false,
+  ).firstMatch(input.trim());
+  if (match == null) return null;
+  final name = (match.group(1) ?? match.group(2) ?? '').trim();
+  final message = (match.group(3) ?? match.group(4) ?? '').trim();
+  if (name.isEmpty ||
+      name.length > 100 ||
+      message.isEmpty ||
+      message.length > 4000) {
+    return null;
+  }
+  return NativeThreadCommand(name: name, message: message);
+}
+
+@visibleForTesting
+List<KaedeMessage> threadTimelineMessages(
+  KaedeChannel channel,
+  List<KaedeMessage> messages,
+) {
+  final starter = channel.isThread ? channel.starterMessage : null;
+  if (starter == null ||
+      messages.any((message) => message.ref == starter.ref)) {
+    return messages;
+  }
+  return List<KaedeMessage>.unmodifiable(<KaedeMessage>[starter, ...messages]);
+}
+
+/// Discord type-21 thread starters carry the source message only in
+/// `referenced_message`. A missing projection is a deliberate unavailable
+/// state, never an empty message.
+@visibleForTesting
+KaedeMessage threadStarterDisplayMessage(KaedeMessage message) {
+  if (message.messageType != 21) return message;
+  return message.referencedMessage ??
+      message.copyWith(contentUnavailable: true);
 }
 
 /// Deep link to a message that the web and desktop clients can open. Guild
@@ -662,13 +712,19 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       });
     }
     final moderationStatus = state.activeModerationStatus;
-    final encryptedPaused =
-        channel.encryptionMode == 'e2ee' && channel.encryptionState != 'active';
+    final encryptedPaused = channelEncryptionPaused(channel);
+    final canUseCommands = canUseApplicationCommands(channel);
     final canSend = !encryptedPaused &&
+        (!channel.locked || canManageThreads(channel)) &&
         moderationStatus == null &&
         (channel.type == ChannelType.dm ||
-            channel.allows(Permission.sendMessages));
-    final messages = state.messages;
+            (channel.isThread
+                ? canSendInThread(channel)
+                : channel.allows(Permission.sendMessages)));
+    final stateMessages = state.messages;
+    final messages = threadTimelineMessages(channel, stateMessages);
+    final detachedStarter =
+        messages.length == stateMessages.length ? null : channel.starterMessage;
     final pending = state.pendingMessages;
     final jump = state.messageJump;
     final channelChanged = _renderedChannel != channel.ref;
@@ -874,12 +930,20 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                             final previous = messageIndex > 0
                                 ? messages[messageIndex - 1]
                                 : null;
-                            final startsNewDay = previous == null ||
-                                !sameCalendarDay(
-                                  previous.createdAt,
-                                  message.createdAt,
-                                );
-                            final compact = previous != null &&
+                            final startsNewDay = message.createdAtAvailable &&
+                                (previous == null ||
+                                    !previous.createdAtAvailable ||
+                                    !sameCalendarDay(
+                                      previous.createdAt,
+                                      message.createdAt,
+                                    ));
+                            final detached =
+                                message.ref == detachedStarter?.ref;
+                            final compact = !detached &&
+                                previous != null &&
+                                previous.ref != detachedStarter?.ref &&
+                                previous.createdAtAvailable &&
+                                message.createdAtAvailable &&
                                 !startsNewDay &&
                                 previous.authorRef == message.authorRef &&
                                 previous.reference == null &&
@@ -903,14 +967,27 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                               referenced: message.reference == null
                                   ? null
                                   : messageByWire[message.reference!.wire],
-                              onReply: reply,
+                              onReply: detached ? null : reply,
                               onJump: message.reference == null
                                   ? null
                                   : () => _jumpTo(message.reference!),
-                              onMenu: () => _showMessageActions(message),
-                              onReaction: (emoji) =>
-                                  _toggleReaction(message, emoji),
-                              onAddReaction: message.reactionCounts.isEmpty
+                              onMenu: detached
+                                  ? null
+                                  : () => _showMessageActions(message),
+                              onOpenThread: message.thread == null
+                                  ? null
+                                  : () => ref
+                                      .read(mobileControllerProvider.notifier)
+                                      .selectChannel(message.thread!),
+                              onReaction: detached || channel.archived
+                                  ? null
+                                  : (emoji) => _toggleReaction(message, emoji),
+                              onAddReaction: detached ||
+                                      message.reactionCounts.isEmpty ||
+                                      !canAddMessageReaction(
+                                        channel,
+                                        emojiExists: false,
+                                      )
                                   ? null
                                   : () => _addReactionFromPicker(message),
                               onAuthorTap: message.author == null
@@ -942,7 +1019,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                                               .withValues(alpha: .13)
                                           : Colors.transparent,
                                       child: SwipeToReply(
-                                        enabled: canSend &&
+                                        enabled: !detached &&
+                                            canSend &&
                                             message.deletedAt == null,
                                         onReply: reply,
                                         child: tile,
@@ -980,16 +1058,27 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
             ),
           if (_commandQuery != null)
             _CommandSuggestions(
-              commands: _commandCandidates(_commandQuery!),
+              commands: channel.archived || !canUseCommands
+                  ? const <MobileApplicationCommand>[]
+                  : _commandCandidates(_commandQuery!),
+              showNativeThread: !channel.isThread &&
+                  (channel.type == ChannelType.text ||
+                      channel.type == ChannelType.announcement) &&
+                  canCreatePublicThread(channel) &&
+                  hasSendMessagesInThreads(channel) &&
+                  'thread'.contains(_commandQuery!.toLowerCase()),
+              onNativeThread: _insertNativeThreadCommand,
               onSelected: _insertCommand,
             ),
           if (!canSend)
             _PermissionNotice(
               message: encryptedPaused
                   ? 'Encrypted messaging is paused while participant device keys are secured. No plaintext will be sent.'
-                  : moderationStatus == null
-                      ? 'You do not have permission to send messages here.'
-                      : 'You cannot send messages while timed out.',
+                  : channel.locked && !canManageThreads(channel)
+                      ? 'This thread is locked. Only moderators can send messages.'
+                      : moderationStatus == null
+                          ? 'You do not have permission to send messages here.'
+                          : 'You cannot send messages while timed out.',
             )
           else
             IgnorePointer(
@@ -1002,7 +1091,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 notifyReply: _notifyReply,
                 uploads: _uploads,
                 sending: _sending,
-                slowModeRemaining: _slowModeRemaining(channel.ref),
+                slowModeRemaining: _slowModeRemaining(channel),
                 compact: MediaQuery.sizeOf(context).width <= 360,
                 canAttach: channel.type == ChannelType.dm ||
                     channel.allows(Permission.attachFiles),
@@ -1107,6 +1196,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     _composer.value = TextEditingValue(
       text: '/${command.name} ',
       selection: TextSelection.collapsed(offset: command.name.length + 2),
+    );
+    setState(() => _commandQuery = null);
+    _composerFocus.requestFocus();
+  }
+
+  void _insertNativeThreadCommand() {
+    const text = '/thread name: message:';
+    _composer.value = const TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: 13),
     );
     setState(() => _commandQuery = null);
     _composerFocus.requestFocus();
@@ -1481,7 +1580,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       _showGifUnavailable();
       return;
     }
-    final remaining = _slowModeRemaining(channel.ref);
+    final remaining = _slowModeRemaining(channel);
     if (remaining > Duration.zero) {
       final seconds = (remaining.inMilliseconds / 1000).ceil();
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -1495,10 +1594,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           .read(mobileControllerProvider.notifier)
           .send(channel.ref, gif.url.toString());
       if (channel.slowModeSeconds > 0) {
-        _startSlowMode(
-          channel.ref,
-          Duration(seconds: channel.slowModeSeconds),
-        );
+        _startSlowMode(channel, Duration(seconds: channel.slowModeSeconds));
       }
       await WidgetsBinding.instance.endOfFrame;
       if (_composerChannel == channel.ref && _scroll.hasClients) {
@@ -1510,7 +1606,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       }
     } on Object catch (error) {
       if (error is KaedeException && error.retryAfter != null) {
-        _startSlowMode(channel.ref, error.retryAfter!);
+        _startSlowMode(channel, error.retryAfter!);
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -1566,7 +1662,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     final state = ref.read(mobileControllerProvider);
     final channel = state.activeChannel;
     if (channel == null || _composerChannel != channel.ref) return;
-    if (_slowModeRemaining(channel.ref) > Duration.zero) return;
+    if (_slowModeRemaining(channel) > Duration.zero) return;
     unawaited(HapticFeedback.lightImpact());
     final content = _composer.text;
     final reply = _reply;
@@ -1578,6 +1674,73 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       final commandMatch = RegExp(r'^/([a-z0-9_-]{1,32})(?:\s+([\s\S]*))?$',
               caseSensitive: false)
           .firstMatch(content.trim());
+      final nativeThread = parseNativeThreadCommand(content);
+      if (commandMatch?.group(1)?.toLowerCase() == 'thread') {
+        if (nativeThread == null) {
+          throw const UserInputException(
+            'Use /thread name:<thread name> message:<first message>.',
+          );
+        }
+        if (channel.type != ChannelType.text &&
+            channel.type != ChannelType.announcement) {
+          throw const UserInputException(
+            'Threads can only be created from a text or announcement channel.',
+          );
+        }
+        if (!canCreatePublicThread(channel) ||
+            !hasSendMessagesInThreads(channel)) {
+          throw const UserInputException(
+            'You do not have permission to create a thread with a first message here.',
+          );
+        }
+        if (channel.encryptionMode == 'e2ee') {
+          throw const UserInputException(
+            'The native /thread command is unavailable in an encrypted channel because its atomic first message would be plaintext.',
+          );
+        }
+        if (reply != null) {
+          throw const UserInputException(
+            'Create the thread without replying to another message.',
+          );
+        }
+        if (pendingUploads.isNotEmpty &&
+            !channel.allows(Permission.attachFiles)) {
+          throw const UserInputException(
+            'You do not have permission to attach files here.',
+          );
+        }
+        final uploaded = <EntityRef>[];
+        for (final item in pendingUploads) {
+          uploaded.add(await controller.repository.uploadAttachmentFile(
+            channel: channel.ref,
+            filename: item.name,
+            contentType: item.contentType,
+            file: item.file,
+          ));
+        }
+        final created = await controller.createThread(
+          parent: channel,
+          name: nativeThread.name,
+          content: nativeThread.message,
+          type: channel.type == ChannelType.announcement ? 10 : 11,
+          attachments: uploaded,
+        );
+        controller.setDraft(channel.ref, '');
+        if (_composerChannel == channel.ref) {
+          _updatingComposer = true;
+          _composer.clear();
+          _updatingComposer = false;
+        }
+        setState(() {
+          _uploads.removeWhere(pendingUploads.contains);
+          _reply = null;
+        });
+        for (final upload in pendingUploads) {
+          unawaited(upload.deleteIfTemporary());
+        }
+        await controller.selectChannel(created);
+        return;
+      }
       final matchingCommands = commandMatch == null
           ? const <MobileApplicationCommand>[]
           : _applicationCommands
@@ -1586,6 +1749,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                   command.name == commandMatch.group(1))
               .toList(growable: false);
       if (matchingCommands.length == 1) {
+        if (!canUseApplicationCommands(channel)) {
+          throw const UserInputException(
+            'You do not have permission to use application commands in this channel.',
+          );
+        }
+        if (channel.archived) {
+          throw const UserInputException(
+            'Commands are unavailable in archived threads.',
+          );
+        }
         if (channel.encryptionMode == 'e2ee') {
           throw const UserInputException(
             'Bot commands are unavailable in end-to-end encrypted channels.',
@@ -1668,10 +1841,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         unawaited(upload.deleteIfTemporary());
       }
       if (channel.slowModeSeconds > 0) {
-        _startSlowMode(
-          channel.ref,
-          Duration(seconds: channel.slowModeSeconds),
-        );
+        _startSlowMode(channel, Duration(seconds: channel.slowModeSeconds));
       }
       await WidgetsBinding.instance.endOfFrame;
       if (_composerChannel == channel.ref && _scroll.hasClients) {
@@ -1680,7 +1850,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       }
     } on Object catch (error) {
       if (error is KaedeException && error.retryAfter != null) {
-        _startSlowMode(channel.ref, error.retryAfter!);
+        _startSlowMode(channel, error.retryAfter!);
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -1695,16 +1865,19 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     }
   }
 
-  Duration _slowModeRemaining(EntityRef channel) {
-    final deadline = _slowModeUntil[channel];
+  Duration _slowModeRemaining(KaedeChannel channel) {
+    if (canBypassSlowmode(channel)) return Duration.zero;
+    final deadline = _slowModeUntil[channel.ref];
     if (deadline == null) return Duration.zero;
     final remaining = deadline.difference(DateTime.now());
     return remaining.isNegative ? Duration.zero : remaining;
   }
 
-  void _startSlowMode(EntityRef channel, Duration duration) {
-    if (duration <= Duration.zero || !mounted) return;
-    _slowModeUntil[channel] = DateTime.now().add(duration);
+  void _startSlowMode(KaedeChannel channel, Duration duration) {
+    if (duration <= Duration.zero || !mounted || canBypassSlowmode(channel)) {
+      return;
+    }
+    _slowModeUntil[channel.ref] = DateTime.now().add(duration);
     _slowModeTimer?.cancel();
     _slowModeTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) {
       if (!mounted) {
@@ -1746,8 +1919,10 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     final channel = state.activeChannel;
     if (channel == null) return;
     final removing = message.reactedEmoji.contains(emoji);
-    final canAdd = channel.type == ChannelType.dm ||
-        channel.allows(Permission.addReactions);
+    final canAdd = canAddMessageReaction(
+      channel,
+      emojiExists: (message.reactionCounts[emoji] ?? 0) > 0,
+    );
     if (!removing && !canAdd) return;
     unawaited(HapticFeedback.selectionClick());
     final controller = ref.read(mobileControllerProvider.notifier);
@@ -1866,10 +2041,13 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     if (message.deletedAt != null) return;
     final me = ref.read(mobileControllerProvider).user?.ref;
     final channel = ref.read(mobileControllerProvider).activeChannel!;
-    final canReact = channel.type == ChannelType.dm ||
-        channel.allows(Permission.addReactions);
+    final canReact = canAddMessageReaction(channel, emojiExists: false);
     final canManage = channel.type == ChannelType.dm ||
         channel.allows(Permission.manageMessages);
+    final canPin = canPinMessages(channel);
+    final canDelete = (message.authorRef == me || canManage) &&
+        (!channel.archived || !channel.locked || canManageThreads(channel));
+    final canStartThread = canStartThreadFromMessage(channel);
     final recent = canReact ? await _recentReactions(me) : const <String>[];
     final sentGif = composerGifFromMessage(message.content);
     final gifFavorite = sentGif == null
@@ -1877,9 +2055,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         : (await loadComposerGifFavorites()).any((item) =>
             item.id == sentGif.id ||
             item.url.toString() == sentGif.url.toString());
-    final contextCommands = _applicationCommands
-        .where((command) => command.type == 'message' || command.type == 'user')
-        .toList(growable: false);
+    final contextCommands = canUseApplicationCommands(channel)
+        ? _applicationCommands
+            .where((command) =>
+                command.type == 'message' || command.type == 'user')
+            .toList(growable: false)
+        : const <MobileApplicationCommand>[];
     if (!mounted) return;
     final action = await showModalBottomSheet<String>(
       context: context,
@@ -1940,6 +2121,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                   leading: const Icon(Icons.reply_rounded),
                   title: const Text('Reply'),
                   onTap: () => Navigator.pop(context, 'reply')),
+              if (canStartThread)
+                ListTile(
+                  leading: const Icon(Icons.forum_outlined),
+                  title: const Text('Create Thread'),
+                  onTap: () => Navigator.pop(context, 'create-thread'),
+                ),
               if (message.content?.isNotEmpty == true)
                 ListTile(
                     leading: const Icon(Icons.copy_rounded),
@@ -1971,14 +2158,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                     title: const Text('View reactions'),
                     trailing: const Icon(Icons.chevron_right_rounded),
                     onTap: () => Navigator.pop(context, 'view-reactions')),
-              if (contextCommands.isNotEmpty && message.e2ee == null)
+              if (contextCommands.isNotEmpty &&
+                  message.e2ee == null &&
+                  !channel.archived)
                 ListTile(
                   leading: const Icon(Icons.apps_rounded),
                   title: const Text('Apps'),
                   trailing: const Icon(Icons.chevron_right_rounded),
                   onTap: () => Navigator.pop(context, 'app-command'),
                 ),
-              if (canManage)
+              if (canPin)
                 ListTile(
                     leading: Icon(message.pinned
                         ? Icons.push_pin_rounded
@@ -1986,7 +2175,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                     title:
                         Text(message.pinned ? 'Unpin message' : 'Pin message'),
                     onTap: () => Navigator.pop(context, 'pin')),
-              if (message.authorRef == me &&
+              if (!channel.archived &&
+                  (!channel.locked || canManageThreads(channel)) &&
+                  message.authorRef == me &&
                   (message.e2ee == null || message.content != null))
                 ListTile(
                     leading: const Icon(Icons.edit_outlined),
@@ -1998,7 +2189,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                   title: const Text('Report message'),
                   onTap: () => Navigator.pop(context, 'report'),
                 ),
-              if (message.authorRef == me || canManage)
+              if (canDelete)
                 ListTile(
                   leading: const Icon(Icons.delete_outline_rounded,
                       color: KaedeColors.danger),
@@ -2029,6 +2220,16 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           break;
         case 'copy':
           await Clipboard.setData(ClipboardData(text: message.content ?? ''));
+          break;
+        case 'create-thread':
+          final name = await _threadNameDialog();
+          if (name == null) break;
+          final created = await controller.createThreadFromMessage(
+            parent: channel,
+            message: message,
+            name: name,
+          );
+          await controller.selectChannel(created);
           break;
         case 'copy-link':
           final instance = controller.api.tokens?.instance.value;
@@ -2168,6 +2369,40 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
           FilledButton(
               onPressed: () => Navigator.pop(context, input.text.trim()),
               child: const Text('Save')),
+        ],
+      ),
+    );
+  }
+
+  Future<String?> _threadNameDialog() {
+    final input = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Create Thread'),
+        content: TextField(
+          controller: input,
+          autofocus: true,
+          maxLength: 100,
+          decoration: const InputDecoration(
+            labelText: 'Thread name',
+            counterText: '',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ValueListenableBuilder<TextEditingValue>(
+            valueListenable: input,
+            builder: (context, value, _) => FilledButton(
+              onPressed: value.text.trim().isEmpty
+                  ? null
+                  : () => Navigator.pop(context, value.text.trim()),
+              child: const Text('Create'),
+            ),
+          ),
         ],
       ),
     );
@@ -2947,7 +3182,7 @@ final class _ReactionChip extends StatelessWidget {
   final String emoji;
   final int count;
   final bool mine;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) => Material(
@@ -3262,40 +3497,172 @@ final class _UploadChip extends StatelessWidget {
 /// every line in the transcript starts on the same vertical rule.
 const double _messageGutter = 60;
 
+final class _ThreadCreatedRow extends StatelessWidget {
+  const _ThreadCreatedRow({required this.message, this.onOpen});
+
+  final KaedeMessage message;
+  final VoidCallback? onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final thread = message.thread;
+    final name = thread?.name?.trim().isNotEmpty == true
+        ? thread!.name!.trim()
+        : message.content?.trim().isNotEmpty == true
+            ? message.content!.trim()
+            : 'Thread unavailable';
+    return InkWell(
+      onTap: onOpen,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 7, 12, 7),
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 30,
+              child: Icon(Icons.forum_outlined,
+                  size: 18, color: KaedeColors.muted),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text.rich(
+                TextSpan(
+                  text:
+                      '${message.author?.name ?? 'A member'} started a thread: ',
+                  style: const TextStyle(
+                    color: KaedeColors.muted,
+                    fontSize: 13,
+                  ),
+                  children: [
+                    TextSpan(
+                      text: name,
+                      style: const TextStyle(
+                        color: KaedeColors.text,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (onOpen != null)
+              const Icon(Icons.chevron_right_rounded,
+                  size: 18, color: KaedeColors.muted),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _MessageThreadPreview extends StatelessWidget {
+  const _MessageThreadPreview({required this.thread, this.onTap});
+
+  final KaedeChannel thread;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Material(
+          color: KaedeColors.panel,
+          borderRadius: BorderRadius.circular(KaedeRadius.small),
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(KaedeRadius.small),
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 380),
+              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+              decoration: BoxDecoration(
+                border: Border.all(color: KaedeColors.border),
+                borderRadius: BorderRadius.circular(KaedeRadius.small),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    thread.locked
+                        ? Icons.lock_outline_rounded
+                        : Icons.forum_outlined,
+                    size: 17,
+                    color: KaedeColors.muted,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          thread.name ?? 'Thread',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        Text(
+                          '${thread.messageCount} message${thread.messageCount == 1 ? '' : 's'}',
+                          style: const TextStyle(
+                            color: KaedeColors.muted,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (onTap != null)
+                    const Icon(Icons.chevron_right_rounded,
+                        size: 18, color: KaedeColors.muted),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
 final class _MessageTile extends StatelessWidget {
   const _MessageTile(
       {required this.message,
       required this.state,
       required this.compact,
-      required this.onReply,
-      required this.onMenu,
-      required this.onReaction,
+      this.onReply,
+      this.onMenu,
+      this.onReaction,
       this.onAddReaction,
       this.onAuthorTap,
+      this.onOpenThread,
       this.referenced,
       this.onJump});
   final KaedeMessage message;
   final MobileState state;
   final KaedeMessage? referenced;
   final bool compact;
-  final VoidCallback onReply;
-  final VoidCallback onMenu;
-  final ValueChanged<String> onReaction;
+  final VoidCallback? onReply;
+  final VoidCallback? onMenu;
+  final ValueChanged<String>? onReaction;
   final VoidCallback? onAddReaction;
   final VoidCallback? onAuthorTap;
+  final VoidCallback? onOpenThread;
   final VoidCallback? onJump;
 
   void _openMenu() {
+    if (onMenu == null) return;
     HapticFeedback.mediumImpact();
-    onMenu();
+    onMenu!();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (message.messageType == 18) {
+      return _ThreadCreatedRow(
+        message: message,
+        onOpen: onOpenThread,
+      );
+    }
     if (message.messageType >= 3 && message.messageType <= 5) {
       return _SystemMessageRow(message: message);
     }
-    final author = message.author;
+    final displayedMessage = threadStarterDisplayMessage(message);
+    final author = displayedMessage.author;
     final guild = state.activeGuild;
     final authorMember = author == null
         ? null
@@ -3305,12 +3672,12 @@ final class _MessageTile extends StatelessWidget {
     final authorColor = guild == null || authorMember == null
         ? null
         : memberRoleColor(guild, authorMember);
-    final deleted = message.deletedAt != null;
-    final mediaPreview = previewMediaUrl(message.content ?? '');
-    final linkPreview = previewableMessageLink(message.content);
+    final deleted = displayedMessage.deletedAt != null;
+    final mediaPreview = previewMediaUrl(displayedMessage.content ?? '');
+    final linkPreview = previewableMessageLink(displayedMessage.content);
     final failed = message.deliveryStatus == 'failed';
     return InkWell(
-      onLongPress: _openMenu,
+      onLongPress: onMenu == null ? null : _openMenu,
       onDoubleTap: deleted ? null : onReply,
       child: Padding(
         padding: EdgeInsets.fromLTRB(12, compact ? 1 : 8, 12, 1),
@@ -3368,16 +3735,19 @@ final class _MessageTile extends StatelessWidget {
                               ),
                             ),
                           ),
-                          const SizedBox(width: 8),
-                          Text(
-                            DateFormat.jm().format(message.createdAt.toLocal()),
-                            style: const TextStyle(
-                              color: KaedeColors.muted,
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w500,
+                          if (displayedMessage.createdAtAvailable) ...[
+                            const SizedBox(width: 8),
+                            Text(
+                              DateFormat.jm()
+                                  .format(displayedMessage.createdAt.toLocal()),
+                              style: const TextStyle(
+                                color: KaedeColors.muted,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w500,
+                              ),
                             ),
-                          ),
-                          if (message.editedAt != null) ...[
+                          ],
+                          if (displayedMessage.editedAt != null) ...[
                             const SizedBox(width: 6),
                             const Text(
                               '(edited)',
@@ -3387,7 +3757,7 @@ final class _MessageTile extends StatelessWidget {
                               ),
                             ),
                           ],
-                          if (message.pinned) ...[
+                          if (displayedMessage.pinned) ...[
                             const SizedBox(width: 6),
                             const Icon(Icons.push_pin_rounded,
                                 size: 11, color: KaedeColors.muted),
@@ -3403,9 +3773,18 @@ final class _MessageTile extends StatelessWidget {
                         fontStyle: FontStyle.italic,
                       ),
                     )
-                  else if (message.e2ee != null && message.content == null)
+                  else if (displayedMessage.contentUnavailable)
+                    const Text(
+                      'Message unavailable',
+                      style: TextStyle(
+                        color: KaedeColors.muted,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    )
+                  else if (displayedMessage.e2ee != null &&
+                      displayedMessage.content == null)
                     const _UndecryptableNotice()
-                  else if (message.content case final content?
+                  else if (displayedMessage.content case final content?
                       when content.isNotEmpty)
                     KaedeMessageMarkdown(
                       content: content,
@@ -3413,7 +3792,7 @@ final class _MessageTile extends StatelessWidget {
                       omitMediaUrl: mediaPreview,
                     ),
                   if (!deleted &&
-                      message.e2ee == null &&
+                      displayedMessage.e2ee == null &&
                       mediaPreview == null &&
                       linkPreview != null)
                     _LinkPreviewCard(url: linkPreview),
@@ -3421,25 +3800,35 @@ final class _MessageTile extends StatelessWidget {
                     _RemoteMediaPreview(uri: mediaPreview),
                   for (final attachment in deleted
                       ? const <KaedeAttachment>[]
-                      : message.attachments)
+                      : displayedMessage.attachments)
                     _AttachmentCard(
                       attachment: attachment,
                       encryptedManifest:
-                          _encryptedManifestFor(message, attachment),
+                          _encryptedManifestFor(displayedMessage, attachment),
                     ),
-                  if (!deleted && message.reactionCounts.isNotEmpty)
+                  if (!deleted)
+                    if (message.thread case final thread?)
+                      _MessageThreadPreview(
+                        thread: thread,
+                        onTap: onOpenThread,
+                      ),
+                  if (!deleted && displayedMessage.reactionCounts.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 6, bottom: 2),
                       child: Wrap(
                         spacing: 5,
                         runSpacing: 5,
                         children: [
-                          for (final reaction in message.reactionCounts.entries)
+                          for (final reaction
+                              in displayedMessage.reactionCounts.entries)
                             _ReactionChip(
                               emoji: reaction.key,
                               count: reaction.value,
-                              mine: message.reactedEmoji.contains(reaction.key),
-                              onTap: () => onReaction(reaction.key),
+                              mine: displayedMessage.reactedEmoji
+                                  .contains(reaction.key),
+                              onTap: onReaction == null
+                                  ? null
+                                  : () => onReaction!(reaction.key),
                             ),
                           if (onAddReaction != null)
                             _AddReactionChip(onTap: onAddReaction!),
@@ -4902,14 +5291,21 @@ final class _MentionSuggestions extends StatelessWidget {
 }
 
 final class _CommandSuggestions extends StatelessWidget {
-  const _CommandSuggestions({required this.commands, required this.onSelected});
+  const _CommandSuggestions({
+    required this.commands,
+    required this.showNativeThread,
+    required this.onNativeThread,
+    required this.onSelected,
+  });
 
   final List<MobileApplicationCommand> commands;
+  final bool showNativeThread;
+  final VoidCallback onNativeThread;
   final ValueChanged<MobileApplicationCommand> onSelected;
 
   @override
   Widget build(BuildContext context) {
-    if (commands.isEmpty) return const SizedBox.shrink();
+    if (commands.isEmpty && !showNativeThread) return const SizedBox.shrink();
     return Container(
       constraints: const BoxConstraints(maxHeight: 230),
       margin: const EdgeInsets.fromLTRB(8, 2, 8, 4),
@@ -4920,9 +5316,18 @@ final class _CommandSuggestions extends StatelessWidget {
       ),
       child: ListView.builder(
         shrinkWrap: true,
-        itemCount: commands.length,
+        itemCount: commands.length + (showNativeThread ? 1 : 0),
         itemBuilder: (context, index) {
-          final command = commands[index];
+          if (showNativeThread && index == 0) {
+            return ListTile(
+              dense: true,
+              leading: const Icon(Icons.forum_outlined),
+              title: const Text('/thread'),
+              subtitle: const Text('Create a thread with a first message'),
+              onTap: onNativeThread,
+            );
+          }
+          final command = commands[index - (showNativeThread ? 1 : 0)];
           return ListTile(
             dense: true,
             leading: const Icon(Icons.terminal_rounded),

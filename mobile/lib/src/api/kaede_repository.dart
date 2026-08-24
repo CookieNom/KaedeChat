@@ -511,6 +511,157 @@ final class KaedeRepository {
         headers: <String, String>{'If-Match': version},
       );
 
+  Future<KaedeChannel> channel(EntityRef channel) async =>
+      KaedeChannel.fromJson(
+        await api.getJson('/api/v1/channels/${channel.wire}'),
+      );
+
+  Future<KaedeChannel> createThread({
+    required EntityRef parent,
+    required String name,
+    String? content,
+    int? type,
+    int? autoArchiveDuration,
+    int? rateLimitPerUser,
+    bool? invitable,
+    List<String> appliedTagIds = const <String>[],
+    List<EntityRef> attachments = const <EntityRef>[],
+    List<EntityRef> mentionUsers = const <EntityRef>[],
+    String? nonce,
+  }) async =>
+      KaedeChannel.fromJson(await api.sendJson(
+        'POST',
+        '/api/v1/channels/${parent.wire}/threads',
+        data: <String, Object?>{
+          'name': name.trim(),
+          if (type != null) 'type': type,
+          if (autoArchiveDuration != null)
+            'auto_archive_duration': autoArchiveDuration,
+          if (rateLimitPerUser != null) 'rate_limit_per_user': rateLimitPerUser,
+          if (invitable != null) 'invitable': invitable,
+          if (appliedTagIds.isNotEmpty) 'applied_tag_ids': appliedTagIds,
+          if (content?.trim().isNotEmpty == true || attachments.isNotEmpty)
+            'message': <String, Object?>{
+              if (content?.trim().isNotEmpty == true)
+                'content': content!.trim(),
+              'attachment_ids': messageAttachmentIds(attachments),
+              'mention_user_ids': mentionUsers
+                  .map((reference) => reference.wire)
+                  .toSet()
+                  .toList(growable: false),
+              'client_nonce': nonce ?? const Uuid().v4(),
+            },
+        },
+      ));
+
+  Future<KaedeChannel> createThreadFromMessage({
+    required EntityRef parent,
+    required EntityRef message,
+    required String name,
+    int? autoArchiveDuration,
+    int? rateLimitPerUser,
+  }) async =>
+      KaedeChannel.fromJson(await api.sendJson(
+        'POST',
+        '/api/v1/channels/${parent.wire}/messages/${message.wire}/threads',
+        data: <String, Object?>{
+          'name': name.trim(),
+          if (autoArchiveDuration != null)
+            'auto_archive_duration': autoArchiveDuration,
+          if (rateLimitPerUser != null) 'rate_limit_per_user': rateLimitPerUser,
+        },
+      ));
+
+  Future<ThreadPage> threads(
+    EntityRef parent, {
+    bool archived = false,
+    bool includeArchived = false,
+    DateTime? before,
+    String? cursor,
+    int limit = 50,
+    String? tagId,
+    List<String> tagIds = const <String>[],
+    String? query,
+    int? sortOrder,
+  }) async =>
+      ThreadPage.fromJson(await api.getJson(
+        '/api/v1/channels/${parent.wire}/threads',
+        query: <String, Object?>{
+          if (includeArchived)
+            'include_archived': true
+          else
+            'archived': archived,
+          'limit': limit,
+          if (cursor != null)
+            'cursor': cursor
+          else if (before != null)
+            'before': before.toUtc().toIso8601String(),
+          // Dio serializes a list as repeated query keys (`tag_id=1&tag_id=2`),
+          // which is the forum API's OR-matching contract.
+          if (tagIds.isNotEmpty) 'tag_id': tagIds,
+          if (tagIds.isEmpty && tagId != null) 'tag_id': tagId,
+          if (query?.trim().isNotEmpty == true) 'query': query!.trim(),
+          if (sortOrder != null) 'sort_order': sortOrder,
+        },
+      ));
+
+  Future<ThreadPage> activeThreads(EntityRef guild) async =>
+      ThreadPage.fromJson(await api.getJson(
+        '/api/v1/guilds/${guild.wire}/threads/active',
+      ));
+
+  Future<KaedeChannel> updateThread(
+    EntityRef thread,
+    Map<String, Object?> patch,
+  ) async =>
+      KaedeChannel.fromJson(await api.sendJson(
+        'PATCH',
+        '/api/v1/channels/${thread.wire}',
+        data: patch,
+      ));
+
+  Future<void> deleteThread(EntityRef thread) =>
+      api.sendJson('DELETE', '/api/v1/channels/${thread.wire}');
+
+  Future<List<ThreadMember>> threadMembers(EntityRef thread) async {
+    final payload = await api.getList(
+      '/api/v1/channels/${thread.wire}/thread-members',
+    );
+    return payload
+        .map((item) => ThreadMember.fromJson(item, thread: thread))
+        .toList(growable: false);
+  }
+
+  Future<void> joinThread(
+    EntityRef thread, {
+    String notificationLevel = 'inherit',
+  }) =>
+      api.sendJson(
+        'PUT',
+        '/api/v1/channels/${thread.wire}/thread-members/@me',
+        data: <String, Object?>{
+          'flags': 0,
+          'notification_level': notificationLevel,
+        },
+      );
+
+  Future<void> leaveThread(EntityRef thread) => api.sendJson(
+        'DELETE',
+        '/api/v1/channels/${thread.wire}/thread-members/@me',
+      );
+
+  Future<void> addThreadMember(EntityRef thread, EntityRef user) =>
+      api.sendJson(
+        'PUT',
+        '/api/v1/channels/${thread.wire}/thread-members/${user.wire}',
+      );
+
+  Future<void> removeThreadMember(EntityRef thread, EntityRef user) =>
+      api.sendJson(
+        'DELETE',
+        '/api/v1/channels/${thread.wire}/thread-members/${user.wire}',
+      );
+
   Future<List<KaedeMessage>> messages(
     EntityRef channel, {
     EntityRef? before,

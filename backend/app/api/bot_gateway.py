@@ -14,6 +14,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from starlette.requests import Request
 
+from app.api.bots import redact_bot_message_payload, redact_bot_thread_payload
 from app.bots.auth import BotPrincipal, require_bot
 from app.bots.installations import installation_has_membership
 from app.chat.events import interaction_dispatch_audience
@@ -265,6 +266,8 @@ def event_intent(event_type: str) -> str:
         return "guild_typing"
     if event_type.startswith("INTERACTION"):
         return "interactions"
+    if event_type.startswith("THREAD"):
+        return "guilds"
     return "guilds"
 
 
@@ -281,7 +284,11 @@ def event_scope(event_type: str) -> str:
         return "members.read"
     if event_type.startswith("VOICE"):
         return "voice.states.read"
-    if event_type.startswith("CHANNEL") or event_type.startswith("TYPING"):
+    if (
+        event_type.startswith("CHANNEL")
+        or event_type.startswith("THREAD")
+        or event_type.startswith("TYPING")
+    ):
         return "channels.read"
     if event_type.startswith("GUILD_ROLE"):
         return "roles.read"
@@ -365,24 +372,82 @@ def filtered_event(
         rendered["guild_domain"] = guild_domain
         if event_type.startswith("VOICE") and rendered.get("channel_id") is not None:
             rendered["channel_domain"] = guild_domain
+    if event_type == "THREAD_MEMBERS_UPDATE":
+        can_receive_member_deltas = (
+            "guild_members" in effective_intents
+            and "members.read" in principal.scopes
+            and "members.read" in granted_scopes
+        )
+        if not can_receive_member_deltas:
+            self_ref = f"{principal.user.id}@{principal.user.origin_domain}"
+            added = [
+                item
+                for item in rendered.get("added_members", [])
+                if isinstance(item, dict)
+                and f"{item.get('user_id')}@{item.get('user_domain')}" == self_ref
+            ]
+            removed_refs = [
+                item
+                for item in rendered.get("removed_member_refs", [])
+                if isinstance(item, dict)
+                and f"{item.get('id')}@{item.get('origin_domain')}" == self_ref
+            ]
+            legacy_removed = [
+                item
+                for item in rendered.get("removed_member_ids", [])
+                if item in {str(principal.user.id), self_ref}
+            ]
+            if not added and not removed_refs and not legacy_removed:
+                return None
+            rendered["added_members"] = added
+            rendered["removed_member_ids"] = (
+                [str(principal.user.id)] if (removed_refs or legacy_removed) else []
+            )
+            rendered["removed_member_refs"] = removed_refs
+            for item in added:
+                item.pop("member", None)
+                item.pop("presence", None)
     can_receive_content = (
         "message_content" in effective_intents
         and "messages.content" in principal.scopes
         and "messages.content" in granted_scopes
     )
-    if event_type.startswith("MESSAGE") and "content" in rendered and not can_receive_content:
-        rendered["content"] = None
-        rendered["content_unavailable"] = True
     can_receive_attachments = (
         "attachments.read" in principal.scopes and "attachments.read" in granted_scopes
     )
-    if (
-        event_type.startswith("MESSAGE")
-        and "attachments" in rendered
-        and not can_receive_attachments
-    ):
-        rendered["attachments"] = []
-        rendered["attachments_unavailable"] = True
+    can_receive_thread_history = (
+        "messages.history" in principal.scopes
+        and "messages.history" in granted_scopes
+        and "messages.metadata" in principal.scopes
+        and "messages.metadata" in granted_scopes
+    )
+    if event_type.startswith("MESSAGE"):
+        rendered = redact_bot_message_payload(
+            rendered,
+            can_read_content=can_receive_content,
+            can_read_attachments=can_receive_attachments,
+        )
+    if event_type.startswith("THREAD"):
+        redact_bot_thread_payload(
+            rendered,
+            can_read_history=can_receive_thread_history,
+            can_read_content=can_receive_content,
+            can_read_attachments=can_receive_attachments,
+        )
+    if event_type == "THREAD_LIST_SYNC" and isinstance(rendered.get("threads"), list):
+        safe_threads: list[dict[str, object]] = []
+        for item in rendered["threads"]:
+            if not isinstance(item, dict):
+                continue
+            safe_threads.append(
+                redact_bot_thread_payload(
+                    dict(item),
+                    can_read_history=can_receive_thread_history,
+                    can_read_content=can_receive_content,
+                    can_read_attachments=can_receive_attachments,
+                )
+            )
+        rendered["threads"] = safe_threads
     return {
         "op": 0,
         "t": event_type,
@@ -415,7 +480,7 @@ async def encrypted_guild_channels(session: Any, guild: Guild) -> set[tuple[int,
             Channel.guild_id == guild.id,
             Channel.guild_domain == guild.origin_domain,
             Channel.unavailable.is_(False),
-            Channel.encryption_mode == "e2ee",
+            (Channel.encryption_mode == "e2ee") | Channel.e2ee_required.is_(True),
         )
     )
     return {(int(channel_id), str(domain)) for channel_id, domain in rows}
@@ -622,6 +687,31 @@ async def bot_gateway(websocket: WebSocket) -> None:
                 },
             }
         )
+        from app.api.threads import active_thread_sync_payload
+
+        guild_by_ref = {(guild.id, guild.origin_domain): guild for guild in guilds}
+        for installation in installations:
+            topic = f"guild:{installation.guild_domain}:{installation.guild_id}"
+            grants = topic_grants.get(topic)
+            guild = guild_by_ref.get((installation.guild_id, installation.guild_domain))
+            if grants is None or guild is None:
+                continue
+            async with websocket.app.state.sessionmaker() as session:
+                sync_payload = await active_thread_sync_payload(
+                    session, redis, guild, principal.user
+                )
+            event = filtered_event(
+                principal,
+                {"t": "THREAD_LIST_SYNC", "d": sync_payload},
+                grants[0],
+                grants[1],
+                topic=topic,
+                installation_id=grants[2],
+            )
+            if event is not None:
+                event["s"] = 0
+                event["topic"] = topic
+                await websocket.send_json(event)
         for topic in topics:
             cursor = cursors.get(topic, 0)
             replay_current = await replay_topic(
@@ -694,7 +784,14 @@ async def bot_gateway(websocket: WebSocket) -> None:
                     if isinstance(channel, str) and channel.startswith("dispatch:")
                     else ""
                 )
-                if raw.get("t") in {"CHANNEL_CREATE", "CHANNEL_UPDATE", "CHANNEL_DELETE"}:
+                if raw.get("t") in {
+                    "CHANNEL_CREATE",
+                    "CHANNEL_UPDATE",
+                    "CHANNEL_DELETE",
+                    "THREAD_CREATE",
+                    "THREAD_UPDATE",
+                    "THREAD_DELETE",
+                }:
                     matching_guild = next(
                         (
                             guild

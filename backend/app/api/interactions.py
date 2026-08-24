@@ -243,12 +243,14 @@ async def create_interaction(
     access = await load_channel_access(session, settings, auth.user, channel_ref)
     if access.guild is None:
         raise HTTPException(status_code=409, detail={"code": "GUILD_INTERACTION_REQUIRED"})
+    if access.channel.type in {10, 11, 12} and access.channel.archived:
+        raise HTTPException(status_code=409, detail={"code": "THREAD_ARCHIVED"})
     await require_permissions(
         session,
         redis,
         access.guild,
         auth.user,
-        required_permissions("message.list"),
+        required_permissions("application.command.use"),
         channel=access.channel,
     )
     if access.guild.origin_domain != settings.domain:
@@ -325,6 +327,8 @@ async def create_interaction(
         raise HTTPException(status_code=404, detail={"code": "APPLICATION_COMMAND_NOT_FOUND"})
     installation, command, application, bot = row
     encrypted = access.channel.encryption_mode == "e2ee"
+    if access.channel.type in {10, 11, 12} and (access.channel.e2ee_required or encrypted):
+        raise HTTPException(status_code=409, detail={"code": "BOT_THREAD_E2EE_UNSUPPORTED"})
     if encrypted and payload.encrypted_payload is None:
         raise HTTPException(
             status_code=409,

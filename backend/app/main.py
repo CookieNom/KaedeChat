@@ -43,6 +43,9 @@ from app.api.push import relay_router as push_relay_router
 from app.api.push import router as push_router
 from app.api.relationships import router as relationships_router
 from app.api.search import router as search_router
+from app.api.threads import bot_router as bot_threads_router
+from app.api.threads import federation_router as thread_federation_router
+from app.api.threads import router as threads_router
 from app.api.users import router as users_router
 from app.api.voice import router as voice_router
 from app.api.webhooks import router as webhooks_router
@@ -130,6 +133,9 @@ app.include_router(guilds_router)
 app.include_router(gifs_router)
 app.include_router(guild_lifecycle_router)
 app.include_router(channels_router)
+app.include_router(threads_router)
+app.include_router(bot_threads_router)
+app.include_router(thread_federation_router)
 app.include_router(calls_router)
 app.include_router(dms_router)
 app.include_router(e2ee_router)

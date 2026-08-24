@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   commandCompletions,
   commandInvocation,
+  commandOptionsComplete,
+  commandStringOptions,
   type ApplicationCommand
 } from './application-commands';
 
@@ -37,5 +39,20 @@ describe('application commands', () => {
       options: { raw: 'lunch tomorrow' }
     });
     expect(commandInvocation('/missing hello', commands)).toBeNull();
+  });
+
+  it('exposes the bounded string options needed by Discord-style command fields', () => {
+    const thread = {
+      ...commands[0],
+      name: 'thread',
+      options: [
+        { type: 'string' as const, name: 'name', required: true },
+        { type: 'string' as const, name: 'message', required: true },
+        { type: 'boolean' as const, name: 'private' }
+      ]
+    };
+    expect(commandStringOptions(thread).map((option) => option.name)).toEqual(['name', 'message']);
+    expect(commandOptionsComplete(thread, { name: 'test', message: '' })).toBe(false);
+    expect(commandOptionsComplete(thread, { name: 'test', message: 'hello' })).toBe(true);
   });
 });

@@ -22,7 +22,7 @@ from app.bots.installations import (
     revoke_installations_for_guild_member,
 )
 from app.chat.audit import add_audit_entry
-from app.chat.e2ee_membership import pause_guild_e2ee_for_membership_change
+from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import (
     queue_guild_mutation,
@@ -30,6 +30,10 @@ from app.chat.guild_revision import (
 )
 from app.chat.payloads import guild_payload
 from app.chat.schemas import GuildOwnershipTransfer
+from app.chat.thread_membership import (
+    cleanup_guild_member_threads,
+    publish_guild_thread_member_cleanup,
+)
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
@@ -125,6 +129,8 @@ async def leave_guild(
         )
 
     deleted_role_refs: list[tuple[int, str]] = []
+    removed_thread_members = []
+    e2ee_policy_channels: list[Channel] = []
     if guild.origin_domain != settings.domain:
         remote_guild_domain = guild.origin_domain
         await mark_remote_guild_departed(
@@ -155,6 +161,13 @@ async def leave_guild(
             user_domain=actor_domain,
         )
     else:
+        removed_thread_members = await cleanup_guild_member_threads(
+            session,
+            settings,
+            guild,
+            auth.user,
+            [(actor_id, actor_domain)],
+        )
         revoked_installations = await revoke_installations_for_guild_member(
             session,
             guild_id=guild.id,
@@ -170,7 +183,6 @@ async def leave_guild(
             revoked_installations,
         )
         await session.delete(member)
-        await pause_guild_e2ee_for_membership_change(session, guild)
         await queue_guild_mutation(
             session,
             settings,
@@ -179,12 +191,15 @@ async def leave_guild(
             "guild.member.remove",
             {"user": {"id": str(actor_id), "origin_domain": actor_domain}},
             snapshot_required=True,
+            e2ee_policy_channels=e2ee_policy_channels,
         )
 
     await session.commit()
     if guild.origin_domain == settings.domain:
         await wake_queued_guild_federation(guild)
+        await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
         await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
+        await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
     else:
         from app.tasks import federation_deliver
 

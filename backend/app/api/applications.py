@@ -33,11 +33,14 @@ from app.bots.installations import (
     cleanup_installation_roles,
     publish_deleted_installation_roles,
 )
-from app.chat.e2ee_membership import pause_guild_e2ee_for_membership_change
 from app.chat.events import guild_topic, publish_dispatch
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
 from app.chat.payloads import member_payload, role_payload, user_payload
 from app.chat.permissions import get_permissions
+from app.chat.thread_membership import (
+    cleanup_guild_member_threads,
+    publish_guild_thread_member_cleanup,
+)
 from app.core.permissions import ALL_PERMISSIONS, Permission
 from app.core.rate_limits import ClientRateLimit, enforce_keyed_rate_limit
 from app.core.settings import DOMAIN_RE, Settings, get_settings
@@ -1587,6 +1590,7 @@ async def install_bot(
         mutation_signer,
         "guild.member.add",
         {"user": profile_from_user(bot), "joined_at": member.joined_at.isoformat()},
+        pause_e2ee=False,
     )
     await queue_guild_mutation(
         session,
@@ -1600,6 +1604,7 @@ async def install_bot(
             "member_version": str(member.member_version),
         },
         snapshot_required=True,
+        pause_e2ee=False,
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
@@ -2143,8 +2148,15 @@ async def _uninstall_bot_from_local_guild(
             installation.bot_user_domain,
         ),
     )
+    removed_thread_members = []
     if member is not None:
-        await pause_guild_e2ee_for_membership_change(session, guild)
+        removed_thread_members = await cleanup_guild_member_threads(
+            session,
+            settings,
+            guild,
+            mutation_signer,
+            [(installation.bot_user_id, installation.bot_user_domain)],
+        )
         await queue_guild_mutation(
             session,
             settings,
@@ -2158,11 +2170,13 @@ async def _uninstall_bot_from_local_guild(
                 }
             },
             snapshot_required=True,
+            pause_e2ee=False,
         )
         await session.delete(member)
     await session.commit()
     await wake_queued_guild_federation(guild)
     await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
+    await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
     if member is not None:
         await publish_dispatch(
             redis,

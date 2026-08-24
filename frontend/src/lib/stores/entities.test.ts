@@ -94,6 +94,64 @@ describe('normalized entity collections', () => {
     expect(store.channels.get('3@alpha.test')?.name).toBe('general');
   });
 
+  it('purges revoked thread content and nested guild projections', () => {
+    const store = new ChatEntityStore();
+    const thread = {
+      id: '3',
+      origin_domain: 'alpha.test',
+      guild_id: '1',
+      guild_domain: 'alpha.test',
+      type: 12,
+      name: 'private',
+      topic: null,
+      position: 0,
+      parent_id: '2',
+      parent_domain: 'alpha.test',
+      rate_limit_per_user: 0,
+      last_message_id: null,
+      last_message_domain: null
+    } satisfies Channel;
+    store.ingestGuilds([
+      {
+        id: '1',
+        origin_domain: 'alpha.test',
+        name: 'Lanterns',
+        description: null,
+        icon_hash: null,
+        owner_id: '2',
+        permission_generation: '1',
+        unavailable: false,
+        channels: [thread]
+      }
+    ]);
+    store.messages.upsert({
+      id: '9',
+      origin_domain: 'alpha.test',
+      channel_id: '3',
+      channel_domain: 'alpha.test',
+      author_id: '7',
+      author_domain: 'alpha.test',
+      author: null,
+      content: 'secret',
+      message_type: 0,
+      flags: 0,
+      client_nonce: null,
+      referenced_message_id: null,
+      referenced_message_domain: null,
+      mention_user_refs: [],
+      attachments: [],
+      edited_at: null,
+      deleted_at: null,
+      created_at: '2026-08-24T10:00:00Z'
+    });
+
+    store.removeChannel(thread);
+
+    expect(store.channels.get('3@alpha.test')).toBeUndefined();
+    expect(store.messages.values).toEqual([]);
+    expect(store.guilds.get('1@alpha.test')?.channels).toEqual([]);
+  });
+
   it('ingests initial member presence and applies live updates', () => {
     const store = new ChatEntityStore();
     const user = {

@@ -41,6 +41,50 @@ enum DegradedFeature {
 String _lastConversationKey(String accountKey) =>
     'last_conversation:${Uri.encodeComponent(accountKey)}';
 
+final _threadMentionPattern = RegExp(r'<@([1-9][0-9]{0,18})@([A-Za-z0-9.-]+)>');
+
+List<EntityRef> _threadMentionReferences(String content) =>
+    _threadMentionPattern
+        .allMatches(content)
+        .map((match) => EntityRef(
+              Snowflake(match.group(1)!),
+              Domain(match.group(2)!),
+            ))
+        .toSet()
+        .toList(growable: false);
+
+/// Applies a guild-wide channel update to a thread without discarding the
+/// viewer-specific projection returned by the thread endpoints. Encryption
+/// activation uses CHANNEL_UPDATE, while permissions, membership, and the
+/// expanded starter are intentionally absent from that broadcast payload.
+KaedeChannel mergeThreadChannelUpdate(
+  KaedeChannel current,
+  Map<String, Object?> update,
+) =>
+    KaedeChannel.fromJson(<String, Object?>{
+      ...current.toJson(),
+      ...update,
+      'permissions': current.permissions.toString(),
+      'member': current.member?.toJson(),
+      'starter_message': current.starterMessage?.toJson(),
+    });
+
+KaedeChannel applyThreadPermissionUpdate(
+  KaedeChannel current,
+  Object? permissions,
+) =>
+    KaedeChannel.fromJson(<String, Object?>{
+      ...current.toJson(),
+      'permissions': '$permissions',
+    });
+
+/// Required forum children fail closed before activation even though their
+/// server projection is still plaintext. An active required room must also
+/// carry the E2EE mode; any inconsistent projection stays paused.
+bool channelEncryptionPaused(KaedeChannel channel) => channel.e2eeRequired
+    ? channel.encryptionMode != 'e2ee' || channel.encryptionState != 'active'
+    : channel.encryptionMode == 'e2ee' && channel.encryptionState != 'active';
+
 const _pushTransport = String.fromEnvironment(
   'KAEDE_PUSH_TRANSPORT',
   defaultValue: 'relay',
@@ -115,7 +159,8 @@ KaedeChannel? resolveInitialConversation({
             }))
           .where((channel) =>
               channel.type == ChannelType.text ||
-              channel.type == ChannelType.announcement),
+              channel.type == ChannelType.announcement ||
+              channel.type == ChannelType.forum),
   ];
   for (final channel in accessible) {
     if (channel.ref == savedRef) return channel;
@@ -241,6 +286,26 @@ bool messageJumpSelectionIsCurrent({
 }) =>
     expectedGeneration == currentGeneration && expectedChannel == activeChannel;
 
+@visibleForTesting
+bool threadMembersUpdateRemovesUser(
+  Map<String, Object?> update,
+  EntityRef? user,
+) {
+  if (user == null) return false;
+  final rawRefs = update['removed_member_refs'];
+  if (rawRefs is List && rawRefs.isNotEmpty) {
+    for (final raw in rawRefs.whereType<Map<Object?, Object?>>()) {
+      if ('${raw['id']}' == user.id.value &&
+          '${raw['origin_domain']}' == user.domain.value) {
+        return true;
+      }
+    }
+    return false;
+  }
+  final rawIds = update['removed_member_ids'];
+  return rawIds is List && rawIds.any((id) => '$id' == user.id.value);
+}
+
 final class TypingParticipant {
   const TypingParticipant({
     required this.user,
@@ -321,6 +386,7 @@ final class MobileState {
     this.guilds = const <KaedeGuild>[],
     this.guildNavigation = const GuildNavigation(),
     this.dms = const <KaedeChannel>[],
+    this.threads = const <KaedeChannel>[],
     this.relationships = const <Map<String, Object?>>[],
     this.selectedGuild,
     this.selectedChannel,
@@ -359,6 +425,7 @@ final class MobileState {
   final List<KaedeGuild> guilds;
   final GuildNavigation guildNavigation;
   final List<KaedeChannel> dms;
+  final List<KaedeChannel> threads;
   final List<Map<String, Object?>> relationships;
   final EntityRef? selectedGuild;
   final EntityRef? selectedChannel;
@@ -396,7 +463,11 @@ final class MobileState {
   }
 
   KaedeChannel? get activeChannel {
-    for (final channel in <KaedeChannel>[...dms, ...?activeGuild?.channels]) {
+    for (final channel in <KaedeChannel>[
+      ...dms,
+      ...threads,
+      ...?activeGuild?.channels,
+    ]) {
       if (channel.ref == selectedChannel) return channel;
     }
     return null;
@@ -433,6 +504,7 @@ final class MobileState {
     List<KaedeGuild>? guilds,
     GuildNavigation? guildNavigation,
     List<KaedeChannel>? dms,
+    List<KaedeChannel>? threads,
     List<Map<String, Object?>>? relationships,
     EntityRef? selectedGuild,
     bool clearGuild = false,
@@ -476,6 +548,7 @@ final class MobileState {
         guilds: guilds ?? this.guilds,
         guildNavigation: guildNavigation ?? this.guildNavigation,
         dms: dms ?? this.dms,
+        threads: threads ?? this.threads,
         relationships: relationships ?? this.relationships,
         selectedGuild: clearGuild ? null : selectedGuild ?? this.selectedGuild,
         selectedChannel:
@@ -630,9 +703,14 @@ final class MobileController extends StateNotifier<MobileState> {
   String? _e2eeAccount;
   Future<void> _e2eeLifecycleTail = Future<void>.value();
   var _e2eeGeneration = 0;
+  final Map<EntityRef, Future<KaedeChannel>> _requiredThreadActivations =
+      <EntityRef, Future<KaedeChannel>>{};
 
   KaedeChannel? _channel(EntityRef ref) {
     for (final channel in state.dms) {
+      if (channel.ref == ref) return channel;
+    }
+    for (final channel in state.threads) {
       if (channel.ref == ref) return channel;
     }
     for (final guild in state.guilds) {
@@ -1187,9 +1265,10 @@ final class MobileController extends StateNotifier<MobileState> {
           _appActive && _conversationPaneVisible ? initial?.ref : null,
     );
     if (initial != null) {
-      unawaited(loadMessages());
+      if (!initial.isForum) unawaited(loadMessages());
       if (initial.guildRef case final guild?) {
         unawaited(refreshSelfModeration(guild));
+        unawaited(loadActiveThreads(guild));
       }
     }
     _dirtyCacheGroups.addAll(_allCacheGroups);
@@ -1300,6 +1379,347 @@ final class MobileController extends StateNotifier<MobileState> {
     _scheduleMetadataCache(const <String>{'guilds'});
     _scheduleNavigationRefresh();
     return created;
+  }
+
+  KaedeChannel _withMyThreadMembership(
+    KaedeChannel thread,
+    Iterable<ThreadMember> members,
+  ) {
+    final me = state.user?.ref;
+    if (me == null || thread.member != null) return thread;
+    for (final member in members) {
+      if (member.threadRef == thread.ref && member.userRef == me) {
+        return thread.copyWith(member: member);
+      }
+    }
+    return thread;
+  }
+
+  void _upsertThread(KaedeChannel thread) {
+    if (!thread.isThread) return;
+    final threads = <KaedeChannel>[
+      for (final current in state.threads)
+        if (current.ref != thread.ref) current,
+      thread,
+    ];
+    Map<EntityRef, List<KaedeMessage>>? messageStore;
+    if (thread.parentRef case final parent?) {
+      final parentMessages = state.messageStore[parent];
+      if (parentMessages != null &&
+          parentMessages.any((message) => message.thread?.ref == thread.ref)) {
+        messageStore = Map<EntityRef, List<KaedeMessage>>.of(state.messageStore)
+          ..[parent] = List<KaedeMessage>.unmodifiable([
+            for (final message in parentMessages)
+              message.thread?.ref == thread.ref
+                  ? message.copyWith(thread: thread)
+                  : message,
+          ]);
+      }
+    }
+    state = state.copyWith(
+      threads: List.unmodifiable(threads),
+      messageStore:
+          messageStore == null ? null : Map.unmodifiable(messageStore),
+    );
+  }
+
+  KaedeChannel _upsertThreadBroadcast(KaedeChannel thread) {
+    final current = _channel(thread.ref);
+    final projected = current?.isThread == true
+        ? mergeThreadChannelUpdate(current!, thread.toJson())
+        : thread;
+    _upsertThread(projected);
+    return projected;
+  }
+
+  void _removeThread(EntityRef thread) {
+    final removed = state.threads.where((candidate) => candidate.ref == thread);
+    if (removed.isEmpty) return;
+    final threads = state.threads
+        .where((candidate) => candidate.ref != thread)
+        .toList(growable: false);
+    Map<EntityRef, List<KaedeMessage>>? messageStore;
+    if (removed.first.parentRef case final parent?) {
+      final parentMessages = state.messageStore[parent];
+      if (parentMessages != null &&
+          parentMessages.any((message) => message.thread?.ref == thread)) {
+        messageStore = Map<EntityRef, List<KaedeMessage>>.of(state.messageStore)
+          ..[parent] = List<KaedeMessage>.unmodifiable([
+            for (final message in parentMessages)
+              message.thread?.ref == thread
+                  ? message.copyWith(clearThread: true)
+                  : message,
+          ]);
+      }
+    }
+    state = state.copyWith(
+      threads: List.unmodifiable(threads),
+      clearChannel: state.selectedChannel == thread,
+      messageStore:
+          messageStore == null ? null : Map.unmodifiable(messageStore),
+    );
+  }
+
+  Future<ThreadPage> loadThreads(
+    EntityRef parent, {
+    bool archived = false,
+    bool includeArchived = false,
+    DateTime? before,
+    String? cursor,
+    int limit = 50,
+    String? tagId,
+    List<String> tagIds = const <String>[],
+    String? query,
+    int? sortOrder,
+  }) async {
+    final page = await repository.threads(
+      parent,
+      archived: archived,
+      includeArchived: includeArchived,
+      before: before,
+      cursor: cursor,
+      limit: limit,
+      tagId: tagId,
+      tagIds: tagIds,
+      query: query,
+      sortOrder: sortOrder,
+    );
+    final decorated = page.threads
+        .map((thread) => _withMyThreadMembership(thread, page.members))
+        .toList(growable: false);
+    for (final thread in decorated) {
+      _upsertThread(thread);
+    }
+    return ThreadPage(
+      threads: decorated,
+      members: page.members,
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor,
+    );
+  }
+
+  Future<void> loadActiveThreads(EntityRef guild) async {
+    try {
+      final page = await repository.activeThreads(guild);
+      final incoming = page.threads
+          .map((thread) => _withMyThreadMembership(thread, page.members))
+          .toList(growable: false);
+      final incomingRefs = incoming.map((thread) => thread.ref).toSet();
+      final threads = <KaedeChannel>[
+        for (final thread in state.threads)
+          if (thread.guildRef != guild ||
+              thread.archived ||
+              incomingRefs.contains(thread.ref))
+            thread,
+        for (final thread in incoming)
+          if (!state.threads.any((current) =>
+              current.ref == thread.ref && current.guildRef == guild))
+            thread,
+      ];
+      // Prefer the fresh payload for refs already present.
+      final fresh = {for (final thread in incoming) thread.ref: thread};
+      state = state.copyWith(
+        threads: List.unmodifiable(
+          threads.map((thread) => fresh[thread.ref] ?? thread),
+        ),
+      );
+    } on Object {
+      // Active threads are supplemental navigation. The parent channels and
+      // any already-open child remain usable while this projection retries.
+    }
+  }
+
+  Future<KaedeChannel> fetchThread(EntityRef thread) async {
+    final fetched = await repository.channel(thread);
+    _upsertThread(fetched);
+    return _ensureRequiredThreadEncryption(fetched);
+  }
+
+  Future<void> _refreshThreadProjection(EntityRef thread) async {
+    final sessionGeneration = _sessionLoadGeneration;
+    try {
+      final fetched = await repository.channel(thread);
+      if (mounted && sessionGeneration == _sessionLoadGeneration) {
+        _upsertThread(fetched);
+      }
+    } on Object {
+      // A bare gateway projection remains permissionless and therefore
+      // fail-closed until an authoritative fetch succeeds.
+    }
+  }
+
+  Future<KaedeChannel> _ensureRequiredThreadEncryption(
+    KaedeChannel thread,
+  ) async {
+    if (!thread.isThread ||
+        !thread.e2eeRequired ||
+        !channelEncryptionPaused(thread)) {
+      return thread;
+    }
+    final existing = _requiredThreadActivations[thread.ref];
+    if (existing != null) return existing;
+    final sessionGeneration = _sessionLoadGeneration;
+    final activation = _activateRequiredThreadEncryption(
+      thread,
+      sessionGeneration,
+    );
+    _requiredThreadActivations[thread.ref] = activation;
+    try {
+      return await activation;
+    } finally {
+      if (identical(_requiredThreadActivations[thread.ref], activation)) {
+        _requiredThreadActivations.remove(thread.ref);
+      }
+    }
+  }
+
+  Future<KaedeChannel> _activateRequiredThreadEncryption(
+    KaedeChannel thread,
+    int sessionGeneration,
+  ) async {
+    var current = _channel(thread.ref) ?? thread;
+    if (!channelEncryptionPaused(current)) return current;
+    Object? activationError;
+    try {
+      final activated = await (await e2eeClient()).enableRoom(current);
+      if (mounted && sessionGeneration == _sessionLoadGeneration) {
+        _upsertThread(activated);
+      }
+      return activated;
+    } on Object catch (error) {
+      activationError = error;
+      // A different client may have won the one-at-a-time activation race.
+      // Re-read once before presenting the thread as paused.
+      try {
+        current = await repository.channel(thread.ref);
+      } on Object {
+        // Keep the last complete, viewer-specific projection.
+      }
+    }
+    if (mounted && sessionGeneration == _sessionLoadGeneration) {
+      _upsertThread(current);
+      if (channelEncryptionPaused(current)) {
+        state = state.copyWith(
+          error: userFacingError(
+            activationError,
+            summary:
+                'Encryption setup is required before anyone can reply. Open this post again to retry',
+          ),
+        );
+      }
+    }
+    return current;
+  }
+
+  Future<KaedeChannel> createThread({
+    required KaedeChannel parent,
+    required String name,
+    String? content,
+    int? type,
+    List<String> appliedTagIds = const <String>[],
+    List<EntityRef> attachments = const <EntityRef>[],
+  }) async {
+    final created = await repository.createThread(
+      parent: parent.ref,
+      name: name,
+      content: content,
+      type: type,
+      autoArchiveDuration: parent.defaultAutoArchiveDuration,
+      rateLimitPerUser: parent.defaultThreadRateLimitPerUser,
+      appliedTagIds: appliedTagIds,
+      attachments: attachments,
+      mentionUsers: content == null
+          ? const <EntityRef>[]
+          : _threadMentionReferences(content),
+    );
+    _upsertThread(created);
+    return _ensureRequiredThreadEncryption(created);
+  }
+
+  Future<KaedeChannel> createThreadFromMessage({
+    required KaedeChannel parent,
+    required KaedeMessage message,
+    required String name,
+  }) async {
+    if (parent.encryptionMode == 'e2ee') {
+      throw StateError(
+        'A thread cannot be created from a message in an end-to-end encrypted channel.',
+      );
+    }
+    final created = await repository.createThreadFromMessage(
+      parent: parent.ref,
+      message: message.ref,
+      name: name,
+      autoArchiveDuration: parent.defaultAutoArchiveDuration,
+      rateLimitPerUser: parent.defaultThreadRateLimitPerUser,
+    );
+    _upsertThread(created);
+    return created;
+  }
+
+  Future<KaedeChannel> updateThread(
+    KaedeChannel thread,
+    Map<String, Object?> patch,
+  ) async {
+    final updated = await repository.updateThread(thread.ref, patch);
+    _upsertThread(updated);
+    return updated;
+  }
+
+  Future<void> deleteThread(KaedeChannel thread) async {
+    await repository.deleteThread(thread.ref);
+    _removeThread(thread.ref);
+  }
+
+  Future<void> setThreadFollowed(KaedeChannel thread, bool followed) async {
+    final current = _channel(thread.ref) ?? thread;
+    if (followed) {
+      await repository.joinThread(current.ref);
+      final user = state.user;
+      if (user != null) {
+        _upsertThread(current.copyWith(
+          member: ThreadMember(
+            threadRef: current.ref,
+            userRef: user.ref,
+            joinTimestamp: DateTime.now().toUtc(),
+          ),
+          memberCount: current.memberCount + (current.followed ? 0 : 1),
+        ));
+      }
+    } else {
+      await repository.leaveThread(current.ref);
+      _upsertThread(current.copyWith(
+        clearMember: true,
+        memberCount: max(0, current.memberCount - (current.followed ? 1 : 0)),
+      ));
+    }
+  }
+
+  Future<void> setThreadNotificationLevel(
+    KaedeChannel thread,
+    String notificationLevel,
+  ) async {
+    const levels = <String>{'inherit', 'all', 'mentions', 'none'};
+    if (!levels.contains(notificationLevel)) {
+      throw ArgumentError.value(
+        notificationLevel,
+        'notificationLevel',
+        'Unsupported thread notification level',
+      );
+    }
+    final current = _channel(thread.ref) ?? thread;
+    final member = current.member;
+    if (current.archived || member == null) {
+      throw StateError(
+          'Join this active thread before changing notifications.');
+    }
+    await repository.joinThread(
+      current.ref,
+      notificationLevel: notificationLevel,
+    );
+    _upsertThread(current.copyWith(
+      member: member.copyWith(notificationLevel: notificationLevel),
+    ));
   }
 
   void _scheduleNavigationRefresh() {
@@ -1523,6 +1943,7 @@ final class MobileController extends StateNotifier<MobileState> {
     );
     push.setAppVisibility(active: _appActive);
     unawaited(refreshSelfModeration(guild.ref));
+    unawaited(loadActiveThreads(guild.ref));
     return Future<void>.value();
   }
 
@@ -1563,6 +1984,7 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _selectChannel(KaedeChannel channel) async {
+    if (channel.isThread) _upsertThread(channel);
     state = state.copyWith(
       selectedGuild: channel.guildRef ?? state.selectedGuild,
       selectedChannel: channel.ref,
@@ -1579,9 +2001,31 @@ final class MobileController extends StateNotifier<MobileState> {
       requestGuildMembers(guild);
     }
     _acknowledgeVisibleConversation();
-    if (channel.type == ChannelType.text ||
-        channel.type == ChannelType.announcement ||
-        channel.type == ChannelType.dm) {
+    var selected = channel;
+    if (selected.isThread) {
+      try {
+        selected = await fetchThread(selected.ref);
+      } on Object catch (error) {
+        final cached = _channel(selected.ref);
+        if (cached == null || cached.permissions == BigInt.zero) {
+          if (state.selectedChannel == selected.ref) {
+            state = state.copyWith(
+              error: userFacingError(
+                error,
+                summary: 'Could not open this thread',
+              ),
+            );
+          }
+          return;
+        }
+        selected = cached;
+      }
+      if (state.selectedChannel != channel.ref) return;
+    }
+    if (selected.type == ChannelType.text ||
+        selected.type == ChannelType.announcement ||
+        selected.isThread ||
+        selected.type == ChannelType.dm) {
       await loadMessages();
     }
   }
@@ -1711,6 +2155,23 @@ final class MobileController extends StateNotifier<MobileState> {
       }
     }
     if (channel == null) {
+      try {
+        final direct = await repository.channel(destination.channel);
+        if (direct.isThread) {
+          _upsertThread(direct);
+          channel = direct;
+          for (final candidateGuild in state.guilds) {
+            if (candidateGuild.ref == direct.guildRef) {
+              guild = candidateGuild;
+              break;
+            }
+          }
+        }
+      } on Object {
+        // Fall through to the ordinary unavailable notice.
+      }
+    }
+    if (channel == null) {
       state =
           state.copyWith(error: 'This conversation is no longer available.');
       return false;
@@ -1758,6 +2219,9 @@ final class MobileController extends StateNotifier<MobileState> {
       var ordered = page.reversed.toList();
       if (channel.encryptionMode == 'e2ee') {
         ordered = await (await e2eeClient()).decryptMessages(channel, ordered);
+      }
+      for (final message in ordered) {
+        if (message.thread case final thread?) _upsertThreadBroadcast(thread);
       }
       final withOlder = Set<EntityRef>.of(state.channelsWithOlderMessages);
       final reachedRetainedStart = channel.historyTruncated &&
@@ -1871,6 +2335,11 @@ final class MobileController extends StateNotifier<MobileState> {
     if (channelState == null) {
       throw StateError('This conversation is unavailable.');
     }
+    if (channelEncryptionPaused(channelState)) {
+      throw StateError(
+        'End-to-end encryption must finish before replies can be sent.',
+      );
+    }
     Map<String, Object?>? e2ee;
     String? wireContent = content.trim().isEmpty ? null : content.trim();
     if (channelState.encryptionMode == 'e2ee') {
@@ -1965,6 +2434,11 @@ final class MobileController extends StateNotifier<MobileState> {
     }
     final channel = _channel(message.channelRef);
     if (channel == null) throw StateError('This conversation is unavailable.');
+    if (channelEncryptionPaused(channel)) {
+      throw StateError(
+        'End-to-end encryption must finish before messages can be edited.',
+      );
+    }
     Map<String, Object?>? e2ee;
     String? wireContent = content;
     if (channel.encryptionMode == 'e2ee') {
@@ -2701,6 +3175,7 @@ final class MobileController extends StateNotifier<MobileState> {
             event.data['message'] is Map ? event.data['message'] : event.data;
         final message =
             KaedeMessage.fromJson(Map<String, Object?>.from(raw as Map));
+        if (message.thread case final thread?) _upsertThreadBroadcast(thread);
         final existing = state.messageStore[message.channelRef];
         if (existing != null || message.channelRef == state.selectedChannel) {
           final fast = appendNewestMessage(
@@ -2837,12 +3312,126 @@ final class MobileController extends StateNotifier<MobileState> {
           _setTyping(channel, user);
         }
         break;
+      case 'THREAD_CREATE' || 'THREAD_UPDATE':
+        final raw = event.data['thread'] ?? event.data['channel'] ?? event.data;
+        if (raw is Map) {
+          final update = Map<String, Object?>.from(raw);
+          final ref = _entityRef(update['id'], update['origin_domain']);
+          final current = ref == null ? null : _channel(ref);
+          final thread = current?.isThread == true
+              ? mergeThreadChannelUpdate(current!, update)
+              : KaedeChannel.fromJson(update);
+          _upsertThread(thread);
+          if (current == null) unawaited(_refreshThreadProjection(thread.ref));
+        }
+        break;
+      case 'THREAD_DELETE':
+        final raw = event.data['thread'] ?? event.data['channel'];
+        final data = raw is Map ? Map<String, Object?>.from(raw) : event.data;
+        final thread = _entityRef(
+          data['id'] ?? data['channel_id'] ?? data['thread_id'],
+          data['origin_domain'] ??
+              data['channel_domain'] ??
+              data['thread_domain'],
+        );
+        if (thread != null) _removeThread(thread);
+        break;
+      case 'THREAD_LIST_SYNC':
+        final rawThreads = event.data['threads'];
+        final rawMembers = event.data['members'];
+        final syncedMembers = <EntityRef, ThreadMember>{};
+        if (rawMembers is List) {
+          for (final raw in rawMembers.whereType<Map<Object?, Object?>>()) {
+            final member = ThreadMember.fromJson(
+              raw.map((key, value) => MapEntry('$key', value)),
+            );
+            syncedMembers[member.threadRef] = member;
+          }
+        }
+        if (rawThreads is List) {
+          for (final raw in rawThreads.whereType<Map<Object?, Object?>>()) {
+            final update = raw.map((key, value) => MapEntry('$key', value));
+            final thread = KaedeChannel.fromJson(update);
+            final member = syncedMembers[thread.ref];
+            _upsertThread(rawMembers is List
+                ? thread.copyWith(
+                    member: member,
+                    clearMember: member == null,
+                  )
+                : thread);
+          }
+        }
+        break;
+      case 'THREAD_MEMBER_UPDATE':
+        final threadRef = _entityRef(
+          event.data['id'] ?? event.data['thread_id'],
+          event.data['thread_domain'] ?? event.data['origin_domain'],
+        );
+        if (threadRef != null) {
+          final current = _channel(threadRef);
+          if (current?.isThread == true) {
+            final removed = event.data['removed'] == true;
+            if (removed) {
+              _upsertThread(current!.copyWith(clearMember: true));
+            } else {
+              final member = ThreadMember.fromJson(
+                event.data,
+                thread: threadRef,
+              );
+              if (member.userRef == state.user?.ref) {
+                _upsertThread(current!.copyWith(member: member));
+              }
+            }
+          }
+        }
+        break;
+      case 'THREAD_MEMBERS_UPDATE':
+        final threadRef = _entityRef(
+          event.data['id'] ?? event.data['thread_id'],
+          event.data['thread_domain'] ?? event.data['origin_domain'],
+        );
+        final current = threadRef == null ? null : _channel(threadRef);
+        if (current?.isThread == true) {
+          final removesCurrentUser = threadMembersUpdateRemovesUser(
+            event.data,
+            state.user?.ref,
+          );
+          if (removesCurrentUser &&
+              current!.type == ChannelType.privateThread) {
+            unawaited(_revokeChannelAccess(<String, Object?>{
+              ...event.data,
+              'channel_id': current.ref.id.value,
+              'channel_domain': current.ref.domain.value,
+            }));
+          } else {
+            _upsertThread(current!.copyWith(
+              memberCount: _asInt(event.data['member_count']),
+              clearMember: removesCurrentUser,
+            ));
+          }
+        }
+        break;
       case 'GUILD_CREATE' ||
             'GUILD_UPDATE' ||
             'GUILD_DELETE' ||
             'CHANNEL_CREATE' ||
-            'CHANNEL_UPDATE' ||
             'CHANNEL_DELETE':
+        _scheduleNavigationRefresh();
+        break;
+      case 'CHANNEL_UPDATE':
+        final raw = event.data['channel'] ?? event.data;
+        if (raw is Map) {
+          final update = Map<String, Object?>.from(raw);
+          final ref = _entityRef(update['id'], update['origin_domain']);
+          final current = ref == null ? null : _channel(ref);
+          if (current?.isThread == true) {
+            // E2EE activation publishes this immediately before its control
+            // messages, so update the cached policy synchronously in the same
+            // gateway batch. A navigation refresh excludes thread channels.
+            _upsertThread(mergeThreadChannelUpdate(current!, update));
+            break;
+          }
+        }
         _scheduleNavigationRefresh();
         break;
       case 'GUILD_NAVIGATION_UPDATE':
@@ -2913,7 +3502,6 @@ final class MobileController extends StateNotifier<MobileState> {
         _scheduleNavigationRefresh();
         break;
       case 'CHANNEL_ACCESS_GRANTED' ||
-            'CHANNEL_PERMISSION_UPDATE' ||
             'GUILD_ROLE_CREATE' ||
             'GUILD_ROLE_UPDATE' ||
             'GUILD_ROLE_DELETE' ||
@@ -2925,6 +3513,23 @@ final class MobileController extends StateNotifier<MobileState> {
             'RESUMED' ||
             'INVALID_SESSION':
         _scheduleNavigationRefresh();
+        break;
+      case 'CHANNEL_PERMISSION_UPDATE':
+        final threadRef = _entityRef(
+          event.data['channel_id'],
+          event.data['channel_domain'],
+        );
+        final current = threadRef == null ? null : _channel(threadRef);
+        if (current?.isThread == true) {
+          _upsertThread(
+            applyThreadPermissionUpdate(
+              current!,
+              event.data['permissions'],
+            ),
+          );
+        } else {
+          _scheduleNavigationRefresh();
+        }
         break;
       case 'CALL_CREATE':
         _scheduleNavigationRefresh();
@@ -3033,13 +3638,33 @@ final class MobileController extends StateNotifier<MobileState> {
     final target = _messageRef(data);
     if (target == null) return;
     if (data['author_id'] != null && data['created_at'] != null) {
-      final message = KaedeMessage.fromJson(data);
+      var message = KaedeMessage.fromJson(data);
+      if (message.thread case final thread?) {
+        message = message.copyWith(thread: _upsertThreadBroadcast(thread));
+      }
       _patchStoredMessage(target, (_) => message);
+      _patchThreadStarter(target, (_) => message);
       if (message.e2ee != null) unawaited(_decryptIncoming(message));
       return;
     }
-    _patchStoredMessage(target, (message) {
-      var next = message;
+    KaedeChannel? attachedThread;
+    final rawThread = data['thread'];
+    if (rawThread is Map) {
+      final update = Map<String, Object?>.from(rawThread);
+      final ref = _entityRef(update['id'], update['origin_domain']);
+      final current = ref == null ? null : _channel(ref);
+      attachedThread = current?.isThread == true
+          ? mergeThreadChannelUpdate(current!, update)
+          : KaedeChannel.fromJson(update);
+      _upsertThread(attachedThread);
+      if (current == null) {
+        unawaited(_refreshThreadProjection(attachedThread.ref));
+      }
+    }
+    KaedeMessage patch(KaedeMessage message) {
+      var next = attachedThread == null
+          ? message
+          : message.copyWith(thread: attachedThread);
       if (data.containsKey('pinned')) {
         next = next.copyWith(pinned: data['pinned'] == true);
       }
@@ -3083,7 +3708,10 @@ final class MobileController extends StateNotifier<MobileState> {
         );
       }
       return next;
-    });
+    }
+
+    _patchStoredMessage(target, patch);
+    _patchThreadStarter(target, patch);
   }
 
   void _applyAttachmentUpdate(Map<String, Object?> data) {
@@ -3177,16 +3805,36 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   void _tombstoneMessage(EntityRef target) {
-    _patchStoredMessage(
-      target,
-      (message) => message.copyWith(
-        clearContent: true,
-        attachments: const <KaedeAttachment>[],
-        mentionUserRefs: const <EntityRef>[],
-        reactionCounts: const <String, int>{},
-        deletedAt: DateTime.now().toUtc(),
-      ),
-    );
+    KaedeMessage tombstone(KaedeMessage message) => message.copyWith(
+          clearContent: true,
+          attachments: const <KaedeAttachment>[],
+          mentionUserRefs: const <EntityRef>[],
+          reactionCounts: const <String, int>{},
+          deletedAt: DateTime.now().toUtc(),
+        );
+
+    _patchStoredMessage(target, tombstone);
+    _patchThreadStarter(target, tombstone);
+  }
+
+  void _patchThreadStarter(
+    EntityRef target,
+    KaedeMessage Function(KaedeMessage message) patch,
+  ) {
+    var changed = false;
+    final threads = state.threads.map((thread) {
+      final starter = thread.starterMessage;
+      if (starter == null ||
+          starter.ref != target ||
+          starter.channelRef != thread.ref) {
+        return thread;
+      }
+      changed = true;
+      return thread.copyWith(starterMessage: patch(starter));
+    }).toList(growable: false);
+    if (changed) {
+      state = state.copyWith(threads: List<KaedeChannel>.unmodifiable(threads));
+    }
   }
 
   EntityRef? _messageRef(Map<String, Object?> data) {
@@ -3798,9 +4446,13 @@ final class MobileController extends StateNotifier<MobileState> {
       state.typingByChannel,
     )..remove(ref);
     final drafts = Map<EntityRef, String>.of(state.drafts)..remove(ref);
+    final threads = state.threads
+        .where((thread) => thread.ref != ref)
+        .toList(growable: false);
     if (state.selectedChannel == ref) {
       state = state.copyWith(
         clearChannel: true,
+        threads: List.unmodifiable(threads),
         messageStore: store,
         unreadCounts: unread,
         mentionCounts: mentions,
@@ -3810,6 +4462,7 @@ final class MobileController extends StateNotifier<MobileState> {
       );
     } else {
       state = state.copyWith(
+        threads: List.unmodifiable(threads),
         messageStore: store,
         unreadCounts: unread,
         mentionCounts: mentions,
@@ -3834,6 +4487,16 @@ final class MobileController extends StateNotifier<MobileState> {
             .any((channel) => channel.ref == message.channelRef)) {
           guild = candidate;
           break;
+        }
+      }
+      if (guild == null) {
+        final thread = state.threads
+            .where((candidate) => candidate.ref == message.channelRef)
+            .firstOrNull;
+        if (thread?.guildRef case final guildRef?) {
+          guild = state.guilds
+              .where((candidate) => candidate.ref == guildRef)
+              .firstOrNull;
         }
       }
     }

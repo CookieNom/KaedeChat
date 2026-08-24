@@ -16,6 +16,7 @@ from app.api.dependencies import (
     require_user,
 )
 from app.chat.audit import add_audit_entry
+from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import (
     federation_channel_state,
@@ -66,7 +67,88 @@ DEFAULT_PERMISSIONS = int(
     | Permission.USE_VAD
     | Permission.STREAM
     | Permission.CHANGE_NICKNAME
+    | Permission.USE_APPLICATION_COMMANDS
+    | Permission.CREATE_PUBLIC_THREADS
+    | Permission.CREATE_PRIVATE_THREADS
+    | Permission.SEND_MESSAGES_IN_THREADS
 )
+
+
+async def forum_tags_payload(
+    tags: list[object],
+    snowflake: SnowflakeGenerator,
+    *,
+    existing_ids: set[int] | None = None,
+) -> list[dict[str, object]]:
+    rendered: list[dict[str, object]] = []
+    for value in tags:
+        raw = value.model_dump()  # type: ignore[attr-defined]
+        if raw.get("id") is not None:
+            tag_id = int(raw["id"])
+            if existing_ids is None or tag_id not in existing_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "FORUM_TAG_ID_INVALID"},
+                )
+        else:
+            tag_id = await snowflake.mint()
+        rendered.append(
+            {
+                "id": str(tag_id),
+                "name": raw["name"],
+                "moderated": bool(raw["moderated"]),
+                "emoji_id": (str(raw["emoji_id"]) if raw.get("emoji_id") is not None else None),
+                "emoji_name": raw.get("emoji_name"),
+            }
+        )
+    return rendered
+
+
+async def validate_forum_emoji_ids(
+    session: AsyncSession,
+    guild: Guild,
+    tags: list[object],
+    default_reaction: object | None,
+) -> None:
+    """Reject deleted, foreign-guild, and unknown custom emoji references."""
+
+    emoji_ids: set[int] = set()
+    for value in tags:
+        raw = value if isinstance(value, dict) else value.model_dump()  # type: ignore[attr-defined]
+        if raw.get("emoji_id") is not None:
+            emoji_ids.add(int(raw["emoji_id"]))
+    if default_reaction is not None:
+        raw = (
+            default_reaction
+            if isinstance(default_reaction, dict)
+            else default_reaction.model_dump()  # type: ignore[attr-defined]
+        )
+        if raw.get("emoji_id") is not None:
+            emoji_ids.add(int(raw["emoji_id"]))
+    if not emoji_ids:
+        return
+    live_ids = set(
+        await session.scalars(
+            select(Emoji.id).where(
+                Emoji.id.in_(emoji_ids),
+                Emoji.origin_domain == guild.origin_domain,
+                Emoji.guild_id == guild.id,
+                Emoji.guild_domain == guild.origin_domain,
+            )
+        )
+    )
+    if live_ids != emoji_ids:
+        raise HTTPException(status_code=400, detail={"code": "FORUM_EMOJI_INVALID"})
+
+
+def forum_reaction_payload(value: object | None) -> dict[str, object] | None:
+    if value is None:
+        return None
+    raw = value.model_dump()  # type: ignore[attr-defined]
+    return {
+        "emoji_id": str(raw["emoji_id"]) if raw.get("emoji_id") is not None else None,
+        "emoji_name": raw.get("emoji_name"),
+    }
 
 
 async def overwrite_source_channel(session: AsyncSession, channel: Channel) -> Channel:
@@ -324,6 +406,7 @@ async def list_my_guilds(
                     [(guild.id, guild.origin_domain) for guild in guilds]
                 ),
                 Channel.unavailable.is_(False),
+                Channel.type.not_in({10, 11, 12}),
             )
             .order_by(Channel.position, Channel.id)
         )
@@ -382,6 +465,7 @@ async def get_guild(
                 Channel.guild_id == guild.id,
                 Channel.guild_domain == guild.origin_domain,
                 Channel.unavailable.is_(False),
+                Channel.type.not_in({10, 11, 12}),
             )
             .order_by(Channel.position, Channel.id)
         )
@@ -528,6 +612,15 @@ async def create_channel(
     await require_permissions(
         session, redis, guild, auth.user, required_permissions("channel.create")
     )
+    if payload.type == 15 and payload.e2ee_required and not settings.e2ee_activation_enabled:
+        raise HTTPException(status_code=403, detail={"code": "E2EE_ACTIVATION_DISABLED"})
+    if payload.type == 15:
+        await validate_forum_emoji_ids(
+            session,
+            guild,
+            list(payload.available_tags),
+            payload.default_reaction_emoji,
+        )
     if payload.type == 4 and payload.parent_id is not None:
         raise HTTPException(status_code=400, detail={"code": "INVALID_CHANNEL_PARENT"})
     if payload.parent_id is not None:
@@ -540,11 +633,15 @@ async def create_channel(
         if parent.type != 4:
             raise HTTPException(status_code=400, detail={"code": "PARENT_NOT_CATEGORY"})
     channel_id = await snowflake.mint()
+    now = datetime.now(UTC)
     position = await session.scalar(
         select(func.coalesce(func.max(Channel.position), -1)).where(
-            Channel.guild_id == guild.id, Channel.guild_domain == guild.origin_domain
+            Channel.guild_id == guild.id,
+            Channel.guild_domain == guild.origin_domain,
+            Channel.type.not_in({10, 11, 12}),
         )
     )
+    forum = payload.type == 15
     channel = Channel(
         id=channel_id,
         origin_domain=settings.domain,
@@ -558,7 +655,24 @@ async def create_channel(
         parent_domain=settings.domain if payload.parent_id is not None else None,
         permissions_synced=payload.parent_id is not None,
         rate_limit_per_user=payload.rate_limit_per_user,
+        flags=payload.flags if forum else 0,
+        default_auto_archive_duration=(
+            payload.default_auto_archive_duration if payload.type in {0, 5, 15} else None
+        ),
+        default_thread_rate_limit_per_user=(
+            payload.default_thread_rate_limit_per_user if payload.type in {0, 15} else None
+        ),
+        available_tags=(
+            await forum_tags_payload(list(payload.available_tags), snowflake) if forum else []
+        ),
+        default_reaction_emoji=(
+            forum_reaction_payload(payload.default_reaction_emoji) if forum else None
+        ),
+        default_sort_order=payload.default_sort_order if forum else None,
+        default_forum_layout=payload.default_forum_layout if forum else None,
+        e2ee_required=payload.e2ee_required if forum else False,
         created_floor_id=channel_id,
+        created_at=now,
     )
     session.add(channel)
     await queue_guild_mutation(
@@ -683,6 +797,8 @@ async def put_overwrite(
 ) -> dict[str, str]:
     guild = await local_guild(session, settings, guild_id, for_update=True)
     channel = await guild_channel(session, settings, guild_id, channel_id)
+    if channel.type in {10, 11, 12}:
+        raise HTTPException(status_code=400, detail={"code": "THREAD_OVERWRITES_UNSUPPORTED"})
     actor_permissions = await require_permissions(
         session,
         redis,
@@ -735,6 +851,7 @@ async def put_overwrite(
             overwrite.allow = payload.allow
             overwrite.deny = payload.deny
     guild.permission_generation += 1
+    e2ee_policy_channels: list[Channel] = []
     event_type = "guild.overwrite.delete" if empty_overwrite else "guild.overwrite.upsert"
     overwrite_payload: dict[str, object] = {
         "channel": {"id": str(channel.id), "origin_domain": channel.origin_domain},
@@ -757,6 +874,7 @@ async def put_overwrite(
         {"overwrite": overwrite_payload},
         channel=channel,
         snapshot_required=True,
+        e2ee_policy_channels=e2ee_policy_channels,
     )
     await add_audit_entry(
         session,
@@ -770,6 +888,16 @@ async def put_overwrite(
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_e2ee_policy_updates(
+        session,
+        redis,
+        settings,
+        [
+            item
+            for item in e2ee_policy_channels
+            if (item.id, item.origin_domain) != (channel.id, channel.origin_domain)
+        ],
+    )
     await publish_dispatch(
         redis,
         guild_topic(settings.domain, guild.id),
@@ -790,6 +918,8 @@ async def list_overwrites(
 ) -> list[dict[str, str]]:
     guild = await local_guild(session, settings, guild_id)
     channel = await guild_channel(session, settings, guild_id, channel_id)
+    if channel.type in {10, 11, 12}:
+        raise HTTPException(status_code=400, detail={"code": "THREAD_OVERWRITES_UNSUPPORTED"})
     await require_permissions(
         session,
         redis,
@@ -868,6 +998,7 @@ async def delete_overwrite(
             raise HTTPException(status_code=403, detail={"code": "CANNOT_MANAGE_PERMISSIONS"})
         await session.delete(overwrite)
     guild.permission_generation += 1
+    e2ee_policy_channels: list[Channel] = []
     await queue_guild_mutation(
         session,
         settings,
@@ -883,6 +1014,7 @@ async def delete_overwrite(
         },
         channel=channel,
         snapshot_required=True,
+        e2ee_policy_channels=e2ee_policy_channels,
     )
     await add_audit_entry(
         session,
@@ -896,6 +1028,16 @@ async def delete_overwrite(
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_e2ee_policy_updates(
+        session,
+        redis,
+        settings,
+        [
+            item
+            for item in e2ee_policy_channels
+            if (item.id, item.origin_domain) != (channel.id, channel.origin_domain)
+        ],
+    )
     await publish_dispatch(
         redis, guild_topic(settings.domain, guild.id), "CHANNEL_UPDATE", channel_payload(channel)
     )

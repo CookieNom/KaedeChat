@@ -24,6 +24,8 @@
   import {
     commandCompletions,
     commandInvocation,
+    commandOptionsComplete,
+    commandStringOptions,
     type ApplicationCommand
   } from '$lib/chat/application-commands';
   import { messageSearchUserCandidates } from '$lib/chat/message-search';
@@ -50,11 +52,37 @@
     type ChannelDropPlacement
   } from '$lib/chat/channels';
   import {
+    activeThreadsForParent,
+    createThread,
+    createThreadFromMessage,
+    fetchActiveGuildThreads,
+    fetchChannel,
+    fetchThreadMembers,
+    fetchThreads,
+    FORUM_POST_CONTENT_MAX_LENGTH,
+    forumDefaultSort,
+    isForumChannel,
+    isThreadChannel,
+    isThreadParentChannel,
+    mergeThreadIntoChannels,
+    ordinaryGuildChannels,
+    parseNativeThreadCommand,
+    parseCreatedThread,
+    setThreadMember,
+    setThreadMembership,
+    threadParentAllowsChildCreation,
+    threadMembersUpdateRemovesUser,
+    threadRequiresE2EEActivation,
+    updateThread
+  } from '$lib/chat/threads';
+  import {
     compareMessages,
     failPendingMessage,
     mergeMessageSnapshot,
     messageDeliveryFailure,
-    reconcileMessage
+    messageReferenceTarget,
+    reconcileMessage,
+    resolvedReferencedMessage
   } from '$lib/chat/reconcile';
   import { compareEntityRefs, entityKey, entityRef, matchesEntityRef } from '$lib/chat/refs';
   import { buildTimeline } from '$lib/chat/timeline';
@@ -73,6 +101,7 @@
     Message,
     ReadStateStatus,
     Role,
+    ThreadMember,
     UserSummary
   } from '$lib/chat/types';
   import { userDisplayName } from '$lib/chat/users';
@@ -87,6 +116,9 @@
   import ComposerAutocomplete, {
     type Completion
   } from '$lib/components/ComposerAutocomplete.svelte';
+  import CommandOptionComposer from '$lib/components/CommandOptionComposer.svelte';
+  import CreateThreadDialog from '$lib/components/CreateThreadDialog.svelte';
+  import ForumView from '$lib/components/ForumView.svelte';
   import GuildMemberRoster from '$lib/components/GuildMemberRoster.svelte';
   import { memberRoleColor } from '$lib/chat/members';
   import EmojiPicker from '$lib/components/EmojiPicker.svelte';
@@ -97,6 +129,8 @@
   import PinnedMessagesPanel from '$lib/components/PinnedMessagesPanel.svelte';
   import PresencePicker from '$lib/components/PresencePicker.svelte';
   import UploadPreviewTray from '$lib/components/UploadPreviewTray.svelte';
+  import ThreadHeader from '$lib/components/ThreadHeader.svelte';
+  import ThreadsPanel from '$lib/components/ThreadsPanel.svelte';
   import UserProfileCard from '$lib/components/UserProfileCard.svelte';
   import VirtualMessageList from '$lib/components/VirtualMessageList.svelte';
   import {
@@ -104,7 +138,7 @@
     initializeE2EE,
     type KaedeE2EEClient
   } from '$lib/e2ee/client';
-  import { confirmEncryptedRoomJoin } from '$lib/e2ee/disclosures';
+  import { acknowledgeEncryptedRoom, confirmEncryptedRoomJoin } from '$lib/e2ee/disclosures';
   import { uploadEncryptedChannelFile } from '$lib/e2ee/media';
   import { uploadChannelFile, type PendingUpload } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
@@ -140,6 +174,23 @@
     code: string;
   }
 
+  const nativeThreadOptions = [
+    {
+      type: 'string' as const,
+      name: 'name',
+      description: 'The thread name',
+      required: true,
+      max_length: 100
+    },
+    {
+      type: 'string' as const,
+      name: 'message',
+      description: 'Type the first message in your thread',
+      required: true,
+      max_length: 4000
+    }
+  ];
+
   const guildId = $derived(page.params.guildId ?? '');
   const channelId = $derived(page.params.channelId ?? '');
   const localDomain = typeof window === 'undefined' ? '' : window.location.hostname;
@@ -150,6 +201,7 @@
   let selfModerationExpiryTimer: number | null = null;
   let selfModerationRetryTimer: number | null = null;
   const guilds = $derived(entities.guilds.values);
+  let loadedRouteChannel = $state<Channel | null>(null);
   const messages = $derived(
     entities.messages.values.filter((message) =>
       matchesEntityRef(
@@ -189,12 +241,16 @@
   const homeUnreadCount = $derived(directMessageUnreadCount(readStates));
   let content = $state('');
   let applicationCommands = $state<ApplicationCommand[]>([]);
+  let selectedApplicationCommand = $state<ApplicationCommand | null>(null);
+  let nativeThreadComposer = $state(false);
+  let commandOptionValues = $state<Record<string, string>>({});
   let commandNotice = $state('');
   let gifPickerEnabled = $state(false);
   let gifPickerOpen = $state(false);
   let messageSearchOpen = $state(false);
   let gifConfigurationError = $state('');
   let gifConfigurationLoading = $state(false);
+  let e2eeActivationEnabled = $state(false);
   let featureController: AbortController | null = null;
   let emojiPickerOpen = $state(false);
   let availableEmojis = $state<CustomEmoji[]>([]);
@@ -205,6 +261,37 @@
   let error = $state('');
   let busy = $state(false);
   let channelReady = $state(false);
+  let forumPosts = $state<Channel[]>([]);
+  let forumLoading = $state(false);
+  let forumLoadingMore = $state(false);
+  let forumError = $state('');
+  let forumHasMore = $state(false);
+  let forumCursor = $state('');
+  let forumFilterState = $state<{
+    query: string;
+    selectedTagIds: string[];
+    sort: 'recent_activity' | 'creation_date';
+  }>({ query: '', selectedTagIds: [], sort: 'recent_activity' });
+  let forumRequestSequence = 0;
+  let forumRefreshTimer: number | null = null;
+  let forumPostBusy = $state(false);
+  let threadMembers = $state<ThreadMember[]>([]);
+  let threadActionBusy = $state(false);
+  let threadEncryptionBusy = $state(false);
+  let threadEncryptionStatus = $state('');
+  let threadCreateSource = $state<Message | null>(null);
+  let threadCreateBusy = $state(false);
+  let threadCreateError = $state('');
+  let threadDirectoryActive = $state<Channel[]>([]);
+  let threadDirectoryArchived = $state<Channel[]>([]);
+  let threadDirectoryOpen = $state(false);
+  let threadDirectoryLoading = $state(false);
+  let threadDirectoryLoadingMore = $state(false);
+  let threadDirectoryActiveHasMore = $state(false);
+  let threadDirectoryArchivedHasMore = $state(false);
+  let threadDirectoryActiveCursor = $state('');
+  let threadDirectoryArchivedCursor = $state('');
+  let threadDirectoryBusy = $state(false);
   let typing = $state('');
   let typingParticipants = $state<TypingParticipant[]>([]);
   let replyingMessage = $state<Message | null>(null);
@@ -323,7 +410,61 @@
   });
 
   const channel = $derived(
-    guild?.channels?.find((item) => matchesEntityRef(channelId, item, localDomain)) ?? null
+    guild?.channels?.find((item) => matchesEntityRef(channelId, item, localDomain)) ??
+      loadedRouteChannel
+  );
+  const parentChannel = $derived(
+    channel?.parent_id && guild
+      ? (guild.channels?.find(
+          (item) => item.id === channel.parent_id && item.origin_domain === channel.parent_domain
+        ) ?? null)
+      : null
+  );
+  const forumParent = $derived(isForumChannel(parentChannel) ? parentChannel : null);
+  const threadDirectoryParent = $derived(
+    channel && (channel.type === 0 || channel.type === 5)
+      ? channel
+      : parentChannel && (parentChannel.type === 0 || parentChannel.type === 5)
+        ? parentChannel
+        : null
+  );
+  const forumDefaultReaction = $derived.by(() => {
+    const reaction = forumParent?.default_reaction_emoji;
+    if (reaction?.emoji_name) return reaction.emoji_name;
+    if (!reaction?.emoji_id) return '👍';
+    const emoji = availableEmojis.find(
+      (item) =>
+        item.id === reaction.emoji_id &&
+        item.guild_id === forumParent?.guild_id &&
+        item.guild_domain === forumParent?.guild_domain
+    );
+    return emoji ? customEmojiToken(emoji) : '';
+  });
+  const forumStarterMessage = $derived(
+    channel && isThreadChannel(channel)
+      ? (channel.starter_message ?? messages.find((message) => message.message_type === 0) ?? null)
+      : null
+  );
+  const threadTimelineStarter = $derived.by(() => {
+    if (!channel || !isThreadChannel(channel) || !channel.starter_message) return null;
+    const starter = channel.starter_message;
+    return messages.some((message) => entityKey(message) === entityKey(starter)) ? null : starter;
+  });
+  const currentThreadMember = $derived.by(() => {
+    if (!channel || !isThreadChannel(channel) || !currentUser) return null;
+    if (channel.member) return channel.member;
+    return (
+      threadMembers.find((member) => {
+        if (member.user) return entityKey(member.user) === entityKey(currentUser);
+        return (
+          member.user_id === currentUser.id && member.user_domain === currentUser.origin_domain
+        );
+      }) ?? null
+    );
+  });
+  const currentThreadJoined = $derived(Boolean(currentThreadMember));
+  const currentThreadNotificationLevel = $derived(
+    currentThreadMember?.notification_level ?? 'inherit'
   );
   const pickerEmojis = $derived.by((): CustomEmojiOption[] => {
     if (!guild || !channel) return [];
@@ -346,6 +487,15 @@
   });
   const currentReadState = $derived(channel ? unreadFor(channel) : undefined);
   const channelGroups = $derived(groupChannels(guild?.channels ?? []));
+  const dynamicPermission = (name: string, fallback: bigint): bigint =>
+    (Permission as Record<string, bigint>)[name] ?? fallback;
+  const CREATE_PUBLIC_THREADS = dynamicPermission('CREATE_PUBLIC_THREADS', 1n << 35n);
+  const CREATE_PRIVATE_THREADS = dynamicPermission('CREATE_PRIVATE_THREADS', 1n << 36n);
+  const MANAGE_THREADS = dynamicPermission('MANAGE_THREADS', 1n << 34n);
+  const SEND_MESSAGES_IN_THREADS = dynamicPermission('SEND_MESSAGES_IN_THREADS', 1n << 38n);
+  const USE_APPLICATION_COMMANDS = dynamicPermission('USE_APPLICATION_COMMANDS', 1n << 32n);
+  const PIN_MESSAGES = dynamicPermission('PIN_MESSAGES', Permission.MANAGE_MESSAGES);
+  const BYPASS_SLOWMODE = dynamicPermission('BYPASS_SLOWMODE', 1n << 52n);
   const canManageChannels = $derived.by(() => {
     if (!guild || guild.origin_domain !== localDomain) return false;
     if (
@@ -405,16 +555,127 @@
     )
   );
   const canSendMessages = $derived(
-    Boolean(channel && channelHasPermission(channel, Permission.SEND_MESSAGES))
+    Boolean(
+      channel &&
+      (isThreadChannel(channel)
+        ? (!channel.locked || channelHasPermission(channel, MANAGE_THREADS)) &&
+          channelHasPermission(channel, SEND_MESSAGES_IN_THREADS)
+        : channelHasPermission(channel, Permission.SEND_MESSAGES)) &&
+      !threadEncryptionBusy &&
+      (channel.encryption_mode !== 'e2ee' || channel.encryption_state === 'active') &&
+      !threadRequiresE2EEActivation(channel)
+    )
+  );
+  const canManageThreads = $derived(
+    Boolean(channel && channelHasPermission(channel, MANAGE_THREADS))
+  );
+  const canEditCurrentThread = $derived(
+    Boolean(
+      channel &&
+      isThreadChannel(channel) &&
+      (canManageThreads ||
+        (!channel.locked &&
+          currentUser &&
+          channel.owner_id === currentUser.id &&
+          channel.owner_domain === currentUser.origin_domain))
+    )
+  );
+  const canInviteThreadMembers = $derived(
+    Boolean(
+      channel &&
+      isThreadChannel(channel) &&
+      !channel.archived &&
+      channelHasPermission(channel, SEND_MESSAGES_IN_THREADS) &&
+      (channel.type !== 12 || canManageThreads || (channel.invitable && currentThreadJoined))
+    )
+  );
+  const canRemoveThreadMembers = $derived(
+    Boolean(
+      channel &&
+      !channel.archived &&
+      (canManageThreads ||
+        (channel.type === 12 &&
+          currentUser &&
+          channel.owner_id === currentUser.id &&
+          channel.owner_domain === currentUser.origin_domain))
+    )
+  );
+  const canEnableThreadEncryption = $derived(
+    Boolean(
+      channel &&
+      isThreadChannel(channel) &&
+      !channel.archived &&
+      canEditCurrentThread &&
+      e2eeActivationEnabled &&
+      channel.encryption_mode !== 'e2ee'
+    )
+  );
+  const canRekeyThreadEncryption = $derived(
+    Boolean(
+      channel &&
+      isThreadChannel(channel) &&
+      !channel.archived &&
+      canEditCurrentThread &&
+      channel.encryption_mode === 'e2ee' &&
+      (channel.encryption_state === 'rekeying' || channel.encryption_state === 'failed')
+    )
+  );
+  const canCreatePublicThreads = $derived(
+    Boolean(
+      channel &&
+      isThreadParentChannel(channel) &&
+      channel.encryption_mode !== 'e2ee' &&
+      channelHasPermission(channel, CREATE_PUBLIC_THREADS)
+    )
+  );
+  const canCreateNativeThread = $derived(
+    Boolean(
+      channel &&
+      (channel.type === 0 || channel.type === 5) &&
+      canCreatePublicThreads &&
+      channelHasPermission(channel, SEND_MESSAGES_IN_THREADS)
+    )
+  );
+  const canCreateDirectoryPublicThread = $derived(
+    Boolean(
+      threadDirectoryParent &&
+      threadParentAllowsChildCreation(threadDirectoryParent) &&
+      channelHasPermission(threadDirectoryParent, CREATE_PUBLIC_THREADS)
+    )
+  );
+  const canCreateDirectoryPrivateThread = $derived(
+    Boolean(
+      threadDirectoryParent?.type === 0 &&
+      threadParentAllowsChildCreation(threadDirectoryParent) &&
+      channelHasPermission(threadDirectoryParent, CREATE_PRIVATE_THREADS)
+    )
+  );
+  const canSendDirectoryStarter = $derived(
+    Boolean(
+      threadDirectoryParent &&
+      threadDirectoryParent.encryption_mode !== 'e2ee' &&
+      channelHasPermission(threadDirectoryParent, SEND_MESSAGES_IN_THREADS)
+    )
+  );
+  const canCreateForumPost = $derived(
+    Boolean(
+      channel && isForumChannel(channel) && channelHasPermission(channel, Permission.SEND_MESSAGES)
+    )
   );
   const canAddReactions = $derived(
-    Boolean(channel && channelHasPermission(channel, Permission.ADD_REACTIONS))
+    Boolean(channel && !channel.archived && channelHasPermission(channel, Permission.ADD_REACTIONS))
   );
   const canAttachFiles = $derived(
     Boolean(canSendMessages && channel && channelHasPermission(channel, Permission.ATTACH_FILES))
   );
-  const canManageMessages = $derived(
-    Boolean(channel && channelHasPermission(channel, Permission.MANAGE_MESSAGES))
+  const canPinMessages = $derived(
+    Boolean(channel && !channel.archived && channelHasPermission(channel, PIN_MESSAGES))
+  );
+  const canUseApplicationCommands = $derived(
+    Boolean(channel && channelHasPermission(channel, USE_APPLICATION_COMMANDS))
+  );
+  const canBypassSlowmode = $derived(
+    Boolean(channel && channelHasPermission(channel, BYPASS_SLOWMODE))
   );
   const timeline = $derived(
     buildTimeline(
@@ -437,14 +698,7 @@
   });
 
   function referencedMessage(message: Message): Message | null {
-    if (!message.referenced_message_id) return null;
-    return (
-      messages.find(
-        (candidate) =>
-          candidate.id === message.referenced_message_id &&
-          candidate.origin_domain === message.referenced_message_domain
-      ) ?? null
-    );
+    return resolvedReferencedMessage(message, messages);
   }
 
   function resetTyping() {
@@ -493,8 +747,24 @@
       ];
     if (completionQuery.marker === '#')
       return channelCompletions(guild?.channels ?? [], completionQuery.query);
-    if (completionQuery.marker === '/')
-      return commandCompletions(applicationCommands, completionQuery.query);
+    if (completionQuery.marker === '/') {
+      if (channel?.archived) return [];
+      const commands = canUseApplicationCommands
+        ? commandCompletions(applicationCommands, completionQuery.query)
+        : [];
+      const needle = completionQuery.query.toLocaleLowerCase();
+      return canCreateNativeThread && 'thread'.includes(needle)
+        ? [
+            {
+              value: '/thread',
+              label: '/thread',
+              detail: 'Create a thread · name, message',
+              kind: 'application-command' as const
+            },
+            ...commands
+          ]
+        : commands;
+    }
     const needle = completionQuery.query.toLocaleLowerCase();
     const custom = pickerEmojis
       .filter((emoji) => emoji.name.toLocaleLowerCase().includes(needle))
@@ -553,6 +823,14 @@
     guild = { ...guild, channels: reconciled };
     entities.guilds.upsert(guild);
     entities.channels.upsertMany(reconciled);
+  }
+
+  function withCurrentThreads(channels: Channel[]): Channel[] {
+    const threads = (guild?.channels ?? []).filter(isThreadChannel);
+    return [
+      ...channels,
+      ...threads.filter((thread) => !channels.some((item) => entityKey(item) === entityKey(thread)))
+    ];
   }
 
   function closeChannelMenu(restoreFocus = false) {
@@ -1089,7 +1367,7 @@
       const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
       placement = event.clientY > bounds.top + bounds.height / 2 ? 'after' : 'before';
     }
-    const previous = guild.channels ?? [];
+    const previous = ordinaryGuildChannels(guild.channels ?? []);
     const next = moveChannel(
       previous,
       draggedChannelKey,
@@ -1124,7 +1402,7 @@
     const index = siblings.findIndex((item) => entityKey(item) === entityKey(target));
     const neighbor = siblings[index + direction];
     if (!neighbor) return;
-    const previous = guild.channels ?? [];
+    const previous = ordinaryGuildChannels(guild.channels ?? []);
     const next = moveChannel(
       previous,
       entityKey(target),
@@ -1163,7 +1441,7 @@
       routeGeneration === loadGeneration &&
       guild !== null &&
       entityRef(guild) === targetGuild;
-    setCurrentChannels(next);
+    setCurrentChannels(withCurrentThreads(next));
     reorderingChannels = true;
     error = '';
     channelOrderStatus = 'Saving channel order…';
@@ -1179,11 +1457,11 @@
         })
       });
       if (!stillCurrent()) return;
-      setCurrentChannels(saved);
+      setCurrentChannels(withCurrentThreads(saved));
       channelOrderStatus = successMessage;
     } catch (caught) {
       if (!stillCurrent()) return;
-      setCurrentChannels(previous);
+      setCurrentChannels(withCurrentThreads(previous));
       error = userErrorMessage(caught, 'Could not save the channel order. Reload and try again.');
       channelOrderStatus = 'Channel order was not saved. The previous order has been restored.';
     } finally {
@@ -1864,6 +2142,13 @@
             : item
         )
       );
+      if (channel?.starter_message && entityKey(channel.starter_message) === entityKey(update)) {
+        rememberThread({
+          ...channel,
+          starter_message: { ...channel.starter_message, ...update }
+        });
+      }
+      scheduleForumRefreshForChannel(update.channel_id, update.channel_domain);
     } else if (dispatch.t === 'ATTACHMENT_UPDATE') {
       const update = dispatch.d as {
         message_id: string;
@@ -1901,6 +2186,23 @@
           )
         );
       }
+      if (
+        channel?.starter_message &&
+        entityKey(channel.starter_message) ===
+          entityKey({ id: deleted.id, origin_domain: deleted.origin_domain })
+      ) {
+        rememberThread({
+          ...channel,
+          starter_message: {
+            ...channel.starter_message,
+            content: null,
+            attachments: [],
+            deleted_at: new Date().toISOString(),
+            content_unavailable: true
+          }
+        });
+      }
+      scheduleForumRefreshForChannel(deleted.channel_id, deleted.channel_domain);
     } else if (dispatch.t === 'MESSAGE_SEND_REJECTED') {
       const rejected = dispatch.d as {
         channel_id: string;
@@ -1932,6 +2234,155 @@
           apiErrorMessage(rejected.code || 'REQUEST_FAILED', 400, {
             message: rejected.reason
           });
+      }
+    } else if (dispatch.t === 'THREAD_CREATE') {
+      try {
+        const created = parseCreatedThread(dispatch.d);
+        rememberThread({
+          ...created.channel,
+          starter_message: created.starter_message ?? created.channel.starter_message
+        });
+        scheduleForumRefreshForThread(created.channel);
+      } catch {
+        // Ignore a malformed projection; the next guild/channel snapshot repairs it.
+      }
+    } else if (dispatch.t === 'THREAD_UPDATE') {
+      const updated = dispatch.d as Channel;
+      if (updated.id && updated.origin_domain && isThreadChannel(updated)) {
+        rememberThread(updated);
+        scheduleForumRefreshForThread(updated);
+      }
+    } else if (dispatch.t === 'THREAD_DELETE') {
+      const deleted = dispatch.d as {
+        id: string;
+        origin_domain: string;
+        parent_id?: string;
+        parent_domain?: string;
+      };
+      const deletedKey = entityKey(deleted);
+      scheduleForumRefreshForThread(deleted);
+      forumPosts = forumPosts.filter((item) => entityKey(item) !== deletedKey);
+      threadDirectoryActive = threadDirectoryActive.filter(
+        (item) => entityKey(item) !== deletedKey
+      );
+      threadDirectoryArchived = threadDirectoryArchived.filter(
+        (item) => entityKey(item) !== deletedKey
+      );
+      if (guild) {
+        setCurrentChannels((guild.channels ?? []).filter((item) => entityKey(item) !== deletedKey));
+        if (channel && entityKey(channel) === deletedKey) {
+          const destination = (guild.channels ?? []).find(
+            (item) => item.id === deleted.parent_id && item.origin_domain === deleted.parent_domain
+          );
+          if (destination) window.location.assign(guildChannelPath(guild, destination));
+        }
+      }
+    } else if (dispatch.t === 'THREAD_LIST_SYNC') {
+      const update = dispatch.d as { threads?: Channel[]; members?: ThreadMember[] };
+      const syncedMembers = update.members ?? [];
+      for (const thread of update.threads ?? []) {
+        const member = syncedMembers.find(
+          (item) =>
+            item.id === thread.id &&
+            (!item.thread_domain || item.thread_domain === thread.origin_domain)
+        );
+        rememberThread({
+          ...thread,
+          member: member ?? null
+        });
+      }
+      if (channel && isThreadChannel(channel)) {
+        threadMembers = syncedMembers.filter(
+          (member) =>
+            member.id === channel.id &&
+            (!member.thread_domain || member.thread_domain === channel.origin_domain)
+        );
+      }
+    } else if (dispatch.t === 'THREAD_MEMBER_UPDATE') {
+      const member = dispatch.d as ThreadMember & { thread_domain?: string };
+      if (
+        channel &&
+        isThreadChannel(channel) &&
+        member.id === channel.id &&
+        (!member.thread_domain || member.thread_domain === channel.origin_domain)
+      ) {
+        const memberRef = `${member.user_id}@${member.user_domain}`;
+        threadMembers = [
+          ...threadMembers.filter((item) => `${item.user_id}@${item.user_domain}` !== memberRef),
+          member
+        ];
+        if (
+          currentUser &&
+          member.user_id === currentUser.id &&
+          member.user_domain === currentUser.origin_domain
+        ) {
+          rememberThread({ ...channel, member });
+        }
+      }
+    } else if (dispatch.t === 'THREAD_MEMBERS_UPDATE') {
+      const update = dispatch.d as {
+        id: string;
+        thread_domain?: string;
+        member_count?: number;
+        removed_member_ids?: string[];
+        removed_member_refs?: Array<{ id: string; origin_domain: string }>;
+      };
+      const threadDomain = update.thread_domain ?? guild?.origin_domain ?? localDomain;
+      const target = (guild?.channels ?? []).find(
+        (item) => item.id === update.id && item.origin_domain === threadDomain
+      );
+      if (target && isThreadChannel(target)) {
+        const removesCurrentUser = threadMembersUpdateRemovesUser(update, currentUser);
+        const targetIsCurrent = channel ? entityKey(channel) === entityKey(target) : false;
+        if (removesCurrentUser && target.type === 12) {
+          if (targetIsCurrent) {
+            setMessages([]);
+            threadMembers = [];
+          }
+          forumPosts = forumPosts.filter((item) => entityKey(item) !== entityKey(target));
+          threadDirectoryActive = threadDirectoryActive.filter(
+            (item) => entityKey(item) !== entityKey(target)
+          );
+          threadDirectoryArchived = threadDirectoryArchived.filter(
+            (item) => entityKey(item) !== entityKey(target)
+          );
+          entities.channels.remove(entityKey(target));
+          if (guild) {
+            setCurrentChannels(
+              (guild.channels ?? []).filter((item) => entityKey(item) !== entityKey(target))
+            );
+            if (targetIsCurrent) {
+              const destination = (guild.channels ?? []).find(
+                (item) =>
+                  item.id === target.parent_id && item.origin_domain === target.parent_domain
+              );
+              window.location.assign(
+                destination ? guildChannelPath(guild, destination) : resolve('/home')
+              );
+            }
+          }
+        } else {
+          rememberThread({
+            ...target,
+            member_count: update.member_count ?? target.member_count,
+            member: removesCurrentUser ? null : target.member
+          });
+          if (targetIsCurrent) {
+            if (removesCurrentUser && currentUser) {
+              threadMembers = threadMembers.filter((member) => {
+                if (member.user) return entityKey(member.user) !== entityKey(currentUser);
+                return !(
+                  member.user_id === currentUser.id &&
+                  member.user_domain === currentUser.origin_domain
+                );
+              });
+            } else {
+              void fetchThreadMembers(target).then((members) => {
+                if (matchesEntityRef(channelId, target, localDomain)) threadMembers = members;
+              });
+            }
+          }
+        }
       }
     } else if (dispatch.t === 'GUILD_EMOJI_CREATE') {
       const emoji = dispatch.d as CustomEmoji;
@@ -2193,9 +2644,11 @@
     try {
       const configuration = await loadAuthConfiguration(controller.signal);
       gifPickerEnabled = configuration.gif_picker_enabled;
+      e2eeActivationEnabled = configuration.e2ee_activation_enabled;
     } catch (caught) {
       if (controller.signal.aborted) return;
       gifPickerEnabled = false;
+      e2eeActivationEnabled = false;
       gifConfigurationError = userErrorMessage(
         caught,
         'Could not check whether GIF search is available. Try again.'
@@ -2300,6 +2753,8 @@
       selfModerationExpiryTimer = null;
       if (selfModerationRetryTimer !== null) window.clearTimeout(selfModerationRetryTimer);
       selfModerationRetryTimer = null;
+      if (forumRefreshTimer !== null) window.clearTimeout(forumRefreshTimer);
+      forumRefreshTimer = null;
       resetUploads();
     };
   });
@@ -2356,6 +2811,10 @@
   }
 
   function restoreSlowmode(targetChannel: string) {
+    if (canBypassSlowmode) {
+      slowmodeRemaining = 0;
+      return;
+    }
     try {
       const stored = Number(
         localStorage.getItem(
@@ -2378,6 +2837,7 @@
       const buffered: Dispatch[] = [];
       dispatchBuffer = buffered;
       guild = null;
+      loadedRouteChannel = null;
       selfModeration = null;
       selfModerationWarning = '';
       selfModerationRequest += 1;
@@ -2390,6 +2850,9 @@
       resetUploads();
       content = '';
       applicationCommands = [];
+      selectedApplicationCommand = null;
+      nativeThreadComposer = false;
+      commandOptionValues = {};
       commandNotice = '';
       composerCursor = 0;
       editingMessage = null;
@@ -2445,6 +2908,34 @@
       error = '';
       busy = false;
       channelReady = false;
+      forumPosts = [];
+      forumLoading = false;
+      forumLoadingMore = false;
+      forumError = '';
+      forumHasMore = false;
+      forumCursor = '';
+      forumFilterState = { query: '', selectedTagIds: [], sort: 'recent_activity' };
+      forumRequestSequence += 1;
+      if (forumRefreshTimer !== null) window.clearTimeout(forumRefreshTimer);
+      forumRefreshTimer = null;
+      forumPostBusy = false;
+      threadMembers = [];
+      threadActionBusy = false;
+      threadEncryptionBusy = false;
+      threadEncryptionStatus = '';
+      threadCreateSource = null;
+      threadCreateBusy = false;
+      threadCreateError = '';
+      threadDirectoryActive = [];
+      threadDirectoryArchived = [];
+      threadDirectoryOpen = false;
+      threadDirectoryLoading = false;
+      threadDirectoryLoadingMore = false;
+      threadDirectoryActiveHasMore = false;
+      threadDirectoryArchivedHasMore = false;
+      threadDirectoryActiveCursor = '';
+      threadDirectoryArchivedCursor = '';
+      threadDirectoryBusy = false;
       timelineAtBottom = false;
       loadingEarlier = false;
       hasLater = false;
@@ -2505,7 +2996,9 @@
         loadedCurrentUser,
         loadedEmojis,
         loadedPins,
-        loadedCommands
+        loadedCommands,
+        routeChannel,
+        activeGuildThreads
       ] = await Promise.all([
         api<Guild>(`/guilds/${encodeURIComponent(targetGuild)}`),
         api<Guild[]>('/users/@me/guilds'),
@@ -2518,7 +3011,14 @@
         api<Message[]>(`/channels/${encodeURIComponent(targetChannel)}/pins`).catch(() => []),
         api<ApplicationCommand[]>(
           `/guilds/${encodeURIComponent(targetGuild)}/application-commands`
-        ).catch(() => [])
+        ).catch(() => []),
+        fetchChannel(targetChannel).catch(() => null),
+        fetchActiveGuildThreads(targetGuild).catch(() => ({
+          threads: [],
+          members: [],
+          has_more: false,
+          next_cursor: null
+        }))
       ]);
       if (
         routeGeneration !== loadGeneration ||
@@ -2527,7 +3027,17 @@
         targetChannel !== channelId
       )
         return;
+      for (const thread of activeGuildThreads.threads) {
+        loadedGuild.channels = mergeThreadIntoChannels(loadedGuild.channels ?? [], thread);
+      }
+      let loadedChannel =
+        loadedGuild.channels?.find((item) => matchesEntityRef(targetChannel, item, localDomain)) ??
+        routeChannel;
+      if (loadedChannel && isThreadChannel(loadedChannel)) {
+        loadedGuild.channels = mergeThreadIntoChannels(loadedGuild.channels ?? [], loadedChannel);
+      }
       guild = preserveHistorySync(loadedGuild);
+      loadedRouteChannel = loadedChannel;
       availableEmojis = loadedEmojis;
       pinnedMessages = loadedPins;
       applicationCommands = loadedCommands;
@@ -2547,9 +3057,80 @@
       void loadVoiceOccupancy(loadedGuild.channels ?? [], routeGeneration);
       hasEarlier = targetAround ? loadedMessages.length > 0 : loadedMessages.length === 50;
       hasLater = Boolean(targetAround && loadedMessages.length > 0);
-      const loadedChannel = loadedGuild.channels?.find((item) =>
-        matchesEntityRef(targetChannel, item, localDomain)
-      );
+      if (loadedChannel && isForumChannel(loadedChannel)) {
+        forumLoading = true;
+        try {
+          const feed = await fetchThreads(loadedChannel, { includeArchived: true });
+          if (routeGeneration !== loadGeneration || targetChannel !== channelId) return;
+          forumPosts = feed.threads;
+          const initialSort = forumDefaultSort(loadedChannel);
+          forumFilterState = { query: '', selectedTagIds: [], sort: initialSort };
+          forumHasMore = feed.has_more;
+          forumCursor = feed.next_cursor ?? '';
+          threadMembers = feed.members;
+          for (const thread of forumPosts) {
+            loadedGuild.channels = mergeThreadIntoChannels(loadedGuild.channels ?? [], thread);
+          }
+          guild = preserveHistorySync(loadedGuild);
+        } catch (caught) {
+          forumError = userErrorMessage(caught, 'Could not load forum posts. Try again.');
+        } finally {
+          forumLoading = false;
+        }
+      } else if (loadedChannel && isThreadChannel(loadedChannel)) {
+        threadMembers = await fetchThreadMembers(loadedChannel).catch(() => []);
+        const loadedParent = loadedGuild.channels?.find(
+          (item) =>
+            item.id === loadedChannel?.parent_id &&
+            item.origin_domain === loadedChannel?.parent_domain
+        );
+        if (loadedParent && isForumChannel(loadedParent)) {
+          forumLoading = true;
+          try {
+            const feed = await fetchThreads(loadedParent, { includeArchived: true });
+            if (routeGeneration !== loadGeneration || targetChannel !== channelId) return;
+            forumPosts = feed.threads;
+            const initialSort = forumDefaultSort(loadedParent);
+            forumFilterState = { query: '', selectedTagIds: [], sort: initialSort };
+            forumHasMore = feed.has_more;
+            forumCursor = feed.next_cursor ?? '';
+            for (const thread of feed.threads) {
+              loadedGuild.channels = mergeThreadIntoChannels(loadedGuild.channels ?? [], thread);
+            }
+            guild = preserveHistorySync(loadedGuild);
+          } catch (caught) {
+            forumError = userErrorMessage(caught, 'Could not load forum posts. Try again.');
+          } finally {
+            forumLoading = false;
+          }
+        }
+        if (threadRequiresE2EEActivation(loadedChannel)) {
+          threadEncryptionStatus = 'Securing replies with end-to-end encryption…';
+          try {
+            const client = await initializeE2EE(loadedCurrentUser);
+            const updated = await client.activateRoom(entityRef(loadedChannel));
+            if (routeGeneration !== loadGeneration || targetChannel !== channelId) return;
+            loadedChannel = updated;
+            loadedRouteChannel = updated;
+            loadedGuild.channels = mergeThreadIntoChannels(loadedGuild.channels ?? [], updated);
+            guild = preserveHistorySync(loadedGuild);
+            e2eeClient = client;
+            threadEncryptionStatus = 'End-to-end encryption is active for replies.';
+          } catch {
+            threadEncryptionStatus =
+              'Encryption setup is required before anyone can reply. Retrying…';
+            const retryThread = loadedChannel;
+            window.setTimeout(() => {
+              if (routeGeneration !== loadGeneration || targetChannel !== channelId) return;
+              void activateRequiredThread(retryThread, loadedParent).catch(() => {
+                if (routeGeneration === loadGeneration)
+                  threadEncryptionStatus =
+                    'Encryption activation is still required. Replies remain disabled.';
+              });
+            }, 1500);
+          }
+        }
+      }
       if (loadedChannel?.encryption_mode !== 'e2ee') {
         void initializeE2EE(loadedCurrentUser)
           .then((client) => {
@@ -2560,7 +3141,10 @@
           });
       }
       let orderedMessages = loadedMessages.reverse().sort(compareMessages);
-      if (loadedChannel?.encryption_mode === 'e2ee') {
+      if (
+        loadedChannel?.encryption_mode === 'e2ee' &&
+        loadedChannel.encryption_state === 'active'
+      ) {
         if (
           !confirmEncryptedRoomJoin(
             entityRef(loadedCurrentUser),
@@ -2723,6 +3307,589 @@
     setMessages(reconcileMessage(messages, message));
   }
 
+  function rememberThread(thread: Channel) {
+    loadedRouteChannel = matchesEntityRef(channelId, thread, localDomain)
+      ? { ...loadedRouteChannel, ...thread }
+      : loadedRouteChannel;
+    const threadParent = guild?.channels?.find(
+      (item) => item.id === thread.parent_id && item.origin_domain === thread.parent_domain
+    );
+    if (isForumChannel(threadParent)) {
+      forumPosts = forumPosts.some((item) => entityKey(item) === entityKey(thread))
+        ? forumPosts.map((item) =>
+            entityKey(item) === entityKey(thread) ? { ...item, ...thread } : item
+          )
+        : [...forumPosts, thread];
+    }
+    if (
+      threadDirectoryParent &&
+      thread.parent_id === threadDirectoryParent.id &&
+      thread.parent_domain === threadDirectoryParent.origin_domain
+    ) {
+      const mergeDirectory = (items: Channel[]) =>
+        items.some((item) => entityKey(item) === entityKey(thread))
+          ? items.map((item) =>
+              entityKey(item) === entityKey(thread) ? { ...item, ...thread } : item
+            )
+          : [...items, thread];
+      if (thread.archived) {
+        threadDirectoryActive = threadDirectoryActive.filter(
+          (item) => entityKey(item) !== entityKey(thread)
+        );
+        threadDirectoryArchived = mergeDirectory(threadDirectoryArchived);
+      } else {
+        threadDirectoryArchived = threadDirectoryArchived.filter(
+          (item) => entityKey(item) !== entityKey(thread)
+        );
+        threadDirectoryActive = mergeDirectory(threadDirectoryActive);
+      }
+    }
+    if (guild) setCurrentChannels(mergeThreadIntoChannels(guild.channels ?? [], thread));
+  }
+
+  async function activateRequiredThread(
+    thread: Channel,
+    parent: Channel | null | undefined
+  ): Promise<Channel> {
+    if (!threadRequiresE2EEActivation(thread)) return thread;
+    if (!currentUser) throw new Error('Sign in again before opening this encrypted post.');
+    threadEncryptionStatus = 'Securing replies with end-to-end encryption…';
+    try {
+      const client = await initializeE2EE(currentUser);
+      const updated = await client.activateRoom(entityRef(thread));
+      e2eeClient = client;
+      if (
+        matchesEntityRef(channelId, updated, localDomain) &&
+        !confirmEncryptedRoomJoin(entityRef(currentUser), entityRef(updated), 'messages')
+      ) {
+        threadEncryptionStatus =
+          'Open the post again when you are ready to review its encryption disclosure.';
+        if (guild && parent) window.location.assign(guildChannelPath(guild, parent));
+        throw new Error('The encrypted room disclosure was declined.');
+      }
+      rememberThread(updated);
+      threadEncryptionStatus = 'End-to-end encryption is active for replies.';
+      return updated;
+    } catch (caught) {
+      threadEncryptionStatus =
+        'Encryption setup is required before anyone can reply. Replies remain disabled.';
+      throw caught;
+    }
+  }
+
+  async function createForumPost(
+    forum: Channel,
+    draft: { name: string; content: string; appliedTagIds: string[] }
+  ) {
+    if (!guild || forumPostBusy) return;
+    const generation = loadGeneration;
+    forumError = '';
+    const attachmentIds = uploads
+      .filter((item) => item.status === 'ready' && item.attachmentId)
+      .map((item) => item.attachmentId as string);
+    if (!draft.name.trim() || (!draft.content.trim() && !attachmentIds.length)) return;
+    if (draft.content.length > FORUM_POST_CONTENT_MAX_LENGTH) {
+      forumError = `Post messages can be at most ${FORUM_POST_CONTENT_MAX_LENGTH} characters.`;
+      return;
+    }
+    forumPostBusy = true;
+    try {
+      const created = await createThread(forum, {
+        ...draft,
+        attachmentIds,
+        autoArchiveDuration: forum.default_auto_archive_duration ?? 1440
+      });
+      if (generation !== loadGeneration) return;
+      let createdChannel: Channel = {
+        ...created.channel,
+        starter_message: created.starter_message ?? created.channel.starter_message
+      };
+      rememberThread(createdChannel);
+      clearSubmittedUploads(attachmentIds);
+      if (threadRequiresE2EEActivation(createdChannel)) {
+        try {
+          createdChannel = await activateRequiredThread(createdChannel, forum);
+        } catch {
+          // The detail view keeps replies disabled and retries activation on reload.
+        }
+      }
+      if (generation === loadGeneration) {
+        window.location.assign(guildChannelPath(guild, createdChannel));
+      }
+    } catch (caught) {
+      if (generation === loadGeneration)
+        forumError = userErrorMessage(caught, 'Could not create the post. Try again.');
+    } finally {
+      if (generation === loadGeneration) forumPostBusy = false;
+    }
+  }
+
+  async function reloadForumPosts(
+    forum: Channel,
+    filters: { query: string; selectedTagIds: string[]; sort: 'recent_activity' | 'creation_date' },
+    silent = false
+  ) {
+    const generation = loadGeneration;
+    const requestSequence = ++forumRequestSequence;
+    const forumKey = entityKey(forum);
+    forumFilterState = filters;
+    if (!silent) forumLoading = true;
+    forumLoadingMore = false;
+    if (!silent) forumError = '';
+    try {
+      const options = {
+        query: filters.query,
+        tagIds: filters.selectedTagIds,
+        sort: filters.sort
+      } as const;
+      const feed = await fetchThreads(forum, { ...options, includeArchived: true });
+      const activeForum = isForumChannel(channel) ? channel : forumParent;
+      if (
+        generation !== loadGeneration ||
+        requestSequence !== forumRequestSequence ||
+        !activeForum ||
+        entityKey(activeForum) !== forumKey
+      )
+        return;
+      forumPosts = feed.threads;
+      forumHasMore = feed.has_more;
+      forumCursor = feed.next_cursor ?? '';
+      for (const thread of forumPosts) rememberThread(thread);
+    } catch (caught) {
+      if (!silent && generation === loadGeneration && requestSequence === forumRequestSequence)
+        forumError = userErrorMessage(caught, 'Could not search forum posts. Try again.');
+    } finally {
+      if (!silent && generation === loadGeneration && requestSequence === forumRequestSequence)
+        forumLoading = false;
+    }
+  }
+
+  function scheduleForumRefreshForChannel(channelId: string, channelDomain: string) {
+    const thread = (guild?.channels ?? []).find(
+      (item) => item.id === channelId && item.origin_domain === channelDomain
+    );
+    if (thread && isThreadChannel(thread)) scheduleForumRefreshForThread(thread);
+  }
+
+  function scheduleForumRefreshForThread(thread: {
+    parent_id?: string | null;
+    parent_domain?: string | null;
+  }) {
+    const forum = isForumChannel(channel) ? channel : forumParent;
+    if (!forum || thread.parent_id !== forum.id || thread.parent_domain !== forum.origin_domain)
+      return;
+    if (forumRefreshTimer !== null) window.clearTimeout(forumRefreshTimer);
+    const forumKey = entityKey(forum);
+    forumRefreshTimer = window.setTimeout(() => {
+      forumRefreshTimer = null;
+      const activeForum = isForumChannel(channel) ? channel : forumParent;
+      if (!activeForum || entityKey(activeForum) !== forumKey) return;
+      void reloadForumPosts(activeForum, forumFilterState, true);
+    }, 180);
+  }
+
+  async function loadMoreForumPosts(forum: Channel) {
+    if (forumLoading || forumLoadingMore || !forumHasMore) return;
+    const generation = loadGeneration;
+    const requestSequence = forumRequestSequence;
+    const forumKey = entityKey(forum);
+    forumLoadingMore = true;
+    forumError = '';
+    const options = {
+      query: forumFilterState.query,
+      tagIds: forumFilterState.selectedTagIds,
+      sort: forumFilterState.sort,
+      limit: 100
+    } as const;
+    try {
+      const page = await fetchThreads(forum, {
+        ...options,
+        includeArchived: true,
+        cursor: forumCursor
+      });
+      const activeForum = isForumChannel(channel) ? channel : forumParent;
+      if (
+        generation !== loadGeneration ||
+        requestSequence !== forumRequestSequence ||
+        !activeForum ||
+        entityKey(activeForum) !== forumKey
+      )
+        return;
+      const appended = page.threads;
+      forumPosts = [
+        ...new Map(
+          [...forumPosts, ...appended].map((thread) => [entityKey(thread), thread])
+        ).values()
+      ];
+      forumHasMore = page.has_more;
+      forumCursor = page.next_cursor ?? '';
+      for (const thread of appended) rememberThread(thread);
+    } catch (caught) {
+      if (generation === loadGeneration && requestSequence === forumRequestSequence)
+        forumError = userErrorMessage(caught, 'Could not load more forum posts. Try again.');
+    } finally {
+      if (generation === loadGeneration && requestSequence === forumRequestSequence)
+        forumLoadingMore = false;
+    }
+  }
+
+  function requestThreadForMessage(message: Message) {
+    if (!canCreatePublicThreads || !channel || channel.encryption_mode === 'e2ee') return;
+    threadCreateError = '';
+    threadCreateSource = message;
+  }
+
+  async function createMessageThread(name: string) {
+    if (!threadCreateSource || !channel || !guild || threadCreateBusy) return;
+    const source = threadCreateSource;
+    const parent = channel;
+    const generation = loadGeneration;
+    threadCreateBusy = true;
+    threadCreateError = '';
+    try {
+      const created = await createThreadFromMessage(parent, source, name);
+      if (generation !== loadGeneration) return;
+      const createdChannel = {
+        ...created.channel,
+        starter_message: created.starter_message ?? created.channel.starter_message ?? source
+      };
+      rememberThread(createdChannel);
+      threadCreateSource = null;
+      window.location.assign(guildChannelPath(guild, createdChannel));
+    } catch (caught) {
+      if (generation === loadGeneration)
+        threadCreateError = userErrorMessage(caught, 'Could not create the thread. Try again.');
+    } finally {
+      if (generation === loadGeneration) threadCreateBusy = false;
+    }
+  }
+
+  async function openThreadDirectory() {
+    const parent = threadDirectoryParent;
+    if (!parent || threadDirectoryLoading) return;
+    const generation = loadGeneration;
+    const parentKey = entityKey(parent);
+    threadDirectoryLoading = true;
+    error = '';
+    try {
+      const [active, archived] = await Promise.all([
+        fetchThreads(parent, { archived: false, limit: 100 }),
+        fetchThreads(parent, { archived: true, limit: 100 })
+      ]);
+      if (
+        generation !== loadGeneration ||
+        !threadDirectoryParent ||
+        entityKey(threadDirectoryParent) !== parentKey
+      )
+        return;
+      threadDirectoryActive = active.threads;
+      threadDirectoryArchived = archived.threads;
+      threadDirectoryActiveHasMore = active.has_more;
+      threadDirectoryArchivedHasMore = archived.has_more;
+      threadDirectoryActiveCursor = active.next_cursor ?? '';
+      threadDirectoryArchivedCursor = archived.next_cursor ?? '';
+      for (const thread of [...active.threads, ...archived.threads]) rememberThread(thread);
+    } catch (caught) {
+      if (generation === loadGeneration)
+        error = userErrorMessage(caught, 'Could not load the thread directory. Try again.');
+    } finally {
+      if (generation === loadGeneration) threadDirectoryLoading = false;
+    }
+  }
+
+  async function loadMoreThreadDirectory(archived: boolean) {
+    const parent = threadDirectoryParent;
+    const hasMore = archived ? threadDirectoryArchivedHasMore : threadDirectoryActiveHasMore;
+    if (!parent || !hasMore || threadDirectoryLoading || threadDirectoryLoadingMore) return;
+    const generation = loadGeneration;
+    const parentKey = entityKey(parent);
+    threadDirectoryLoadingMore = true;
+    try {
+      const page = await fetchThreads(parent, {
+        archived,
+        limit: 100,
+        cursor: archived ? threadDirectoryArchivedCursor : threadDirectoryActiveCursor
+      });
+      if (
+        generation !== loadGeneration ||
+        !threadDirectoryParent ||
+        entityKey(threadDirectoryParent) !== parentKey
+      )
+        return;
+      for (const thread of page.threads) rememberThread(thread);
+      if (archived) {
+        threadDirectoryArchivedHasMore = page.has_more;
+        threadDirectoryArchivedCursor = page.next_cursor ?? '';
+      } else {
+        threadDirectoryActiveHasMore = page.has_more;
+        threadDirectoryActiveCursor = page.next_cursor ?? '';
+      }
+    } catch (caught) {
+      if (generation === loadGeneration)
+        error = userErrorMessage(caught, 'Could not load more threads. Try again.');
+    } finally {
+      if (generation === loadGeneration) threadDirectoryLoadingMore = false;
+    }
+  }
+
+  function showThreadDirectory() {
+    if (!threadDirectoryParent) return;
+    threadDirectoryOpen = true;
+    void openThreadDirectory();
+  }
+
+  function openProjectedThread(thread: Channel) {
+    if (!guild) return;
+    rememberThread(thread);
+    window.location.assign(guildChannelPath(guild, thread));
+  }
+
+  async function createDirectoryThread(draft: { name: string; message: string; private: boolean }) {
+    const parent = threadDirectoryParent;
+    if (
+      !parent ||
+      !guild ||
+      threadDirectoryBusy ||
+      (draft.private ? !canCreateDirectoryPrivateThread : !canCreateDirectoryPublicThread)
+    )
+      return;
+    const generation = loadGeneration;
+    threadDirectoryBusy = true;
+    error = '';
+    try {
+      const created = await createThread(parent, {
+        name: draft.name,
+        content: parent.encryption_mode === 'e2ee' ? undefined : draft.message || undefined,
+        type: draft.private ? 12 : parent.type === 5 ? 10 : 11,
+        invitable: draft.private ? true : undefined
+      });
+      if (generation !== loadGeneration) return;
+      let createdChannel: Channel = {
+        ...created.channel,
+        starter_message: created.starter_message ?? created.channel.starter_message
+      };
+      rememberThread(createdChannel);
+      if (threadRequiresE2EEActivation(createdChannel)) {
+        try {
+          createdChannel = await activateRequiredThread(createdChannel, parent);
+        } catch {
+          // The detail view keeps replies disabled and retries activation on reload.
+        }
+      }
+      window.location.assign(guildChannelPath(guild, createdChannel));
+    } catch (caught) {
+      if (generation === loadGeneration)
+        error = userErrorMessage(caught, 'Could not create the thread. Try again.');
+    } finally {
+      if (generation === loadGeneration) threadDirectoryBusy = false;
+    }
+  }
+
+  async function createNativeThread(name: string, message: string) {
+    if (!channel || !guild || !canCreateNativeThread || busy) return;
+    if (channel.encryption_mode === 'e2ee') {
+      error = 'Threads cannot be created from an end-to-end encrypted parent channel.';
+      return;
+    }
+    const generation = loadGeneration;
+    busy = true;
+    error = '';
+    try {
+      const created = await createThread(channel, {
+        name,
+        content: message,
+        type: channel.type === 5 ? 10 : 11
+      });
+      if (generation !== loadGeneration) return;
+      const createdChannel = {
+        ...created.channel,
+        starter_message: created.starter_message ?? created.channel.starter_message
+      };
+      rememberThread(createdChannel);
+      content = '';
+      composerCursor = 0;
+      nativeThreadComposer = false;
+      commandOptionValues = {};
+      window.location.assign(guildChannelPath(guild, createdChannel));
+    } catch (caught) {
+      if (generation === loadGeneration)
+        error = userErrorMessage(caught, 'Could not create the thread. Try again.');
+    } finally {
+      if (generation === loadGeneration) busy = false;
+    }
+  }
+
+  async function changeThreadMembership(joined: boolean) {
+    if (!channel || !isThreadChannel(channel) || threadActionBusy) return;
+    threadActionBusy = true;
+    error = '';
+    try {
+      const notificationLevel = currentThreadNotificationLevel;
+      await setThreadMembership(channel, joined, notificationLevel);
+      rememberThread({
+        ...channel,
+        member: joined
+          ? { ...(currentThreadMember ?? {}), notification_level: notificationLevel }
+          : null
+      });
+      threadMembers = await fetchThreadMembers(channel).catch(() => threadMembers);
+    } catch (caught) {
+      error = userErrorMessage(
+        caught,
+        joined ? 'Could not join this thread.' : 'Could not leave this thread.'
+      );
+    } finally {
+      threadActionBusy = false;
+    }
+  }
+
+  async function changeThreadNotifications(
+    notificationLevel: NonNullable<ThreadMember['notification_level']>
+  ) {
+    if (
+      !channel ||
+      !isThreadChannel(channel) ||
+      !currentThreadJoined ||
+      channel.archived ||
+      threadActionBusy
+    )
+      return;
+    threadActionBusy = true;
+    error = '';
+    try {
+      await setThreadMembership(channel, true, notificationLevel);
+      rememberThread({
+        ...channel,
+        member: { ...(currentThreadMember ?? {}), notification_level: notificationLevel }
+      });
+      threadMembers = await fetchThreadMembers(channel).catch(() => threadMembers);
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not update thread notifications.');
+    } finally {
+      threadActionBusy = false;
+    }
+  }
+
+  async function updateCurrentThreadEncryption() {
+    if (
+      !channel ||
+      !isThreadChannel(channel) ||
+      !currentUser ||
+      threadActionBusy ||
+      (!canEnableThreadEncryption && !canRekeyThreadEncryption)
+    )
+      return;
+    const target = channel;
+    const user = currentUser;
+    const rekey = canRekeyThreadEncryption;
+    const warning =
+      'Turn on end-to-end encryption for this thread? This is permanent and protects only new content; existing history stays readable to the server. Server search, link and GIF previews, bots, webhooks, file previews, malware scanning, and PhotoDNA scanning will stop. Notifications become generic, while participants, timing, and message-size metadata remain visible. Participant identities remain unverified until everyone compares the safety number through a separate trusted channel; repeat that comparison after membership or identity changes to detect key substitution by an actively malicious instance. Losing the synchronized account vault, all trusted local state, and the recovery backup loses encrypted history. Removed members keep content they already received.';
+    if (
+      !window.confirm(
+        rekey
+          ? 'Create fresh encryption keys for the current thread members? Removed members and revoked devices will not receive the new keys.'
+          : warning
+      )
+    )
+      return;
+    threadActionBusy = true;
+    threadEncryptionBusy = true;
+    threadEncryptionStatus = rekey
+      ? 'Securing the current thread members…'
+      : 'Turning on end-to-end encryption for new replies…';
+    error = '';
+    try {
+      const client = e2eeClient ?? (await initializeE2EE(user));
+      const updated = rekey
+        ? await client.rekeyRoom(entityRef(target))
+        : await client.activateRoom(entityRef(target));
+      if (!rekey) acknowledgeEncryptedRoom(entityRef(user), entityRef(updated));
+      e2eeClient = client;
+      rememberThread(updated);
+      e2eeSafetyNumber = await client.safetyNumber(updated).catch(() => '');
+      threadEncryptionStatus = rekey
+        ? 'Fresh encryption keys are active for the current thread members.'
+        : 'End-to-end encryption is active for new replies.';
+    } catch (caught) {
+      const refreshed = await fetchChannel(entityRef(target)).catch(() => null);
+      if (refreshed) rememberThread(refreshed);
+      threadEncryptionStatus = rekey
+        ? 'Encryption remains paused until the current members are secured.'
+        : 'End-to-end encryption could not be activated.';
+      error = userErrorMessage(caught, 'Could not update end-to-end encryption.');
+    } finally {
+      threadEncryptionBusy = false;
+      threadActionBusy = false;
+    }
+  }
+
+  async function patchCurrentThread(patch: {
+    name?: string;
+    archived?: boolean;
+    locked?: boolean;
+    invitable?: boolean;
+    pinned?: boolean;
+    applied_tag_ids?: string[];
+  }) {
+    if (!channel || !isThreadChannel(channel) || threadActionBusy) return false;
+    const moderatorOnly = patch.locked !== undefined || patch.pinned !== undefined;
+    if (moderatorOnly ? !canManageThreads : !canEditCurrentThread) return false;
+    threadActionBusy = true;
+    error = '';
+    try {
+      rememberThread(await updateThread(channel, patch));
+      return true;
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not update the thread. Try again.');
+      return false;
+    } finally {
+      threadActionBusy = false;
+    }
+  }
+
+  async function changeThreadMember(userRef: string, joined: boolean) {
+    if (
+      !channel ||
+      !isThreadChannel(channel) ||
+      (joined ? !canInviteThreadMembers : !canRemoveThreadMembers) ||
+      threadActionBusy
+    )
+      return;
+    threadActionBusy = true;
+    error = '';
+    try {
+      await setThreadMember(channel, userRef, joined);
+      threadMembers = await fetchThreadMembers(channel);
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not update the thread member.');
+    } finally {
+      threadActionBusy = false;
+    }
+  }
+
+  async function deleteCurrentThread() {
+    if (
+      !channel ||
+      !isThreadChannel(channel) ||
+      !parentChannel ||
+      !guild ||
+      !canManageThreads ||
+      threadActionBusy
+    )
+      return;
+    const label = isForumChannel(parentChannel) ? 'post' : 'thread';
+    if (!window.confirm(`Delete “${channel.name ?? label}”? This cannot be undone.`)) return;
+    threadActionBusy = true;
+    error = '';
+    try {
+      await api(`/channels/${encodeURIComponent(entityRef(channel))}`, { method: 'DELETE' });
+      window.location.assign(guildChannelPath(guild, parentChannel));
+    } catch (caught) {
+      error = userErrorMessage(caught, `Could not delete the ${label}. Try again.`);
+      threadActionBusy = false;
+    }
+  }
+
   function forgetConfirmedSends() {
     for (const message of messages) {
       if (message.client_nonce && !message.id.startsWith('pending-')) {
@@ -2749,6 +3916,10 @@
   async function send(retry?: PendingMessageSend) {
     const text = content.trim();
     if (editingMessage && !retry) {
+      if (channel?.archived) {
+        error = 'Archived threads cannot be edited.';
+        return;
+      }
       if (!text || busy) return;
       const editing = editingMessage;
       const generation = loadGeneration;
@@ -2792,12 +3963,94 @@
       }
       return;
     }
-    const invocation = !retry ? commandInvocation(text, applicationCommands) : null;
-    if (invocation) {
-      if (!channelReady || !channel || busy) return;
+    if (nativeThreadComposer && !retry) {
+      const name = commandOptionValues.name?.trim() ?? '';
+      const message = commandOptionValues.message?.trim() ?? '';
+      if (!name || !message) return;
+      await createNativeThread(name, message);
+      return;
+    }
+    if (selectedApplicationCommand && !retry) {
+      const selected = selectedApplicationCommand;
+      if (!canUseApplicationCommands) {
+        error = 'You do not have permission to use application commands in this channel.';
+        return;
+      }
+      if (
+        !commandOptionsComplete(selected, commandOptionValues) ||
+        !channelReady ||
+        !channel ||
+        busy
+      )
+        return;
       if (channel.encryption_mode === 'e2ee') {
         error =
           'Bot commands are disabled in this E2EE channel until encrypted interactions are enabled in this client.';
+        return;
+      }
+      if (channel.archived) {
+        error = 'Commands are unavailable in archived threads.';
+        return;
+      }
+      const generation = loadGeneration;
+      busy = true;
+      error = '';
+      commandNotice = '';
+      try {
+        await api(`/channels/${encodeURIComponent(entityRef(channel))}/interactions`, {
+          method: 'POST',
+          body: JSON.stringify({
+            application_ref: selected.application_ref,
+            command_name: selected.name,
+            command_type: selected.type,
+            options: Object.fromEntries(
+              Object.entries(commandOptionValues).filter(([, value]) => value.trim())
+            )
+          })
+        });
+        if (generation !== loadGeneration) return;
+        selectedApplicationCommand = null;
+        commandOptionValues = {};
+        content = '';
+        commandNotice = `/${selected.name} sent to ${selected.application_name}.`;
+      } catch (caught) {
+        if (generation === loadGeneration)
+          error = userErrorMessage(caught, 'The bot command could not be delivered.');
+      } finally {
+        if (generation === loadGeneration) busy = false;
+      }
+      return;
+    }
+    if (!retry && /^\/thread(?:\s|$)/i.test(text)) {
+      if (!canCreateNativeThread) {
+        error =
+          channel?.encryption_mode === 'e2ee'
+            ? 'Threads cannot be created from an end-to-end encrypted parent channel.'
+            : 'You do not have permission to create threads in this channel.';
+        return;
+      }
+      const nativeThread = parseNativeThreadCommand(text);
+      if (!nativeThread) {
+        error = 'Use /thread with both name: and message: options.';
+        return;
+      }
+      await createNativeThread(nativeThread.name, nativeThread.message);
+      return;
+    }
+    const invocation = !retry ? commandInvocation(text, applicationCommands) : null;
+    if (invocation) {
+      if (!channelReady || !channel || busy) return;
+      if (!canUseApplicationCommands) {
+        error = 'You do not have permission to use application commands in this channel.';
+        return;
+      }
+      if (channel.encryption_mode === 'e2ee') {
+        error =
+          'Bot commands are disabled in this E2EE channel until encrypted interactions are enabled in this client.';
+        return;
+      }
+      if (channel.archived) {
+        error = 'Commands are unavailable in archived threads.';
         return;
       }
       const generation = loadGeneration;
@@ -2958,7 +4211,8 @@
           )
         );
         clearSubmittedUploads(draft.attachmentIds);
-        if (channel.rate_limit_per_user > 0) startSlowmode(channel.rate_limit_per_user * 1000);
+        if (channel.rate_limit_per_user > 0 && !canBypassSlowmode)
+          startSlowmode(channel.rate_limit_per_user * 1000);
         return;
       }
       reconcile(
@@ -2971,7 +4225,8 @@
           : saved
       );
       clearSubmittedUploads(draft.attachmentIds);
-      if (channel.rate_limit_per_user > 0) startSlowmode(channel.rate_limit_per_user * 1000);
+      if (channel.rate_limit_per_user > 0 && !canBypassSlowmode)
+        startSlowmode(channel.rate_limit_per_user * 1000);
       await acknowledge(saved);
     } catch (caught) {
       if (generation !== loadGeneration || routeChannel !== channelId) return;
@@ -3211,7 +4466,7 @@
   }
 
   async function togglePinnedMessage(message: Message, shouldPin: boolean) {
-    if (!channel || !canManageMessages) return;
+    if (!channel || !canPinMessages) return;
     try {
       await api(
         `/channels/${encodeURIComponent(entityRef(channel))}/pins/${encodeURIComponent(entityRef(message))}`,
@@ -3226,7 +4481,8 @@
   }
 
   async function toggleMessageReaction(message: Message, emoji: string, remove: boolean) {
-    if (!channel || (!canAddReactions && !remove)) return;
+    const emojiExists = Number(message.reaction_counts?.[emoji] ?? 0) > 0;
+    if (channel?.archived || !channel || (!remove && !canAddReactions && !emojiExists)) return;
     const channelRef = encodeURIComponent(entityRef(channel));
     const messageRef = encodeURIComponent(entityRef(message));
     try {
@@ -3257,8 +4513,30 @@
   }
 
   function jumpToReply(message: Message) {
-    if (!message.referenced_message_id || !message.referenced_message_domain) return;
-    jumpToMessageReference(`${message.referenced_message_id}@${message.referenced_message_domain}`);
+    const target = messageReferenceTarget(message);
+    if (!target) return;
+    const reference = entityRef(target);
+    if (
+      guild &&
+      target.channel_id &&
+      target.channel_domain &&
+      !matchesEntityRef(
+        channelId,
+        {
+          id: target.channel_id,
+          origin_domain: target.channel_domain
+        },
+        localDomain
+      )
+    ) {
+      const destination = guildChannelPath(guild, {
+        id: target.channel_id,
+        origin_domain: target.channel_domain
+      });
+      window.location.assign(`${destination}?${new URLSearchParams({ around: reference })}`);
+      return;
+    }
+    jumpToMessageReference(reference);
   }
 
   function finishEditing() {
@@ -3365,6 +4643,28 @@
 
   function chooseCompletion(completion: Completion) {
     if (!completionQuery) return;
+    if (completion.kind === 'application-command') {
+      const commandName = completion.value.replace(/^\//, '');
+      if (commandName === 'thread' && canCreateNativeThread) {
+        nativeThreadComposer = true;
+        selectedApplicationCommand = null;
+        commandOptionValues = {};
+        content = '';
+        composerCursor = 0;
+        return;
+      }
+      const selected = applicationCommands.find(
+        (command) => command.type === 'chat_input' && command.name === commandName
+      );
+      if (selected && commandStringOptions(selected).length) {
+        selectedApplicationCommand = selected;
+        nativeThreadComposer = false;
+        commandOptionValues = {};
+        content = '';
+        composerCursor = 0;
+        return;
+      }
+    }
     const cursor = completionQuery.start + completion.value.length + 1;
     content = replaceCompletion(content, completionQuery, completion.value);
     composerCursor = cursor;
@@ -3372,6 +4672,15 @@
       composerInput?.focus();
       composerInput?.setSelectionRange(cursor, cursor);
     });
+  }
+
+  function cancelCommandComposer() {
+    nativeThreadComposer = false;
+    selectedApplicationCommand = null;
+    commandOptionValues = {};
+    content = '';
+    composerCursor = 0;
+    void tick().then(() => composerInput?.focus());
   }
 
   function timelineBottomChanged(value: boolean) {
@@ -3708,6 +5017,24 @@
                     </button>
                   </div>
                   {@render voiceMembers(item)}
+                  {#if guild && isThreadParentChannel(item)}
+                    <div class="active-thread-list">
+                      {#each activeThreadsForParent(guild.channels ?? [], item) as activeThread (entityKey(activeThread))}
+                        <a
+                          class:active={matchesEntityRef(channelId, activeThread, localDomain)}
+                          href={guildChannelPath(guild, activeThread)}
+                          aria-current={matchesEntityRef(channelId, activeThread, localDomain)
+                            ? 'page'
+                            : undefined}
+                          onclick={() => closeMobileNavigation(false)}
+                          ><span aria-hidden="true">└</span><Icon
+                            name="message"
+                            size={14}
+                          />{activeThread.name}</a
+                        >
+                      {/each}
+                    </div>
+                  {/if}
                 {/each}
               </div>
             {/if}
@@ -3772,6 +5099,24 @@
                 </button>
               </div>
               {@render voiceMembers(item)}
+              {#if guild && isThreadParentChannel(item)}
+                <div class="active-thread-list">
+                  {#each activeThreadsForParent(guild.channels ?? [], item) as activeThread (entityKey(activeThread))}
+                    <a
+                      class:active={matchesEntityRef(channelId, activeThread, localDomain)}
+                      href={guildChannelPath(guild, activeThread)}
+                      aria-current={matchesEntityRef(channelId, activeThread, localDomain)
+                        ? 'page'
+                        : undefined}
+                      onclick={() => closeMobileNavigation(false)}
+                      ><span aria-hidden="true">└</span><Icon
+                        name="message"
+                        size={14}
+                      />{activeThread.name}</a
+                    >
+                  {/each}
+                </div>
+              {/if}
             {/each}
           </div>
         {/if}
@@ -3831,17 +5176,39 @@
               <Icon name="volume" size={18} />
             {:else if channel?.type === 5}
               <Icon name="bell" size={18} />
+            {:else if isForumChannel(channel) || isThreadChannel(channel)}
+              <Icon name="message" size={18} />
             {:else}
               #
             {/if}
           </span>
           <div>
             <strong>{channel?.name ?? 'Channel'}</strong>
-            {#if channel?.topic}<span>{channel.topic}</span>{/if}
+            {#if channel?.topic && !isThreadChannel(channel)}<span>{channel.topic}</span>{/if}
           </div>
         </div>
       </div>
       <div class="channel-header-actions">
+        {#if guild && threadDirectoryParent}
+          <ThreadsPanel
+            bind:open={threadDirectoryOpen}
+            {guild}
+            parent={threadDirectoryParent}
+            activeThreads={threadDirectoryActive}
+            archivedThreads={threadDirectoryArchived}
+            loading={threadDirectoryLoading}
+            loadingMore={threadDirectoryLoadingMore}
+            activeHasMore={threadDirectoryActiveHasMore}
+            archivedHasMore={threadDirectoryArchivedHasMore}
+            busy={threadDirectoryBusy}
+            canCreatePublic={canCreateDirectoryPublicThread}
+            canCreatePrivate={canCreateDirectoryPrivateThread}
+            canSendStarter={canSendDirectoryStarter}
+            onOpen={openThreadDirectory}
+            onLoadMore={loadMoreThreadDirectory}
+            onCreate={createDirectoryThread}
+          />
+        {/if}
         {#if channel?.encryption_mode === 'e2ee'}
           <button
             class="icon-button active e2ee-status-button"
@@ -3854,15 +5221,17 @@
             <span>{channel.encryption_state === 'active' ? 'Encrypted' : 'Rekey needed'}</span>
           </button>
         {/if}
-        <MessageSearch
-          bind:open={messageSearchOpen}
-          scope="guild"
-          scopeRef={guild ? entityRef(guild) : guildId}
-          accountRef={currentUser ? entityRef(currentUser) : null}
-          {channel}
-          users={messageSearchUsers}
-          placement="header"
-        />
+        {#if !isForumChannel(channel)}
+          <MessageSearch
+            bind:open={messageSearchOpen}
+            scope="guild"
+            scopeRef={guild ? entityRef(guild) : guildId}
+            accountRef={currentUser ? entityRef(currentUser) : null}
+            {channel}
+            users={messageSearchUsers}
+            placement="header"
+          />
+        {/if}
         <button
           class:active={memberRosterOpen}
           class="icon-button member-roster-toggle"
@@ -3876,6 +5245,52 @@
         </button>
       </div>
     </header>
+    {#if guild && channel && isThreadChannel(channel)}
+      <ThreadHeader
+        {guild}
+        thread={channel}
+        parent={parentChannel}
+        joined={currentThreadJoined}
+        notificationLevel={currentThreadNotificationLevel}
+        starterMessage={forumStarterMessage}
+        reactionEmoji={forumDefaultReaction}
+        canReact={canAddReactions ||
+          Number(forumStarterMessage?.reaction_counts?.[forumDefaultReaction] ?? 0) > 0 ||
+          Boolean(forumStarterMessage?.reacted_emoji?.includes(forumDefaultReaction))}
+        canEdit={canEditCurrentThread}
+        canManage={canManageThreads}
+        canInviteMembers={canInviteThreadMembers}
+        canRemoveMembers={canRemoveThreadMembers}
+        canEnableEncryption={canEnableThreadEncryption}
+        canRekeyEncryption={canRekeyThreadEncryption}
+        busy={threadActionBusy}
+        encryptionStatus={threadEncryptionStatus}
+        {threadMembers}
+        guildMembers={members}
+        availableTags={forumParent?.available_tags ?? []}
+        customEmojis={pickerEmojis}
+        onMembership={changeThreadMembership}
+        onNotifications={changeThreadNotifications}
+        onReaction={toggleMessageReaction}
+        onRename={(name) => patchCurrentThread({ name })}
+        onEncryption={updateCurrentThreadEncryption}
+        onInvitable={(invitable) => void patchCurrentThread({ invitable })}
+        onArchive={(archived) =>
+          void patchCurrentThread(
+            !archived && channel.locked && canManageThreads
+              ? { archived, locked: false }
+              : { archived }
+          )}
+        onLock={(locked) =>
+          void patchCurrentThread(
+            !locked && channel.archived ? { archived: false, locked } : { locked }
+          )}
+        onMemberChange={changeThreadMember}
+        onPin={(pinned) => void patchCurrentThread({ pinned })}
+        onTagsChange={(applied_tag_ids) => void patchCurrentThread({ applied_tag_ids })}
+        onDelete={deleteCurrentThread}
+      />
+    {/if}
     {#if readStateWarning}
       <div class="read-state-warning" role="status">
         <span>{readStateWarning}</span>
@@ -3911,285 +5326,434 @@
           <VoiceDock channelRef={entityRef(channel)} permissions={channel.permissions ?? '0'} />
         {/key}
       </div>
+    {:else if channel && guild && isForumChannel(channel)}
+      <ForumView
+        {guild}
+        forum={channel}
+        posts={forumPosts}
+        loading={forumLoading}
+        loadingMore={forumLoadingMore}
+        hasMore={forumHasMore}
+        error={forumError}
+        canCreate={canCreateForumPost}
+        canManageTags={channelHasPermission(channel, MANAGE_THREADS)}
+        customEmojis={pickerEmojis}
+        busy={forumPostBusy}
+        {uploads}
+        onCreate={(draft) => createForumPost(channel, draft)}
+        onFiltersChange={(filters) => reloadForumPosts(channel, filters)}
+        onLoadMore={() => loadMoreForumPosts(channel)}
+        onFiles={canAttachFiles ? queueFiles : undefined}
+        onRemoveUpload={removeUpload}
+      />
     {:else}
       <div
-        class="message-list"
-        aria-live="polite"
-        role="log"
-        aria-label={`Messages in ${channel?.name ?? 'channel'}`}
+        class:forum-thread-split={Boolean(
+          guild && forumParent && channel && isThreadChannel(channel)
+        )}
+        class="conversation-layout"
       >
-        {#if error}<p class="form-error message-error" role="alert">{error}</p>{/if}
-        {#snippet emptyTimeline()}
-          {#if channelReady && channel}
-            <section class="channel-welcome">
-              <span class="welcome-mark" aria-hidden="true">#</span>
-              <h2>Welcome to #{channel.name}</h2>
-              <p>This is the beginning of the conversation.</p>
-            </section>
-          {/if}
-        {/snippet}
-        {#key channelId}
-          <VirtualMessageList
-            items={timeline}
-            empty={emptyTimeline}
-            {hasEarlier}
-            {loadingEarlier}
-            {hasLater}
-            {loadingLater}
-            onLoadEarlier={loadEarlier}
-            onLoadLater={loadLater}
-            targetKey={targetTimelineKey}
-            onBottomChange={timelineBottomChanged}
-            label={`Messages in ${channel?.name ?? 'channel'}`}
+        {#if guild && forumParent && channel && isThreadChannel(channel)}
+          <ForumView
+            {guild}
+            forum={forumParent}
+            posts={forumPosts}
+            loading={forumLoading}
+            loadingMore={forumLoadingMore}
+            hasMore={forumHasMore}
+            error={forumError}
+            canCreate={channelHasPermission(forumParent, Permission.SEND_MESSAGES)}
+            canManageTags={channelHasPermission(forumParent, MANAGE_THREADS)}
+            customEmojis={pickerEmojis}
+            busy={forumPostBusy}
+            compact
+            onCreate={(draft) => createForumPost(forumParent, draft)}
+            onFiltersChange={(filters) => reloadForumPosts(forumParent, filters)}
+            onLoadMore={() => loadMoreForumPosts(forumParent)}
+          />
+        {/if}
+        <div class="thread-conversation">
+          <div
+            class="message-list"
+            aria-live="polite"
+            role="log"
+            aria-label={`Messages in ${channel?.name ?? 'channel'}`}
           >
-            {#snippet renderItem(item)}
-              {#if item.kind === 'day'}
-                <div class="timeline-divider" role="separator"><span>{item.label}</span></div>
-              {:else if item.kind === 'new'}
-                <div class="timeline-divider new" role="separator"><span>{item.label}</span></div>
-              {:else}
-                <MessageRow
-                  message={item.message}
-                  compact={item.compact}
-                  authorColor={item.message.author
-                    ? memberRoleColor(
-                        memberFor(item.message.author_id, item.message.author_domain),
-                        guild?.roles ?? []
-                      )
-                    : undefined}
-                  mentionUsers={entities.users.values}
-                  mentionRoles={guild?.roles ?? []}
-                  referencedMessage={referencedMessage(item.message)}
-                  pinned={pinnedMessages.some(
-                    (pinned) => entityKey(pinned) === entityKey(item.message)
-                  )}
-                  presence={item.message.author ? presenceFor(item.message.author) : 'offline'}
-                  canEdit={item.message.author_id === currentUser?.id &&
-                    item.message.author_domain === currentUser?.origin_domain}
-                  onEdit={startEditing}
-                  onDelete={deleteMessage}
-                  onMessageAuthor={item.message.author &&
-                  item.message.author.profile_resolved !== false &&
-                  (item.message.author_id !== currentUser?.id ||
-                    item.message.author_domain !== currentUser?.origin_domain)
-                    ? messageAuthor
-                    : undefined}
-                  onRetry={retryMessage}
-                  onViewProfile={openMessageProfile}
-                  onReply={startReply}
-                  canReact={canAddReactions}
-                  customEmojis={pickerEmojis}
-                  reactionUserKey={currentUser ? entityKey(currentUser) : ''}
-                  onToggleReaction={toggleMessageReaction}
-                  onJumpToReference={jumpToReply}
-                  onTogglePin={canManageMessages ? togglePinnedMessage : undefined}
-                  moderationActions={item.message.author
-                    ? moderationActionsFor(item.message.author)
-                    : []}
-                  onModerate={requestModeration}
-                />
+            {#if error}<p class="form-error message-error" role="alert">{error}</p>{/if}
+            {#snippet emptyTimeline()}
+              {#if channelReady && channel && !threadTimelineStarter}
+                <section class="channel-welcome">
+                  <span class="welcome-mark" aria-hidden="true">#</span>
+                  <h2>Welcome to #{channel.name}</h2>
+                  <p>This is the beginning of the conversation.</p>
+                </section>
               {/if}
             {/snippet}
-          </VirtualMessageList>
-        {/key}
-      </div>
-      <footer class="composer-wrap">
-        <span class="typing-line">{typing}</span>
-        {#if replyingMessage}
-          <div class="reply-banner">
-            <span>
-              Replying to
-              <strong>{userDisplayName(replyingMessage.author)}</strong>
-            </span>
-            <div class="reply-banner-actions">
-              {#if replyingMessage.author && (replyingMessage.author.id !== currentUser?.id || replyingMessage.author.origin_domain !== currentUser?.origin_domain)}
-                <label class="reply-notify-toggle">
-                  <input type="checkbox" bind:checked={replyNotify} />
-                  Notify author
-                </label>
+            {#snippet threadStarterHeader()}
+              {#if threadTimelineStarter}
+                <div
+                  class="thread-starter-reference"
+                  aria-label="Original message that started this thread"
+                >
+                  <MessageRow
+                    message={threadTimelineStarter}
+                    authorColor={threadTimelineStarter.author
+                      ? memberRoleColor(
+                          memberFor(
+                            threadTimelineStarter.author_id,
+                            threadTimelineStarter.author_domain
+                          ),
+                          guild?.roles ?? []
+                        )
+                      : undefined}
+                    mentionUsers={entities.users.values}
+                    mentionRoles={guild?.roles ?? []}
+                    presence={threadTimelineStarter.author
+                      ? presenceFor(threadTimelineStarter.author)
+                      : 'offline'}
+                    actionsEnabled={false}
+                    timestampFormat="date-time"
+                    domIdPrefix="thread-starter"
+                    onViewProfile={threadTimelineStarter.author ? openMessageProfile : undefined}
+                  />
+                </div>
               {/if}
-              <button type="button" onclick={cancelReply} aria-label="Cancel reply">×</button>
-            </div>
+            {/snippet}
+            {#key channelId}
+              <VirtualMessageList
+                items={timeline}
+                empty={emptyTimeline}
+                header={threadStarterHeader}
+                {hasEarlier}
+                {loadingEarlier}
+                {hasLater}
+                {loadingLater}
+                onLoadEarlier={loadEarlier}
+                onLoadLater={loadLater}
+                targetKey={targetTimelineKey}
+                onBottomChange={timelineBottomChanged}
+                label={`Messages in ${channel?.name ?? 'channel'}`}
+              >
+                {#snippet renderItem(item)}
+                  {#if item.kind === 'day'}
+                    <div class="timeline-divider" role="separator"><span>{item.label}</span></div>
+                  {:else if item.kind === 'new'}
+                    <div class="timeline-divider new" role="separator">
+                      <span>{item.label}</span>
+                    </div>
+                  {:else}
+                    <MessageRow
+                      message={item.message}
+                      compact={item.compact}
+                      authorColor={item.message.author
+                        ? memberRoleColor(
+                            memberFor(item.message.author_id, item.message.author_domain),
+                            guild?.roles ?? []
+                          )
+                        : undefined}
+                      mentionUsers={entities.users.values}
+                      mentionRoles={guild?.roles ?? []}
+                      referencedMessage={referencedMessage(item.message)}
+                      pinned={pinnedMessages.some(
+                        (pinned) => entityKey(pinned) === entityKey(item.message)
+                      )}
+                      presence={item.message.author ? presenceFor(item.message.author) : 'offline'}
+                      canEdit={!channel?.archived &&
+                        (!channel?.locked || canManageThreads) &&
+                        item.message.author_id === currentUser?.id &&
+                        item.message.author_domain === currentUser?.origin_domain}
+                      canDelete={((item.message.author_id === currentUser?.id &&
+                        item.message.author_domain === currentUser?.origin_domain) ||
+                        Boolean(
+                          channel && channelHasPermission(channel, Permission.MANAGE_MESSAGES)
+                        )) &&
+                        (!channel?.archived || !channel?.locked || canManageThreads)}
+                      onEdit={startEditing}
+                      onDelete={deleteMessage}
+                      onMessageAuthor={item.message.author &&
+                      item.message.author.profile_resolved !== false &&
+                      (item.message.author_id !== currentUser?.id ||
+                        item.message.author_domain !== currentUser?.origin_domain)
+                        ? messageAuthor
+                        : undefined}
+                      onRetry={retryMessage}
+                      onViewProfile={openMessageProfile}
+                      onReply={startReply}
+                      onCreateThread={canCreatePublicThreads &&
+                      item.message.message_type === 0 &&
+                      !item.message.id.startsWith('pending-')
+                        ? requestThreadForMessage
+                        : undefined}
+                      onOpenThread={openProjectedThread}
+                      onOpenThreads={showThreadDirectory}
+                      canReact={canAddReactions}
+                      canReactToExisting={Boolean(channel && !channel.archived)}
+                      customEmojis={pickerEmojis}
+                      reactionUserKey={currentUser ? entityKey(currentUser) : ''}
+                      onToggleReaction={!channel?.archived ? toggleMessageReaction : undefined}
+                      onJumpToReference={jumpToReply}
+                      onTogglePin={canPinMessages ? togglePinnedMessage : undefined}
+                      moderationActions={item.message.author
+                        ? moderationActionsFor(item.message.author)
+                        : []}
+                      onModerate={requestModeration}
+                    />
+                  {/if}
+                {/snippet}
+              </VirtualMessageList>
+            {/key}
           </div>
-        {/if}
-        {#if editingMessage}
-          <div class="editing-banner">
-            <span>Editing message <small>Your draft and attachments are saved.</small></span>
-            <button type="button" onclick={finishEditing}>Cancel</button>
-          </div>
-        {/if}
-        <ComposerAutocomplete
-          bind:this={autocomplete}
-          query={completionQuery?.query ?? ''}
-          options={completionOptions}
-          listboxId="guild-message-suggestions"
-          onActiveIndexChange={(index) => (completionActive = index)}
-          onOpenChange={(open) => (completionOpen = open)}
-          onSelect={chooseCompletion}
-        />
-        {#if canSendMessages || editingMessage}
-          <form
-            class="composer"
-            ondragover={(event) => event.preventDefault()}
-            ondrop={composerDrop}
-            onsubmit={(event) => {
-              event.preventDefault();
-              send();
-            }}
-          >
-            <input
-              class="visually-hidden"
-              bind:this={fileInput}
-              type="file"
-              multiple
-              onchange={(event) => {
-                const target = event.currentTarget;
-                if (target.files) void queueFiles(target.files);
-                target.value = '';
-              }}
+          <footer class="composer-wrap">
+            <span class="typing-line">{typing}</span>
+            {#if replyingMessage}
+              <div class="reply-banner">
+                <span>
+                  Replying to
+                  <strong>{userDisplayName(replyingMessage.author)}</strong>
+                </span>
+                <div class="reply-banner-actions">
+                  {#if replyingMessage.author && (replyingMessage.author.id !== currentUser?.id || replyingMessage.author.origin_domain !== currentUser?.origin_domain)}
+                    <label class="reply-notify-toggle">
+                      <input type="checkbox" bind:checked={replyNotify} />
+                      Notify author
+                    </label>
+                  {/if}
+                  <button type="button" onclick={cancelReply} aria-label="Cancel reply">×</button>
+                </div>
+              </div>
+            {/if}
+            {#if editingMessage}
+              <div class="editing-banner">
+                <span>Editing message <small>Your draft and attachments are saved.</small></span>
+                <button type="button" onclick={finishEditing}>Cancel</button>
+              </div>
+            {/if}
+            <ComposerAutocomplete
+              bind:this={autocomplete}
+              query={completionQuery?.query ?? ''}
+              options={completionOptions}
+              listboxId="guild-message-suggestions"
+              onActiveIndexChange={(index) => (completionActive = index)}
+              onOpenChange={(open) => (completionOpen = open)}
+              onSelect={chooseCompletion}
             />
-            <button
-              class="attach-button"
-              type="button"
-              disabled={busy ||
-                !channelReady ||
-                !channel ||
-                !canAttachFiles ||
-                Boolean(editingMessage)}
-              onclick={() => fileInput?.click()}
-              aria-label={canAttachFiles
-                ? 'Attach files'
-                : 'You cannot attach files in this channel'}
-              title={canAttachFiles ? 'Attach files' : 'You cannot attach files in this channel'}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="m9.5 12.5 5.8-5.8a3 3 0 1 1 4.2 4.3l-8.2 8.1a5 5 0 0 1-7.1-7L12 4.3" />
-              </svg>
-            </button>
-            <textarea
-              use:autosizeTextarea={{ value: content, maxHeight: 180 }}
-              bind:this={composerInput}
-              bind:value={content}
-              oninput={composerChanged}
-              onselect={syncComposerCursor}
-              onclick={syncComposerCursor}
-              onkeyup={syncComposerCursor}
-              onkeydown={composerKeydown}
-              onpaste={composerPaste}
-              disabled={!channelReady || !channel}
-              role="combobox"
-              aria-autocomplete="list"
-              aria-expanded={completionOpen}
-              aria-controls={completionOpen ? 'guild-message-suggestions' : undefined}
-              aria-activedescendant={completionOpen
-                ? `guild-message-suggestions-option-${completionActive}`
-                : undefined}
-              aria-label={`Message ${channel?.name ?? 'channel'}`}
-              placeholder={`Message #${channel?.name ?? 'channel'}`}
-              rows="1"
-              maxlength="4000"
-            ></textarea>
-            {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage}
-              <button
-                class="gif-button"
-                class:active={gifPickerOpen}
-                type="button"
-                disabled={busy || !channelReady || !channel || !gifPickerEnabled}
-                aria-label={gifPickerEnabled
-                  ? 'Choose a GIF'
-                  : 'GIF availability could not be checked'}
-                title={gifPickerEnabled ? 'Choose a GIF' : gifConfigurationError}
-                aria-expanded={gifPickerOpen}
-                onclick={() => {
-                  gifPickerOpen = !gifPickerOpen;
-                  emojiPickerOpen = false;
-                }}>GIF</button
+            {#if canSendMessages || canCreateNativeThread || editingMessage}
+              <form
+                class="composer"
+                ondragover={(event) => event.preventDefault()}
+                ondrop={composerDrop}
+                onsubmit={(event) => {
+                  event.preventDefault();
+                  send();
+                }}
               >
-            {/if}
-            {#if !editingMessage}
-              <button
-                class="emoji-button"
-                class:active={emojiPickerOpen}
-                type="button"
-                disabled={busy || !channelReady || !channel}
-                aria-label="Choose an emoji"
-                aria-expanded={emojiPickerOpen}
-                onclick={() => {
-                  emojiPickerOpen = !emojiPickerOpen;
-                  gifPickerOpen = false;
-                }}>☺</button
-              >
-            {/if}
-            {#if slowmodeRemaining > 0}
-              <small class="slowmode-indicator" role="status" title="Slow mode is active"
-                >⏱ {slowmodeRemaining}s</small
-              >
+                <input
+                  class="visually-hidden"
+                  bind:this={fileInput}
+                  type="file"
+                  multiple
+                  onchange={(event) => {
+                    const target = event.currentTarget;
+                    if (target.files) void queueFiles(target.files);
+                    target.value = '';
+                  }}
+                />
+                <button
+                  class="attach-button"
+                  type="button"
+                  disabled={busy ||
+                    !channelReady ||
+                    !channel ||
+                    !canAttachFiles ||
+                    Boolean(editingMessage || nativeThreadComposer || selectedApplicationCommand)}
+                  onclick={() => fileInput?.click()}
+                  aria-label={canAttachFiles
+                    ? 'Attach files'
+                    : 'You cannot attach files in this channel'}
+                  title={canAttachFiles
+                    ? 'Attach files'
+                    : 'You cannot attach files in this channel'}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m9.5 12.5 5.8-5.8a3 3 0 1 1 4.2 4.3l-8.2 8.1a5 5 0 0 1-7.1-7L12 4.3" />
+                  </svg>
+                </button>
+                {#if nativeThreadComposer}
+                  <CommandOptionComposer
+                    commandName="thread"
+                    options={nativeThreadOptions}
+                    values={commandOptionValues}
+                    disabled={busy}
+                    onValueChange={(name, value) =>
+                      (commandOptionValues = { ...commandOptionValues, [name]: value })}
+                    onCancel={cancelCommandComposer}
+                  />
+                {:else if selectedApplicationCommand}
+                  <CommandOptionComposer
+                    commandName={selectedApplicationCommand.name}
+                    applicationName={selectedApplicationCommand.application_name}
+                    options={commandStringOptions(selectedApplicationCommand)}
+                    values={commandOptionValues}
+                    disabled={busy}
+                    onValueChange={(name, value) =>
+                      (commandOptionValues = { ...commandOptionValues, [name]: value })}
+                    onCancel={cancelCommandComposer}
+                  />
+                {:else}
+                  <textarea
+                    use:autosizeTextarea={{ value: content, maxHeight: 180 }}
+                    bind:this={composerInput}
+                    bind:value={content}
+                    oninput={composerChanged}
+                    onselect={syncComposerCursor}
+                    onclick={syncComposerCursor}
+                    onkeyup={syncComposerCursor}
+                    onkeydown={composerKeydown}
+                    onpaste={composerPaste}
+                    disabled={!channelReady || !channel}
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-expanded={completionOpen}
+                    aria-controls={completionOpen ? 'guild-message-suggestions' : undefined}
+                    aria-activedescendant={completionOpen
+                      ? `guild-message-suggestions-option-${completionActive}`
+                      : undefined}
+                    aria-label={`Message ${channel?.name ?? 'channel'}`}
+                    placeholder={canSendMessages
+                      ? `Message #${channel?.name ?? 'channel'}`
+                      : 'Use /thread to create a thread'}
+                    rows="1"
+                    maxlength="4000"
+                  ></textarea>
+                {/if}
+                {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage && !nativeThreadComposer && !selectedApplicationCommand}
+                  <button
+                    class="gif-button"
+                    class:active={gifPickerOpen}
+                    type="button"
+                    disabled={busy ||
+                      !channelReady ||
+                      !channel ||
+                      !canSendMessages ||
+                      !gifPickerEnabled}
+                    aria-label={gifPickerEnabled
+                      ? 'Choose a GIF'
+                      : 'GIF availability could not be checked'}
+                    title={gifPickerEnabled ? 'Choose a GIF' : gifConfigurationError}
+                    aria-expanded={gifPickerOpen}
+                    onclick={() => {
+                      gifPickerOpen = !gifPickerOpen;
+                      emojiPickerOpen = false;
+                    }}>GIF</button
+                  >
+                {/if}
+                {#if !editingMessage && !nativeThreadComposer && !selectedApplicationCommand}
+                  <button
+                    class="emoji-button"
+                    class:active={emojiPickerOpen}
+                    type="button"
+                    disabled={busy || !channelReady || !channel || !canSendMessages}
+                    aria-label="Choose an emoji"
+                    aria-expanded={emojiPickerOpen}
+                    onclick={() => {
+                      emojiPickerOpen = !emojiPickerOpen;
+                      gifPickerOpen = false;
+                    }}>☺</button
+                  >
+                {/if}
+                {#if nativeThreadComposer || selectedApplicationCommand}
+                  <small class="composer-count"></small>
+                {:else if slowmodeRemaining > 0}
+                  <small class="slowmode-indicator" role="status" title="Slow mode is active"
+                    >⏱ {slowmodeRemaining}s</small
+                  >
+                {:else}
+                  <small class="composer-count">{content.length}/4000</small>
+                {/if}
+                <button
+                  class="send-button"
+                  disabled={busy ||
+                    (slowmodeRemaining > 0 &&
+                      !nativeThreadComposer &&
+                      !selectedApplicationCommand &&
+                      !/^\/thread(?:\s|$)/i.test(content.trim())) ||
+                    !channelReady ||
+                    !channel ||
+                    (!canSendMessages &&
+                      !nativeThreadComposer &&
+                      !selectedApplicationCommand &&
+                      !/^\/thread(?:\s|$)/i.test(content.trim())) ||
+                    uploads.some((item) => item.status === 'uploading') ||
+                    (nativeThreadComposer
+                      ? !commandOptionValues.name?.trim() || !commandOptionValues.message?.trim()
+                      : selectedApplicationCommand
+                        ? !commandOptionsComplete(selectedApplicationCommand, commandOptionValues)
+                        : editingMessage
+                          ? !content.trim()
+                          : !content.trim() && !uploads.some((item) => item.status === 'ready'))}
+                  aria-label="Send message"
+                  title="Send message"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m4 4 17 8-17 8 3-7 8-1-8-1z" />
+                  </svg>
+                </button>
+              </form>
+              {#if commandNotice}<p class="composer-feature-warning" role="status">
+                  <span>{commandNotice}</span>
+                </p>{/if}
+              {#if gifConfigurationError}
+                <p class="composer-feature-warning" role="status">
+                  <span>{gifConfigurationError}</span>
+                  <button
+                    type="button"
+                    disabled={gifConfigurationLoading}
+                    onclick={() => void refreshGifConfiguration()}
+                  >
+                    {gifConfigurationLoading ? 'Checking…' : 'Retry GIF check'}
+                  </button>
+                </p>
+              {/if}
+              {#if gifPickerOpen}
+                <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
+              {/if}
+              {#if emojiPickerOpen}
+                <EmojiPicker
+                  customEmojis={pickerEmojis}
+                  onSelect={chooseEmoji}
+                  onClose={() => (emojiPickerOpen = false)}
+                />
+              {/if}
+              {#if uploads.length && !editingMessage}
+                <UploadPreviewTray {uploads} onRemove={removeUpload} />
+              {/if}
             {:else}
-              <small class="composer-count">{content.length}/4000</small>
+              <div class="composer composer-disabled" role="note">
+                <Icon name="lock" size={18} />
+                <span
+                  >{threadRequiresE2EEActivation(channel)
+                    ? 'End-to-end encryption must finish activating before replies can be sent.'
+                    : channel?.archived
+                      ? 'This thread is archived.'
+                      : channel?.locked
+                        ? 'This post has been locked. Only moderators can send messages.'
+                        : 'You do not have permission to send messages in this channel.'}</span
+                >
+              </div>
             {/if}
-            <button
-              class="send-button"
-              disabled={busy ||
-                slowmodeRemaining > 0 ||
-                !channelReady ||
-                !channel ||
-                uploads.some((item) => item.status === 'uploading') ||
-                (editingMessage
-                  ? !content.trim()
-                  : !content.trim() && !uploads.some((item) => item.status === 'ready'))}
-              aria-label="Send message"
-              title="Send message"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="m4 4 17 8-17 8 3-7 8-1-8-1z" />
-              </svg>
-            </button>
-          </form>
-          {#if commandNotice}<p class="composer-feature-warning" role="status">
-              <span>{commandNotice}</span>
-            </p>{/if}
-          {#if gifConfigurationError}
-            <p class="composer-feature-warning" role="status">
-              <span>{gifConfigurationError}</span>
-              <button
-                type="button"
-                disabled={gifConfigurationLoading}
-                onclick={() => void refreshGifConfiguration()}
-              >
-                {gifConfigurationLoading ? 'Checking…' : 'Retry GIF check'}
-              </button>
-            </p>
-          {/if}
-          {#if gifPickerOpen}
-            <GifPicker onSelect={chooseGif} onClose={() => (gifPickerOpen = false)} />
-          {/if}
-          {#if emojiPickerOpen}
-            <EmojiPicker
-              customEmojis={pickerEmojis}
-              onSelect={chooseEmoji}
-              onClose={() => (emojiPickerOpen = false)}
+          </footer>
+          {#if pinsOpen}
+            <PinnedMessagesPanel
+              messages={pinnedMessages}
+              loading={pinsLoading}
+              error={pinsError}
+              onClose={() => (pinsOpen = false)}
+              onJump={jumpToPinnedMessage}
+              onRetry={() => void loadPins()}
             />
           {/if}
-          {#if uploads.length && !editingMessage}
-            <UploadPreviewTray {uploads} onRemove={removeUpload} />
-          {/if}
-        {:else}
-          <div class="composer composer-disabled" role="note">
-            <Icon name="lock" size={18} />
-            <span>You do not have permission to send messages in this channel.</span>
-          </div>
-        {/if}
-      </footer>
-      {#if pinsOpen}
-        <PinnedMessagesPanel
-          messages={pinnedMessages}
-          loading={pinsLoading}
-          error={pinsError}
-          onClose={() => (pinsOpen = false)}
-          onJump={jumpToPinnedMessage}
-          onRetry={() => void loadPins()}
-        />
-      {/if}
+        </div>
+      </div>
     {/if}
   </section>
   {#if memberRosterOpen}
@@ -4202,6 +5766,18 @@
     />
   {/if}
 </main>
+
+{#if threadCreateSource}
+  <CreateThreadDialog
+    message={threadCreateSource}
+    busy={threadCreateBusy}
+    error={threadCreateError}
+    onCreate={createMessageThread}
+    onClose={() => {
+      if (!threadCreateBusy) threadCreateSource = null;
+    }}
+  />
+{/if}
 
 {#if profile}
   <UserProfileCard
@@ -4639,6 +6215,10 @@
             <label>
               <input type="radio" bind:group={channelDialogType} value={5} />
               <span><strong>Announcement</strong><small>Broadcast important updates</small></span>
+            </label>
+            <label>
+              <input type="radio" bind:group={channelDialogType} value={15} />
+              <span><strong>Forum</strong><small>Organized posts and discussions</small></span>
             </label>
           </fieldset>
         {/if}

@@ -52,6 +52,12 @@ const eventNames = <String>{
   "CHANNEL_ACCESS_GRANTED",
   "CHANNEL_ACCESS_REVOKED",
   "CHANNEL_PERMISSION_UPDATE",
+  "THREAD_CREATE",
+  "THREAD_UPDATE",
+  "THREAD_DELETE",
+  "THREAD_LIST_SYNC",
+  "THREAD_MEMBER_UPDATE",
+  "THREAD_MEMBERS_UPDATE",
   "GUILD_CREATE",
   "GUILD_UPDATE",
   "GUILD_DELETE",
@@ -112,8 +118,15 @@ abstract final class Permission {
   static const manageWebhooks = 536870912;
   static const manageEmojis = 1073741824;
   static const stream = 2147483648;
+  static const useApplicationCommands = 4294967296;
+  static const manageThreads = 17179869184;
+  static const createPublicThreads = 34359738368;
+  static const createPrivateThreads = 68719476736;
+  static const sendMessagesInThreads = 274877906944;
   static const moderateMembers = 1099511627776;
   static const banInstances = 2199023255552;
+  static const pinMessages = 2251799813685248;
+  static const bypassSlowmode = 4503599627370496;
 }
 
 enum PermissionDanger { normal, elevated, dangerous, critical }
@@ -218,7 +231,7 @@ const permissionMetadata = <PermissionMetadata>[
     description: "Add reactions to messages.",
     group: "Text",
     resourceScopes: ["channel"],
-    channelTypes: [0, 5],
+    channelTypes: [0, 5, 10, 11, 12, 15],
     dependencies: <int>[1024, 65536],
     danger: PermissionDanger.normal,
   ),
@@ -240,7 +253,7 @@ const permissionMetadata = <PermissionMetadata>[
     description: "See a channel and its live activity.",
     group: "General",
     resourceScopes: ["channel"],
-    channelTypes: [0, 2, 4, 5],
+    channelTypes: [0, 2, 4, 5, 10, 11, 12, 15],
     dependencies: <int>[],
     danger: PermissionDanger.normal,
   ),
@@ -248,10 +261,11 @@ const permissionMetadata = <PermissionMetadata>[
     name: "SEND_MESSAGES",
     bit: 2048,
     label: "Send messages",
-    description: "Send messages in text and announcement channels.",
+    description:
+        "Send messages in channels and create posts in forum channels.",
     group: "Text",
     resourceScopes: ["channel"],
-    channelTypes: [0, 5],
+    channelTypes: [0, 5, 15],
     dependencies: <int>[1024],
     danger: PermissionDanger.normal,
   ),
@@ -259,10 +273,10 @@ const permissionMetadata = <PermissionMetadata>[
     name: "MANAGE_MESSAGES",
     bit: 8192,
     label: "Manage messages",
-    description: "Delete, pin, and moderate other members' messages.",
+    description: "Delete and moderate other members' messages.",
     group: "Text",
     resourceScopes: ["channel"],
-    channelTypes: [0, 5],
+    channelTypes: [0, 5, 10, 11, 12, 15],
     dependencies: <int>[1024, 65536],
     danger: PermissionDanger.elevated,
   ),
@@ -273,8 +287,8 @@ const permissionMetadata = <PermissionMetadata>[
     description: "Expand links into rich previews.",
     group: "Text",
     resourceScopes: ["channel"],
-    channelTypes: [0, 5],
-    dependencies: <int>[2048],
+    channelTypes: [0, 5, 10, 11, 12, 15],
+    dependencies: <int>[1024],
     danger: PermissionDanger.normal,
   ),
   PermissionMetadata(
@@ -284,8 +298,8 @@ const permissionMetadata = <PermissionMetadata>[
     description: "Upload and attach files to messages.",
     group: "Text",
     resourceScopes: ["channel"],
-    channelTypes: [0, 5],
-    dependencies: <int>[2048],
+    channelTypes: [0, 5, 10, 11, 12, 15],
+    dependencies: <int>[1024],
     danger: PermissionDanger.normal,
   ),
   PermissionMetadata(
@@ -296,7 +310,7 @@ const permissionMetadata = <PermissionMetadata>[
         "Read retained messages and receive permitted federated history.",
     group: "Text",
     resourceScopes: ["channel"],
-    channelTypes: [0, 5],
+    channelTypes: [0, 5, 10, 11, 12, 15],
     dependencies: <int>[1024],
     danger: PermissionDanger.normal,
   ),
@@ -307,8 +321,8 @@ const permissionMetadata = <PermissionMetadata>[
     description: "Notify broad guild or role audiences.",
     group: "Text",
     resourceScopes: ["channel"],
-    channelTypes: [0, 5],
-    dependencies: <int>[2048],
+    channelTypes: [0, 5, 10, 11, 12, 15],
+    dependencies: <int>[1024],
     danger: PermissionDanger.elevated,
   ),
   PermissionMetadata(
@@ -318,8 +332,8 @@ const permissionMetadata = <PermissionMetadata>[
     description: "Use emoji originating outside this guild.",
     group: "Text",
     resourceScopes: ["channel"],
-    channelTypes: [0, 5],
-    dependencies: <int>[2048],
+    channelTypes: [0, 5, 10, 11, 12, 15],
+    dependencies: <int>[1024],
     danger: PermissionDanger.normal,
   ),
   PermissionMetadata(
@@ -430,7 +444,7 @@ const permissionMetadata = <PermissionMetadata>[
     description: "Create, edit, rotate, and revoke channel webhooks.",
     group: "Management",
     resourceScopes: ["guild", "channel"],
-    channelTypes: [0, 5],
+    channelTypes: [0, 5, 15],
     dependencies: <int>[],
     danger: PermissionDanger.critical,
   ),
@@ -457,6 +471,64 @@ const permissionMetadata = <PermissionMetadata>[
     danger: PermissionDanger.normal,
   ),
   PermissionMetadata(
+    name: "USE_APPLICATION_COMMANDS",
+    bit: 4294967296,
+    label: "Use application commands",
+    description:
+        "Use slash commands and context menu commands from applications.",
+    group: "Applications",
+    resourceScopes: ["channel"],
+    channelTypes: [0, 2, 5, 10, 11, 12, 15],
+    dependencies: <int>[1024],
+    danger: PermissionDanger.normal,
+  ),
+  PermissionMetadata(
+    name: "MANAGE_THREADS",
+    bit: 17179869184,
+    label: "Manage threads and posts",
+    description:
+        "Rename, archive, lock, delete, and view private threads and forum posts.",
+    group: "Thread management",
+    resourceScopes: ["guild", "channel"],
+    channelTypes: [0, 5, 10, 11, 12, 15],
+    dependencies: <int>[1024],
+    danger: PermissionDanger.elevated,
+  ),
+  PermissionMetadata(
+    name: "CREATE_PUBLIC_THREADS",
+    bit: 34359738368,
+    label: "Create public threads",
+    description: "Create public and announcement threads.",
+    group: "Threads",
+    resourceScopes: ["channel"],
+    channelTypes: [0, 5],
+    dependencies: <int>[1024],
+    danger: PermissionDanger.normal,
+  ),
+  PermissionMetadata(
+    name: "CREATE_PRIVATE_THREADS",
+    bit: 68719476736,
+    label: "Create private threads",
+    description: "Create private threads.",
+    group: "Threads",
+    resourceScopes: ["channel"],
+    channelTypes: [0],
+    dependencies: <int>[1024],
+    danger: PermissionDanger.normal,
+  ),
+  PermissionMetadata(
+    name: "SEND_MESSAGES_IN_THREADS",
+    bit: 274877906944,
+    label: "Send messages in threads",
+    description:
+        "Send messages in public, private, announcement, and forum-post threads.",
+    group: "Threads",
+    resourceScopes: ["channel"],
+    channelTypes: [0, 5, 10, 11, 12, 15],
+    dependencies: <int>[1024],
+    danger: PermissionDanger.normal,
+  ),
+  PermissionMetadata(
     name: "MODERATE_MEMBERS",
     bit: 1099511627776,
     label: "Timeout members",
@@ -477,5 +549,27 @@ const permissionMetadata = <PermissionMetadata>[
     channelTypes: [],
     dependencies: <int>[],
     danger: PermissionDanger.critical,
+  ),
+  PermissionMetadata(
+    name: "PIN_MESSAGES",
+    bit: 2251799813685248,
+    label: "Pin messages",
+    description: "Pin and unpin messages in text channels and threads.",
+    group: "Text moderation",
+    resourceScopes: ["channel"],
+    channelTypes: [0, 5, 10, 11, 12, 15],
+    dependencies: <int>[1024, 65536],
+    danger: PermissionDanger.elevated,
+  ),
+  PermissionMetadata(
+    name: "BYPASS_SLOWMODE",
+    bit: 4503599627370496,
+    label: "Bypass slowmode",
+    description: "Send messages and create posts without waiting for slowmode.",
+    group: "Text",
+    resourceScopes: ["channel"],
+    channelTypes: [0, 5, 10, 11, 12, 15],
+    dependencies: <int>[1024],
+    danger: PermissionDanger.elevated,
   ),
 ];

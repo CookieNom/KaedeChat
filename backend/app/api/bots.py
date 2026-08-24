@@ -137,6 +137,66 @@ def user_auth(principal: BotPrincipal) -> AuthenticatedUser:
     return cast(AuthenticatedUser, principal)
 
 
+def redact_bot_message_payload(
+    rendered: dict[str, object],
+    *,
+    can_read_content: bool,
+    can_read_attachments: bool,
+    unavailable: bool = False,
+    include_reference: bool = True,
+) -> dict[str, object]:
+    """Apply bot content grants to one message and its resolved reference.
+
+    Discord type-21 thread starters keep the source body in
+    ``referenced_message``.  Keeping this projection in one bounded helper
+    prevents REST and Gateway paths from accidentally treating that nested
+    message as metadata.
+    """
+
+    if unavailable or not can_read_content or rendered.get("e2ee") is not None:
+        rendered["content"] = None
+        rendered["e2ee"] = None
+        rendered["content_unavailable"] = True
+    if unavailable or not can_read_attachments:
+        rendered["attachments"] = []
+        rendered["attachments_unavailable"] = True
+    referenced = rendered.get("referenced_message")
+    if include_reference and isinstance(referenced, dict):
+        rendered["referenced_message"] = redact_bot_message_payload(
+            dict(referenced),
+            can_read_content=can_read_content,
+            can_read_attachments=can_read_attachments,
+            unavailable=unavailable,
+            include_reference=False,
+        )
+    return rendered
+
+
+def redact_bot_thread_payload(
+    rendered: dict[str, object],
+    *,
+    can_read_history: bool,
+    can_read_content: bool,
+    can_read_attachments: bool,
+) -> dict[str, object]:
+    unavailable = (
+        not can_read_history
+        or bool(rendered.get("e2ee_required"))
+        or rendered.get("encryption_mode") == "e2ee"
+    )
+    for key in ("starter_message", "message"):
+        starter = rendered.get(key)
+        if not isinstance(starter, dict):
+            continue
+        rendered[key] = redact_bot_message_payload(
+            dict(starter),
+            can_read_content=can_read_content,
+            can_read_attachments=can_read_attachments,
+            unavailable=unavailable,
+        )
+    return rendered
+
+
 async def installation_for_channel(
     session: AsyncSession,
     settings: Settings,
@@ -148,11 +208,22 @@ async def installation_for_channel(
     channel = await session.get(Channel, (channel_id, channel_domain))
     if channel is None or channel.unavailable:
         raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
-    if channel.encryption_mode == "e2ee" and scope in {
+    bot_content_unavailable = channel.encryption_mode == "e2ee" or bool(channel.e2ee_required)
+    if bot_content_unavailable and scope in {
         "messages.content",
         "messages.history",
+        "messages.send",
     }:
-        raise HTTPException(status_code=409, detail={"code": "BOT_E2EE_CONTENT_UNAVAILABLE"})
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": (
+                    "BOT_THREAD_E2EE_UNSUPPORTED"
+                    if scope == "messages.send"
+                    else "BOT_E2EE_CONTENT_UNAVAILABLE"
+                )
+            },
+        )
     if channel.guild_id is None:
         principal.require_scope(scope)
         if scope != "messages.send" or "dm.send" not in principal.scopes:
@@ -450,6 +521,7 @@ async def bot_guild_channels(
                 Channel.guild_id == guild.id,
                 Channel.guild_domain == guild.origin_domain,
                 Channel.unavailable.is_(False),
+                Channel.type.not_in({10, 11, 12}),
             )
             .order_by(Channel.position, Channel.id)
         )
@@ -472,7 +544,7 @@ async def bot_get_channel(
     redis: Annotated[Redis, Depends(get_redis)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, object]:
-    channel, _ = await installation_for_channel(
+    channel, installation = await installation_for_channel(
         session, settings, principal, channel_ref, "channels.read"
     )
     permissions = Permission(0)
@@ -485,6 +557,30 @@ async def bot_get_channel(
         )
         if not permissions & Permission.VIEW_CHANNEL:
             raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+    if channel.type in {10, 11, 12} and channel.guild_id is not None:
+        from app.api.threads import rendered_thread
+
+        if guild is None:
+            raise HTTPException(status_code=404, detail={"code": "GUILD_NOT_FOUND"})
+        rendered = await rendered_thread(session, redis, guild, principal.user, channel)
+        return redact_bot_thread_payload(
+            rendered,
+            can_read_history=(
+                installation is not None
+                and "messages.history" in principal.scopes
+                and "messages.history" in installation.granted_scopes
+            ),
+            can_read_content=(
+                installation is not None
+                and "messages.content" in principal.scopes
+                and "messages.content" in installation.granted_scopes
+            ),
+            can_read_attachments=(
+                installation is not None
+                and "attachments.read" in principal.scopes
+                and "attachments.read" in installation.granted_scopes
+            ),
+        )
     return channel_payload(channel) | {"permissions": str(int(permissions))}
 
 
@@ -1387,15 +1483,14 @@ async def bot_list_messages(
         and installation is not None
         and "attachments.read" in installation.granted_scopes
     )
-    if not can_read_content:
-        for message in messages:
-            message["content"] = None
-            message["content_unavailable"] = True
-    if not can_read_attachments:
-        for message in messages:
-            message["attachments"] = []
-            message["attachments_unavailable"] = True
-    return messages
+    return [
+        redact_bot_message_payload(
+            message,
+            can_read_content=can_read_content,
+            can_read_attachments=can_read_attachments,
+        )
+        for message in messages
+    ]
 
 
 @router.post("/channels/{channel_ref}/messages", status_code=201)
@@ -1421,12 +1516,17 @@ async def bot_create_message(
             "messages.send",
             "dm.send",
         )
-    if channel.encryption_mode == "e2ee" and (
-        installation is None or installation.e2ee_mode != "participant" or payload.e2ee is None
+    if channel.encryption_mode == "e2ee":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "BOT_E2EE_DISABLED"},
+        )
+    if channel.type in {10, 11, 12} and (
+        channel.e2ee_required or channel.encryption_mode == "e2ee"
     ):
         raise HTTPException(
             status_code=409,
-            detail={"code": "BOT_E2EE_ENVELOPE_REQUIRED"},
+            detail={"code": "BOT_THREAD_E2EE_UNSUPPORTED"},
         )
     if payload.attachment_ids:
         if installation is None:
@@ -1631,8 +1731,28 @@ async def bot_list_pins(
     redis: Annotated[Redis, Depends(get_redis)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> list[dict[str, object]]:
-    await installation_for_channel(session, settings, principal, channel_ref, "messages.history")
-    return await list_pins(channel_ref, user_auth(principal), session, redis, settings)
+    _, installation = await installation_for_channel(
+        session, settings, principal, channel_ref, "messages.history"
+    )
+    pins = await list_pins(channel_ref, user_auth(principal), session, redis, settings)
+    can_read_content = (
+        installation is not None
+        and "messages.content" in principal.scopes
+        and "messages.content" in installation.granted_scopes
+    )
+    can_read_attachments = (
+        installation is not None
+        and "attachments.read" in principal.scopes
+        and "attachments.read" in installation.granted_scopes
+    )
+    return [
+        redact_bot_message_payload(
+            message,
+            can_read_content=can_read_content,
+            can_read_attachments=can_read_attachments,
+        )
+        for message in pins
+    ]
 
 
 @router.put("/channels/{channel_ref}/pins/{message_ref}", status_code=204)

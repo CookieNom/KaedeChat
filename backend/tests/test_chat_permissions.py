@@ -77,6 +77,49 @@ def test_implicit_masks_remove_dependent_permissions() -> None:
     assert without_send == Permission.VIEW_CHANNEL
 
 
+def test_forum_send_dependencies_and_read_only_thread_reactions() -> None:
+    forum = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain=DOMAIN,
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN)},
+        base_permissions=int(
+            Permission.VIEW_CHANNEL
+            | Permission.ATTACH_FILES
+            | Permission.EMBED_LINKS
+            | Permission.MENTION_EVERYONE
+        ),
+        overwrites=[],
+        channel_type=15,
+        timed_out=False,
+    )
+    assert forum == Permission.VIEW_CHANNEL
+
+    thread = resolve_permissions(
+        owner=False,
+        user_id=22,
+        user_domain=DOMAIN,
+        everyone_role_id=10,
+        everyone_role_domain=DOMAIN,
+        role_ids={(10, DOMAIN)},
+        base_permissions=int(
+            Permission.VIEW_CHANNEL
+            | Permission.READ_MESSAGE_HISTORY
+            | Permission.ADD_REACTIONS
+            | Permission.USE_EXTERNAL_EMOJIS
+            | Permission.ATTACH_FILES
+        ),
+        overwrites=[],
+        channel_type=11,
+        timed_out=False,
+    )
+    assert thread & Permission.USE_EXTERNAL_EMOJIS
+    assert thread & Permission.ADD_REACTIONS
+    assert not thread & Permission.ATTACH_FILES
+
+
 def test_timeout_reduces_member_to_read_only() -> None:
     result = resolve(
         base=(

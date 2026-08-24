@@ -28,16 +28,25 @@ async def on_member_join(member: kaede.Member) -> None:
 Worker enrollment is intentionally separate from normal startup. See `docs/bot-api-quickstart.md` in the Kaede repository.
 
 The SDK includes typed `Guild`, `Channel`, `Member`, `Role`, `Message`, and
-`Attachment` resources. `Invite`, `Webhook`, `Emoji`, and `Interaction` have
-their own classes, and there are types for reactions, pins, presence, typing,
-deletions, bans, voice state, and voice occupancy. Every resource remembers its
-target instance, so convenience methods stay safe when one worker connects to
-several federated Kaede instances.
+`Attachment` resources. Forums and threads reuse `Channel`, with typed tags,
+thread metadata, membership, pagination, and Gateway events. `Invite`,
+`Webhook`, `Emoji`, and `Interaction` have their own classes, and there are
+types for reactions, pins, presence, typing, deletions, bans, voice state, and
+voice occupancy. Every resource remembers its target instance, so convenience
+methods stay safe when one worker connects to several federated Kaede
+instances.
 
-Scoped helpers cover channel and role CRUD, member roles, and message and
-voice moderation. Others manage invites, webhooks, and emojis, open outbound
-DMs, and handle safe attachment upload/download. Guild, channel, and role
-updates use the version returned by Kaede, and object-storage redirects never
-receive bot credentials. See the repository quickstart for required scopes,
-installation-level media quotas, E2EE exclusions, and the full endpoint
-contract.
+Forum listings use `Channel.threads(include_archived=True)` for one globally
+ordered active-and-archived feed. They expose an opaque `ThreadPage.next_cursor`;
+pass it unchanged to `Channel.threads(cursor=..., include_archived=True)` to
+continue the same pinned-and-timestamp-ordered listing. Thread member helpers
+support `after`/`limit` pagination and optional typed guild-member envelopes.
+
+Scoped helpers cover channel and role CRUD, forum policy and post creation,
+thread lifecycle and membership, member roles, and message and voice
+moderation. Others manage invites, webhooks, and emojis, open outbound DMs, and
+handle safe attachment upload/download. Guild, channel, and role updates use
+the version returned by Kaede, and object-storage redirects never receive bot
+credentials. See the repository quickstart for required scopes,
+installation-level media quotas, the fail-closed E2EE boundary, and the full
+endpoint contract.

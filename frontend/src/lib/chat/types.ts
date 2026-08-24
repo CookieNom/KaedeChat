@@ -18,6 +18,25 @@ export interface UserSummary {
 
 export type PresenceStatus = 'online' | 'idle' | 'dnd' | 'offline';
 
+export interface ForumTag {
+  id: string;
+  name: string;
+  moderated?: boolean;
+  emoji_id?: string | null;
+  emoji_name?: string | null;
+}
+
+export interface ThreadMember {
+  id?: string;
+  thread_domain?: string;
+  user_id?: string;
+  user_domain?: string;
+  join_timestamp?: string;
+  flags?: number;
+  notification_level?: 'inherit' | 'all' | 'mentions' | 'none';
+  user?: UserSummary;
+}
+
 export interface Channel {
   id: string;
   origin_domain: string;
@@ -49,6 +68,29 @@ export interface Channel {
   conversation_type?: 'direct' | 'group';
   owner_id?: string | null;
   owner_domain?: string | null;
+  archived?: boolean;
+  locked?: boolean;
+  invitable?: boolean;
+  auto_archive_duration?: number;
+  archive_timestamp?: string | null;
+  message_count?: number;
+  member_count?: number;
+  total_message_sent?: number;
+  created_at?: string;
+  flags?: number | string;
+  applied_tag_ids?: string[];
+  available_tags?: ForumTag[];
+  default_auto_archive_duration?: number;
+  default_thread_rate_limit_per_user?: number;
+  default_sort_order?: 0 | 1 | 'recent_activity' | 'creation_date' | null;
+  default_forum_layout?: 0 | 1 | 2 | 'list' | 'gallery' | null;
+  default_reaction_emoji?: { emoji_id?: string | null; emoji_name?: string | null } | null;
+  e2ee_required?: boolean;
+  default_thread_encryption_mode?: 'plaintext' | 'e2ee';
+  member?: ThreadMember | null;
+  starter_message?: Message | null;
+  last_message?: Message | null;
+  pinned?: boolean;
   version?: string | null;
   /** Whether this instance retained only the newest part of a remote DM. */
   history_truncated?: boolean;
@@ -133,6 +175,17 @@ export interface Message {
   client_nonce: string | null;
   referenced_message_id: string | null;
   referenced_message_domain: string | null;
+  message_reference?: {
+    type?: number;
+    message_id: string | null;
+    message_domain?: string | null;
+    channel_id: string | null;
+    channel_domain?: string | null;
+    guild_id?: string | null;
+    guild_domain?: string | null;
+  } | null;
+  /** Resolved source/reply payload. Type-21 thread starters keep their body only here. */
+  referenced_message?: Message | null;
   mention_user_refs: FederatedIdentity[];
   attachments?: Attachment[];
   reaction_counts?: Record<string, number>;
@@ -153,6 +206,10 @@ export interface Message {
   /** Nonterminal failure while extending this page from the DM authority. */
   history_page_error_code?: string;
   history_page_retry_after_ms?: number;
+  /** The referenced thread starter was deleted or is outside retained/readable history. */
+  content_unavailable?: boolean;
+  /** Active thread projected onto its parent-channel starter or thread-created notice. */
+  thread?: Channel | null;
 }
 
 export interface ReactionUsersResponse {

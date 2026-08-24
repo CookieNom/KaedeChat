@@ -105,6 +105,97 @@ final class ComposerCustomEmoji {
       );
 }
 
+/// Shared renderer for the same canonical custom-emoji asset used by the
+/// composer, forum tags, and forum default reactions.
+final class CustomEmojiImage extends StatelessWidget {
+  const CustomEmojiImage({
+    required this.ref,
+    required this.label,
+    this.size = 20,
+    super.key,
+  });
+
+  final EntityRef ref;
+  final String label;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        image: true,
+        label: label,
+        child: ExcludeSemantics(
+          child: CachedNetworkImage(
+            imageUrl: Uri.https(
+              ref.domain.value,
+              '/media/emojis/${ref.id.value}/thumbnail_128',
+            ).toString(),
+            width: size,
+            height: size,
+            fit: BoxFit.contain,
+            placeholder: (_, __) => SizedBox.square(dimension: size),
+            errorWidget: (_, __, ___) => Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: size <= 20 ? 10 : 12),
+            ),
+          ),
+        ),
+      );
+}
+
+EntityRef? customEmojiRef(String? rawId, Domain originDomain) {
+  final id = rawId?.trim();
+  if (id == null || id.isEmpty) return null;
+  try {
+    return EntityRef(Snowflake(id), originDomain);
+  } on FormatException {
+    return null;
+  }
+}
+
+@visibleForTesting
+EntityRef? forumTagCustomEmojiRef(ForumTag tag, Domain originDomain) =>
+    customEmojiRef(tag.emojiId, originDomain);
+
+final class ForumTagLabel extends StatelessWidget {
+  const ForumTagLabel({
+    required this.tag,
+    required this.originDomain,
+    this.fontSize,
+    this.emojiSize = 16,
+    super.key,
+  });
+
+  final ForumTag tag;
+  final Domain originDomain;
+  final double? fontSize;
+  final double emojiSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final customRef = forumTagCustomEmojiRef(tag, originDomain);
+    final unicode = tag.emojiName?.trim();
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (customRef != null) ...[
+          CustomEmojiImage(
+            ref: customRef,
+            label: ':${tag.name}:',
+            size: emojiSize,
+          ),
+          const SizedBox(width: 4),
+        ] else if (unicode?.isNotEmpty == true) ...[
+          Text(unicode!, style: TextStyle(fontSize: fontSize)),
+          const SizedBox(width: 4),
+        ],
+        Text(tag.name, style: TextStyle(fontSize: fontSize)),
+      ],
+    );
+  }
+}
+
 bool customEmojiAvailableInChannel(
   ComposerCustomEmoji emoji,
   KaedeChannel channel,
@@ -590,21 +681,10 @@ final class _ComposerEmojiChoice {
 
   Widget build() {
     if (customEmoji case final custom?) {
-      return CachedNetworkImage(
-        imageUrl: custom.previewUri.toString(),
-        width: 34,
-        height: 34,
-        fit: BoxFit.contain,
-        placeholder: (_, __) => const SizedBox.square(
-          dimension: 22,
-          child: CircularProgressIndicator(strokeWidth: 1.5),
-        ),
-        errorWidget: (_, __, ___) => Text(
-          label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontSize: 10),
-        ),
+      return CustomEmojiImage(
+        ref: custom.ref,
+        label: label,
+        size: 34,
       );
     }
     return Text(emoji!, style: const TextStyle(fontSize: 25));

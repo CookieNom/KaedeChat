@@ -1,5 +1,26 @@
 import type { CompletionOption } from './completion';
 
+export interface ApplicationCommandOption {
+  type:
+    | 'subcommand'
+    | 'subcommand_group'
+    | 'string'
+    | 'integer'
+    | 'boolean'
+    | 'user'
+    | 'channel'
+    | 'role'
+    | 'mentionable'
+    | 'number'
+    | 'attachment';
+  name: string;
+  description?: string;
+  required?: boolean;
+  min_length?: number;
+  max_length?: number;
+  choices?: Array<{ name: string; value: string | number }>;
+}
+
 export interface ApplicationCommand {
   id: string;
   application_ref: string;
@@ -7,7 +28,20 @@ export interface ApplicationCommand {
   name: string;
   type: 'chat_input' | 'user' | 'message';
   description?: string;
-  options?: Array<Record<string, unknown>>;
+  options?: ApplicationCommandOption[];
+}
+
+export function commandStringOptions(command: ApplicationCommand): ApplicationCommandOption[] {
+  return (command.options ?? []).filter((option) => option.type === 'string');
+}
+
+export function commandOptionsComplete(
+  command: ApplicationCommand,
+  values: Record<string, string>
+): boolean {
+  return commandStringOptions(command).every(
+    (option) => !option.required || Boolean(values[option.name]?.trim())
+  );
 }
 
 export function commandCompletions(

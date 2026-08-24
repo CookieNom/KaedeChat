@@ -30,7 +30,18 @@ List<Json> _objects(Object? value) => value is List
 
 enum PresenceStatus { online, idle, dnd, invisible, offline }
 
-enum ChannelType { text, dm, voice, unknown, category, announcement }
+enum ChannelType {
+  text,
+  dm,
+  voice,
+  unknown,
+  category,
+  announcement,
+  announcementThread,
+  publicThread,
+  privateThread,
+  forum,
+}
 
 enum RelationshipType { friend, pendingIn, pendingOut, blocked }
 
@@ -40,8 +51,107 @@ ChannelType channelType(int value) => switch (value) {
       2 => ChannelType.voice,
       4 => ChannelType.category,
       5 => ChannelType.announcement,
+      10 => ChannelType.announcementThread,
+      11 => ChannelType.publicThread,
+      12 => ChannelType.privateThread,
+      15 => ChannelType.forum,
       _ => ChannelType.unknown,
     };
+
+final class ForumTag {
+  const ForumTag({
+    required this.id,
+    required this.name,
+    this.moderated = false,
+    this.emojiId,
+    this.emojiName,
+  });
+
+  factory ForumTag.fromJson(Json json) => ForumTag(
+        id: '${json['id']}',
+        name: _string(json['name']) ?? '',
+        moderated: _boolean(json['moderated']),
+        emojiId: _string(json['emoji_id']),
+        emojiName: _string(json['emoji_name']),
+      );
+
+  final String id;
+  final String name;
+  final bool moderated;
+  final String? emojiId;
+  final String? emojiName;
+
+  String? get emoji => emojiName?.trim().isNotEmpty == true ? emojiName : null;
+
+  Json toJson() => <String, Object?>{
+        'id': id,
+        'name': name,
+        'moderated': moderated,
+        if (emojiId?.isNotEmpty == true)
+          'emoji_id': emojiId
+        else if (emojiName?.isNotEmpty == true)
+          'emoji_name': emojiName,
+      };
+}
+
+final class ThreadMember {
+  const ThreadMember({
+    required this.threadRef,
+    required this.userRef,
+    required this.joinTimestamp,
+    this.flags = 0,
+    this.notificationLevel = 'inherit',
+  });
+
+  factory ThreadMember.fromJson(Json json, {EntityRef? thread}) {
+    final threadRef = thread ??
+        EntityRef(
+          Snowflake('${json['id'] ?? json['thread_id']}'),
+          Domain('${json['thread_domain'] ?? json['origin_domain']}'),
+        );
+    return ThreadMember(
+      threadRef: threadRef,
+      userRef: EntityRef(
+        Snowflake('${json['user_id']}'),
+        Domain('${json['user_domain'] ?? json['origin_domain']}'),
+      ),
+      joinTimestamp: DateTime.parse(
+        '${json['join_timestamp'] ?? json['joined_at']}',
+      ).toUtc(),
+      flags: _integer(json['flags']),
+      notificationLevel: switch (_string(json['notification_level'])) {
+        'all' => 'all',
+        'mentions' => 'mentions',
+        'none' => 'none',
+        _ => 'inherit',
+      },
+    );
+  }
+
+  final EntityRef threadRef;
+  final EntityRef userRef;
+  final DateTime joinTimestamp;
+  final int flags;
+  final String notificationLevel;
+
+  ThreadMember copyWith({String? notificationLevel}) => ThreadMember(
+        threadRef: threadRef,
+        userRef: userRef,
+        joinTimestamp: joinTimestamp,
+        flags: flags,
+        notificationLevel: notificationLevel ?? this.notificationLevel,
+      );
+
+  Json toJson() => <String, Object?>{
+        'id': threadRef.id.value,
+        'thread_domain': threadRef.domain.value,
+        'user_id': userRef.id.value,
+        'user_domain': userRef.domain.value,
+        'join_timestamp': joinTimestamp.toUtc().toIso8601String(),
+        'flags': flags,
+        'notification_level': notificationLevel,
+      };
+}
 
 final class KaedeUser {
   const KaedeUser({
@@ -124,6 +234,7 @@ final class KaedeChannel {
     required this.type,
     required this.position,
     required this.permissions,
+    this.createdAt,
     this.guildRef,
     this.name,
     this.topic,
@@ -149,11 +260,31 @@ final class KaedeChannel {
     this.encryptionEpoch,
     this.encryptionActivatedAt,
     this.searchAvailable = true,
+    this.archived = false,
+    this.locked = false,
+    this.invitable = true,
+    this.autoArchiveDuration = 1440,
+    this.archiveTimestamp,
+    this.messageCount = 0,
+    this.totalMessageSent = 0,
+    this.memberCount = 0,
+    this.flags = 0,
+    this.appliedTagIds = const <String>[],
+    this.availableTags = const <ForumTag>[],
+    this.defaultReactionEmoji,
+    this.defaultThreadRateLimitPerUser = 0,
+    this.defaultAutoArchiveDuration = 1440,
+    this.defaultSortOrder,
+    this.defaultForumLayout = 0,
+    this.e2eeRequired = false,
+    this.starterMessage,
+    this.member,
     this.version,
   });
 
   factory KaedeChannel.fromJson(Json json) {
     final domain = Domain(json['origin_domain']! as String);
+    final ref = EntityRef(Snowflake(json['id']! as String), domain);
     final guildId = _string(json['guild_id']);
     final guildDomain = _string(json['guild_domain']);
     final parentId = _string(json['parent_id']);
@@ -162,8 +293,15 @@ final class KaedeChannel {
     final lastDomain = _string(json['last_message_domain']);
     final ownerId = _string(json['owner_id']);
     final ownerDomain = _string(json['owner_domain']);
+    final createdAt = _string(json['created_at']);
+    final parentRef = parentId == null || parentDomain == null
+        ? null
+        : EntityRef(Snowflake(parentId), Domain(parentDomain));
+    final ownerRef = ownerId == null || ownerDomain == null
+        ? null
+        : EntityRef(Snowflake(ownerId), Domain(ownerDomain));
     return KaedeChannel(
-      ref: EntityRef(Snowflake(json['id']! as String), domain),
+      ref: ref,
       guildRef: guildId == null || guildDomain == null
           ? null
           : EntityRef(Snowflake(guildId), Domain(guildDomain)),
@@ -171,9 +309,9 @@ final class KaedeChannel {
       name: _string(json['name']),
       topic: _string(json['topic']),
       position: _integer(json['position']),
-      parentRef: parentId == null || parentDomain == null
-          ? null
-          : EntityRef(Snowflake(parentId), Domain(parentDomain)),
+      createdAt:
+          createdAt == null ? null : DateTime.tryParse(createdAt)?.toUtc(),
+      parentRef: parentRef,
       permissions:
           BigInt.tryParse(_string(json['permissions']) ?? '0') ?? BigInt.zero,
       lastMessageRef: lastId == null || lastDomain == null
@@ -181,9 +319,7 @@ final class KaedeChannel {
           : EntityRef(Snowflake(lastId), Domain(lastDomain)),
       recipients: _objects(json['recipients']).map(KaedeUser.fromJson).toList(),
       conversationType: _string(json['conversation_type']) ?? 'direct',
-      ownerRef: ownerId == null || ownerDomain == null
-          ? null
-          : EntityRef(Snowflake(ownerId), Domain(ownerDomain)),
+      ownerRef: ownerRef,
       slowModeSeconds: _integer(json['rate_limit_per_user']),
       permissionsSynced: _boolean(json['permissions_synced']),
       historyTruncated: _boolean(json['history_truncated']),
@@ -206,6 +342,48 @@ final class KaedeChannel {
           ? null
           : DateTime.parse(json['encryption_activated_at']! as String).toUtc(),
       searchAvailable: _boolean(json['search_available'], true),
+      archived: _boolean(json['archived']),
+      locked: _boolean(json['locked']),
+      invitable: _boolean(json['invitable'], true),
+      autoArchiveDuration: _integer(json['auto_archive_duration'], 1440),
+      archiveTimestamp: _string(json['archive_timestamp']) == null
+          ? null
+          : DateTime.parse('${json['archive_timestamp']}').toUtc(),
+      messageCount: _integer(json['message_count']),
+      totalMessageSent: _integer(json['total_message_sent']),
+      memberCount: _integer(json['member_count']),
+      flags: _integer(json['flags']),
+      appliedTagIds: (json['applied_tag_ids'] ?? json['applied_tags']) is List
+          ? ((json['applied_tag_ids'] ?? json['applied_tags'])! as List)
+              .map((value) => '$value')
+              .toList(growable: false)
+          : const <String>[],
+      availableTags:
+          _objects(json['available_tags']).map(ForumTag.fromJson).toList(),
+      defaultReactionEmoji: json['default_reaction_emoji'] is Map
+          ? Map<String, Object?>.from(json['default_reaction_emoji']! as Map)
+          : null,
+      defaultThreadRateLimitPerUser:
+          _integer(json['default_thread_rate_limit_per_user']),
+      defaultAutoArchiveDuration:
+          _integer(json['default_auto_archive_duration'], 1440),
+      defaultSortOrder: _nullableInteger(json['default_sort_order']),
+      defaultForumLayout: _integer(json['default_forum_layout']),
+      e2eeRequired: _boolean(json['e2ee_required']),
+      starterMessage: json['starter_message'] is Map
+          ? KaedeMessage.fromThreadStarterJson(
+              Map<String, Object?>.from(json['starter_message']! as Map),
+              thread: ref,
+              parent: parentRef,
+              owner: ownerRef,
+            )
+          : null,
+      member: json['member'] is Map
+          ? ThreadMember.fromJson(
+              Map<String, Object?>.from(json['member']! as Map),
+              thread: ref,
+            )
+          : null,
       version: _string(json['version']),
     );
   }
@@ -216,6 +394,7 @@ final class KaedeChannel {
   final String? name;
   final String? topic;
   final int position;
+  final DateTime? createdAt;
   final EntityRef? parentRef;
   final BigInt permissions;
   final EntityRef? lastMessageRef;
@@ -239,9 +418,40 @@ final class KaedeChannel {
   final int? encryptionEpoch;
   final DateTime? encryptionActivatedAt;
   final bool searchAvailable;
+  final bool archived;
+  final bool locked;
+  final bool invitable;
+  final int autoArchiveDuration;
+  final DateTime? archiveTimestamp;
+  final int messageCount;
+  final int totalMessageSent;
+  final int memberCount;
+  final int flags;
+  final List<String> appliedTagIds;
+  final List<ForumTag> availableTags;
+  final Map<String, Object?>? defaultReactionEmoji;
+  final int defaultThreadRateLimitPerUser;
+  final int defaultAutoArchiveDuration;
+  final int? defaultSortOrder;
+  final int defaultForumLayout;
+  final bool e2eeRequired;
+  final KaedeMessage? starterMessage;
+  final ThreadMember? member;
   final String? version;
 
   bool allows(int bit) => permissions & BigInt.from(bit) != BigInt.zero;
+
+  bool get isThread => switch (type) {
+        ChannelType.announcementThread ||
+        ChannelType.publicThread ||
+        ChannelType.privateThread =>
+          true,
+        _ => false,
+      };
+
+  bool get isForum => type == ChannelType.forum;
+  bool get followed => member != null;
+  bool get pinned => flags & 2 != 0;
 
   Json toJson() => <String, Object?>{
         'id': ref.id.value,
@@ -254,11 +464,16 @@ final class KaedeChannel {
           ChannelType.voice => 2,
           ChannelType.category => 4,
           ChannelType.announcement => 5,
+          ChannelType.announcementThread => 10,
+          ChannelType.publicThread => 11,
+          ChannelType.privateThread => 12,
+          ChannelType.forum => 15,
           ChannelType.unknown => -1,
         },
         'name': name,
         'topic': topic,
         'position': position,
+        'created_at': createdAt?.toUtc().toIso8601String(),
         'parent_id': parentRef?.id.value,
         'parent_domain': parentRef?.domain.value,
         'permissions': permissions.toString(),
@@ -291,8 +506,109 @@ final class KaedeChannel {
         'encryption_activated_at':
             encryptionActivatedAt?.toUtc().toIso8601String(),
         'search_available': searchAvailable,
+        'archived': archived,
+        'locked': locked,
+        'invitable': invitable,
+        'auto_archive_duration': autoArchiveDuration,
+        'archive_timestamp': archiveTimestamp?.toUtc().toIso8601String(),
+        'message_count': messageCount,
+        'total_message_sent': totalMessageSent,
+        'member_count': memberCount,
+        'flags': flags,
+        'applied_tag_ids': appliedTagIds,
+        'available_tags': availableTags.map((tag) => tag.toJson()).toList(),
+        'default_reaction_emoji': defaultReactionEmoji,
+        'default_thread_rate_limit_per_user': defaultThreadRateLimitPerUser,
+        'default_auto_archive_duration': defaultAutoArchiveDuration,
+        'default_sort_order': defaultSortOrder,
+        'default_forum_layout': defaultForumLayout,
+        'e2ee_required': e2eeRequired,
+        'starter_message': starterMessage?.toJson(),
+        'member': member?.toJson(),
         'version': version,
       };
+
+  KaedeChannel copyWith({
+    String? name,
+    DateTime? createdAt,
+    bool clearCreatedAt = false,
+    bool? archived,
+    bool? locked,
+    bool? invitable,
+    int? autoArchiveDuration,
+    DateTime? archiveTimestamp,
+    int? messageCount,
+    int? totalMessageSent,
+    int? memberCount,
+    int? flags,
+    List<String>? appliedTagIds,
+    String? encryptionMode,
+    String? encryptionState,
+    int? encryptionPolicyGeneration,
+    String? encryptionProtocol,
+    String? encryptionSuite,
+    String? encryptionGroupId,
+    int? encryptionEpoch,
+    DateTime? encryptionActivatedAt,
+    KaedeMessage? starterMessage,
+    ThreadMember? member,
+    bool clearMember = false,
+    String? version,
+  }) =>
+      KaedeChannel(
+        ref: ref,
+        type: type,
+        position: position,
+        permissions: permissions,
+        createdAt: clearCreatedAt ? null : createdAt ?? this.createdAt,
+        guildRef: guildRef,
+        name: name ?? this.name,
+        topic: topic,
+        parentRef: parentRef,
+        lastMessageRef: lastMessageRef,
+        recipients: recipients,
+        conversationType: conversationType,
+        ownerRef: ownerRef,
+        slowModeSeconds: slowModeSeconds,
+        permissionsSynced: permissionsSynced,
+        historyTruncated: historyTruncated,
+        historyRetention: historyRetention,
+        federatedHistoryPolicy: federatedHistoryPolicy,
+        historyRemoteAvailable: historyRemoteAvailable,
+        oldestAvailableMessageRef: oldestAvailableMessageRef,
+        historyDegradedCode: historyDegradedCode,
+        encryptionMode: encryptionMode ?? this.encryptionMode,
+        encryptionState: encryptionState ?? this.encryptionState,
+        encryptionPolicyGeneration:
+            encryptionPolicyGeneration ?? this.encryptionPolicyGeneration,
+        encryptionProtocol: encryptionProtocol ?? this.encryptionProtocol,
+        encryptionSuite: encryptionSuite ?? this.encryptionSuite,
+        encryptionGroupId: encryptionGroupId ?? this.encryptionGroupId,
+        encryptionEpoch: encryptionEpoch ?? this.encryptionEpoch,
+        encryptionActivatedAt:
+            encryptionActivatedAt ?? this.encryptionActivatedAt,
+        searchAvailable: searchAvailable,
+        archived: archived ?? this.archived,
+        locked: locked ?? this.locked,
+        invitable: invitable ?? this.invitable,
+        autoArchiveDuration: autoArchiveDuration ?? this.autoArchiveDuration,
+        archiveTimestamp: archiveTimestamp ?? this.archiveTimestamp,
+        messageCount: messageCount ?? this.messageCount,
+        totalMessageSent: totalMessageSent ?? this.totalMessageSent,
+        memberCount: memberCount ?? this.memberCount,
+        flags: flags ?? this.flags,
+        appliedTagIds: appliedTagIds ?? this.appliedTagIds,
+        availableTags: availableTags,
+        defaultReactionEmoji: defaultReactionEmoji,
+        defaultThreadRateLimitPerUser: defaultThreadRateLimitPerUser,
+        defaultAutoArchiveDuration: defaultAutoArchiveDuration,
+        defaultSortOrder: defaultSortOrder,
+        defaultForumLayout: defaultForumLayout,
+        e2eeRequired: e2eeRequired,
+        starterMessage: starterMessage ?? this.starterMessage,
+        member: clearMember ? null : member ?? this.member,
+        version: version ?? this.version,
+      );
 
   /// Returns a copy with the [user] replacing the recipient whose ref equals
   /// [userRef]. Cheaper than a JSON round-trip for a single-field profile
@@ -303,6 +619,7 @@ final class KaedeChannel {
         type: type,
         position: position,
         permissions: permissions,
+        createdAt: createdAt,
         guildRef: guildRef,
         name: name,
         topic: topic,
@@ -333,8 +650,63 @@ final class KaedeChannel {
         encryptionEpoch: encryptionEpoch,
         encryptionActivatedAt: encryptionActivatedAt,
         searchAvailable: searchAvailable,
+        archived: archived,
+        locked: locked,
+        invitable: invitable,
+        autoArchiveDuration: autoArchiveDuration,
+        archiveTimestamp: archiveTimestamp,
+        messageCount: messageCount,
+        totalMessageSent: totalMessageSent,
+        memberCount: memberCount,
+        flags: flags,
+        appliedTagIds: appliedTagIds,
+        availableTags: availableTags,
+        defaultReactionEmoji: defaultReactionEmoji,
+        defaultThreadRateLimitPerUser: defaultThreadRateLimitPerUser,
+        defaultAutoArchiveDuration: defaultAutoArchiveDuration,
+        defaultSortOrder: defaultSortOrder,
+        defaultForumLayout: defaultForumLayout,
+        e2eeRequired: e2eeRequired,
+        starterMessage: starterMessage,
+        member: member,
         version: version,
       );
+}
+
+final class ThreadPage {
+  const ThreadPage({
+    required this.threads,
+    required this.members,
+    required this.hasMore,
+    this.nextCursor,
+  });
+
+  factory ThreadPage.fromJson(Json json) {
+    final threads = _objects(json['threads'])
+        .map(KaedeChannel.fromJson)
+        .toList(growable: false);
+    final byId = <String, KaedeChannel>{
+      for (final thread in threads) thread.ref.id.value: thread,
+    };
+    final members = <ThreadMember>[];
+    for (final raw in _objects(json['members'])) {
+      final id = '${raw['id'] ?? raw['thread_id'] ?? ''}';
+      final thread = byId[id];
+      if (thread == null) continue;
+      members.add(ThreadMember.fromJson(raw, thread: thread.ref));
+    }
+    return ThreadPage(
+      threads: threads,
+      members: List.unmodifiable(members),
+      hasMore: _boolean(json['has_more']),
+      nextCursor: _string(json['next_cursor']),
+    );
+  }
+
+  final List<KaedeChannel> threads;
+  final List<ThreadMember> members;
+  final bool hasMore;
+  final String? nextCursor;
 }
 
 final class MessageSearchResult {
@@ -683,13 +1055,25 @@ final class KaedeMessage {
     this.pinned = false,
     this.reactionCounts = const <String, int>{},
     this.reactedEmoji = const <String>{},
+    this.thread,
+    this.referencedMessage,
+    this.contentUnavailable = false,
+    this.createdAtAvailable = true,
     this.deletedAt,
     this.historyPageComplete = false,
     this.historyPageErrorCode,
     this.historyPageRetryAfterMs,
   });
 
-  factory KaedeMessage.fromJson(Json json) {
+  factory KaedeMessage.fromJson(Json json) => KaedeMessage._fromJson(
+        json,
+        includeReferencedMessage: true,
+      );
+
+  factory KaedeMessage._fromJson(
+    Json json, {
+    required bool includeReferencedMessage,
+  }) {
     final referenceId = _string(json['referenced_message_id']);
     final referenceDomain = _string(json['referenced_message_domain']);
     final author = json['author'];
@@ -742,6 +1126,21 @@ final class KaedeMessage {
         (json['reacted_emoji'] as List? ?? const <Object>[])
             .map((value) => '$value'),
       ),
+      thread: json['thread'] is Map
+          ? KaedeChannel.fromJson(
+              Map<String, Object?>.from(json['thread']! as Map),
+            )
+          : null,
+      referencedMessage:
+          includeReferencedMessage && json['referenced_message'] is Map
+              ? KaedeMessage._fromJson(
+                  Map<String, Object?>.from(
+                    json['referenced_message']! as Map,
+                  ),
+                  includeReferencedMessage: false,
+                )
+              : null,
+      contentUnavailable: _boolean(json['content_unavailable']),
       deletedAt: _string(json['deleted_at']) == null
           ? null
           : DateTime.parse(json['deleted_at']! as String).toUtc(),
@@ -749,6 +1148,48 @@ final class KaedeMessage {
       historyPageErrorCode: _string(json['history_page_error_code']),
       historyPageRetryAfterMs:
           (json['history_page_retry_after_ms'] as num?)?.toInt(),
+    );
+  }
+
+  /// Retained-history thread sources may intentionally omit content, author,
+  /// or timestamps. Normalize only that projection; ordinary transcript
+  /// messages keep the strict decoder above so malformed events still fail.
+  factory KaedeMessage.fromThreadStarterJson(
+    Json json, {
+    required EntityRef thread,
+    EntityRef? parent,
+    EntityRef? owner,
+  }) {
+    final normalized = Map<String, Object?>.of(json);
+    normalized['id'] ??= thread.id.value;
+    normalized['origin_domain'] ??= thread.domain.value;
+    normalized['channel_id'] ??= (parent ?? thread).id.value;
+    normalized['channel_domain'] ??= (parent ?? thread).domain.value;
+    final author = owner ?? thread;
+    normalized['author_id'] ??= author.id.value;
+    normalized['author_domain'] ??= author.domain.value;
+    final rawAuthor = normalized['author'];
+    if (rawAuthor is Map &&
+        (rawAuthor['id'] == null ||
+            rawAuthor['origin_domain'] == null ||
+            rawAuthor['username'] == null)) {
+      normalized.remove('author');
+    }
+    final rawCreatedAt = _string(normalized['created_at']);
+    final createdAt =
+        rawCreatedAt == null ? null : DateTime.tryParse(rawCreatedAt);
+    normalized['created_at'] =
+        (createdAt ?? DateTime.fromMillisecondsSinceEpoch(0, isUtc: true))
+            .toUtc()
+            .toIso8601String();
+    final decoded = KaedeMessage.fromJson(normalized);
+    return decoded.copyWith(
+      contentUnavailable: decoded.contentUnavailable ||
+          (decoded.referencedMessage == null &&
+              decoded.content == null &&
+              decoded.attachments.isEmpty &&
+              decoded.deletedAt == null),
+      createdAtAvailable: createdAt != null,
     );
   }
 
@@ -774,6 +1215,10 @@ final class KaedeMessage {
   final bool pinned;
   final Set<String> reactedEmoji;
   final Map<String, int> reactionCounts;
+  final KaedeChannel? thread;
+  final KaedeMessage? referencedMessage;
+  final bool contentUnavailable;
+  final bool createdAtAvailable;
   final DateTime? deletedAt;
   final bool historyPageComplete;
   final String? historyPageErrorCode;
@@ -803,6 +1248,12 @@ final class KaedeMessage {
     bool? pinned,
     Set<String>? reactedEmoji,
     Map<String, int>? reactionCounts,
+    KaedeChannel? thread,
+    bool clearThread = false,
+    KaedeMessage? referencedMessage,
+    bool clearReferencedMessage = false,
+    bool? contentUnavailable,
+    bool? createdAtAvailable,
     DateTime? deletedAt,
     bool? historyPageComplete,
     String? historyPageErrorCode,
@@ -836,6 +1287,12 @@ final class KaedeMessage {
         pinned: pinned ?? this.pinned,
         reactedEmoji: reactedEmoji ?? this.reactedEmoji,
         reactionCounts: reactionCounts ?? this.reactionCounts,
+        thread: clearThread ? null : thread ?? this.thread,
+        referencedMessage: clearReferencedMessage
+            ? null
+            : referencedMessage ?? this.referencedMessage,
+        contentUnavailable: contentUnavailable ?? this.contentUnavailable,
+        createdAtAvailable: createdAtAvailable ?? this.createdAtAvailable,
         deletedAt: deletedAt ?? this.deletedAt,
         historyPageComplete: historyPageComplete ?? this.historyPageComplete,
         historyPageErrorCode: clearHistoryPageErrorCode
@@ -864,7 +1321,8 @@ final class KaedeMessage {
         'referenced_message_id': reference?.id.value,
         'referenced_message_domain': reference?.domain.value,
         'client_nonce': clientNonce,
-        'created_at': createdAt.toUtc().toIso8601String(),
+        'created_at':
+            createdAtAvailable ? createdAt.toUtc().toIso8601String() : null,
         'edited_at': editedAt?.toUtc().toIso8601String(),
         'delivery_status': deliveryStatus,
         'failure_reason': failureReason,
@@ -872,6 +1330,9 @@ final class KaedeMessage {
         'pinned': pinned,
         'reacted_emoji': reactedEmoji.toList(),
         'reaction_counts': reactionCounts,
+        'thread': thread?.toJson(),
+        'referenced_message': referencedMessage?.toJson(),
+        'content_unavailable': contentUnavailable,
         'deleted_at': deletedAt?.toUtc().toIso8601String(),
         'history_page_complete': historyPageComplete,
         'history_page_error_code': historyPageErrorCode,

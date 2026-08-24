@@ -20,9 +20,21 @@ tests = ["nonce reconciliation", "resume gap", "access revocation purge", "pagin
 
 [[surface]]
 id = "composer"
-web = ["multiline growth", "Markdown", "mentions", "role mentions", "emoji autocomplete", "custom emoji", "GIF", "attachments", "slow mode"]
+web = ["multiline growth", "Markdown", "mentions", "role mentions", "emoji autocomplete", "custom emoji", "GIF", "attachments", "slow mode", "typed slash command options", "native thread command"]
 desktop = "kaede-ui::composer"
 tests = ["permission gating", "autocomplete tokens", "upload cancellation", "slow-mode countdown"]
+
+[[surface]]
+id = "threads"
+web = ["public, private, and announcement threads", "message thread creation and parent previews", "active and archived thread directory", "join, follow, and notification levels", "archive and lock", "thread members and invites", "parent breadcrumbs", "active thread nesting", "optional future-only E2EE"]
+desktop = "kaede-ui::threads"
+tests = ["channel type recognition", "parent nesting", "native command parsing", "response envelopes", "permission gating", "starter projection and redaction", "notification membership state"]
+
+[[surface]]
+id = "forums"
+web = ["server-backed title search", "OR tag filters", "recent and posted sorting", "list and gallery layouts", "post guidelines", "tag-required post composer", "moderated tags", "pinned and closed posts", "default reaction", "wide split view", "required future-post E2EE policy"]
+desktop = "kaede-ui::forums"
+tests = ["title-only filtering", "OR tag filtering", "pinned ordering", "Discord default normalization"]
 
 [[surface]]
 id = "media"
@@ -78,4 +90,3 @@ group_dms = "No group-DM contract exists yet"
 stickers = "No sticker model or API exists yet"
 closed_app_push = "Requires a server push registration and delivery protocol"
 e2ee_key_management = "Opaque envelopes are supported; device/key protocol is not"
-

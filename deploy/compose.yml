@@ -890,7 +890,11 @@ services:
       - sh
       - -ec
       - >-
+        alembic upgrade a23d8f1c6e40 &&
+        python -m scripts.verify_migration_guards prepare-thread-permissions &&
         alembic upgrade head &&
+        python -m scripts.verify_migration_guards verify-thread-permissions &&
+        python -m scripts.verify_migration_guards cleanup-thread-permissions &&
         python -m scripts.verify_schema &&
         alembic downgrade b46d9a1f2c73 &&
         python -m scripts.verify_migration_guards prepare-federation &&

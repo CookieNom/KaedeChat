@@ -31,6 +31,7 @@
     | 'screen'
     | 'sparkles'
     | 'trash'
+    | 'threads'
     | 'user'
     | 'users'
     | 'video'
@@ -154,6 +155,8 @@
     />
   {:else if name === 'trash'}
     <path d="M4 7h16M9 7V4h6v3M18 7l-1 14H7L6 7M10 11v6M14 11v6" />
+  {:else if name === 'threads'}
+    <path d="M7 3v12a4 4 0 0 0 4 4h8M3 7h8M15 15l4 4-4 4" />
   {:else if name === 'user'}
     <circle cx="12" cy="8" r="4" />
     <path d="M4 21a8 8 0 0 1 16 0" />

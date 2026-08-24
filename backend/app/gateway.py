@@ -1315,6 +1315,10 @@ VISIBILITY_INVALIDATING_EVENTS = {
     "CHANNEL_CREATE",
     "CHANNEL_UPDATE",
     "CHANNEL_DELETE",
+    "THREAD_CREATE",
+    "THREAD_UPDATE",
+    "THREAD_MEMBER_UPDATE",
+    "THREAD_MEMBERS_UPDATE",
     "GUILD_UPDATE",
     "GUILD_ROLE_CREATE",
     "GUILD_ROLE_UPDATE",
@@ -1449,6 +1453,53 @@ async def event_visibility(
         return dispatch_audience_allows(user, event), True
     guild_id, guild_domain = guild_ref.resolve(settings.domain)
     guild_key = (guild_id, guild_domain)
+    prior_thread_delete_ref: tuple[int, str] | None = None
+    prior_thread_delete_visible = False
+    prior_current_member_removal_ref: tuple[int, str] | None = None
+    prior_current_member_removal_visible = False
+    if event.get("t") == "THREAD_DELETE" and isinstance(event.get("d"), dict):
+        delete_data = event["d"]
+        try:
+            delete_domain = (
+                delete_data.get("origin_domain") or delete_data.get("thread_domain") or guild_domain
+            )
+            prior_thread_delete_ref = validate_entity_reference(
+                f"{delete_data.get('id')}@{delete_domain}"
+            ).resolve(guild_domain)
+        except ValueError:
+            prior_thread_delete_ref = None
+        prior_thread_delete_visible = prior_thread_delete_ref in summary.channels.get(
+            guild_key, set()
+        )
+    if event.get("t") == "THREAD_MEMBERS_UPDATE" and isinstance(event.get("d"), dict):
+        member_data = event["d"]
+        removed_refs = member_data.get("removed_member_refs")
+        exact_self_removed = any(
+            isinstance(item, dict)
+            and str(item.get("id")) == str(user.id)
+            and item.get("origin_domain") == user.origin_domain
+            for item in (removed_refs if isinstance(removed_refs, list) else [])
+        )
+        if not exact_self_removed and not removed_refs:
+            removed_ids = member_data.get("removed_member_ids")
+            exact_self_removed = str(user.id) in (
+                removed_ids if isinstance(removed_ids, list) else []
+            )
+        if exact_self_removed:
+            try:
+                member_thread_domain = (
+                    member_data.get("thread_domain")
+                    or member_data.get("origin_domain")
+                    or guild_domain
+                )
+                prior_current_member_removal_ref = validate_entity_reference(
+                    f"{member_data.get('id')}@{member_thread_domain}"
+                ).resolve(guild_domain)
+            except ValueError:
+                prior_current_member_removal_ref = None
+            prior_current_member_removal_visible = (
+                prior_current_member_removal_ref in summary.channels.get(guild_key, set())
+            )
     fence = await current_acl_fence(sessionmaker, user, guild_id, guild_domain)
     if fence is None:
         summary.guilds.discard(guild_key)
@@ -1483,9 +1534,17 @@ async def event_visibility(
     # the canonical reference.
     if event.get("t") == "ATTACHMENT_UPDATE" and (channel_id is None or channel_domain is None):
         return False, True
-    if channel_id is None and event.get("t") in {"CHANNEL_CREATE", "CHANNEL_UPDATE"}:
+    if channel_id is None and event.get("t") in {
+        "CHANNEL_CREATE",
+        "CHANNEL_UPDATE",
+        "THREAD_CREATE",
+        "THREAD_UPDATE",
+        "THREAD_DELETE",
+        "THREAD_MEMBER_UPDATE",
+        "THREAD_MEMBERS_UPDATE",
+    }:
         channel_id = data.get("id")
-        channel_domain = data.get("origin_domain")
+        channel_domain = data.get("origin_domain") or data.get("thread_domain")
     if channel_id is None:
         return True, True
     try:
@@ -1495,9 +1554,20 @@ async def event_visibility(
     channel_number, resolved_domain = channel_ref.resolve(guild_domain)
     if event.get("t") == "CHANNEL_DELETE":
         return True, True
-    return (channel_number, resolved_domain) in summary.channels.get(
-        (guild_id, guild_domain), set()
-    ), True
+    resolved_ref = (channel_number, resolved_domain)
+    allowed = (
+        prior_thread_delete_visible
+        if event.get("t") == "THREAD_DELETE" and prior_thread_delete_ref == resolved_ref
+        else (
+            prior_current_member_removal_visible
+            if event.get("t") == "THREAD_MEMBERS_UPDATE"
+            and prior_current_member_removal_ref == resolved_ref
+            else resolved_ref in summary.channels.get((guild_id, guild_domain), set())
+        )
+    )
+    if event.get("t") == "THREAD_DELETE":
+        summary.channels.get((guild_id, guild_domain), set()).discard(resolved_ref)
+    return allowed, True
 
 
 async def apply_user_topic_control(
@@ -1745,6 +1815,7 @@ async def deliver_topic_event(
         )
 
     if guild_key is not None:
+        thread_sync_parent_ids: set[int] = set()
         for channel_id, channel_domain in sorted(before - after):
             await send(
                 "CHANNEL_ACCESS_REVOKED",
@@ -1765,7 +1836,25 @@ async def deliver_topic_event(
                 rendered["permissions"] = str(
                     int(await get_permissions(session, redis, guild, user, channel=channel))
                 )
+                if channel.type in {0, 5, 15}:
+                    thread_sync_parent_ids.add(channel.id)
+                elif channel.type in {10, 11, 12} and channel.parent_id is not None:
+                    thread_sync_parent_ids.add(channel.parent_id)
             await send("CHANNEL_ACCESS_GRANTED", rendered)
+        if thread_sync_parent_ids:
+            from app.api.threads import active_thread_sync_payload
+
+            async with sessionmaker() as session:
+                guild = await session.get(Guild, guild_key)
+                if guild is not None:
+                    sync_payload = await active_thread_sync_payload(
+                        session,
+                        redis,
+                        guild,
+                        user,
+                        parent_ids=thread_sync_parent_ids,
+                    )
+                    await send("THREAD_LIST_SYNC", sync_payload)
         if event.get("t") in VISIBILITY_INVALIDATING_EVENTS:
             permission_targets = before & after
             event_data = event.get("d")
@@ -2394,6 +2483,20 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                     ),
                 }
             )
+            from app.api.threads import active_thread_sync_payload
+
+            for guild in guilds:
+                async with sessionmaker() as session:
+                    sync_payload = await active_thread_sync_payload(session, redis, guild, user)
+                sequence += 1
+                await websocket.send_json(
+                    {
+                        "op": GatewayOp.DISPATCH,
+                        "t": "THREAD_LIST_SYNC",
+                        "s": sequence,
+                        "d": sync_payload,
+                    }
+                )
             replay = await replay_topic_events(redis, topics, cursors)
             if replay is None:
                 await websocket.send_json({"op": GatewayOp.INVALID_SESSION, "d": False})

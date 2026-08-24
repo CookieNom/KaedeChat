@@ -42,6 +42,12 @@ from .models import (
     ReadyEvent,
     Role,
     RoleDeleteEvent,
+    ThreadDeleteEvent,
+    ThreadListSyncEvent,
+    ThreadMember,
+    ThreadMemberUpdateEvent,
+    ThreadMembersUpdateEvent,
+    ThreadPage,
     TypingEvent,
     VoiceOccupancy,
     VoiceStateEvent,
@@ -103,6 +109,32 @@ def _provided_fields(**values: object) -> dict[str, object]:
         for name, value in values.items()
         if not isinstance(value, MissingType)
     }
+
+
+def _wire_forum_tags(
+    value: list[dict[str, Any]] | MissingType,
+) -> list[dict[str, Any]] | MissingType:
+    if isinstance(value, MissingType):
+        return value
+    rendered: list[dict[str, Any]] = []
+    for tag in value:
+        item = dict(tag)
+        for key in ("id", "emoji_id"):
+            if key in item and item[key] is not None:
+                item[key] = str(item[key])
+        rendered.append(item)
+    return rendered
+
+
+def _wire_forum_emoji(
+    value: dict[str, Any] | None | MissingType,
+) -> dict[str, Any] | None | MissingType:
+    if value is None or isinstance(value, MissingType):
+        return value
+    rendered = dict(value)
+    if "emoji_id" in rendered and rendered["emoji_id"] is not None:
+        rendered["emoji_id"] = str(rendered["emoji_id"])
+    return rendered
 
 
 def _version_headers(version: str | None) -> dict[str, str]:
@@ -458,6 +490,347 @@ class Client:
         )
         return Channel.from_payload(self, origin, raw)
 
+    def _thread_page(
+        self,
+        raw: dict[str, Any],
+        *,
+        target: str,
+        default_domain: str,
+    ) -> ThreadPage:
+        threads = [
+            Channel.from_payload(self, target, item)
+            for item in raw.get("threads", [])
+            if isinstance(item, dict)
+        ]
+        domains = {thread.ref.id: thread.ref.domain for thread in threads}
+        members: list[ThreadMember] = []
+        for item in raw.get("members", []):
+            if not isinstance(item, dict):
+                continue
+            thread_id = item.get("id", item.get("thread_id"))
+            thread_domain = item.get("thread_domain")
+            if not isinstance(thread_domain, str) and thread_id is not None:
+                thread_domain = domains.get(int(thread_id), default_domain)
+            normalized = dict(item)
+            if isinstance(thread_domain, str):
+                normalized["thread_domain"] = thread_domain
+            members.append(
+                ThreadMember.from_payload(
+                    normalized,
+                    default_domain=default_domain,
+                    client=self,
+                    target=target,
+                )
+            )
+        return ThreadPage(
+            threads=threads,
+            members=members,
+            has_more=bool(raw.get("has_more", False)),
+            next_cursor=(
+                str(raw["next_cursor"]) if raw.get("next_cursor") is not None else None
+            ),
+        )
+
+    async def start_thread(
+        self,
+        channel: EntityRef,
+        name: str,
+        *,
+        target: str | None = None,
+        type: int | None = None,
+        content: str | None = None,
+        e2ee: dict[str, Any] | None = None,
+        attachment_ids: list[int] | None = None,
+        applied_tag_ids: list[int] | None = None,
+        auto_archive_duration: int | None = None,
+        rate_limit_per_user: int | None = None,
+        invitable: bool | None = None,
+        client_nonce: str | None = None,
+    ) -> Channel:
+        if content is not None and e2ee is not None:
+            raise ValueError(
+                "a thread starter cannot contain plaintext and E2EE content"
+            )
+        if type is not None and type not in {10, 11, 12}:
+            raise ValueError("thread type must be 10, 11, or 12")
+        origin = self._target(target)
+        body: dict[str, Any] = {"name": name}
+        for key, value in (
+            ("type", type),
+            ("auto_archive_duration", auto_archive_duration),
+            ("rate_limit_per_user", rate_limit_per_user),
+            ("invitable", invitable),
+        ):
+            if value is not None:
+                body[key] = value
+        if applied_tag_ids is not None:
+            body["applied_tag_ids"] = [str(item) for item in applied_tag_ids]
+        if any(
+            value is not None for value in (content, e2ee, attachment_ids, client_nonce)
+        ):
+            starter: dict[str, Any] = {}
+            if content is not None:
+                starter["content"] = content
+            if e2ee is not None:
+                starter["e2ee"] = e2ee
+            if attachment_ids is not None:
+                starter["attachment_ids"] = [str(item) for item in attachment_ids]
+            if client_nonce is not None:
+                starter["client_nonce"] = client_nonce
+            body["message"] = starter
+        raw = await self.request(
+            "POST",
+            f"/api/v1/bots/channels/{channel}/threads",
+            target=origin,
+            json=body,
+        )
+        return Channel.from_payload(self, origin, raw)
+
+    async def start_thread_from_message(
+        self,
+        channel: EntityRef,
+        message: EntityRef,
+        name: str,
+        *,
+        target: str | None = None,
+        auto_archive_duration: int | None = None,
+        rate_limit_per_user: int | None = None,
+    ) -> Channel:
+        origin = self._target(target)
+        body: dict[str, Any] = {"name": name}
+        if auto_archive_duration is not None:
+            body["auto_archive_duration"] = auto_archive_duration
+        if rate_limit_per_user is not None:
+            body["rate_limit_per_user"] = rate_limit_per_user
+        raw = await self.request(
+            "POST",
+            f"/api/v1/bots/channels/{channel}/messages/{message}/threads",
+            target=origin,
+            json=body,
+        )
+        return Channel.from_payload(self, origin, raw)
+
+    async def fetch_threads(
+        self,
+        channel: EntityRef,
+        *,
+        target: str | None = None,
+        archived: bool = False,
+        include_archived: bool = False,
+        before: datetime | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        tag_id: int | None = None,
+        tag_ids: list[int] | None = None,
+        query: str | None = None,
+        sort_order: int | None = None,
+    ) -> ThreadPage:
+        if tag_id is not None and tag_ids is not None:
+            raise ValueError("use tag_id or tag_ids, not both")
+        if before is not None and cursor is not None:
+            raise ValueError("use before or cursor, not both")
+        if archived and include_archived:
+            raise ValueError("include_archived cannot be combined with archived")
+        origin = self._target(target)
+        params: dict[str, Any] = {
+            "limit": min(100, max(1, limit)),
+        }
+        if include_archived:
+            params["include_archived"] = "true"
+        else:
+            params["archived"] = str(archived).lower()
+        if before is not None:
+            params["before"] = before.isoformat()
+        if cursor is not None:
+            params["cursor"] = cursor
+        selected_tags = (
+            tag_ids if tag_ids is not None else ([tag_id] if tag_id is not None else [])
+        )
+        if selected_tags:
+            params["tag_id"] = [str(item) for item in selected_tags]
+        if query is not None:
+            params["query"] = query
+        if sort_order is not None:
+            params["sort_order"] = sort_order
+        raw = await self.request(
+            "GET",
+            f"/api/v1/bots/channels/{channel}/threads",
+            target=origin,
+            params=params,
+        )
+        return self._thread_page(raw, target=origin, default_domain=channel.domain)
+
+    async def active_threads(
+        self,
+        guild: EntityRef,
+        *,
+        target: str | None = None,
+    ) -> ThreadPage:
+        origin = self._target(target)
+        raw = await self.request(
+            "GET",
+            f"/api/v1/bots/guilds/{guild}/threads/active",
+            target=origin,
+        )
+        return self._thread_page(raw, target=origin, default_domain=guild.domain)
+
+    async def edit_thread(
+        self,
+        thread: EntityRef,
+        *,
+        target: str | None = None,
+        name: str | MissingType = MISSING,
+        archived: bool | MissingType = MISSING,
+        locked: bool | MissingType = MISSING,
+        invitable: bool | MissingType = MISSING,
+        auto_archive_duration: int | MissingType = MISSING,
+        rate_limit_per_user: int | MissingType = MISSING,
+        applied_tag_ids: list[int] | MissingType = MISSING,
+        pinned: bool | MissingType = MISSING,
+    ) -> Channel:
+        origin = self._target(target)
+        body = _provided_fields(
+            name=name,
+            archived=archived,
+            locked=locked,
+            invitable=invitable,
+            auto_archive_duration=auto_archive_duration,
+            rate_limit_per_user=rate_limit_per_user,
+            pinned=pinned,
+        )
+        if not isinstance(applied_tag_ids, MissingType):
+            body["applied_tag_ids"] = [str(item) for item in applied_tag_ids]
+        if not body:
+            raise ValueError("at least one thread field is required")
+        raw = await self.request(
+            "PATCH",
+            f"/api/v1/bots/channels/{thread}",
+            target=origin,
+            json=body,
+        )
+        return Channel.from_payload(self, origin, raw)
+
+    async def delete_thread(
+        self, thread: EntityRef, *, target: str | None = None
+    ) -> None:
+        await self.request(
+            "DELETE",
+            f"/api/v1/bots/channels/{thread}",
+            target=target,
+        )
+
+    async def join_thread(
+        self,
+        thread: EntityRef,
+        *,
+        target: str | None = None,
+        flags: int = 0,
+        notification_level: str = "inherit",
+    ) -> None:
+        if flags < 0:
+            raise ValueError("thread member flags cannot be negative")
+        if notification_level not in {"inherit", "all", "mentions", "none"}:
+            raise ValueError("unsupported thread notification level")
+        await self.request(
+            "PUT",
+            f"/api/v1/bots/channels/{thread}/thread-members/@me",
+            target=target,
+            json={"flags": flags, "notification_level": notification_level},
+        )
+
+    async def leave_thread(
+        self, thread: EntityRef, *, target: str | None = None
+    ) -> None:
+        await self.request(
+            "DELETE",
+            f"/api/v1/bots/channels/{thread}/thread-members/@me",
+            target=target,
+        )
+
+    async def add_thread_member(
+        self,
+        thread: EntityRef,
+        user: EntityRef,
+        *,
+        target: str | None = None,
+    ) -> None:
+        await self.request(
+            "PUT",
+            f"/api/v1/bots/channels/{thread}/thread-members/{user}",
+            target=target,
+        )
+
+    async def remove_thread_member(
+        self,
+        thread: EntityRef,
+        user: EntityRef,
+        *,
+        target: str | None = None,
+    ) -> None:
+        await self.request(
+            "DELETE",
+            f"/api/v1/bots/channels/{thread}/thread-members/{user}",
+            target=target,
+        )
+
+    async def thread_members(
+        self,
+        thread: EntityRef,
+        *,
+        target: str | None = None,
+        after: EntityRef | None = None,
+        limit: int = 100,
+        with_member: bool = False,
+    ) -> list[ThreadMember]:
+        origin = self._target(target)
+        params: dict[str, Any] = {
+            "limit": min(100, max(1, limit)),
+            "with_member": str(with_member).lower(),
+        }
+        if after is not None:
+            params["after"] = str(after)
+        raw = await self.request(
+            "GET",
+            f"/api/v1/bots/channels/{thread}/thread-members",
+            target=origin,
+            params=params,
+        )
+        items = raw.get("members", []) if isinstance(raw, dict) else raw
+        return [
+            ThreadMember.from_payload(
+                item,
+                default_domain=thread.domain,
+                default_thread=thread,
+                client=self,
+                target=origin,
+            )
+            for item in items
+            if isinstance(item, dict)
+        ]
+
+    async def fetch_thread_member(
+        self,
+        thread: EntityRef,
+        user: EntityRef,
+        *,
+        target: str | None = None,
+        with_member: bool = False,
+    ) -> ThreadMember:
+        origin = self._target(target)
+        raw = await self.request(
+            "GET",
+            f"/api/v1/bots/channels/{thread}/thread-members/{user}",
+            target=origin,
+            params={"with_member": str(with_member).lower()},
+        )
+        return ThreadMember.from_payload(
+            raw,
+            default_domain=thread.domain,
+            default_thread=thread,
+            client=self,
+            target=origin,
+        )
+
     async def fetch_members(
         self,
         guild: EntityRef,
@@ -527,19 +900,40 @@ class Client:
         topic: str | None = None,
         parent_id: int | None = None,
         rate_limit_per_user: int = 0,
+        default_thread_rate_limit_per_user: int | MissingType = MISSING,
+        default_auto_archive_duration: int | MissingType = MISSING,
+        available_tags: list[dict[str, Any]] | MissingType = MISSING,
+        default_reaction_emoji: dict[str, Any] | None | MissingType = MISSING,
+        default_sort_order: int | None | MissingType = MISSING,
+        default_forum_layout: int | MissingType = MISSING,
+        flags: int | MissingType = MISSING,
+        e2ee_required: bool | MissingType = MISSING,
     ) -> Channel:
         origin = self._target(target)
+        body: dict[str, object] = {
+            "name": name,
+            "type": type,
+            "topic": topic,
+            "parent_id": str(parent_id) if parent_id is not None else None,
+            "rate_limit_per_user": rate_limit_per_user,
+        }
+        body.update(
+            _provided_fields(
+                default_thread_rate_limit_per_user=default_thread_rate_limit_per_user,
+                default_auto_archive_duration=default_auto_archive_duration,
+                available_tags=_wire_forum_tags(available_tags),
+                default_reaction_emoji=_wire_forum_emoji(default_reaction_emoji),
+                default_sort_order=default_sort_order,
+                default_forum_layout=default_forum_layout,
+                flags=flags,
+                e2ee_required=e2ee_required,
+            )
+        )
         raw = await self.request(
             "POST",
             f"/api/v1/bots/guilds/{guild}/channels",
             target=origin,
-            json={
-                "name": name,
-                "type": type,
-                "topic": topic,
-                "parent_id": str(parent_id) if parent_id is not None else None,
-                "rate_limit_per_user": rate_limit_per_user,
-            },
+            json=body,
         )
         return Channel.from_payload(self, origin, raw)
 
@@ -554,6 +948,14 @@ class Client:
         topic: str | None | MissingType = MISSING,
         parent_id: int | None | MissingType = MISSING,
         rate_limit_per_user: int | MissingType = MISSING,
+        default_thread_rate_limit_per_user: int | MissingType = MISSING,
+        default_auto_archive_duration: int | MissingType = MISSING,
+        available_tags: list[dict[str, Any]] | MissingType = MISSING,
+        default_reaction_emoji: dict[str, Any] | None | MissingType = MISSING,
+        default_sort_order: int | None | MissingType = MISSING,
+        default_forum_layout: int | MissingType = MISSING,
+        flags: int | MissingType = MISSING,
+        e2ee_required: bool | MissingType = MISSING,
         federated_history_policy: str | MissingType = MISSING,
         sync_permissions: bool | MissingType = MISSING,
     ) -> Channel:
@@ -563,6 +965,14 @@ class Client:
             topic=topic,
             parent_id=(str(parent_id) if isinstance(parent_id, int) else parent_id),
             rate_limit_per_user=rate_limit_per_user,
+            default_thread_rate_limit_per_user=default_thread_rate_limit_per_user,
+            default_auto_archive_duration=default_auto_archive_duration,
+            available_tags=_wire_forum_tags(available_tags),
+            default_reaction_emoji=_wire_forum_emoji(default_reaction_emoji),
+            default_sort_order=default_sort_order,
+            default_forum_layout=default_forum_layout,
+            flags=flags,
+            e2ee_required=e2ee_required,
             federated_history_policy=federated_history_policy,
             sync_permissions=sync_permissions,
         )
@@ -1563,6 +1973,109 @@ class Client:
             return GuildDeleteEvent(
                 target,
                 EntityRef(int(data["id"]), str(data["origin_domain"])),
+            )
+        if event_type in {"THREAD_CREATE", "THREAD_UPDATE"} and "type" in data:
+            return Channel.from_payload(self, target, data)
+        if event_type == "THREAD_DELETE":
+            return ThreadDeleteEvent(
+                target=target,
+                thread_ref=EntityRef(int(data["id"]), str(data["origin_domain"])),
+                guild_ref=EntityRef(int(data["guild_id"]), str(data["guild_domain"])),
+                parent_ref=EntityRef(
+                    int(data["parent_id"]), str(data["parent_domain"])
+                ),
+                type=int(data["type"]),
+            )
+        if event_type == "THREAD_LIST_SYNC":
+            guild_ref = EntityRef(int(data["guild_id"]), str(data["guild_domain"]))
+            raw_channel_ids = data.get("channel_ids")
+            threads = tuple(
+                Channel.from_payload(self, target, item)
+                for item in data.get("threads", [])
+                if isinstance(item, dict)
+            )
+            domains = {thread.ref.id: thread.ref.domain for thread in threads}
+            members: list[ThreadMember] = []
+            for item in data.get("members", []):
+                if not isinstance(item, dict):
+                    continue
+                normalized = dict(item)
+                thread_id = normalized.get("id", normalized.get("thread_id"))
+                if (
+                    not isinstance(normalized.get("thread_domain"), str)
+                    and thread_id is not None
+                ):
+                    normalized["thread_domain"] = domains.get(
+                        int(thread_id), guild_ref.domain
+                    )
+                members.append(
+                    ThreadMember.from_payload(
+                        normalized,
+                        default_domain=guild_ref.domain,
+                        client=self,
+                        target=target,
+                    )
+                )
+            return ThreadListSyncEvent(
+                target=target,
+                guild_ref=guild_ref,
+                channel_refs=(
+                    tuple(
+                        EntityRef(int(channel_id), guild_ref.domain)
+                        for channel_id in raw_channel_ids
+                    )
+                    if isinstance(raw_channel_ids, list)
+                    else None
+                ),
+                threads=threads,
+                members=tuple(members),
+            )
+        if event_type == "THREAD_MEMBER_UPDATE":
+            thread_ref = EntityRef(int(data["id"]), str(data["thread_domain"]))
+            return ThreadMemberUpdateEvent(
+                target=target,
+                member=ThreadMember.from_payload(
+                    data,
+                    default_domain=thread_ref.domain,
+                    default_thread=thread_ref,
+                    client=self,
+                    target=target,
+                ),
+            )
+        if event_type == "THREAD_MEMBERS_UPDATE":
+            thread_ref = EntityRef(int(data["id"]), str(data["thread_domain"]))
+            guild_ref = EntityRef(int(data["guild_id"]), str(data["guild_domain"]))
+            removed_member_refs = tuple(
+                EntityRef(int(item["id"]), str(item["origin_domain"]))
+                for item in data.get("removed_member_refs", [])
+                if isinstance(item, dict)
+                and item.get("id") is not None
+                and isinstance(item.get("origin_domain"), str)
+            )
+            if not removed_member_refs:
+                removed_member_refs = tuple(
+                    EntityRef.parse(str(item))
+                    if "@" in str(item)
+                    else EntityRef(int(item), guild_ref.domain)
+                    for item in data.get("removed_member_ids", [])
+                )
+            return ThreadMembersUpdateEvent(
+                target=target,
+                thread_ref=thread_ref,
+                guild_ref=guild_ref,
+                member_count=int(data.get("member_count", 0)),
+                added_members=tuple(
+                    ThreadMember.from_payload(
+                        item,
+                        default_domain=thread_ref.domain,
+                        default_thread=thread_ref,
+                        client=self,
+                        target=target,
+                    )
+                    for item in data.get("added_members", [])
+                    if isinstance(item, dict)
+                ),
+                removed_member_refs=removed_member_refs,
             )
         if event_type in {"CHANNEL_CREATE", "CHANNEL_UPDATE"} and "type" in data:
             return Channel.from_payload(self, target, data)

@@ -5,6 +5,8 @@ import {
   failPendingMessage,
   LoadFence,
   mergeMessageSnapshot,
+  messageReferenceTarget,
+  resolvedReferencedMessage,
   reconcileMessage
 } from './reconcile';
 
@@ -38,6 +40,33 @@ describe('chat completion races', () => {
     const afterGateway = reconcileMessage([message('10'), optimistic], saved);
     const afterRest = reconcileMessage(afterGateway, saved);
     expect(afterRest.map((item) => item.id)).toEqual(['10', '12']);
+  });
+
+  it('keeps a type-21 wrapper clean while resolving its nested source message', () => {
+    const source = { ...message('12'), channel_id: '1', content: 'Original body' };
+    const starter = {
+      ...message('12'),
+      channel_id: '20',
+      content: null,
+      message_type: 21,
+      message_reference: {
+        type: 0,
+        message_id: '12',
+        message_domain: 'chat.example',
+        channel_id: '1',
+        channel_domain: 'chat.example'
+      },
+      referenced_message: source
+    };
+
+    expect(starter.content).toBeNull();
+    expect(resolvedReferencedMessage(starter, [])).toBe(source);
+    expect(messageReferenceTarget(starter)).toEqual({
+      id: '12',
+      origin_domain: 'chat.example',
+      channel_id: '1',
+      channel_domain: 'chat.example'
+    });
   });
 
   it('does not mark a gateway-confirmed message failed when the REST response is lost', () => {

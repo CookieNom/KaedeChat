@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from redis.asyncio import Redis
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.postgresql import array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,11 +19,15 @@ from app.api.dependencies import (
 )
 from app.api.guilds import (
     copy_overwrites,
+    forum_reaction_payload,
+    forum_tags_payload,
     guild_channel,
     local_guild,
     overwrite_source_channel,
+    validate_forum_emoji_ids,
 )
 from app.chat.audit import add_audit_entry
+from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import guild_topic, publish_dispatch
 from app.chat.guild_revision import (
     federation_channel_state,
@@ -165,6 +171,8 @@ async def update_channel(
 ) -> dict[str, object]:
     guild = await local_guild(session, settings, guild_id, for_update=True)
     channel = await guild_channel(session, settings, guild_id, channel_id)
+    if channel.type in {10, 11, 12}:
+        raise HTTPException(status_code=400, detail={"code": "USE_THREAD_ENDPOINT"})
     require_current_version(channel.updated_at, if_match)
     await require_permissions(
         session,
@@ -177,7 +185,66 @@ async def update_channel(
     original_parent_id = channel.parent_id
     original_permissions_synced = channel.permissions_synced
     values = payload.model_dump(exclude_unset=True)
+    if values.get("e2ee_required") is False and channel.type == 15 and channel.e2ee_required:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "FORUM_E2EE_REQUIREMENT_IRREVERSIBLE"},
+        )
+    if (
+        values.get("e2ee_required") is True
+        and not channel.e2ee_required
+        and not settings.e2ee_activation_enabled
+    ):
+        raise HTTPException(status_code=403, detail={"code": "E2EE_ACTIVATION_DISABLED"})
     sync_permissions = bool(values.pop("sync_permissions", False))
+    forum_fields = {
+        "available_tags",
+        "default_reaction_emoji",
+        "default_sort_order",
+        "default_forum_layout",
+        "e2ee_required",
+        "flags",
+    }
+    if channel.type != 15 and values.keys() & forum_fields:
+        raise HTTPException(status_code=400, detail={"code": "FORUM_FIELDS_FORUM_ONLY"})
+    if "default_auto_archive_duration" in values and channel.type not in {0, 5, 15}:
+        raise HTTPException(status_code=400, detail={"code": "THREAD_DEFAULT_CHANNEL_TYPE_INVALID"})
+    if "default_thread_rate_limit_per_user" in values and channel.type not in {0, 15}:
+        raise HTTPException(status_code=400, detail={"code": "THREAD_DEFAULT_CHANNEL_TYPE_INVALID"})
+    if channel.type != 15 and isinstance(values.get("topic"), str) and len(values["topic"]) > 1024:
+        raise HTTPException(status_code=400, detail={"code": "CHANNEL_TOPIC_TOO_LONG"})
+    if "available_tags" in values or "default_reaction_emoji" in values:
+        await validate_forum_emoji_ids(
+            session,
+            guild,
+            (
+                list(payload.available_tags or [])
+                if "available_tags" in values
+                else list(channel.available_tags or [])
+            ),
+            (
+                payload.default_reaction_emoji
+                if "default_reaction_emoji" in values
+                else channel.default_reaction_emoji
+            ),
+        )
+    removed_tag_ids: set[int] = set()
+    if "available_tags" in values:
+        existing_tag_ids = {
+            int(str(item["id"]))
+            for item in channel.available_tags or []
+            if isinstance(item, dict) and str(item.get("id", "")).isdigit()
+        }
+        next_tags = await forum_tags_payload(
+            list(payload.available_tags or []),
+            snowflake,
+            existing_ids=existing_tag_ids,
+        )
+        next_tag_ids = {int(str(item["id"])) for item in next_tags}
+        removed_tag_ids = existing_tag_ids - next_tag_ids
+        values["available_tags"] = next_tags
+    if "default_reaction_emoji" in values:
+        values["default_reaction_emoji"] = forum_reaction_payload(payload.default_reaction_emoji)
     permission_state_changed = False
     if "parent_id" in values:
         parent_id = values["parent_id"]
@@ -222,6 +289,26 @@ async def update_channel(
             not channel.permissions_synced or target_parent_id != original_parent_id
         )
         channel.permissions_synced = True
+    tagged_thread_updates: list[Channel] = []
+    if removed_tag_ids:
+        applied_expression: Any = Channel.applied_tag_ids
+        for removed_id in sorted(removed_tag_ids):
+            applied_expression = applied_expression.op("-")(str(removed_id))
+        tagged_thread_updates = list(
+            await session.scalars(
+                update(Channel)
+                .where(
+                    Channel.parent_id == channel.id,
+                    Channel.parent_domain == channel.origin_domain,
+                    Channel.type.in_({10, 11, 12}),
+                    Channel.applied_tag_ids.op("?|")(
+                        array([str(item) for item in sorted(removed_tag_ids)])
+                    ),
+                )
+                .values(applied_tag_ids=applied_expression)
+                .returning(Channel)
+            )
+        )
     changes: list[dict[str, object]] = []
     history_policy_changed = False
     for field, value in values.items():
@@ -257,6 +344,16 @@ async def update_channel(
             channel=channel,
             snapshot_required=history_policy_changed,
         )
+        for thread in tagged_thread_updates:
+            await queue_guild_mutation(
+                session,
+                settings,
+                guild,
+                auth.user,
+                "guild.channel.update",
+                {"channel": federation_channel_state(thread)},
+                channel=thread,
+            )
         await add_audit_entry(
             session,
             snowflake,
@@ -277,6 +374,13 @@ async def update_channel(
             "CHANNEL_UPDATE",
             channel_payload(channel),
         )
+        for thread in tagged_thread_updates:
+            await publish_dispatch(
+                redis,
+                guild_topic(guild.origin_domain, guild.id),
+                "THREAD_UPDATE",
+                channel_payload(thread),
+            )
     return channel_payload(channel)
 
 
@@ -301,6 +405,7 @@ async def reorder_channels(
                 Channel.guild_id == guild.id,
                 Channel.guild_domain == guild.origin_domain,
                 Channel.unavailable.is_(False),
+                Channel.type.not_in({10, 11, 12}),
             )
             .order_by(Channel.position, Channel.id)
             .with_for_update()
@@ -436,6 +541,8 @@ async def delete_channel(
 ) -> Response:
     guild = await local_guild(session, settings, guild_id, for_update=True)
     channel = await guild_channel(session, settings, guild_id, channel_id)
+    if channel.type in {10, 11, 12}:
+        raise HTTPException(status_code=400, detail={"code": "USE_THREAD_ENDPOINT"})
     await require_permissions(
         session,
         redis,
@@ -453,6 +560,22 @@ async def delete_channel(
         .limit(1)
     )
     if message_exists is not None:
+        raise HTTPException(status_code=409, detail={"code": "CHANNEL_NOT_EMPTY"})
+    child_thread_exists = await session.scalar(
+        select(Channel.id)
+        .where(
+            Channel.parent_id == channel.id,
+            Channel.parent_domain == channel.origin_domain,
+            Channel.type.in_({10, 11, 12}),
+            Channel.unavailable.is_(False),
+        )
+        .limit(1)
+    )
+    if child_thread_exists is not None:
+        # Thread parents cannot be physically detached: thread permissions and
+        # lifecycle are inherited from the parent. Match the existing
+        # non-empty-channel contract and require posts/threads to be removed
+        # first.
         raise HTTPException(status_code=409, detail={"code": "CHANNEL_NOT_EMPTY"})
     await add_audit_entry(
         session,
@@ -545,6 +668,7 @@ async def reorder_roles(
         role.position = item.position
         changed.append(role)
     if changed:
+        e2ee_policy_channels: list[Channel] = []
         guild.permission_generation += 1
         for role in changed:
             await queue_guild_mutation(
@@ -555,6 +679,7 @@ async def reorder_roles(
                 "guild.role.update",
                 {"role": role_payload(role)},
                 snapshot_required=True,
+                e2ee_policy_channels=e2ee_policy_channels,
             )
         await add_audit_entry(
             session,
@@ -571,6 +696,7 @@ async def reorder_roles(
         for role in changed:
             await session.refresh(role)
         await wake_queued_guild_federation(guild)
+        await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
         for role in changed:
             await publish_dispatch(
                 redis,
@@ -617,6 +743,7 @@ async def update_role(
             changes.append({"key": field, "old_value": old, "new_value": value})
             setattr(role, field, value)
     if changes:
+        e2ee_policy_channels: list[Channel] = []
         guild.permission_generation += 1
         await queue_guild_mutation(
             session,
@@ -626,6 +753,7 @@ async def update_role(
             "guild.role.update",
             {"role": role_payload(role)},
             snapshot_required=True,
+            e2ee_policy_channels=e2ee_policy_channels,
         )
         await add_audit_entry(
             session,
@@ -641,6 +769,7 @@ async def update_role(
         await session.refresh(guild)
         await session.refresh(role)
         await wake_queued_guild_federation(guild)
+        await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
         await publish_dispatch(
             redis,
             guild_topic(guild.origin_domain, guild.id),
@@ -679,6 +808,7 @@ async def delete_role(
         target_ref={"id": str(role.id), "name": role.name},
     )
     guild.permission_generation += 1
+    e2ee_policy_channels: list[Channel] = []
     await queue_guild_mutation(
         session,
         settings,
@@ -687,6 +817,7 @@ async def delete_role(
         "guild.role.delete",
         {"role": {"id": str(role.id), "origin_domain": role.origin_domain}},
         snapshot_required=True,
+        e2ee_policy_channels=e2ee_policy_channels,
     )
     await session.execute(
         delete(ChannelOverwrite).where(
@@ -699,6 +830,7 @@ async def delete_role(
     await session.commit()
     await session.refresh(guild)
     await wake_queued_guild_federation(guild)
+    await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
     await publish_dispatch(
         redis,
         guild_topic(guild.origin_domain, guild.id),
@@ -753,6 +885,7 @@ async def assign_role(
         .returning(MemberRole.role_id)
     )
     if inserted is not None:
+        e2ee_policy_channels: list[Channel] = []
         member.member_version += 1
         await queue_guild_mutation(
             session,
@@ -766,6 +899,7 @@ async def assign_role(
                 "member_version": str(member.member_version),
             },
             snapshot_required=True,
+            e2ee_policy_channels=e2ee_policy_channels,
         )
         await add_audit_entry(
             session,
@@ -781,6 +915,7 @@ async def assign_role(
         await session.commit()
         await session.refresh(guild)
         await wake_queued_guild_federation(guild)
+        await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
         await publish_dispatch(
             redis,
             guild_topic(guild.origin_domain, guild.id),
@@ -880,6 +1015,7 @@ async def replace_member_roles(
         )
 
     member.member_version += 1
+    e2ee_policy_channels: list[Channel] = []
     for event_type, refs in (
         ("guild.member.role.remove", sorted(removed)),
         ("guild.member.role.add", sorted(added)),
@@ -897,6 +1033,7 @@ async def replace_member_roles(
                     "member_version": str(member.member_version),
                 },
                 snapshot_required=True,
+                e2ee_policy_channels=e2ee_policy_channels,
             )
     await add_audit_entry(
         session,
@@ -918,6 +1055,7 @@ async def replace_member_roles(
     await session.commit()
     await session.refresh(guild)
     await wake_queued_guild_federation(guild)
+    await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
     await publish_dispatch(
         redis,
         guild_topic(guild.origin_domain, guild.id),
@@ -964,6 +1102,7 @@ async def remove_role(
         .returning(MemberRole.role_id)
     )
     if result.scalar_one_or_none() is not None:
+        e2ee_policy_channels: list[Channel] = []
         member.member_version += 1
         await queue_guild_mutation(
             session,
@@ -977,6 +1116,7 @@ async def remove_role(
                 "member_version": str(member.member_version),
             },
             snapshot_required=True,
+            e2ee_policy_channels=e2ee_policy_channels,
         )
         await add_audit_entry(
             session,
@@ -992,6 +1132,7 @@ async def remove_role(
         await session.commit()
         await session.refresh(guild)
         await wake_queued_guild_federation(guild)
+        await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
         await publish_dispatch(
             redis,
             guild_topic(guild.origin_domain, guild.id),

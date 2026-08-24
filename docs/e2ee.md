@@ -164,6 +164,26 @@ account identity pauses new application messages in `rekeying` until an
 authority-ordered commit excludes it. A new member receives future history by
 default. Plaintext system notices are never inserted into an encrypted room.
 
+Threads are independent MLS rooms; a forum parent stores policy only and never
+shares a content key with its posts. Thread titles, tags, archive/lock state,
+membership counts, authorship, and other routing metadata remain plaintext.
+Activating an ordinary thread follows the same irreversible, future-only flow
+as any other channel.
+
+An E2EE-required forum applies that flow to every new post. Post creation first
+commits its required starter atomically as plaintext, then the creating client
+must activate the child thread before any reply is accepted. The UI discloses
+that starter and all earlier history remain server-readable. Activation failure
+leaves a durable post with replies blocked and a visible retry action; it never
+downgrades to accepting plaintext replies. Creating a thread from an existing
+message in an active E2EE parent, or using native `/thread` with a starter
+there, fails closed because the source cannot be safely projected into a new
+MLS group without inventing cross-room key semantics.
+
+Bots receive thread/forum metadata only. E2EE-required post creation and writes
+to an active or activation-required child fail closed until Kaede defines and
+ships a verified bot-device MLS participant protocol.
+
 ## Message envelope
 
 The version-1 JSON object remains legacy opaque transport. The MLS application

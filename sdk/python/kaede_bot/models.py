@@ -119,6 +119,9 @@ class Guild:
     async def channels(self) -> list[Channel]:
         return await self.client.fetch_channels(self.ref, target=self.target)
 
+    async def active_threads(self) -> ThreadPage:
+        return await self.client.active_threads(self.ref, target=self.target)
+
     async def members(
         self,
         *,
@@ -157,6 +160,14 @@ class Guild:
         topic: str | None = None,
         parent_id: int | None = None,
         rate_limit_per_user: int = 0,
+        default_thread_rate_limit_per_user: int | MissingType = MISSING,
+        default_auto_archive_duration: int | MissingType = MISSING,
+        available_tags: list[dict[str, Any]] | MissingType = MISSING,
+        default_reaction_emoji: dict[str, Any] | None | MissingType = MISSING,
+        default_sort_order: int | None | MissingType = MISSING,
+        default_forum_layout: int | MissingType = MISSING,
+        flags: int | MissingType = MISSING,
+        e2ee_required: bool | MissingType = MISSING,
     ) -> Channel:
         return await self.client.create_channel(
             self.ref,
@@ -166,6 +177,14 @@ class Guild:
             topic=topic,
             parent_id=parent_id,
             rate_limit_per_user=rate_limit_per_user,
+            default_thread_rate_limit_per_user=default_thread_rate_limit_per_user,
+            default_auto_archive_duration=default_auto_archive_duration,
+            available_tags=available_tags,
+            default_reaction_emoji=default_reaction_emoji,
+            default_sort_order=default_sort_order,
+            default_forum_layout=default_forum_layout,
+            flags=flags,
+            e2ee_required=e2ee_required,
         )
 
     async def create_role(
@@ -207,6 +226,128 @@ class Guild:
 
 
 @dataclass(slots=True)
+class ThreadMetadata:
+    archived: bool
+    auto_archive_duration: int
+    archive_timestamp: datetime | None = None
+    locked: bool = False
+    invitable: bool | None = None
+    create_timestamp: datetime | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> ThreadMetadata:
+        return cls(
+            archived=bool(payload.get("archived", False)),
+            auto_archive_duration=int(payload.get("auto_archive_duration", 1440)),
+            archive_timestamp=_datetime(payload.get("archive_timestamp")),
+            locked=bool(payload.get("locked", False)),
+            invitable=(
+                bool(payload["invitable"])
+                if payload.get("invitable") is not None
+                else None
+            ),
+            create_timestamp=_datetime(payload.get("create_timestamp")),
+        )
+
+
+@dataclass(slots=True)
+class ThreadMember:
+    thread_ref: EntityRef
+    user_ref: EntityRef
+    guild_ref: EntityRef | None = None
+    join_timestamp: datetime | None = None
+    flags: int = 0
+    notification_level: str = "inherit"
+    member: Member | None = None
+    presence: dict[str, Any] | None = None
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any],
+        *,
+        default_domain: str,
+        default_thread: EntityRef | None = None,
+        client: Client | None = None,
+        target: str | None = None,
+    ) -> ThreadMember:
+        thread_id = payload.get("id", payload.get("thread_id"))
+        thread_domain = payload.get("thread_domain")
+        thread_ref = (
+            EntityRef(int(thread_id), str(thread_domain))
+            if thread_id is not None and isinstance(thread_domain, str)
+            else None
+        )
+        if thread_ref is None:
+            if default_thread is None:
+                raise ValueError(
+                    "thread member payload is missing its thread reference"
+                )
+            thread_ref = default_thread
+        user_id = payload.get("user_id")
+        if user_id is None and isinstance(payload.get("user"), dict):
+            user_id = payload["user"].get("id")
+        user_domain = payload.get("user_domain")
+        if user_domain is None and isinstance(payload.get("user"), dict):
+            user_domain = payload["user"].get("origin_domain")
+        if user_id is None:
+            raise ValueError("thread member payload is missing its user reference")
+        return cls(
+            thread_ref=thread_ref,
+            user_ref=EntityRef(int(user_id), str(user_domain or default_domain)),
+            guild_ref=_optional_ref(payload, "guild_id", "guild_domain"),
+            join_timestamp=_datetime(payload.get("join_timestamp")),
+            flags=int(payload.get("flags", 0)),
+            notification_level=str(payload.get("notification_level", "inherit")),
+            member=(
+                Member.from_payload(client, target, payload["member"])
+                if client is not None
+                and target is not None
+                and isinstance(payload.get("member"), dict)
+                else None
+            ),
+            presence=(
+                dict(payload["presence"])
+                if isinstance(payload.get("presence"), dict)
+                else None
+            ),
+        )
+
+
+@dataclass(slots=True)
+class ForumTag:
+    id: int
+    name: str
+    moderated: bool = False
+    emoji_id: int | None = None
+    emoji_domain: str | None = None
+    emoji_name: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> ForumTag:
+        return cls(
+            id=int(payload["id"]),
+            name=str(payload["name"]),
+            moderated=bool(payload.get("moderated", False)),
+            emoji_id=(
+                int(payload["emoji_id"])
+                if payload.get("emoji_id") is not None
+                else None
+            ),
+            emoji_domain=(
+                str(payload["emoji_domain"])
+                if payload.get("emoji_domain") is not None
+                else None
+            ),
+            emoji_name=(
+                str(payload["emoji_name"])
+                if payload.get("emoji_name") is not None
+                else None
+            ),
+        )
+
+
+@dataclass(slots=True)
 class Channel:
     client: Client
     target: str
@@ -217,10 +358,30 @@ class Channel:
     topic: str | None = None
     position: int = 0
     parent_ref: EntityRef | None = None
+    created_at: datetime | None = None
     permissions: int = 0
     rate_limit_per_user: int = 0
+    flags: int = 0
+    owner_ref: EntityRef | None = None
+    last_message_ref: EntityRef | None = None
+    starter_message_ref: EntityRef | None = None
+    starter_message: Message | None = None
+    thread_metadata: ThreadMetadata | None = None
+    member: ThreadMember | None = None
+    message_count: int = 0
+    total_message_sent: int = 0
+    member_count: int = 0
+    applied_tag_ids: tuple[int, ...] = ()
+    available_tags: tuple[ForumTag, ...] = ()
+    default_reaction_emoji: dict[str, Any] | None = None
+    default_thread_rate_limit_per_user: int | None = None
+    default_auto_archive_duration: int | None = None
+    default_sort_order: int | None = None
+    default_forum_layout: int | None = None
+    e2ee_required: bool = False
     encryption_mode: str = "plaintext"
     search_available: bool = True
+    newly_created: bool = False
     version: str | None = None
     bot_installation_id: int | None = None
 
@@ -228,20 +389,106 @@ class Channel:
     def from_payload(
         cls, client: Client, target: str, payload: dict[str, Any]
     ) -> Channel:
+        ref = EntityRef(int(payload["id"]), str(payload["origin_domain"]))
+        raw_thread_metadata = payload.get("thread_metadata")
+        raw_member = payload.get("member")
+        raw_tags = payload.get("available_tags")
+        raw_applied_tags = payload.get(
+            "applied_tags", payload.get("applied_tag_ids", [])
+        )
+        # Discord calls the atomic forum-create starter `message`; Kaede keeps
+        # `starter_message` on ordinary channel projections for clarity.
+        raw_starter_message = payload.get("starter_message") or payload.get("message")
+        starter_message = (
+            Message.from_payload(client, target, raw_starter_message)
+            if isinstance(raw_starter_message, dict)
+            else None
+        )
         return cls(
             client=client,
             target=target,
-            ref=EntityRef(int(payload["id"]), str(payload["origin_domain"])),
+            ref=ref,
             guild_ref=_optional_ref(payload, "guild_id", "guild_domain"),
             type=int(payload.get("type", 0)),
             name=str(payload["name"]) if payload.get("name") is not None else None,
             topic=str(payload["topic"]) if payload.get("topic") is not None else None,
             position=int(payload.get("position", 0)),
             parent_ref=_optional_ref(payload, "parent_id", "parent_domain"),
+            created_at=_datetime(payload.get("created_at")),
             permissions=int(payload.get("permissions", 0)),
             rate_limit_per_user=int(payload.get("rate_limit_per_user", 0)),
+            flags=int(payload.get("flags") or 0),
+            owner_ref=_optional_ref(payload, "owner_id", "owner_domain"),
+            last_message_ref=_optional_ref(
+                payload, "last_message_id", "last_message_domain"
+            ),
+            starter_message_ref=(
+                _optional_ref(payload, "starter_message_id", "starter_message_domain")
+                or _optional_ref(payload, "source_message_id", "source_message_domain")
+                or (starter_message.ref if starter_message is not None else None)
+            ),
+            starter_message=starter_message,
+            thread_metadata=(
+                ThreadMetadata.from_payload(
+                    raw_thread_metadata
+                    if isinstance(raw_thread_metadata, dict)
+                    else payload
+                )
+                if int(payload.get("type", 0)) in {10, 11, 12}
+                else None
+            ),
+            member=(
+                ThreadMember.from_payload(
+                    raw_member,
+                    default_domain=ref.domain,
+                    default_thread=ref,
+                    client=client,
+                    target=target,
+                )
+                if isinstance(raw_member, dict)
+                else None
+            ),
+            message_count=int(payload.get("message_count") or 0),
+            total_message_sent=int(payload.get("total_message_sent") or 0),
+            member_count=int(payload.get("member_count") or 0),
+            applied_tag_ids=tuple(int(item) for item in raw_applied_tags or ()),
+            available_tags=tuple(
+                ForumTag.from_payload(item)
+                for item in (raw_tags or ())
+                if isinstance(item, dict)
+            ),
+            default_reaction_emoji=(
+                dict(payload["default_reaction_emoji"])
+                if isinstance(payload.get("default_reaction_emoji"), dict)
+                else None
+            ),
+            default_thread_rate_limit_per_user=(
+                int(payload["default_thread_rate_limit_per_user"])
+                if payload.get("default_thread_rate_limit_per_user") is not None
+                else None
+            ),
+            default_auto_archive_duration=(
+                int(payload["default_auto_archive_duration"])
+                if payload.get("default_auto_archive_duration") is not None
+                else None
+            ),
+            default_sort_order=(
+                int(payload["default_sort_order"])
+                if payload.get("default_sort_order") is not None
+                else None
+            ),
+            default_forum_layout=(
+                int(payload["default_forum_layout"])
+                if payload.get("default_forum_layout") is not None
+                else None
+            ),
+            e2ee_required=bool(
+                payload.get("e2ee_required", False)
+                or payload.get("default_thread_encryption_mode") == "e2ee"
+            ),
             encryption_mode=str(payload.get("encryption_mode", "plaintext")),
             search_available=bool(payload.get("search_available", True)),
+            newly_created=bool(payload.get("newly_created", False)),
             version=(
                 str(payload["version"]) if payload.get("version") is not None else None
             ),
@@ -251,6 +498,22 @@ class Channel:
                 else None
             ),
         )
+
+    @property
+    def is_thread(self) -> bool:
+        return self.type in {10, 11, 12}
+
+    @property
+    def is_forum(self) -> bool:
+        return self.type == 15
+
+    @property
+    def archived(self) -> bool:
+        return bool(self.thread_metadata and self.thread_metadata.archived)
+
+    @property
+    def locked(self) -> bool:
+        return bool(self.thread_metadata and self.thread_metadata.locked)
 
     async def send(
         self,
@@ -297,6 +560,14 @@ class Channel:
         topic: str | None | MissingType = MISSING,
         parent_id: int | None | MissingType = MISSING,
         rate_limit_per_user: int | MissingType = MISSING,
+        default_thread_rate_limit_per_user: int | MissingType = MISSING,
+        default_auto_archive_duration: int | MissingType = MISSING,
+        available_tags: list[dict[str, Any]] | MissingType = MISSING,
+        default_reaction_emoji: dict[str, Any] | None | MissingType = MISSING,
+        default_sort_order: int | None | MissingType = MISSING,
+        default_forum_layout: int | MissingType = MISSING,
+        flags: int | MissingType = MISSING,
+        e2ee_required: bool | MissingType = MISSING,
         federated_history_policy: str | MissingType = MISSING,
         sync_permissions: bool | MissingType = MISSING,
     ) -> Channel:
@@ -313,6 +584,14 @@ class Channel:
             topic=topic,
             parent_id=parent_id,
             rate_limit_per_user=rate_limit_per_user,
+            default_thread_rate_limit_per_user=default_thread_rate_limit_per_user,
+            default_auto_archive_duration=default_auto_archive_duration,
+            available_tags=available_tags,
+            default_reaction_emoji=default_reaction_emoji,
+            default_sort_order=default_sort_order,
+            default_forum_layout=default_forum_layout,
+            flags=flags,
+            e2ee_required=e2ee_required,
             federated_history_policy=federated_history_policy,
             sync_permissions=sync_permissions,
         )
@@ -322,6 +601,9 @@ class Channel:
             raise ValueError(
                 "direct-message channels cannot be deleted through guild management"
             )
+        if self.is_thread:
+            await self.client.delete_thread(self.ref, target=self.target)
+            return
         await self.client.delete_channel(self.guild_ref, self.ref, target=self.target)
 
     async def upload(
@@ -349,6 +631,189 @@ class Channel:
         return await self.client.create_webhook(
             self.guild_ref, self.ref, name, target=self.target
         )
+
+    async def start_thread(
+        self,
+        name: str,
+        *,
+        type: int | None = None,
+        content: str | None = None,
+        e2ee: dict[str, Any] | None = None,
+        attachment_ids: list[int] | None = None,
+        applied_tag_ids: list[int] | None = None,
+        auto_archive_duration: int | None = None,
+        rate_limit_per_user: int | None = None,
+        invitable: bool | None = None,
+        client_nonce: str | None = None,
+    ) -> Channel:
+        """Create a thread or an atomic forum post beneath this channel."""
+
+        return await self.client.start_thread(
+            self.ref,
+            name,
+            target=self.target,
+            type=type,
+            content=content,
+            e2ee=e2ee,
+            attachment_ids=attachment_ids,
+            applied_tag_ids=applied_tag_ids,
+            auto_archive_duration=auto_archive_duration,
+            rate_limit_per_user=rate_limit_per_user,
+            invitable=invitable,
+            client_nonce=client_nonce,
+        )
+
+    async def create_post(
+        self,
+        name: str,
+        content: str | None = None,
+        *,
+        e2ee: dict[str, Any] | None = None,
+        attachment_ids: list[int] | None = None,
+        applied_tag_ids: list[int] | None = None,
+        auto_archive_duration: int | None = None,
+        rate_limit_per_user: int | None = None,
+        client_nonce: str | None = None,
+    ) -> Channel:
+        if not self.is_forum:
+            raise ValueError("forum posts require a forum channel")
+        if content is not None and len(content) > 2000:
+            raise ValueError("forum post content cannot exceed 2000 characters")
+        if not content and not attachment_ids and e2ee is None:
+            raise ValueError("a forum post requires content or an attachment")
+        return await self.start_thread(
+            name,
+            type=11,
+            content=content,
+            e2ee=e2ee,
+            attachment_ids=attachment_ids,
+            applied_tag_ids=applied_tag_ids,
+            auto_archive_duration=auto_archive_duration,
+            rate_limit_per_user=rate_limit_per_user,
+            client_nonce=client_nonce,
+        )
+
+    async def threads(
+        self,
+        *,
+        archived: bool = False,
+        include_archived: bool = False,
+        before: datetime | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        tag_id: int | None = None,
+        tag_ids: list[int] | None = None,
+        query: str | None = None,
+        sort_order: int | None = None,
+    ) -> ThreadPage:
+        return await self.client.fetch_threads(
+            self.ref,
+            target=self.target,
+            archived=archived,
+            include_archived=include_archived,
+            before=before,
+            cursor=cursor,
+            limit=limit,
+            tag_id=tag_id,
+            tag_ids=tag_ids,
+            query=query,
+            sort_order=sort_order,
+        )
+
+    async def join(
+        self, *, flags: int = 0, notification_level: str = "inherit"
+    ) -> None:
+        if not self.is_thread:
+            raise ValueError("only threads can be joined")
+        await self.client.join_thread(
+            self.ref,
+            target=self.target,
+            flags=flags,
+            notification_level=notification_level,
+        )
+
+    async def leave(self) -> None:
+        if not self.is_thread:
+            raise ValueError("only threads can be left")
+        await self.client.leave_thread(self.ref, target=self.target)
+
+    async def add_member(self, user: EntityRef) -> None:
+        if not self.is_thread:
+            raise ValueError("members can only be added to threads")
+        await self.client.add_thread_member(
+            self.ref,
+            user,
+            target=self.target,
+        )
+
+    async def remove_member(self, user: EntityRef) -> None:
+        if not self.is_thread:
+            raise ValueError("members can only be removed from threads")
+        await self.client.remove_thread_member(self.ref, user, target=self.target)
+
+    async def members(
+        self,
+        *,
+        after: EntityRef | None = None,
+        limit: int = 100,
+        with_member: bool = False,
+    ) -> list[ThreadMember]:
+        if not self.is_thread:
+            raise ValueError("only threads have thread members")
+        return await self.client.thread_members(
+            self.ref,
+            target=self.target,
+            after=after,
+            limit=limit,
+            with_member=with_member,
+        )
+
+    async def fetch_member(
+        self, user: EntityRef, *, with_member: bool = False
+    ) -> ThreadMember:
+        if not self.is_thread:
+            raise ValueError("only threads have thread members")
+        return await self.client.fetch_thread_member(
+            self.ref,
+            user,
+            target=self.target,
+            with_member=with_member,
+        )
+
+    async def edit_thread(
+        self,
+        *,
+        name: str | MissingType = MISSING,
+        archived: bool | MissingType = MISSING,
+        locked: bool | MissingType = MISSING,
+        invitable: bool | MissingType = MISSING,
+        auto_archive_duration: int | MissingType = MISSING,
+        rate_limit_per_user: int | MissingType = MISSING,
+        applied_tag_ids: list[int] | MissingType = MISSING,
+        pinned: bool | MissingType = MISSING,
+    ) -> Channel:
+        if not self.is_thread:
+            raise ValueError("thread settings require a thread channel")
+        return await self.client.edit_thread(
+            self.ref,
+            target=self.target,
+            name=name,
+            archived=archived,
+            locked=locked,
+            invitable=invitable,
+            auto_archive_duration=auto_archive_duration,
+            rate_limit_per_user=rate_limit_per_user,
+            applied_tag_ids=applied_tag_ids,
+            pinned=pinned,
+        )
+
+
+@dataclass(slots=True)
+class ThreadPage:
+    threads: list[Channel]
+    members: list[ThreadMember]
+    has_more: bool = False
+    next_cursor: str | None = None
 
 
 @dataclass(slots=True)
@@ -828,19 +1293,27 @@ class Message:
     channel_ref: EntityRef
     author: User | None
     content: str | None
-    created_at: datetime
+    created_at: datetime | None
     attachments: list[Attachment]
+    message_type: int = 0
+    thread: Channel | None = None
     content_unavailable: bool = False
     edited_at: datetime | None = None
     deleted_at: datetime | None = None
     referenced_message_ref: EntityRef | None = None
+    referenced_message: Message | None = None
     flags: int = 0
     pinned_at: datetime | None = None
     bot_installation_id: int | None = None
 
     @classmethod
     def from_payload(
-        cls, client: Client, target: str, payload: dict[str, Any]
+        cls,
+        client: Client,
+        target: str,
+        payload: dict[str, Any],
+        *,
+        _reference_depth: int = 0,
     ) -> Message:
         channel = payload.get("channel") or {}
         author = payload.get("author")
@@ -850,6 +1323,25 @@ class Message:
             raise ValueError(
                 "message payload is missing its composite channel reference"
             )
+        message_reference = payload.get("message_reference")
+        referenced_message_ref = _optional_ref(
+            payload, "referenced_message_id", "referenced_message_domain"
+        )
+        if referenced_message_ref is None and isinstance(message_reference, dict):
+            referenced_message_ref = _optional_ref(
+                message_reference, "message_id", "message_domain"
+            )
+        raw_referenced_message = payload.get("referenced_message")
+        referenced_message = (
+            cls.from_payload(
+                client,
+                target,
+                raw_referenced_message,
+                _reference_depth=_reference_depth + 1,
+            )
+            if _reference_depth == 0 and isinstance(raw_referenced_message, dict)
+            else None
+        )
         return cls(
             client=client,
             target=target,
@@ -859,18 +1351,26 @@ class Message:
             content=(
                 str(payload["content"]) if payload.get("content") is not None else None
             ),
-            created_at=datetime.fromisoformat(str(payload["created_at"])),
+            created_at=_datetime(payload.get("created_at")),
             attachments=[
                 Attachment.from_payload(client, target, item)
                 for item in payload.get("attachments") or []
                 if isinstance(item, dict)
             ],
+            message_type=int(payload.get("message_type", 0)),
+            thread=(
+                Channel.from_payload(client, target, payload["thread"])
+                if isinstance(payload.get("thread"), dict)
+                else None
+            ),
             content_unavailable=bool(payload.get("content_unavailable", False)),
             edited_at=_datetime(payload.get("edited_at")),
             deleted_at=_datetime(payload.get("deleted_at")),
-            referenced_message_ref=_optional_ref(
-                payload, "referenced_message_id", "referenced_message_domain"
+            referenced_message_ref=(
+                referenced_message_ref
+                or (referenced_message.ref if referenced_message is not None else None)
             ),
+            referenced_message=referenced_message,
             flags=int(payload.get("flags", 0)),
             pinned_at=_datetime(payload.get("pinned_at")),
             bot_installation_id=(
@@ -919,6 +1419,22 @@ class Message:
 
     async def unpin(self) -> None:
         await self.client.unpin_message(self.channel_ref, self.ref, target=self.target)
+
+    async def start_thread(
+        self,
+        name: str,
+        *,
+        auto_archive_duration: int | None = None,
+        rate_limit_per_user: int | None = None,
+    ) -> Channel:
+        return await self.client.start_thread_from_message(
+            self.channel_ref,
+            self.ref,
+            name,
+            target=self.target,
+            auto_archive_duration=auto_archive_duration,
+            rate_limit_per_user=rate_limit_per_user,
+        )
 
 
 @dataclass(slots=True)
@@ -1026,6 +1542,40 @@ class ChannelDeleteEvent:
     target: str
     channel_ref: EntityRef
     guild_ref: EntityRef | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadDeleteEvent:
+    target: str
+    thread_ref: EntityRef
+    guild_ref: EntityRef
+    parent_ref: EntityRef
+    type: int
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadListSyncEvent:
+    target: str
+    guild_ref: EntityRef
+    channel_refs: tuple[EntityRef, ...] | None
+    threads: tuple[Channel, ...]
+    members: tuple[ThreadMember, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadMemberUpdateEvent:
+    target: str
+    member: ThreadMember
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadMembersUpdateEvent:
+    target: str
+    thread_ref: EntityRef
+    guild_ref: EntityRef
+    member_count: int
+    added_members: tuple[ThreadMember, ...]
+    removed_member_refs: tuple[EntityRef, ...]
 
 
 @dataclass(frozen=True, slots=True)

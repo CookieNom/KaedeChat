@@ -104,6 +104,36 @@ export class ChatEntityStore {
     this.users.upsertMany(channels.flatMap((channel) => channel.recipients ?? []));
   }
 
+  upsertGuildChannel(channel: Channel): void {
+    this.channels.upsert(channel, { append: channel.guild_id !== null });
+    if (!channel.guild_id || !channel.guild_domain) return;
+    this.guilds.update(`${channel.guild_id}@${channel.guild_domain}`, (guild) => ({
+      ...guild,
+      channels: (guild.channels ?? []).some((item) => entityKey(item) === entityKey(channel))
+        ? (guild.channels ?? []).map((item) =>
+            entityKey(item) === entityKey(channel) ? { ...item, ...channel } : item
+          )
+        : [...(guild.channels ?? []), channel]
+    }));
+  }
+
+  removeChannel(channel: Pick<Channel, 'id' | 'origin_domain'>): void {
+    const key = entityKey(channel);
+    this.channels.remove(key);
+    this.messages.replaceWhere(
+      [],
+      (message) =>
+        message.channel_id === channel.id && message.channel_domain === channel.origin_domain
+    );
+    this.readStates.remove(key);
+    this.guilds.replace(
+      this.guilds.values.map((guild) => ({
+        ...guild,
+        channels: (guild.channels ?? []).filter((item) => entityKey(item) !== key)
+      }))
+    );
+  }
+
   ingestCurrentUser(user: UserSummary): void {
     this.currentUser = user;
     this.users.upsert(user);

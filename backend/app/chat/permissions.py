@@ -16,7 +16,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.moderation_status import sanitize_timeout_reason
 from app.core.permissions import ALL_PERMISSIONS, Permission
-from app.db.models import Channel, ChannelOverwrite, Guild, GuildMember, MemberRole, Role, User
+from app.db.models import (
+    Channel,
+    ChannelOverwrite,
+    Guild,
+    GuildMember,
+    MemberRole,
+    Role,
+    ThreadMember,
+    User,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +42,9 @@ TEXT_DEPENDENT = int(
     | Permission.EMBED_LINKS
     | Permission.ATTACH_FILES
     | Permission.MENTION_EVERYONE
+)
+THREAD_TEXT_DEPENDENT = int(
+    Permission.EMBED_LINKS | Permission.ATTACH_FILES | Permission.MENTION_EVERYONE
 )
 VOICE_DEPENDENT = int(
     Permission.SPEAK | Permission.STREAM | Permission.USE_VAD | Permission.MOVE_MEMBERS
@@ -100,8 +112,10 @@ def resolve_permissions(
 
     if not permissions & Permission.VIEW_CHANNEL:
         return 0
-    if channel_type in {0, 5} and not permissions & Permission.SEND_MESSAGES:
+    if channel_type in {0, 5, 15} and not permissions & Permission.SEND_MESSAGES:
         permissions &= ~TEXT_DEPENDENT
+    if channel_type in {10, 11, 12} and not permissions & Permission.SEND_MESSAGES_IN_THREADS:
+        permissions &= ~THREAD_TEXT_DEPENDENT
     if channel_type == 2 and not permissions & Permission.CONNECT:
         permissions &= ~VOICE_DEPENDENT
     if timed_out:
@@ -149,16 +163,28 @@ async def calculate_permissions(
     overwrites: list[PermissionOverwrite] = []
     if channel is not None:
         overwrite_channel = channel
-        if channel.parent_id is not None and channel.permissions_synced:
+        if channel.type in {10, 11, 12}:
             parent = await session.get(Channel, (channel.parent_id, channel.parent_domain))
             if (
                 parent is None
-                or parent.type != 4
+                or parent.type not in {0, 5, 15}
                 or (
                     parent.guild_id,
                     parent.guild_domain,
                 )
                 != (guild.id, guild.origin_domain)
+            ):
+                raise HTTPException(status_code=409, detail={"code": "CHANNEL_PARENT_INVALID"})
+            overwrite_channel = parent
+        if overwrite_channel.parent_id is not None and overwrite_channel.permissions_synced:
+            parent = await session.get(
+                Channel,
+                (overwrite_channel.parent_id, overwrite_channel.parent_domain),
+            )
+            if (
+                parent is None
+                or parent.type != 4
+                or (parent.guild_id, parent.guild_domain) != (guild.id, guild.origin_domain)
             ):
                 raise HTTPException(status_code=409, detail={"code": "CHANNEL_PARENT_INVALID"})
             overwrite_channel = parent
@@ -181,21 +207,26 @@ async def calculate_permissions(
     timed_out = member.timeout_indefinite or (
         member.timeout_until is not None and member.timeout_until > datetime.now(UTC)
     )
-    return (
-        resolve_permissions(
-            owner=guild.owner_id == actor.id and guild.owner_domain == actor.origin_domain,
-            user_id=actor.id,
-            user_domain=actor.origin_domain,
-            everyone_role_id=guild.id,
-            everyone_role_domain=guild.origin_domain,
-            role_ids=role_ids,
-            base_permissions=reduce(bit_or, (role.permissions for role in roles), 0),
-            overwrites=overwrites,
-            channel_type=channel.type if channel else None,
-            timed_out=timed_out,
-        ),
-        member,
+    permissions = resolve_permissions(
+        owner=guild.owner_id == actor.id and guild.owner_domain == actor.origin_domain,
+        user_id=actor.id,
+        user_domain=actor.origin_domain,
+        everyone_role_id=guild.id,
+        everyone_role_domain=guild.origin_domain,
+        role_ids=role_ids,
+        base_permissions=reduce(bit_or, (role.permissions for role in roles), 0),
+        overwrites=overwrites,
+        channel_type=channel.type if channel else None,
+        timed_out=timed_out,
     )
+    if channel is not None and channel.type == 12 and not (permissions & Permission.MANAGE_THREADS):
+        thread_member = await session.get(
+            ThreadMember,
+            (channel.id, channel.origin_domain, actor.id, actor.origin_domain),
+        )
+        if thread_member is None:
+            permissions = 0
+    return permissions, member
 
 
 async def get_permissions(

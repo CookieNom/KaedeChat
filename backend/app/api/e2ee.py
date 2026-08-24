@@ -1483,14 +1483,30 @@ async def require_room_policy_authority(
     if access.guild is not None:
         if access.guild.origin_domain != settings.domain and not allow_remote_authority:
             raise HTTPException(status_code=409, detail={"code": "E2EE_AUTHORITY_REMOTE"})
-        await require_permissions(
-            session,
-            redis,
-            access.guild,
-            actor,
-            Permission.MANAGE_CHANNELS,
-            channel=access.channel,
-        )
+        if access.channel.type in {10, 11, 12}:
+            permissions = await require_permissions(
+                session,
+                redis,
+                access.guild,
+                actor,
+                Permission.VIEW_CHANNEL,
+                channel=access.channel,
+            )
+            owner = (access.channel.owner_id, access.channel.owner_domain) == (
+                actor.id,
+                actor.origin_domain,
+            )
+            if not owner and not permissions & Permission.MANAGE_THREADS:
+                raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
+        else:
+            await require_permissions(
+                session,
+                redis,
+                access.guild,
+                actor,
+                Permission.MANAGE_CHANNELS,
+                channel=access.channel,
+            )
         return None
     conversation = await session.get(
         DMConversation,
@@ -1800,6 +1816,7 @@ async def room_participants(
             .where(
                 GuildMember.guild_id == access.guild.id,
                 GuildMember.guild_domain == access.guild.origin_domain,
+                User.account_type != "bot",
             )
             .order_by(User.origin_domain, User.id)
             .limit(MAX_ROOM_E2EE_MEMBERS + 1)
@@ -2252,7 +2269,7 @@ async def _propose_room_operation(
     if auth.user.origin_domain == settings.domain:
         await require_active_sender_device(session, auth.user, payload.sender_device_id)
     channel = access.channel
-    if channel.type not in {0, 1, 2, 5}:
+    if channel.type not in {0, 1, 2, 5, 10, 11, 12}:
         raise HTTPException(status_code=400, detail={"code": "NOT_TEXT_CHANNEL"})
     request_digest = _operation_request_digest(kind, channel, auth.user, payload)
     operation = await session.scalar(
@@ -2290,9 +2307,10 @@ async def _propose_room_operation(
                 "failed",
             }
         else:
-            valid_context = (
-                channel.encryption_mode == "e2ee" and channel.encryption_state == "active"
-            )
+            valid_context = channel.encryption_mode == "e2ee" and channel.encryption_state in {
+                "active",
+                "rekeying",
+            }
         if not valid_context:
             raise HTTPException(
                 status_code=409,
@@ -2595,7 +2613,7 @@ async def _commit_room_operation(
     else:
         valid_context = (
             channel.encryption_mode == "e2ee"
-            and channel.encryption_state == "active"
+            and channel.encryption_state in {"active", "rekeying"}
             and channel.encryption_policy_generation == operation.base_policy_generation
         )
     if not valid_context:

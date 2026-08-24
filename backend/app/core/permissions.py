@@ -31,8 +31,18 @@ class Permission(IntFlag):
     MANAGE_WEBHOOKS = 1 << 29
     MANAGE_EMOJIS = 1 << 30
     STREAM = 1 << 31
+    # Discord uses bit 31 for this permission, but Kaede already published
+    # STREAM at that bit. Preserve existing stored masks and use the next free
+    # stable bit instead of silently changing either permission.
+    USE_APPLICATION_COMMANDS = 1 << 32
+    MANAGE_THREADS = 1 << 34
+    CREATE_PUBLIC_THREADS = 1 << 35
+    CREATE_PRIVATE_THREADS = 1 << 36
+    SEND_MESSAGES_IN_THREADS = 1 << 38
     MODERATE_MEMBERS = 1 << 40
     BAN_INSTANCES = 1 << 41
+    PIN_MESSAGES = 1 << 51
+    BYPASS_SLOWMODE = 1 << 52
 
 
 ALL_PERMISSIONS = sum(permission.value for permission in Permission)
@@ -127,7 +137,7 @@ PERMISSION_METADATA = (
         "Add reactions to messages.",
         "Text",
         ("channel",),
-        channel_types=(0, 5),
+        channel_types=(0, 5, 10, 11, 12, 15),
         dependencies=(Permission.VIEW_CHANNEL, Permission.READ_MESSAGE_HISTORY),
     ),
     _permission(
@@ -144,24 +154,24 @@ PERMISSION_METADATA = (
         "See a channel and its live activity.",
         "General",
         ("channel",),
-        channel_types=(0, 2, 4, 5),
+        channel_types=(0, 2, 4, 5, 10, 11, 12, 15),
     ),
     _permission(
         Permission.SEND_MESSAGES,
         "Send messages",
-        "Send messages in text and announcement channels.",
+        "Send messages in channels and create posts in forum channels.",
         "Text",
         ("channel",),
-        channel_types=(0, 5),
+        channel_types=(0, 5, 15),
         dependencies=(Permission.VIEW_CHANNEL,),
     ),
     _permission(
         Permission.MANAGE_MESSAGES,
         "Manage messages",
-        "Delete, pin, and moderate other members' messages.",
+        "Delete and moderate other members' messages.",
         "Text",
         ("channel",),
-        channel_types=(0, 5),
+        channel_types=(0, 5, 10, 11, 12, 15),
         dependencies=(Permission.VIEW_CHANNEL, Permission.READ_MESSAGE_HISTORY),
         danger="elevated",
     ),
@@ -171,8 +181,8 @@ PERMISSION_METADATA = (
         "Expand links into rich previews.",
         "Text",
         ("channel",),
-        channel_types=(0, 5),
-        dependencies=(Permission.SEND_MESSAGES,),
+        channel_types=(0, 5, 10, 11, 12, 15),
+        dependencies=(Permission.VIEW_CHANNEL,),
     ),
     _permission(
         Permission.ATTACH_FILES,
@@ -180,8 +190,8 @@ PERMISSION_METADATA = (
         "Upload and attach files to messages.",
         "Text",
         ("channel",),
-        channel_types=(0, 5),
-        dependencies=(Permission.SEND_MESSAGES,),
+        channel_types=(0, 5, 10, 11, 12, 15),
+        dependencies=(Permission.VIEW_CHANNEL,),
     ),
     _permission(
         Permission.READ_MESSAGE_HISTORY,
@@ -189,7 +199,7 @@ PERMISSION_METADATA = (
         "Read retained messages and receive permitted federated history.",
         "Text",
         ("channel",),
-        channel_types=(0, 5),
+        channel_types=(0, 5, 10, 11, 12, 15),
         dependencies=(Permission.VIEW_CHANNEL,),
     ),
     _permission(
@@ -198,8 +208,8 @@ PERMISSION_METADATA = (
         "Notify broad guild or role audiences.",
         "Text",
         ("channel",),
-        channel_types=(0, 5),
-        dependencies=(Permission.SEND_MESSAGES,),
+        channel_types=(0, 5, 10, 11, 12, 15),
+        dependencies=(Permission.VIEW_CHANNEL,),
         danger="elevated",
     ),
     _permission(
@@ -208,8 +218,8 @@ PERMISSION_METADATA = (
         "Use emoji originating outside this guild.",
         "Text",
         ("channel",),
-        channel_types=(0, 5),
-        dependencies=(Permission.SEND_MESSAGES,),
+        channel_types=(0, 5, 10, 11, 12, 15),
+        dependencies=(Permission.VIEW_CHANNEL,),
     ),
     _permission(
         Permission.CONNECT,
@@ -297,7 +307,7 @@ PERMISSION_METADATA = (
         "Create, edit, rotate, and revoke channel webhooks.",
         "Management",
         ("guild", "channel"),
-        channel_types=(0, 5),
+        channel_types=(0, 5, 15),
         danger="critical",
     ),
     _permission(
@@ -318,6 +328,52 @@ PERMISSION_METADATA = (
         dependencies=(Permission.CONNECT,),
     ),
     _permission(
+        Permission.USE_APPLICATION_COMMANDS,
+        "Use application commands",
+        "Use slash commands and context menu commands from applications.",
+        "Applications",
+        ("channel",),
+        channel_types=(0, 2, 5, 10, 11, 12, 15),
+        dependencies=(Permission.VIEW_CHANNEL,),
+    ),
+    _permission(
+        Permission.MANAGE_THREADS,
+        "Manage threads and posts",
+        "Rename, archive, lock, delete, and view private threads and forum posts.",
+        "Thread management",
+        ("guild", "channel"),
+        channel_types=(0, 5, 10, 11, 12, 15),
+        dependencies=(Permission.VIEW_CHANNEL,),
+        danger="elevated",
+    ),
+    _permission(
+        Permission.CREATE_PUBLIC_THREADS,
+        "Create public threads",
+        "Create public and announcement threads.",
+        "Threads",
+        ("channel",),
+        channel_types=(0, 5),
+        dependencies=(Permission.VIEW_CHANNEL,),
+    ),
+    _permission(
+        Permission.CREATE_PRIVATE_THREADS,
+        "Create private threads",
+        "Create private threads.",
+        "Threads",
+        ("channel",),
+        channel_types=(0,),
+        dependencies=(Permission.VIEW_CHANNEL,),
+    ),
+    _permission(
+        Permission.SEND_MESSAGES_IN_THREADS,
+        "Send messages in threads",
+        "Send messages in public, private, announcement, and forum-post threads.",
+        "Threads",
+        ("channel",),
+        channel_types=(0, 5, 10, 11, 12, 15),
+        dependencies=(Permission.VIEW_CHANNEL,),
+    ),
+    _permission(
         Permission.MODERATE_MEMBERS,
         "Timeout members",
         "Temporarily or indefinitely restrict lower-ranked members.",
@@ -332,6 +388,26 @@ PERMISSION_METADATA = (
         "Federation",
         ("guild",),
         danger="critical",
+    ),
+    _permission(
+        Permission.PIN_MESSAGES,
+        "Pin messages",
+        "Pin and unpin messages in text channels and threads.",
+        "Text moderation",
+        ("channel",),
+        channel_types=(0, 5, 10, 11, 12, 15),
+        dependencies=(Permission.VIEW_CHANNEL, Permission.READ_MESSAGE_HISTORY),
+        danger="elevated",
+    ),
+    _permission(
+        Permission.BYPASS_SLOWMODE,
+        "Bypass slowmode",
+        "Send messages and create posts without waiting for slowmode.",
+        "Text",
+        ("channel",),
+        channel_types=(0, 5, 10, 11, 12, 15),
+        dependencies=(Permission.VIEW_CHANNEL,),
+        danger="elevated",
     ),
 )
 

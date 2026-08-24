@@ -1312,7 +1312,7 @@ class Role(Base, FederatedIdMixin, TimestampMixin):
         CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
         CheckConstraint("position >= 0", name="nonnegative_position"),
         CheckConstraint("permissions >= 0", name="nonnegative_permissions"),
-        CheckConstraint("(permissions & ~3302829321471) = 0", name="known_permission_mask"),
+        CheckConstraint("(permissions & ~6759101702335743) = 0", name="known_permission_mask"),
         CheckConstraint("color BETWEEN 0 AND 16777215", name="color_range"),
         Index("ix_roles_guild_position", "guild_id", "guild_domain", "position"),
     )
@@ -1355,7 +1355,9 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
     type: Mapped[int] = mapped_column(Integer, nullable=False)
     unavailable: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
     name: Mapped[str | None] = mapped_column(String(100))
-    topic: Mapped[str | None] = mapped_column(String(1024))
+    # Forum guidelines may use Discord's 4096-character limit. API schemas
+    # retain the 1024-character limit for channel types that do not support it.
+    topic: Mapped[str | None] = mapped_column(String(4096))
     position: Mapped[int] = mapped_column(Integer, server_default="0")
     parent_id: Mapped[int | None] = mapped_column(BigInteger)
     parent_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
@@ -1363,6 +1365,32 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
         Boolean, server_default=false(), nullable=False
     )
     rate_limit_per_user: Mapped[int] = mapped_column(Integer, server_default="0")
+    flags: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    owner_id: Mapped[int | None] = mapped_column(BigInteger)
+    owner_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    archived: Mapped[bool | None] = mapped_column(Boolean)
+    locked: Mapped[bool | None] = mapped_column(Boolean)
+    invitable: Mapped[bool | None] = mapped_column(Boolean)
+    auto_archive_duration: Mapped[int | None] = mapped_column(Integer)
+    archive_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    message_count: Mapped[int | None] = mapped_column(Integer)
+    total_message_sent: Mapped[int | None] = mapped_column(Integer)
+    member_count: Mapped[int | None] = mapped_column(Integer)
+    starter_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    starter_message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    default_auto_archive_duration: Mapped[int | None] = mapped_column(Integer)
+    default_thread_rate_limit_per_user: Mapped[int | None] = mapped_column(Integer)
+    available_tags: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default="[]", nullable=False
+    )
+    applied_tag_ids: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default="[]", nullable=False
+    )
+    default_reaction_emoji: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    default_sort_order: Mapped[int | None] = mapped_column(SmallInteger)
+    default_forum_layout: Mapped[int | None] = mapped_column(SmallInteger)
+    e2ee_required: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
     federated_history_policy: Mapped[str] = mapped_column(
         String(16), server_default="inherit", nullable=False
     )
@@ -1386,6 +1414,8 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
     encryption_activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_message_id: Mapped[int | None] = mapped_column(BigInteger)
     last_message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    last_thread_id: Mapped[int | None] = mapped_column(BigInteger)
+    last_thread_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
     created_floor_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     dm_conversation_id: Mapped[int | None] = mapped_column(
         BigInteger,
@@ -1437,6 +1467,18 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
             use_alter=True,
         ),
         ForeignKeyConstraint(
+            ["last_thread_id", "last_thread_domain", "guild_id", "guild_domain"],
+            [
+                "channels.id",
+                "channels.origin_domain",
+                "channels.guild_id",
+                "channels.guild_domain",
+            ],
+            name="fk_channels_last_thread_ref_guild",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
             ["dm_conversation_id", "dm_conversation_domain"],
             ["dm_conversations.id", "dm_conversations.origin_domain"],
             name="fk_channels_dm_conversation_identity",
@@ -1445,7 +1487,7 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
             initially="DEFERRED",
             use_alter=True,
         ),
-        CheckConstraint("type IN (0,1,2,4,5)", name="channel_type"),
+        CheckConstraint("type IN (0,1,2,4,5,10,11,12,15)", name="channel_type"),
         CheckConstraint(
             "encryption_mode IN ('plaintext','e2ee')",
             name="channel_encryption_mode_value",
@@ -1483,6 +1525,11 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
         CheckConstraint(
             "(parent_id IS NULL) = (parent_domain IS NULL)", name="parent_ref_complete"
         ),
+        CheckConstraint("(owner_id IS NULL) = (owner_domain IS NULL)", name="owner_ref_complete"),
+        CheckConstraint(
+            "(starter_message_id IS NULL) = (starter_message_domain IS NULL)",
+            name="starter_message_ref_complete",
+        ),
         CheckConstraint("parent_id IS NULL OR guild_id IS NOT NULL", name="parent_requires_guild"),
         CheckConstraint("(type = 1) = (guild_id IS NULL)", name="dm_type_matches_guild"),
         CheckConstraint(
@@ -1496,7 +1543,102 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
             "NOT permissions_synced OR (parent_id IS NOT NULL AND type <> 4)",
             name="permission_sync_requires_parent",
         ),
+        CheckConstraint(
+            "type NOT IN (10,11,12) OR unavailable OR "
+            "(parent_id IS NOT NULL AND NOT permissions_synced)",
+            name="thread_requires_unsynced_parent",
+        ),
+        CheckConstraint(
+            "(type IN (10,11,12) AND owner_id IS NOT NULL AND archived IS NOT NULL "
+            "AND locked IS NOT NULL AND auto_archive_duration IS NOT NULL "
+            "AND archive_timestamp IS NOT NULL AND last_activity_at IS NOT NULL "
+            "AND message_count IS NOT NULL "
+            "AND total_message_sent IS NOT NULL "
+            "AND member_count IS NOT NULL) OR "
+            "(type NOT IN (10,11,12) AND owner_id IS NULL AND archived IS NULL "
+            "AND locked IS NULL AND auto_archive_duration IS NULL "
+            "AND archive_timestamp IS NULL AND last_activity_at IS NULL "
+            "AND message_count IS NULL "
+            "AND total_message_sent IS NULL "
+            "AND member_count IS NULL)",
+            name="thread_metadata_context",
+        ),
+        CheckConstraint(
+            "(type = 12 AND invitable IS NOT NULL) OR (type <> 12 AND invitable IS NULL)",
+            name="private_thread_invitable_context",
+        ),
+        CheckConstraint(
+            "auto_archive_duration IS NULL OR auto_archive_duration IN (60,1440,4320,10080)",
+            name="auto_archive_duration_value",
+        ),
+        CheckConstraint(
+            "message_count IS NULL OR message_count >= 0",
+            name="nonnegative_message_count",
+        ),
+        CheckConstraint(
+            "total_message_sent IS NULL OR total_message_sent >= 0",
+            name="nonnegative_total_message_sent",
+        ),
+        CheckConstraint(
+            "member_count IS NULL OR member_count >= 0",
+            name="nonnegative_member_count",
+        ),
+        CheckConstraint(
+            "(type = 15 AND default_auto_archive_duration IS NOT NULL "
+            "AND default_thread_rate_limit_per_user IS NOT NULL "
+            "AND default_forum_layout IS NOT NULL) OR "
+            "(type <> 15 AND default_reaction_emoji IS NULL AND default_sort_order IS NULL "
+            "AND default_forum_layout IS NULL AND available_tags = '[]'::jsonb)",
+            name="forum_metadata_context",
+        ),
+        CheckConstraint(
+            "type IN (0,5,15) OR default_auto_archive_duration IS NULL",
+            name="default_auto_archive_duration_context",
+        ),
+        CheckConstraint(
+            "type IN (0,15) OR default_thread_rate_limit_per_user IS NULL",
+            name="default_thread_rate_context",
+        ),
+        CheckConstraint(
+            "default_auto_archive_duration IS NULL OR "
+            "default_auto_archive_duration IN (60,1440,4320,10080)",
+            name="default_auto_archive_duration_value",
+        ),
+        CheckConstraint(
+            "default_thread_rate_limit_per_user IS NULL OR "
+            "default_thread_rate_limit_per_user BETWEEN 0 AND 21600",
+            name="default_thread_rate_limit_range",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(available_tags) = 'array' AND jsonb_array_length(available_tags) <= 20",
+            name="available_tags_value",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(applied_tag_ids) = 'array' AND jsonb_array_length(applied_tag_ids) <= 5",
+            name="applied_tag_ids_value",
+        ),
+        CheckConstraint(
+            "type IN (10,11,12) OR applied_tag_ids = '[]'::jsonb",
+            name="applied_tags_thread_only",
+        ),
+        CheckConstraint(
+            "default_reaction_emoji IS NULL OR jsonb_typeof(default_reaction_emoji) = 'object'",
+            name="default_reaction_emoji_object",
+        ),
+        CheckConstraint(
+            "default_sort_order IS NULL OR default_sort_order IN (0,1)",
+            name="default_sort_order_value",
+        ),
+        CheckConstraint(
+            "default_forum_layout IS NULL OR default_forum_layout IN (0,1,2)",
+            name="default_forum_layout_value",
+        ),
+        CheckConstraint(
+            "type IN (10,11,12,15) OR NOT e2ee_required",
+            name="e2ee_required_context",
+        ),
         CheckConstraint("position >= 0", name="nonnegative_position"),
+        CheckConstraint("flags >= 0", name="nonnegative_flags"),
         CheckConstraint("rate_limit_per_user BETWEEN 0 AND 21600", name="rate_limit_range"),
         CheckConstraint(
             "federated_history_policy IN ('inherit','disabled','full_retained')",
@@ -1507,7 +1649,91 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
             "(last_message_id IS NULL) = (last_message_domain IS NULL)",
             name="last_message_ref_complete",
         ),
+        CheckConstraint(
+            "(last_thread_id IS NULL) = (last_thread_domain IS NULL)",
+            name="last_thread_ref_complete",
+        ),
+        CheckConstraint(
+            "type = 15 OR last_thread_id IS NULL",
+            name="last_thread_forum_only",
+        ),
         Index("ix_channels_guild_position", "guild_id", "guild_domain", "position"),
+        Index(
+            "ix_channels_parent_activity",
+            "parent_id",
+            "parent_domain",
+            "archived",
+            "last_activity_at",
+            postgresql_where=text("type IN (10,11,12)"),
+        ),
+        Index(
+            "ix_channels_thread_archive_due",
+            "last_activity_at",
+            postgresql_where=text("type IN (10,11,12) AND NOT archived"),
+        ),
+        Index(
+            "ix_channels_parent_archive",
+            "parent_id",
+            "parent_domain",
+            "archived",
+            "archive_timestamp",
+            postgresql_where=text("type IN (10,11,12)"),
+        ),
+        Index(
+            "uq_channels_thread_starter_message",
+            "starter_message_id",
+            "starter_message_domain",
+            unique=True,
+            postgresql_where=text("type IN (10,11,12) AND starter_message_id IS NOT NULL"),
+        ),
+    )
+
+
+class ThreadMember(Base):
+    __tablename__ = "thread_members"
+    thread_id: Mapped[int] = mapped_column(BigInteger)
+    thread_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    flags: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    notification_level: Mapped[str] = mapped_column(
+        String(16), server_default="inherit", nullable=False
+    )
+    __table_args__ = (
+        PrimaryKeyConstraint("thread_id", "thread_domain", "user_id", "user_domain"),
+        ForeignKeyConstraint(
+            ["thread_id", "thread_domain", "guild_id", "guild_domain"],
+            [
+                "channels.id",
+                "channels.origin_domain",
+                "channels.guild_id",
+                "channels.guild_domain",
+            ],
+            name="fk_thread_members_thread_ref_guild",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain", "user_id", "user_domain"],
+            [
+                "guild_members.guild_id",
+                "guild_members.guild_domain",
+                "guild_members.user_id",
+                "guild_members.user_domain",
+            ],
+            name="fk_thread_members_guild_member",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("flags >= 0", name="nonnegative_flags"),
+        CheckConstraint(
+            "notification_level IN ('inherit','all','mentions','none')",
+            name="notification_level_value",
+        ),
+        Index("ix_thread_members_user", "user_id", "user_domain", "thread_id"),
     )
 
 
@@ -1583,7 +1809,7 @@ class ChannelOverwrite(Base):
         CheckConstraint("target_type IN ('role','member')", name="target_type"),
         CheckConstraint("allow >= 0 AND deny >= 0", name="nonnegative_masks"),
         CheckConstraint("(allow & deny) = 0", name="disjoint_masks"),
-        CheckConstraint("((allow | deny) & ~3302829321471) = 0", name="known_permission_masks"),
+        CheckConstraint("((allow | deny) & ~6759101702335743) = 0", name="known_permission_masks"),
     )
 
 

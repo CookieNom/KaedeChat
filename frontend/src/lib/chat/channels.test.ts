@@ -109,6 +109,13 @@ describe('channel grouping and reordering', () => {
     const child = channel('11', 1, 0, category);
     expect(firstNavigableChannel([category, child])).toBe(child);
   });
+
+  it('keeps thread resources out of ordinary category and reorder presentation', () => {
+    const parent = channel('10', 0);
+    const thread = channel('11', 1, 11, parent);
+    expect(flattenIds(groupChannels([parent, thread]))).toEqual(['10']);
+    expect(firstNavigableChannel([thread, parent])).toBe(parent);
+  });
 });
 
 function flattenIds(groups: ReturnType<typeof groupChannels>): string[] {

@@ -34,3 +34,44 @@ def test_federated_instance_bans_use_a_dedicated_critical_permission() -> None:
     )
     assert metadata.resource_scopes == ("guild",)
     assert metadata.danger == "critical"
+
+
+def test_thread_and_forum_permission_bits_are_stable() -> None:
+    assert Permission.USE_APPLICATION_COMMANDS == 1 << 32
+    assert Permission.MANAGE_THREADS == 1 << 34
+    assert Permission.CREATE_PUBLIC_THREADS == 1 << 35
+    assert Permission.CREATE_PRIVATE_THREADS == 1 << 36
+    assert Permission.SEND_MESSAGES_IN_THREADS == 1 << 38
+    assert Permission.PIN_MESSAGES == 1 << 51
+    assert Permission.BYPASS_SLOWMODE == 1 << 52
+    # Existing persisted assignments must never move to make room for parity.
+    assert Permission.STREAM == 1 << 31
+    assert Permission.BAN_INSTANCES == 1 << 41
+
+
+def test_thread_operations_use_their_dedicated_permissions() -> None:
+    assert required_permissions("forum.post.create") == (
+        Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES
+    )
+    assert required_permissions("thread.create.public") == (
+        Permission.VIEW_CHANNEL | Permission.CREATE_PUBLIC_THREADS
+    )
+    assert required_permissions("thread.create.private") == (
+        Permission.VIEW_CHANNEL | Permission.CREATE_PRIVATE_THREADS
+    )
+    assert required_permissions("thread.message.create") == (
+        Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES_IN_THREADS
+    )
+    assert required_permissions("thread.update.other") == (
+        Permission.VIEW_CHANNEL | Permission.MANAGE_THREADS
+    )
+    assert required_permissions("thread.member.join") == Permission.VIEW_CHANNEL
+    assert required_permissions("thread.member.add") == (
+        Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES_IN_THREADS
+    )
+    assert required_permissions("pin.update") == (
+        Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY | Permission.PIN_MESSAGES
+    )
+    assert required_permissions("application.command.use") == (
+        Permission.VIEW_CHANNEL | Permission.USE_APPLICATION_COMMANDS
+    )

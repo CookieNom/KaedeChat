@@ -1,6 +1,42 @@
 import { entityKey } from './refs';
 import type { Message } from './types';
 
+export interface MessageReferenceTarget {
+  id: string;
+  origin_domain: string;
+  channel_id: string | null;
+  channel_domain: string | null;
+}
+
+export function messageReferenceTarget(message: Message): MessageReferenceTarget | null {
+  const reference = message.message_reference;
+  const resolved = message.referenced_message;
+  const id = message.referenced_message_id ?? reference?.message_id ?? resolved?.id;
+  const originDomain =
+    message.referenced_message_domain ?? reference?.message_domain ?? resolved?.origin_domain;
+  if (!id || !originDomain) return null;
+  return {
+    id,
+    origin_domain: originDomain,
+    channel_id: reference?.channel_id ?? resolved?.channel_id ?? null,
+    channel_domain: reference?.channel_domain ?? resolved?.channel_domain ?? null
+  };
+}
+
+export function resolvedReferencedMessage(
+  message: Message,
+  candidates: readonly Message[]
+): Message | null {
+  if (message.referenced_message) return message.referenced_message;
+  const target = messageReferenceTarget(message);
+  if (!target) return null;
+  return (
+    candidates.find(
+      (candidate) => candidate.id === target.id && candidate.origin_domain === target.origin_domain
+    ) ?? null
+  );
+}
+
 export interface MessageDeliveryUpdate {
   message_id: string;
   message_domain: string;

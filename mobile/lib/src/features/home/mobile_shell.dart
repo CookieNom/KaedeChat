@@ -12,9 +12,12 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/role_colors.dart';
+import 'package:kaede_mobile/src/domain/thread_permissions.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/disclosures.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
+import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
+import 'package:kaede_mobile/src/features/chat/forum_channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/message_search_screen.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
@@ -29,7 +32,8 @@ import 'package:uuid/uuid.dart';
 String conversationHeaderTitle(KaedeChannel channel) {
   if (channel.guildRef != null) {
     final name = channel.name?.trim();
-    return '#${name?.isNotEmpty == true ? name : 'channel'}';
+    final display = name?.isNotEmpty == true ? name! : 'channel';
+    return channel.isThread || channel.isForum ? display : '#$display';
   }
   if (channel.conversationType == 'group' &&
       channel.name?.trim().isNotEmpty == true) {
@@ -48,7 +52,8 @@ String conversationHeaderTitle(KaedeChannel channel) {
 bool supportsPinnedMessages(KaedeChannel channel) =>
     channel.type == ChannelType.dm ||
     channel.type == ChannelType.text ||
-    channel.type == ChannelType.announcement;
+    channel.type == ChannelType.announcement ||
+    channel.isThread;
 
 bool conversationCallUsesOverflow(double width) => width <= 360;
 
@@ -543,6 +548,7 @@ final class _ConversationScreenState
     extends ConsumerState<_ConversationScreen> {
   Map<String, Object?>? _activeCall;
   var _callBusy = false;
+  var _threadBusy = false;
   String? _disclosureInFlight;
 
   bool get _isGroup => widget.channel.conversationType == 'group';
@@ -738,6 +744,48 @@ final class _ConversationScreenState
         builder: (_) => _PinnedMessagesSheet(channel: widget.channel),
       );
 
+  Future<void> _showThreadMembers() => showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        showDragHandle: true,
+        builder: (_) => _ThreadMembersSheet(thread: widget.channel),
+      );
+
+  Future<void> _showThreads() => showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        showDragHandle: true,
+        builder: (_) => _ThreadsSheet(
+          parent: widget.channel,
+          onOpen: (thread) {
+            Navigator.pop(context);
+            unawaited(ref
+                .read(mobileControllerProvider.notifier)
+                .selectChannel(thread));
+          },
+        ),
+      );
+
+  Future<void> _toggleThreadFollow() async {
+    if (_threadBusy || widget.channel.archived) return;
+    setState(() => _threadBusy = true);
+    try {
+      await ref
+          .read(mobileControllerProvider.notifier)
+          .setThreadFollowed(widget.channel, !widget.channel.followed);
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(userFacingError(error))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _threadBusy = false);
+    }
+  }
+
   Future<void> _showMessageSearch() => Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (searchContext) => MessageSearchScreen(
@@ -784,6 +832,19 @@ final class _ConversationScreenState
           localGuild &&
           (state.user?.ref == guild.ownerRef ||
               guild.allows(Permission.manageChannels));
+      if (widget.channel.isThread) {
+        await showModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          showDragHandle: true,
+          builder: (_) => _ThreadDetailsSheet(
+            thread: widget.channel,
+            canManage: canManageThreads(widget.channel),
+          ),
+        );
+        return;
+      }
       await showModalBottomSheet<void>(
         context: context,
         isScrollControlled: true,
@@ -819,6 +880,8 @@ final class _ConversationScreenState
     final compactHeader = width <= 400;
     final callUsesOverflow = conversationCallUsesOverflow(width);
     final isDm = widget.channel.type == ChannelType.dm;
+    final supportsThreads = widget.channel.type == ChannelType.text ||
+        widget.channel.type == ChannelType.announcement;
     final overflowItems = <PopupMenuEntry<String>>[
       if (supportsPinnedMessages(widget.channel))
         const PopupMenuItem(
@@ -842,7 +905,18 @@ final class _ConversationScreenState
             title: Text(_activeCall == null ? 'Start call' : 'Join call'),
           ),
         ),
-      if (widget.onMembers != null && compactHeader)
+      if (supportsThreads && compactHeader)
+        const PopupMenuItem(
+          value: 'threads',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.forum_outlined),
+            title: Text('Threads'),
+          ),
+        ),
+      if ((widget.onMembers != null || widget.channel.isThread) &&
+          compactHeader)
         const PopupMenuItem(
           value: 'members',
           child: ListTile(
@@ -858,11 +932,13 @@ final class _ConversationScreenState
           dense: true,
           contentPadding: EdgeInsets.zero,
           leading: const Icon(Icons.settings_outlined),
-          title: Text(widget.channel.guildRef != null
-              ? 'Channel settings'
-              : _isGroup
-                  ? 'Group settings'
-                  : 'Conversation settings'),
+          title: Text(widget.channel.isThread
+              ? 'Thread settings'
+              : widget.channel.guildRef != null
+                  ? 'Channel settings'
+                  : _isGroup
+                      ? 'Group settings'
+                      : 'Conversation settings'),
         ),
       ),
     ];
@@ -904,15 +980,40 @@ final class _ConversationScreenState
                     ? Icons.call_outlined
                     : Icons.call_rounded),
               ),
-            IconButton(
-              tooltip: 'Search this conversation',
-              onPressed: _showMessageSearch,
-              icon: const Icon(Icons.search_rounded),
-            ),
-            if (widget.onMembers != null && !compactHeader)
+            if (widget.channel.isThread && !compactHeader)
               IconButton(
-                tooltip: 'Member list',
-                onPressed: widget.onMembers,
+                tooltip: widget.channel.archived
+                    ? 'Archived threads cannot be followed'
+                    : widget.channel.followed
+                        ? 'Unfollow thread'
+                        : 'Follow thread',
+                onPressed: _threadBusy || widget.channel.archived
+                    ? null
+                    : _toggleThreadFollow,
+                icon: Icon(widget.channel.followed
+                    ? Icons.notifications_rounded
+                    : Icons.notifications_none_rounded),
+              ),
+            if (supportsThreads && !compactHeader)
+              IconButton(
+                tooltip: 'Threads',
+                onPressed: _showThreads,
+                icon: const Icon(Icons.forum_outlined),
+              ),
+            if (!widget.channel.isForum)
+              IconButton(
+                tooltip: 'Search this conversation',
+                onPressed: _showMessageSearch,
+                icon: const Icon(Icons.search_rounded),
+              ),
+            if ((widget.onMembers != null || widget.channel.isThread) &&
+                !compactHeader)
+              IconButton(
+                tooltip:
+                    widget.channel.isThread ? 'Thread members' : 'Member list',
+                onPressed: widget.channel.isThread
+                    ? _showThreadMembers
+                    : widget.onMembers,
                 icon: const Icon(Icons.people_alt_outlined),
               ),
             PopupMenuButton<String>(
@@ -928,10 +1029,17 @@ final class _ConversationScreenState
                     unawaited(_showChannelSettings());
                     return;
                   case 'members':
-                    widget.onMembers?.call();
+                    if (widget.channel.isThread) {
+                      unawaited(_showThreadMembers());
+                    } else {
+                      widget.onMembers?.call();
+                    }
                     return;
                   case 'call':
                     unawaited(_startOrJoinCall());
+                    return;
+                  case 'threads':
+                    unawaited(_showThreads());
                     return;
                 }
               },
@@ -939,8 +1047,956 @@ final class _ConversationScreenState
             ),
           ],
         ),
-        const Expanded(child: ChannelView()),
+        if (widget.channel.isThread) _ForumPostActions(thread: widget.channel),
+        Expanded(
+          child: widget.channel.isForum
+              ? ForumChannelView(
+                  channel: widget.channel,
+                  onOpenThread: (thread) => unawaited(
+                    ref
+                        .read(mobileControllerProvider.notifier)
+                        .selectChannel(thread),
+                  ),
+                )
+              : const ChannelView(),
+        ),
       ],
+    );
+  }
+}
+
+final class _ThreadsSheet extends ConsumerStatefulWidget {
+  const _ThreadsSheet({required this.parent, required this.onOpen});
+
+  final KaedeChannel parent;
+  final ValueChanged<KaedeChannel> onOpen;
+
+  @override
+  ConsumerState<_ThreadsSheet> createState() => _ThreadsSheetState();
+}
+
+final class _ThreadsSheetState extends ConsumerState<_ThreadsSheet> {
+  List<KaedeChannel>? _active;
+  List<KaedeChannel>? _archived;
+  String? _error;
+  var _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    try {
+      final controller = ref.read(mobileControllerProvider.notifier);
+      final pages = await Future.wait<ThreadPage>([
+        controller.loadThreads(widget.parent.ref),
+        controller.loadThreads(widget.parent.ref, archived: true),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _active = pages[0].threads;
+        _archived = pages[1].threads;
+        _error = null;
+      });
+    } on Object catch (error) {
+      if (mounted) setState(() => _error = userFacingError(error));
+    }
+  }
+
+  Future<void> _create() async {
+    final canPublic = canCreatePublicThread(widget.parent);
+    final canPrivate = widget.parent.type == ChannelType.text &&
+        canCreatePrivateThread(widget.parent);
+    final name = TextEditingController();
+    var private = !canPublic && canPrivate;
+    final result = await showDialog<(String, bool)>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Create Thread'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: name,
+                autofocus: true,
+                maxLength: 100,
+                decoration: const InputDecoration(
+                  labelText: 'Thread name',
+                  counterText: '',
+                ),
+              ),
+              if (canPrivate && canPublic)
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: private,
+                  onChanged: (value) => setDialogState(() => private = value),
+                  title: const Text('Private Thread'),
+                  subtitle: const Text('Only invited members can view it.'),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: name,
+              builder: (_, value, __) => FilledButton(
+                onPressed: value.text.trim().isEmpty
+                    ? null
+                    : () => Navigator.pop(
+                          dialogContext,
+                          (value.text.trim(), private),
+                        ),
+                child: const Text('Create'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    name.dispose();
+    if (result == null || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final created =
+          await ref.read(mobileControllerProvider.notifier).createThread(
+                parent: widget.parent,
+                name: result.$1,
+                type: result.$2
+                    ? 12
+                    : widget.parent.type == ChannelType.announcement
+                        ? 10
+                        : 11,
+              );
+      if (mounted) widget.onOpen(created);
+    } on Object catch (error) {
+      if (mounted) setState(() => _error = userFacingError(error));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final canCreate = canCreatePublicThread(widget.parent) ||
+        (widget.parent.type == ChannelType.text &&
+            canCreatePrivateThread(widget.parent));
+    return SafeArea(
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 12, 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text('Threads',
+                      style: Theme.of(context).textTheme.headlineSmall),
+                ),
+                if (canCreate)
+                  FilledButton.icon(
+                    onPressed: _busy ? null : _create,
+                    icon: const Icon(Icons.add_rounded, size: 18),
+                    label: const Text('Create'),
+                  ),
+              ],
+            ),
+          ),
+          if (_error case final error?)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+              child: Text(error,
+                  style: const TextStyle(color: KaedeColors.danger)),
+            ),
+          Expanded(
+            child: _active == null || _archived == null
+                ? const Center(child: CircularProgressIndicator())
+                : RefreshIndicator(
+                    onRefresh: _load,
+                    child: ListView(
+                      padding: const EdgeInsets.fromLTRB(12, 4, 12, 20),
+                      children: [
+                        const _ThreadSectionLabel('Active Threads'),
+                        if (_active!.isEmpty)
+                          const ListTile(
+                            title: Text('No active threads',
+                                style: TextStyle(color: KaedeColors.muted)),
+                          ),
+                        for (final thread in _active!)
+                          _ThreadBrowseRow(
+                            thread: thread,
+                            onOpen: () => widget.onOpen(thread),
+                          ),
+                        const SizedBox(height: 12),
+                        const _ThreadSectionLabel('Archived Threads'),
+                        if (_archived!.isEmpty)
+                          const ListTile(
+                            title: Text('No archived threads',
+                                style: TextStyle(color: KaedeColors.muted)),
+                          ),
+                        for (final thread in _archived!)
+                          _ThreadBrowseRow(
+                            thread: thread,
+                            onOpen: () => widget.onOpen(thread),
+                          ),
+                      ],
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _ThreadSectionLabel extends StatelessWidget {
+  const _ThreadSectionLabel(this.label);
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
+        child: Text(label.toUpperCase(),
+            style: const TextStyle(
+              color: KaedeColors.muted,
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+              letterSpacing: .8,
+            )),
+      );
+}
+
+final class _ThreadBrowseRow extends StatelessWidget {
+  const _ThreadBrowseRow({required this.thread, required this.onOpen});
+
+  final KaedeChannel thread;
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) => ListTile(
+        leading: Icon(
+            thread.locked ? Icons.lock_outline_rounded : Icons.forum_outlined),
+        title: Text(thread.name ?? 'thread'),
+        subtitle: Text([
+          '${thread.messageCount} messages',
+          '${thread.memberCount} members',
+        ].join(' · ')),
+        trailing: const Icon(Icons.chevron_right_rounded),
+        onTap: onOpen,
+      );
+}
+
+final class _ThreadDetailsSheet extends ConsumerStatefulWidget {
+  const _ThreadDetailsSheet({
+    required this.thread,
+    required this.canManage,
+  });
+
+  final KaedeChannel thread;
+  final bool canManage;
+
+  @override
+  ConsumerState<_ThreadDetailsSheet> createState() =>
+      _ThreadDetailsSheetState();
+}
+
+final class _ThreadDetailsSheetState
+    extends ConsumerState<_ThreadDetailsSheet> {
+  var _busy = false;
+  String? _error;
+
+  KaedeChannel get _thread {
+    for (final candidate in ref.read(mobileControllerProvider).threads) {
+      if (candidate.ref == widget.thread.ref) return candidate;
+    }
+    return widget.thread;
+  }
+
+  KaedeChannel? get _parent {
+    final parent = _thread.parentRef;
+    if (parent == null) return null;
+    final state = ref.read(mobileControllerProvider);
+    for (final channel in <KaedeChannel>[
+      ...?state.activeGuild?.channels,
+      ...state.threads,
+    ]) {
+      if (channel.ref == parent) return channel;
+    }
+    return null;
+  }
+
+  Future<void> _run(Future<void> Function() action) async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await action();
+    } on Object catch (error) {
+      if (mounted) setState(() => _error = userFacingError(error));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _edit() async {
+    final thread = _thread;
+    final forum = _parent?.isForum == true ? _parent : null;
+    final name = TextEditingController(text: thread.name ?? '');
+    var duration = thread.autoArchiveDuration;
+    final appliedTags = thread.appliedTagIds.toSet();
+    final result = await showDialog<(String, int, List<String>)>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Edit thread'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: name,
+                autofocus: true,
+                maxLength: 100,
+                decoration: const InputDecoration(
+                  labelText: 'Thread name',
+                  counterText: '',
+                ),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<int>(
+                initialValue: duration,
+                decoration:
+                    const InputDecoration(labelText: 'Hide after inactivity'),
+                items: const [
+                  DropdownMenuItem(value: 60, child: Text('1 hour')),
+                  DropdownMenuItem(value: 1440, child: Text('24 hours')),
+                  DropdownMenuItem(value: 4320, child: Text('3 days')),
+                  DropdownMenuItem(value: 10080, child: Text('1 week')),
+                ],
+                onChanged: (value) =>
+                    setDialogState(() => duration = value ?? duration),
+              ),
+              if (forum != null && forum.availableTags.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Tags (${appliedTags.length}/5)',
+                      style: const TextStyle(fontWeight: FontWeight.w700)),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 7,
+                  runSpacing: 7,
+                  children: [
+                    for (final tag in forum.availableTags)
+                      FilterChip(
+                        label: ForumTagLabel(
+                          tag: tag,
+                          originDomain: forum.ref.domain,
+                        ),
+                        selected: appliedTags.contains(tag.id),
+                        onSelected: tag.moderated && !widget.canManage
+                            ? null
+                            : (_) => setDialogState(() {
+                                  if (!appliedTags.remove(tag.id) &&
+                                      appliedTags.length < 5) {
+                                    appliedTags.add(tag.id);
+                                  }
+                                }),
+                      ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: name,
+              builder: (_, value, __) => FilledButton(
+                onPressed: value.text.trim().isEmpty ||
+                        (forum != null &&
+                            forum.flags & 16 != 0 &&
+                            appliedTags.isEmpty)
+                    ? null
+                    : () => Navigator.pop(
+                          dialogContext,
+                          (
+                            value.text.trim(),
+                            duration,
+                            appliedTags.toList(growable: false),
+                          ),
+                        ),
+                child: const Text('Save'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    name.dispose();
+    if (result == null) return;
+    await _run(() => ref
+            .read(mobileControllerProvider.notifier)
+            .updateThread(thread, <String, Object?>{
+          'name': result.$1,
+          'auto_archive_duration': result.$2,
+          if (forum != null) 'applied_tag_ids': result.$3,
+        }));
+  }
+
+  Future<void> _notifications() async {
+    final thread = _thread;
+    final current = thread.member?.notificationLevel ?? 'inherit';
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Notifications',
+                  style: Theme.of(sheetContext).textTheme.titleLarge),
+              const SizedBox(height: 8),
+              RadioGroup<String>(
+                groupValue: current,
+                onChanged: (value) {
+                  if (value != null) Navigator.pop(sheetContext, value);
+                },
+                child: const Column(
+                  children: [
+                    RadioListTile<String>(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text('Use Default'),
+                      value: 'inherit',
+                    ),
+                    RadioListTile<String>(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text('All Messages'),
+                      value: 'all',
+                    ),
+                    RadioListTile<String>(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text('Only @mentions'),
+                      value: 'mentions',
+                    ),
+                    RadioListTile<String>(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text('Nothing'),
+                      value: 'none',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (selected == null || selected == current) return;
+    await _run(() => ref
+        .read(mobileControllerProvider.notifier)
+        .setThreadNotificationLevel(thread, selected));
+  }
+
+  String _notificationLabel(String level) => switch (level) {
+        'all' => 'All Messages',
+        'mentions' => 'Only @mentions',
+        'none' => 'Nothing',
+        _ => 'Use Default',
+      };
+
+  Future<void> _delete() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete thread?'),
+        content: const Text('This cannot be undone.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: KaedeColors.danger),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await _run(() async {
+      await ref.read(mobileControllerProvider.notifier).deleteThread(_thread);
+      if (mounted) Navigator.pop(context);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    ref.watch(mobileControllerProvider.select((state) => (
+          state.threads,
+          state.user,
+          state.e2eeActivationEnabled,
+        )));
+    final state = ref.read(mobileControllerProvider);
+    final thread = _thread;
+    final isPost = _parent?.isForum == true;
+    final isOwner = state.user?.ref == thread.ownerRef;
+    final canEdit = widget.canManage || (!thread.locked && isOwner);
+    final canReopen = !thread.locked || widget.canManage;
+    final showEncryption =
+        thread.encryptionMode == 'e2ee' || state.e2eeActivationEnabled;
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(isPost ? 'Post settings' : 'Thread settings',
+                style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 16),
+            if (canEdit)
+              _SettingsRow(
+                icon: Icons.edit_outlined,
+                title: isPost ? 'Edit post' : 'Edit thread',
+                subtitle: thread.archived
+                    ? 'Reopen before editing'
+                    : 'Name and auto-archive duration',
+                onTap: _busy || thread.archived ? null : _edit,
+              ),
+            _SettingsRow(
+              icon: thread.followed
+                  ? Icons.notifications_rounded
+                  : Icons.notifications_none_rounded,
+              title: thread.followed ? 'Unfollow' : 'Follow',
+              subtitle: thread.archived
+                  ? 'Archived threads cannot be joined or followed'
+                  : 'Get updates from this ${isPost ? 'post' : 'thread'}',
+              onTap: _busy || thread.archived
+                  ? null
+                  : () => _run(() => ref
+                      .read(mobileControllerProvider.notifier)
+                      .setThreadFollowed(thread, !thread.followed)),
+            ),
+            if (thread.followed)
+              _SettingsRow(
+                icon: Icons.notifications_outlined,
+                title: 'Notifications',
+                subtitle: _notificationLabel(
+                  thread.member?.notificationLevel ?? 'inherit',
+                ),
+                onTap: _busy || thread.archived ? null : _notifications,
+              ),
+            if (canEdit)
+              _SettingsRow(
+                icon: thread.archived
+                    ? Icons.unarchive_outlined
+                    : Icons.archive_outlined,
+                title: thread.archived
+                    ? (isPost ? 'Reopen Post' : 'Unarchive Thread')
+                    : isPost && widget.canManage
+                        ? 'Close Post'
+                        : 'Archive Thread',
+                subtitle: thread.locked && thread.archived
+                    ? 'Only a moderator can reopen this locked thread'
+                    : null,
+                onTap: _busy || (thread.archived && !canReopen)
+                    ? null
+                    : () => _run(() => ref
+                            .read(mobileControllerProvider.notifier)
+                            .updateThread(thread, <String, Object?>{
+                          'archived': !thread.archived,
+                          if (thread.archived && thread.locked) 'locked': false,
+                          if (!thread.archived && isPost && widget.canManage)
+                            'locked': true,
+                        })),
+              ),
+            if (widget.canManage)
+              _SettingsRow(
+                icon: thread.locked
+                    ? Icons.lock_open_outlined
+                    : Icons.lock_outline_rounded,
+                title: thread.locked ? 'Unlock' : 'Lock',
+                subtitle: thread.locked
+                    ? 'Allow members to send after reopening'
+                    : 'Only moderators can send or reopen',
+                onTap: _busy
+                    ? null
+                    : () => _run(() => ref
+                            .read(mobileControllerProvider.notifier)
+                            .updateThread(thread, <String, Object?>{
+                          'locked': !thread.locked,
+                          if (thread.locked && thread.archived)
+                            'archived': false,
+                        })),
+              ),
+            if (widget.canManage && isPost)
+              _SettingsRow(
+                icon: thread.pinned
+                    ? Icons.push_pin_rounded
+                    : Icons.push_pin_outlined,
+                title: thread.pinned ? 'Unpin Post' : 'Pin Post',
+                subtitle: thread.archived
+                    ? 'Reopen the post before pinning it'
+                    : 'Only one post can be pinned in this forum',
+                onTap: _busy || thread.archived
+                    ? null
+                    : () => _run(() => ref
+                            .read(mobileControllerProvider.notifier)
+                            .updateThread(thread, <String, Object?>{
+                          'pinned': !thread.pinned,
+                        })),
+              ),
+            if (thread.type == ChannelType.privateThread && canEdit)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: thread.invitable,
+                onChanged: _busy || thread.archived
+                    ? null
+                    : (value) => _run(() => ref
+                            .read(mobileControllerProvider.notifier)
+                            .updateThread(thread, <String, Object?>{
+                          'invitable': value,
+                        })),
+                title: const Text('Allow members to invite'),
+              ),
+            if (showEncryption)
+              _SettingsRow(
+                icon: thread.encryptionMode == 'e2ee'
+                    ? Icons.lock_rounded
+                    : Icons.lock_open_rounded,
+                iconColor: thread.encryptionMode == 'e2ee'
+                    ? KaedeColors.mint
+                    : KaedeColors.muted,
+                title: 'End-to-end encryption',
+                subtitle: thread.encryptionMode == 'e2ee'
+                    ? thread.encryptionState == 'active'
+                        ? 'Active · verify the safety number'
+                        : 'Paused until keys are activated'
+                    : 'Off · permanent once enabled',
+                onTap: _busy
+                    ? null
+                    : () => _showE2eeRoomSettings(
+                          context,
+                          ref,
+                          thread,
+                          canManage: canEdit,
+                        ),
+              ),
+            if (widget.canManage)
+              _SettingsRow(
+                icon: Icons.delete_outline_rounded,
+                iconColor: KaedeColors.danger,
+                title: isPost ? 'Delete Post' : 'Delete Thread',
+                subtitle: 'Permanently delete all messages',
+                onTap: _busy ? null : _delete,
+              ),
+            if (_error case final error?) ...[
+              const SizedBox(height: 12),
+              Text(error, style: const TextStyle(color: KaedeColors.danger)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _ThreadMembersSheet extends ConsumerStatefulWidget {
+  const _ThreadMembersSheet({required this.thread});
+
+  final KaedeChannel thread;
+
+  @override
+  ConsumerState<_ThreadMembersSheet> createState() =>
+      _ThreadMembersSheetState();
+}
+
+final class _ThreadMembersSheetState
+    extends ConsumerState<_ThreadMembersSheet> {
+  final _invite = TextEditingController();
+  List<ThreadMember>? _members;
+  var _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    _invite.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final members = await ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .threadMembers(widget.thread.ref);
+      if (mounted) setState(() => _members = members);
+    } on Object catch (error) {
+      if (mounted) setState(() => _error = userFacingError(error));
+    }
+  }
+
+  Future<void> _add() async {
+    final handle = _invite.text.trim();
+    if (_busy || handle.isEmpty) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final repository = ref.read(mobileControllerProvider.notifier).repository;
+      final user = await repository.lookupUser(handle);
+      await repository.addThreadMember(widget.thread.ref, user.ref);
+      _invite.clear();
+      await _load();
+    } on Object catch (error) {
+      if (mounted) setState(() => _error = userFacingError(error));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = ref.watch(mobileControllerProvider);
+    final members = _members;
+    final canInvite = canAddThreadMember(widget.thread);
+    final canRemove = canRemoveThreadMember(widget.thread, state.user?.ref);
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          0,
+          20,
+          MediaQuery.viewInsetsOf(context).bottom + 20,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Thread members',
+                style: Theme.of(context).textTheme.headlineSmall),
+            if (canInvite) ...[
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _invite,
+                      decoration: const InputDecoration(
+                        labelText: 'Add member',
+                        hintText: '@friend@example.net',
+                      ),
+                      onSubmitted: (_) => _add(),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filled(
+                    tooltip: 'Add member',
+                    onPressed: _busy ? null : _add,
+                    icon: const Icon(Icons.person_add_alt_1_rounded),
+                  ),
+                ],
+              ),
+            ],
+            if (_error case final error?) ...[
+              const SizedBox(height: 10),
+              Text(error, style: const TextStyle(color: KaedeColors.danger)),
+            ],
+            const SizedBox(height: 10),
+            Expanded(
+              child: members == null
+                  ? const Center(child: CircularProgressIndicator())
+                  : members.isEmpty
+                      ? const Center(child: Text('No joined members.'))
+                      : ListView.builder(
+                          itemCount: members.length,
+                          itemBuilder: (context, index) {
+                            final member = members[index];
+                            final profile =
+                                state.userProfiles[member.userRef] ??
+                                    (state.user?.ref == member.userRef
+                                        ? state.user
+                                        : null);
+                            return ListTile(
+                              leading: profile == null
+                                  ? const CircleAvatar(
+                                      child: Icon(Icons.person_outline_rounded))
+                                  : UserAvatar(user: profile, radius: 18),
+                              title: Text(profile?.name ?? member.userRef.wire),
+                              subtitle:
+                                  profile == null ? null : Text(profile.handle),
+                              trailing: canRemove &&
+                                      member.userRef != state.user?.ref
+                                  ? IconButton(
+                                      tooltip: 'Remove member',
+                                      onPressed: _busy
+                                          ? null
+                                          : () async {
+                                              setState(() => _busy = true);
+                                              try {
+                                                await ref
+                                                    .read(
+                                                        mobileControllerProvider
+                                                            .notifier)
+                                                    .repository
+                                                    .removeThreadMember(
+                                                      widget.thread.ref,
+                                                      member.userRef,
+                                                    );
+                                                await _load();
+                                              } on Object catch (error) {
+                                                if (mounted) {
+                                                  setState(() => _error =
+                                                      userFacingError(error));
+                                                }
+                                              } finally {
+                                                if (mounted) {
+                                                  setState(() => _busy = false);
+                                                }
+                                              }
+                                            },
+                                      icon: const Icon(
+                                          Icons.person_remove_outlined),
+                                    )
+                                  : null,
+                            );
+                          },
+                        ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _ForumPostActions extends ConsumerStatefulWidget {
+  const _ForumPostActions({required this.thread});
+
+  final KaedeChannel thread;
+
+  @override
+  ConsumerState<_ForumPostActions> createState() => _ForumPostActionsState();
+}
+
+final class _ForumPostActionsState extends ConsumerState<_ForumPostActions> {
+  var _busy = false;
+  String? _customEmojiKey;
+  ComposerCustomEmoji? _customEmoji;
+
+  void _resolveCustomEmoji(KaedeChannel forum, String id) {
+    final key = '$id@${forum.ref.domain.value}';
+    if (_customEmojiKey == key) return;
+    _customEmojiKey = key;
+    _customEmoji = null;
+    unawaited(() async {
+      try {
+        final emojis = await ref
+            .read(mobileControllerProvider.notifier)
+            .repository
+            .emojis();
+        final match = composerCustomEmojis(emojis, forum)
+            .where((emoji) =>
+                emoji.ref.id.value == id &&
+                emoji.ref.domain == forum.ref.domain)
+            .firstOrNull;
+        if (!mounted || _customEmojiKey != key || match == null) return;
+        setState(() => _customEmoji = match);
+      } on Object {
+        // Keep the action disabled when the configured custom emoji is no
+        // longer available instead of silently reacting with another emoji.
+      }
+    }());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = ref.watch(mobileControllerProvider);
+    final parentRef = widget.thread.parentRef;
+    if (parentRef == null) return const SizedBox.shrink();
+    KaedeChannel? forum;
+    for (final channel
+        in state.activeGuild?.channels ?? const <KaedeChannel>[]) {
+      if (channel.ref == parentRef) {
+        forum = channel;
+        break;
+      }
+    }
+    if (forum?.isForum != true) return const SizedBox.shrink();
+    final rawEmoji = forum!.defaultReactionEmoji;
+    final name = '${rawEmoji?['emoji_name'] ?? ''}'.trim();
+    final id = '${rawEmoji?['emoji_id'] ?? ''}'.trim();
+    if (id.isNotEmpty && name.isEmpty) _resolveCustomEmoji(forum, id);
+    final configuredEmoji = id.isNotEmpty
+        ? name.isNotEmpty
+            ? '<:$name:$id@${forum.ref.domain.value}>'
+            : _customEmoji?.token
+        : name.isNotEmpty
+            ? name
+            : null;
+    final emoji = configuredEmoji ?? '👍';
+    final customRef = customEmojiRef(id, forum.ref.domain);
+    final starter = widget.thread.starterMessage ?? state.messages.firstOrNull;
+    return Container(
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: KaedeColors.border)),
+      ),
+      padding: const EdgeInsets.fromLTRB(12, 7, 12, 7),
+      alignment: Alignment.centerLeft,
+      child: OutlinedButton.icon(
+        onPressed: _busy ||
+                widget.thread.archived ||
+                starter == null ||
+                (id.isNotEmpty && configuredEmoji == null)
+            ? null
+            : () async {
+                setState(() => _busy = true);
+                try {
+                  await ref
+                      .read(mobileControllerProvider.notifier)
+                      .repository
+                      .react(widget.thread.ref, starter.ref, emoji);
+                } on Object catch (error) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(userFacingError(error))),
+                    );
+                  }
+                } finally {
+                  if (mounted) setState(() => _busy = false);
+                }
+              },
+        icon: customRef == null
+            ? Text(emoji)
+            : CustomEmojiImage(
+                ref: customRef,
+                label: _customEmoji == null
+                    ? 'Custom emoji'
+                    : ':${_customEmoji!.name}:',
+                size: 18,
+              ),
+        label: const Text('React to Post'),
+      ),
     );
   }
 }
@@ -984,6 +2040,8 @@ final class _ChannelDetailsSheetState
       context,
       channel: channel,
       channels: guild.channels,
+      e2eeActivationEnabled:
+          ref.read(mobileControllerProvider).e2eeActivationEnabled,
     );
     if (draft == null || !mounted) return;
     setState(() => _busy = true);
@@ -1021,8 +2079,8 @@ final class _ChannelDetailsSheetState
     ref.watch(mobileControllerProvider
         .select((state) => state.e2eeActivationEnabled));
     final state = ref.read(mobileControllerProvider);
-    final showEncryption =
-        channel.encryptionMode == 'e2ee' || state.e2eeActivationEnabled;
+    final showEncryption = !channel.isForum &&
+        (channel.encryptionMode == 'e2ee' || state.e2eeActivationEnabled);
     final topic = channel.topic?.trim();
     return SafeArea(
       child: SingleChildScrollView(
@@ -1129,6 +2187,7 @@ final class _DirectMessageDetailsSheet extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     ref.watch(mobileControllerProvider.select((state) => (
           state.dms,
+          state.threads,
           state.user,
           state.e2eeActivationEnabled,
         )));
@@ -1289,9 +2348,7 @@ final class _PinnedMessagesSheetState
   var _loading = true;
   String? _error;
 
-  bool get _canManage =>
-      widget.channel.type == ChannelType.dm ||
-      widget.channel.allows(Permission.manageMessages);
+  bool get _canManage => canPinMessages(widget.channel);
 
   @override
   void initState() {
@@ -3126,6 +4183,21 @@ final class _GuildBrowser extends ConsumerWidget {
         (children[parent] ??= <KaedeChannel>[]).add(channel);
       }
     }
+    final activeThreads = <EntityRef, List<KaedeChannel>>{};
+    final forumRefs = channels
+        .where((channel) => channel.isForum)
+        .map((channel) => channel.ref)
+        .toSet();
+    for (final thread in state.threads) {
+      final parent = thread.parentRef;
+      if (thread.guildRef != guild.ref ||
+          thread.archived ||
+          parent == null ||
+          forumRefs.contains(parent)) {
+        continue;
+      }
+      (activeThreads[parent] ??= <KaedeChannel>[]).add(thread);
+    }
     return ColoredBox(
       color: KaedeColors.sidebar,
       child: Column(
@@ -3220,6 +4292,7 @@ final class _GuildBrowser extends ConsumerWidget {
                       controller,
                       guild,
                       channels,
+                      state.e2eeActivationEnabled,
                     )
                 : null,
           ),
@@ -3235,15 +4308,20 @@ final class _GuildBrowser extends ConsumerWidget {
                         children:
                             children[channel.ref] ?? const <KaedeChannel>[],
                         state: state,
+                        activeThreads: activeThreads,
                         onOpen: (child) =>
                             _openChannel(controller, child, onOpenChannel),
                       )
                     else
-                      _ChannelRow(
+                      _ChannelWithThreads(
                         channel: channel,
+                        threads: activeThreads[channel.ref] ?? const [],
                         state: state,
-                        onTap: () =>
-                            _openChannel(controller, channel, onOpenChannel),
+                        onOpen: (selected) => _openChannel(
+                          controller,
+                          selected,
+                          onOpenChannel,
+                        ),
                       ),
               ],
             ),
@@ -3411,10 +4489,12 @@ Future<void> _createGuildChannel(
   MobileController controller,
   KaedeGuild guild,
   List<KaedeChannel> channels,
+  bool e2eeActivationEnabled,
 ) async {
   final draft = await showGuildChannelEditorSheet(
     context,
     channels: channels,
+    e2eeActivationEnabled: e2eeActivationEnabled,
   );
   if (draft == null || !context.mounted) return;
   try {
@@ -3449,12 +4529,14 @@ final class _CategoryGroup extends StatefulWidget {
     required this.category,
     required this.children,
     required this.state,
+    required this.activeThreads,
     required this.onOpen,
   });
 
   final KaedeChannel category;
   final List<KaedeChannel> children;
   final MobileState state;
+  final Map<EntityRef, List<KaedeChannel>> activeThreads;
   final ValueChanged<KaedeChannel> onOpen;
 
   @override
@@ -3510,23 +4592,60 @@ final class _CategoryGroupState extends State<_CategoryGroup> {
           ),
         ),
         for (final channel in visible)
-          _ChannelRow(
+          _ChannelWithThreads(
             channel: channel,
+            threads: widget.activeThreads[channel.ref] ?? const [],
             state: widget.state,
-            onTap: () => widget.onOpen(channel),
+            onOpen: widget.onOpen,
           ),
       ],
     );
   }
 }
 
+final class _ChannelWithThreads extends StatelessWidget {
+  const _ChannelWithThreads({
+    required this.channel,
+    required this.threads,
+    required this.state,
+    required this.onOpen,
+  });
+
+  final KaedeChannel channel;
+  final List<KaedeChannel> threads;
+  final MobileState state;
+  final ValueChanged<KaedeChannel> onOpen;
+
+  @override
+  Widget build(BuildContext context) => Column(
+        children: [
+          _ChannelRow(
+            channel: channel,
+            state: state,
+            onTap: () => onOpen(channel),
+          ),
+          for (final thread in threads)
+            _ChannelRow(
+              channel: thread,
+              state: state,
+              indent: true,
+              onTap: () => onOpen(thread),
+            ),
+        ],
+      );
+}
+
 final class _ChannelRow extends StatelessWidget {
   const _ChannelRow(
-      {required this.channel, required this.state, required this.onTap});
+      {required this.channel,
+      required this.state,
+      required this.onTap,
+      this.indent = false});
 
   final KaedeChannel channel;
   final MobileState state;
   final VoidCallback onTap;
+  final bool indent;
 
   @override
   Widget build(BuildContext context) {
@@ -3543,17 +4662,21 @@ final class _ChannelRow extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(KaedeRadius.small),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(6, 9, 10, 9),
+            padding: EdgeInsets.fromLTRB(indent ? 22 : 6, 9, 10, 9),
             child: Row(
               children: [
                 _UnreadMarker(visible: highlighted && !active),
                 const SizedBox(width: 6),
                 Icon(
-                  channel.type == ChannelType.voice
-                      ? Icons.volume_up_rounded
-                      : channel.type == ChannelType.announcement
-                          ? Icons.campaign_rounded
-                          : Icons.tag_rounded,
+                  channel.isThread
+                      ? Icons.subdirectory_arrow_right_rounded
+                      : channel.isForum
+                          ? Icons.forum_outlined
+                          : channel.type == ChannelType.voice
+                              ? Icons.volume_up_rounded
+                              : channel.type == ChannelType.announcement
+                                  ? Icons.campaign_rounded
+                                  : Icons.tag_rounded,
                   size: 19,
                   color: highlighted || active
                       ? KaedeColors.text

@@ -20,6 +20,17 @@ GUILD_DOMAINS = ("migration-guild-guard-a.invalid", "migration-guild-guard-b.inv
 GUILD_OWNER_IDS = (8_900_000_000_000_001, 8_900_000_000_000_002)
 GUILD_IDS = (8_900_000_000_000_011, 8_900_000_000_000_012)
 GUILD_EVENT_ID = "migration-guard-shared-guild-event"
+THREAD_PERMISSION_DOMAIN = "migration-thread-permissions.invalid"
+THREAD_PERMISSION_OWNER_ID = 8_900_000_000_000_101
+THREAD_PERMISSION_GUILD_ID = 8_900_000_000_000_102
+THREAD_PERMISSION_CHANNEL_ID = 8_900_000_000_000_103
+THREAD_PERMISSION_ROLE_IDS = (8_900_000_000_000_104, 8_900_000_000_000_105)
+SEND_MESSAGES = 1 << 11
+MANAGE_CHANNELS = 1 << 4
+MANAGE_MESSAGES = 1 << 13
+THREAD_MEMBER_DEFAULTS = (1 << 35) | (1 << 36) | (1 << 38)
+PIN_MESSAGES = 1 << 51
+BYPASS_SLOWMODE = 1 << 52
 
 
 async def cleanup_federation_fixture(session: AsyncSession) -> None:
@@ -117,6 +128,148 @@ async def prepare_guild_fixture(session: AsyncSession) -> None:
                 "VALUES (:guild_id, :domain, 1, :event_id, '{}'::jsonb)"
             ),
             {"guild_id": guild_id, "domain": domain, "event_id": GUILD_EVENT_ID},
+        )
+
+
+async def cleanup_thread_permission_fixture(session: AsyncSession) -> None:
+    await session.execute(
+        text("DELETE FROM guilds WHERE origin_domain = :domain"),
+        {"domain": THREAD_PERMISSION_DOMAIN},
+    )
+    await session.execute(
+        text("DELETE FROM users WHERE origin_domain = :domain"),
+        {"domain": THREAD_PERMISSION_DOMAIN},
+    )
+    await session.execute(
+        text("DELETE FROM instances WHERE domain = :domain"),
+        {"domain": THREAD_PERMISSION_DOMAIN},
+    )
+
+
+async def prepare_thread_permission_fixture(session: AsyncSession) -> None:
+    await cleanup_thread_permission_fixture(session)
+    await session.execute(text("SET CONSTRAINTS ALL DEFERRED"))
+    values = {
+        "domain": THREAD_PERMISSION_DOMAIN,
+        "owner_id": THREAD_PERMISSION_OWNER_ID,
+        "guild_id": THREAD_PERMISSION_GUILD_ID,
+        "channel_id": THREAD_PERMISSION_CHANNEL_ID,
+        "member_role_id": THREAD_PERMISSION_ROLE_IDS[0],
+        "channel_role_id": THREAD_PERMISSION_ROLE_IDS[1],
+        "member_permissions": SEND_MESSAGES | MANAGE_MESSAGES,
+        "channel_permissions": MANAGE_CHANNELS,
+    }
+    await session.execute(
+        text("INSERT INTO instances (domain, is_self) VALUES (:domain, false)"), values
+    )
+    await session.execute(
+        text(
+            "INSERT INTO users "
+            "(id, origin_domain, is_local, username, federation_introduced_by_domain) "
+            "VALUES (:owner_id, :domain, false, 'thread_permission_guard', :domain)"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO guilds (id, origin_domain, name, owner_id, owner_domain) "
+            "VALUES (:guild_id, :domain, 'Thread permission guard', :owner_id, :domain)"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO guild_members "
+            "(guild_id, guild_domain, user_id, user_domain, joined_at) "
+            "VALUES (:guild_id, :domain, :owner_id, :domain, now())"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO roles "
+            "(id, origin_domain, guild_id, guild_domain, name, permissions, position) "
+            "VALUES "
+            "(:member_role_id, :domain, :guild_id, :domain, 'Member', "
+            ":member_permissions, 0), "
+            "(:channel_role_id, :domain, :guild_id, :domain, 'Channel manager', "
+            ":channel_permissions, 1)"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO channels "
+            "(id, origin_domain, guild_id, guild_domain, type, name, position, created_floor_id) "
+            "VALUES (:channel_id, :domain, :guild_id, :domain, 0, 'guard', 0, :channel_id)"
+        ),
+        values,
+    )
+    await session.execute(
+        text(
+            "INSERT INTO channel_overwrites "
+            "(channel_id, channel_domain, guild_id, guild_domain, target_id, target_domain, "
+            "target_type, allow, deny) VALUES "
+            "(:channel_id, :domain, :guild_id, :domain, :member_role_id, :domain, 'role', "
+            ":member_permissions, :channel_permissions), "
+            "(:channel_id, :domain, :guild_id, :domain, :channel_role_id, :domain, 'role', "
+            "0, :member_permissions | :channel_permissions)"
+        ),
+        values,
+    )
+
+
+async def verify_thread_permission_fixture(session: AsyncSession) -> None:
+    role_rows = {
+        int(role_id): int(permissions)
+        for role_id, permissions in (
+            await session.execute(
+                text("SELECT id, permissions FROM roles WHERE origin_domain = :domain ORDER BY id"),
+                {"domain": THREAD_PERMISSION_DOMAIN},
+            )
+        ).all()
+    }
+    expected_member = (
+        SEND_MESSAGES | MANAGE_MESSAGES | THREAD_MEMBER_DEFAULTS | PIN_MESSAGES | BYPASS_SLOWMODE
+    )
+    expected_channel_manager = MANAGE_CHANNELS | BYPASS_SLOWMODE
+    expected_roles = {
+        THREAD_PERMISSION_ROLE_IDS[0]: expected_member,
+        THREAD_PERMISSION_ROLE_IDS[1]: expected_channel_manager,
+    }
+    if role_rows != expected_roles:
+        raise VerificationFailure(
+            f"thread permission role backfill mismatch: {role_rows!r} != {expected_roles!r}"
+        )
+
+    overwrite_rows = {
+        int(target_id): (int(allow), int(deny))
+        for target_id, allow, deny in (
+            await session.execute(
+                text(
+                    "SELECT target_id, allow, deny FROM channel_overwrites "
+                    "WHERE channel_domain = :domain ORDER BY target_id"
+                ),
+                {"domain": THREAD_PERMISSION_DOMAIN},
+            )
+        ).all()
+    }
+    expected_overwrites = {
+        THREAD_PERMISSION_ROLE_IDS[0]: (expected_member, MANAGE_CHANNELS),
+        THREAD_PERMISSION_ROLE_IDS[1]: (
+            0,
+            SEND_MESSAGES
+            | MANAGE_MESSAGES
+            | MANAGE_CHANNELS
+            | THREAD_MEMBER_DEFAULTS
+            | PIN_MESSAGES
+            | BYPASS_SLOWMODE,
+        ),
+    }
+    if overwrite_rows != expected_overwrites:
+        raise VerificationFailure(
+            "thread permission overwrite backfill mismatch: "
+            f"{overwrite_rows!r} != {expected_overwrites!r}"
         )
 
 
@@ -243,6 +396,12 @@ async def run(action: str) -> None:
                 await verify_guild_fixture(session)
             elif action == "cleanup-guild":
                 await cleanup_guild_fixture(session)
+            elif action == "prepare-thread-permissions":
+                await prepare_thread_permission_fixture(session)
+            elif action == "verify-thread-permissions":
+                await verify_thread_permission_fixture(session)
+            elif action == "cleanup-thread-permissions":
+                await cleanup_thread_permission_fixture(session)
             else:  # pragma: no cover - argparse enforces the choices
                 raise VerificationFailure(f"unsupported migration-guard action: {action!r}")
     finally:
@@ -260,6 +419,9 @@ def main() -> None:
             "prepare-guild",
             "verify-guild",
             "cleanup-guild",
+            "prepare-thread-permissions",
+            "verify-thread-permissions",
+            "cleanup-thread-permissions",
         ),
     )
     args = parser.parse_args()

@@ -675,6 +675,11 @@ String channelSummaryLine(KaedeChannel channel, KaedeChannel? parent) {
     ChannelType.category => 'Category',
     ChannelType.voice => 'Voice channel',
     ChannelType.announcement => 'Announcement channel',
+    ChannelType.forum => 'Forum channel',
+    ChannelType.announcementThread ||
+    ChannelType.publicThread ||
+    ChannelType.privateThread =>
+      'Thread',
     _ => 'Text channel',
   };
   final placement = channel.type == ChannelType.category
@@ -1165,6 +1170,11 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                     ChannelType.category => Icons.folder_outlined,
                     ChannelType.voice => Icons.volume_up_rounded,
                     ChannelType.announcement => Icons.campaign_rounded,
+                    ChannelType.forum => Icons.forum_outlined,
+                    ChannelType.announcementThread ||
+                    ChannelType.publicThread ||
+                    ChannelType.privateThread =>
+                      Icons.forum_outlined,
                     _ => Icons.tag_rounded
                   },
                   size: 20,
@@ -1215,8 +1225,11 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
             const PopupMenuItem(
                 value: 'permissions', child: Text('Permissions')),
           if (widget.canManageChannels &&
-              {ChannelType.text, ChannelType.announcement, ChannelType.voice}
-                  .contains(channel.type) &&
+              {
+                ChannelType.text,
+                ChannelType.announcement,
+                ChannelType.voice,
+              }.contains(channel.type) &&
               (channel.encryptionMode == 'e2ee' || _e2eeActivationEnabled))
             PopupMenuItem(
               value: 'encryption',
@@ -1350,6 +1363,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
         type: channel.type,
         position: channel.position,
         permissions: channel.permissions,
+        createdAt: channel.createdAt,
         guildRef: channel.guildRef,
         name: channel.name,
         topic: channel.topic,
@@ -1375,6 +1389,14 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
         encryptionEpoch: channel.encryptionEpoch,
         encryptionActivatedAt: channel.encryptionActivatedAt,
         searchAvailable: channel.searchAvailable,
+        flags: channel.flags,
+        availableTags: channel.availableTags,
+        defaultReactionEmoji: channel.defaultReactionEmoji,
+        defaultThreadRateLimitPerUser: channel.defaultThreadRateLimitPerUser,
+        defaultAutoArchiveDuration: channel.defaultAutoArchiveDuration,
+        defaultSortOrder: channel.defaultSortOrder,
+        defaultForumLayout: channel.defaultForumLayout,
+        e2eeRequired: channel.e2eeRequired,
         version: channel.version,
       );
 
@@ -1387,6 +1409,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
       context,
       channels: _channels,
       initialParent: initialParent,
+      e2eeActivationEnabled: _e2eeActivationEnabled,
     );
     if (value == null) return;
     try {
@@ -1406,6 +1429,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
       context,
       channel: channel,
       channels: _channels,
+      e2eeActivationEnabled: _e2eeActivationEnabled,
     );
     if (value == null) return;
     try {
@@ -4827,6 +4851,7 @@ Future<GuildChannelDraft?> showGuildChannelEditorSheet(
   KaedeChannel? channel,
   List<KaedeChannel> channels = const <KaedeChannel>[],
   EntityRef? initialParent,
+  bool e2eeActivationEnabled = false,
 }) =>
     showModalBottomSheet<GuildChannelDraft>(
       context: context,
@@ -4837,6 +4862,7 @@ Future<GuildChannelDraft?> showGuildChannelEditorSheet(
         channel: channel,
         channels: channels,
         initialParent: initialParent,
+        e2eeActivationEnabled: e2eeActivationEnabled,
       ),
     );
 
@@ -4898,11 +4924,13 @@ final class _ChannelEditorSheet extends StatefulWidget {
     this.channel,
     required this.channels,
     this.initialParent,
+    required this.e2eeActivationEnabled,
   });
 
   final KaedeChannel? channel;
   final List<KaedeChannel> channels;
   final EntityRef? initialParent;
+  final bool e2eeActivationEnabled;
 
   @override
   State<_ChannelEditorSheet> createState() => _ChannelEditorSheetState();
@@ -4912,8 +4940,24 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
   final _formKey = GlobalKey<FormState>();
   late final _name = TextEditingController(text: widget.channel?.name ?? '');
   late final _topic = TextEditingController(text: widget.channel?.topic ?? '');
+  late final _defaultReaction = TextEditingController(
+    text: '${widget.channel?.defaultReactionEmoji?['emoji_name'] ?? ''}',
+  );
+  late final String? _defaultReactionId =
+      widget.channel?.defaultReactionEmoji?['emoji_id'] as String?;
+  var _defaultReactionEdited = false;
   late ChannelType _type = widget.channel?.type ?? ChannelType.text;
   late int _slow = widget.channel?.slowModeSeconds ?? 0;
+  late int _threadSlow = widget.channel?.defaultThreadRateLimitPerUser ?? 0;
+  late int _defaultAutoArchive =
+      widget.channel?.defaultAutoArchiveDuration ?? 1440;
+  late int _forumSort = widget.channel?.defaultSortOrder ?? 0;
+  late int _forumLayout = widget.channel?.defaultForumLayout ?? 0;
+  late bool _requireTag = (widget.channel?.flags ?? 0) & 16 != 0;
+  late bool _e2eeRequired = widget.channel?.e2eeRequired ?? false;
+  late final List<ForumTag> _forumTags = [
+    ...?widget.channel?.availableTags,
+  ];
   late String _history = widget.channel?.federatedHistoryPolicy ?? 'inherit';
   late String _parent =
       (widget.channel?.parentRef ?? widget.initialParent)?.wire ?? '';
@@ -4922,6 +4966,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
     (ChannelType.text, 'Text', Icons.tag_rounded),
     (ChannelType.voice, 'Voice', Icons.volume_up_rounded),
     (ChannelType.announcement, 'Announcement', Icons.campaign_rounded),
+    (ChannelType.forum, 'Forum', Icons.forum_outlined),
     (ChannelType.category, 'Category', Icons.folder_outlined),
   ];
 
@@ -4939,7 +4984,40 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
   void dispose() {
     _name.dispose();
     _topic.dispose();
+    _defaultReaction.dispose();
     super.dispose();
+  }
+
+  Future<void> _setE2eeRequired(bool value) async {
+    if (!value) {
+      setState(() => _e2eeRequired = false);
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Require end-to-end encrypted replies?'),
+        content: const Text(
+          'Only new posts will use this policy. Their starter message remains '
+          'plaintext, then all replies and files are end-to-end encrypted. '
+          'Once this forum is saved, the requirement cannot be turned off.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.lock_rounded),
+            label: const Text('Require encryption'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) {
+      setState(() => _e2eeRequired = true);
+    }
   }
 
   @override
@@ -5042,6 +5120,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             ChannelType.category => Icons.folder_outlined,
                             ChannelType.voice => Icons.volume_up_rounded,
                             ChannelType.announcement => Icons.campaign_rounded,
+                            ChannelType.forum => Icons.forum_outlined,
                             _ => Icons.tag_rounded,
                           }),
                         ),
@@ -5088,6 +5167,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                 ChannelType.voice => Icons.volume_up_rounded,
                                 ChannelType.announcement =>
                                   Icons.campaign_rounded,
+                                ChannelType.forum => Icons.forum_outlined,
                                 _ => Icons.tag_rounded,
                               },
                               size: 15,
@@ -5101,6 +5181,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                   ChannelType.voice => 'Voice channel',
                                   ChannelType.announcement =>
                                     'Announcement channel',
+                                  ChannelType.forum => 'Forum channel',
                                   _ => 'Text channel',
                                 }} · the type cannot change after creation',
                                 style: const TextStyle(
@@ -5147,7 +5228,9 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                           decoration: InputDecoration(
                             labelText: _type == ChannelType.voice
                                 ? 'Description (optional)'
-                                : 'Topic (optional)',
+                                : _type == ChannelType.forum
+                                    ? 'Post Guidelines (optional)'
+                                    : 'Topic (optional)',
                             alignLabelWithHint: true,
                           ),
                         ),
@@ -5156,10 +5239,13 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                           DropdownButtonFormField<int>(
                             initialValue: _slow,
                             isExpanded: true,
-                            decoration: const InputDecoration(
-                              labelText: 'Slow mode',
-                              helperText:
-                                  'How long members wait between messages.',
+                            decoration: InputDecoration(
+                              labelText: _type == ChannelType.forum
+                                  ? 'Post slow mode'
+                                  : 'Slow mode',
+                              helperText: _type == ChannelType.forum
+                                  ? 'How long members wait between posts.'
+                                  : 'How long members wait between messages.',
                               prefixIcon: Icon(Icons.timer_outlined),
                             ),
                             items: [
@@ -5170,6 +5256,182 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             onChanged: (value) =>
                                 setState(() => _slow = value ?? 0),
                           ),
+                        ],
+                        if (_type == ChannelType.forum) ...[
+                          const SizedBox(height: 16),
+                          DropdownButtonFormField<int>(
+                            initialValue: _defaultAutoArchive,
+                            decoration: const InputDecoration(
+                              labelText: 'Hide posts after inactivity',
+                              prefixIcon: Icon(Icons.archive_outlined),
+                            ),
+                            items: const [
+                              DropdownMenuItem(
+                                  value: 60, child: Text('1 hour')),
+                              DropdownMenuItem(
+                                  value: 1440, child: Text('24 hours')),
+                              DropdownMenuItem(
+                                  value: 4320, child: Text('3 days')),
+                              DropdownMenuItem(
+                                  value: 10080, child: Text('1 week')),
+                            ],
+                            onChanged: (value) => setState(() =>
+                                _defaultAutoArchive =
+                                    value ?? _defaultAutoArchive),
+                          ),
+                          const SizedBox(height: 14),
+                          DropdownButtonFormField<int>(
+                            initialValue: _threadSlow,
+                            decoration: const InputDecoration(
+                              labelText: 'Default reply slow mode',
+                              helperText:
+                                  'How long members wait between replies.',
+                              prefixIcon: Icon(Icons.timer_outlined),
+                            ),
+                            items: [
+                              for (final entry in slowModes.entries)
+                                DropdownMenuItem(
+                                  value: entry.key,
+                                  child: Text(entry.value),
+                                ),
+                            ],
+                            onChanged: (value) =>
+                                setState(() => _threadSlow = value ?? 0),
+                          ),
+                          const SizedBox(height: 14),
+                          DropdownButtonFormField<int>(
+                            initialValue: _forumSort,
+                            decoration: const InputDecoration(
+                              labelText: 'Default sort order',
+                              prefixIcon: Icon(Icons.swap_vert_rounded),
+                            ),
+                            items: const [
+                              DropdownMenuItem(
+                                  value: 0, child: Text('Recently Active')),
+                              DropdownMenuItem(
+                                  value: 1, child: Text('Date Posted')),
+                            ],
+                            onChanged: (value) =>
+                                setState(() => _forumSort = value ?? 0),
+                          ),
+                          const SizedBox(height: 14),
+                          DropdownButtonFormField<int>(
+                            initialValue: _forumLayout,
+                            decoration: const InputDecoration(
+                              labelText: 'Default layout',
+                              prefixIcon: Icon(Icons.view_agenda_outlined),
+                            ),
+                            items: const [
+                              DropdownMenuItem(
+                                  value: 0, child: Text('Not set')),
+                              DropdownMenuItem(value: 1, child: Text('List')),
+                              DropdownMenuItem(
+                                  value: 2, child: Text('Gallery')),
+                            ],
+                            onChanged: (value) =>
+                                setState(() => _forumLayout = value ?? 0),
+                          ),
+                          const SizedBox(height: 14),
+                          TextFormField(
+                            controller: _defaultReaction,
+                            maxLength: 64,
+                            onChanged: (_) =>
+                                setState(() => _defaultReactionEdited = true),
+                            decoration: InputDecoration(
+                              labelText: 'Default reaction emoji (optional)',
+                              counterText: '',
+                              prefixIcon:
+                                  const Icon(Icons.add_reaction_outlined),
+                              helperText: !_defaultReactionEdited &&
+                                      _defaultReactionId?.isNotEmpty == true
+                                  ? 'A custom emoji is selected.'
+                                  : null,
+                              suffixIcon: !_defaultReactionEdited &&
+                                      _defaultReactionId?.isNotEmpty == true
+                                  ? IconButton(
+                                      tooltip: 'Clear default reaction',
+                                      onPressed: () => setState(() {
+                                        _defaultReactionEdited = true;
+                                        _defaultReaction.clear();
+                                      }),
+                                      icon: const Icon(Icons.close_rounded),
+                                    )
+                                  : null,
+                            ),
+                          ),
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            value: _requireTag,
+                            onChanged: (value) =>
+                                setState(() => _requireTag = value),
+                            title: const Text('Require a tag'),
+                            subtitle: const Text(
+                                'Members must select a tag before posting.'),
+                          ),
+                          if (widget.e2eeActivationEnabled || _e2eeRequired)
+                            SwitchListTile(
+                              contentPadding: EdgeInsets.zero,
+                              value: _e2eeRequired,
+                              onChanged: widget.channel?.e2eeRequired == true
+                                  ? null
+                                  : (value) =>
+                                      unawaited(_setE2eeRequired(value)),
+                              title: const Text(
+                                  'Require end-to-end encrypted replies'),
+                              subtitle: Text(_e2eeRequired
+                                  ? 'Future posts activate encryption after their plaintext starter.'
+                                  : 'New posts use plaintext replies.'),
+                            ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text('Tags (${_forumTags.length}/20)',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleMedium),
+                              ),
+                              TextButton.icon(
+                                onPressed: _forumTags.length >= 20
+                                    ? null
+                                    : () => _editForumTag(),
+                                icon: const Icon(Icons.add_rounded, size: 17),
+                                label: const Text('Create Tag'),
+                              ),
+                            ],
+                          ),
+                          for (var index = 0;
+                              index < _forumTags.length;
+                              index += 1)
+                            ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: CircleAvatar(
+                                radius: 16,
+                                backgroundColor: KaedeColors.raised,
+                                child: Text(_forumTags[index].emoji ?? '#'),
+                              ),
+                              title: Text(_forumTags[index].name),
+                              subtitle: _forumTags[index].moderated
+                                  ? const Text('Moderated')
+                                  : null,
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    tooltip: 'Edit tag',
+                                    onPressed: () => _editForumTag(index),
+                                    icon: const Icon(Icons.edit_outlined),
+                                  ),
+                                  IconButton(
+                                    tooltip: 'Delete tag',
+                                    onPressed: () => setState(
+                                        () => _forumTags.removeAt(index)),
+                                    icon: const Icon(
+                                        Icons.delete_outline_rounded),
+                                  ),
+                                ],
+                              ),
+                            ),
                         ],
                         if (_type == ChannelType.text ||
                             _type == ChannelType.announcement) ...[
@@ -5213,6 +5475,114 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
     );
   }
 
+  Future<void> _editForumTag([int? index]) async {
+    final existing = index == null ? null : _forumTags[index];
+    final name = TextEditingController(text: existing?.name ?? '');
+    final emoji = TextEditingController(text: existing?.emojiName ?? '');
+    var moderated = existing?.moderated ?? false;
+    var emojiEdited = false;
+    final result = await showDialog<ForumTag>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(existing == null ? 'Create Tag' : 'Edit Tag'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: name,
+                autofocus: true,
+                maxLength: 20,
+                decoration: const InputDecoration(
+                  labelText: 'Tag name',
+                  counterText: '',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: emoji,
+                maxLength: 64,
+                onChanged: (_) => setDialogState(() => emojiEdited = true),
+                decoration: InputDecoration(
+                  labelText: 'Emoji (optional)',
+                  counterText: '',
+                  helperText:
+                      !emojiEdited && existing?.emojiId?.isNotEmpty == true
+                          ? 'A custom emoji is selected.'
+                          : null,
+                  suffixIcon:
+                      !emojiEdited && existing?.emojiId?.isNotEmpty == true
+                          ? IconButton(
+                              tooltip: 'Clear tag emoji',
+                              onPressed: () => setDialogState(() {
+                                emojiEdited = true;
+                                emoji.clear();
+                              }),
+                              icon: const Icon(Icons.close_rounded),
+                            )
+                          : null,
+                ),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: moderated,
+                onChanged: (value) => setDialogState(() => moderated = value),
+                title: const Text('Moderated'),
+                subtitle: const Text(
+                    'Only members who can manage threads can use this tag.'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: name,
+              builder: (_, value, __) => FilledButton(
+                onPressed: value.text.trim().isEmpty
+                    ? null
+                    : () => Navigator.pop(
+                          dialogContext,
+                          ForumTag(
+                            id: existing?.id ??
+                                'new-${DateTime.now().microsecondsSinceEpoch}',
+                            name: value.text.trim(),
+                            moderated: moderated,
+                            emojiName: emoji.text.trim().isEmpty
+                                ? null
+                                : emoji.text.trim(),
+                            emojiId: emojiEdited ? null : existing?.emojiId,
+                          ),
+                        ),
+                child: Text(existing == null ? 'Create' : 'Save'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    name.dispose();
+    emoji.dispose();
+    if (result == null || !mounted) return;
+    setState(() {
+      if (index == null) {
+        _forumTags.add(result);
+      } else {
+        _forumTags[index] = result;
+      }
+    });
+  }
+
+  Map<String, Object?>? _defaultReactionPayload() {
+    if (!_defaultReactionEdited && _defaultReactionId?.isNotEmpty == true) {
+      return <String, Object?>{'emoji_id': _defaultReactionId};
+    }
+    final name = _defaultReaction.text.trim();
+    return name.isEmpty ? null : <String, Object?>{'emoji_name': name};
+  }
+
   void _save() {
     if (_formKey.currentState?.validate() != true) return;
     final parent = widget.channels
@@ -5234,6 +5604,22 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
             _type == ChannelType.text || _type == ChannelType.announcement
                 ? _history
                 : null,
+        flags: _type == ChannelType.forum
+            ? _requireTag
+                ? (widget.channel?.flags ?? 0) | 16
+                : (widget.channel?.flags ?? 0) & ~16
+            : null,
+        availableTags:
+            _type == ChannelType.forum ? List.unmodifiable(_forumTags) : null,
+        defaultReactionEmoji:
+            _type == ChannelType.forum ? _defaultReactionPayload() : null,
+        defaultThreadRateLimitPerUser:
+            _type == ChannelType.forum ? _threadSlow : null,
+        defaultAutoArchiveDuration:
+            _type == ChannelType.forum ? _defaultAutoArchive : null,
+        defaultSortOrder: _type == ChannelType.forum ? _forumSort : null,
+        defaultForumLayout: _type == ChannelType.forum ? _forumLayout : null,
+        e2eeRequired: _type == ChannelType.forum ? _e2eeRequired : null,
       ),
     );
   }
@@ -5302,6 +5688,14 @@ final class GuildChannelDraft {
     required this.slowModeSeconds,
     this.parentRef,
     this.federatedHistoryPolicy,
+    this.flags,
+    this.availableTags,
+    this.defaultReactionEmoji,
+    this.defaultThreadRateLimitPerUser,
+    this.defaultAutoArchiveDuration,
+    this.defaultSortOrder,
+    this.defaultForumLayout,
+    this.e2eeRequired,
   });
 
   final String name;
@@ -5310,6 +5704,14 @@ final class GuildChannelDraft {
   final int slowModeSeconds;
   final EntityRef? parentRef;
   final String? federatedHistoryPolicy;
+  final int? flags;
+  final List<ForumTag>? availableTags;
+  final Map<String, Object?>? defaultReactionEmoji;
+  final int? defaultThreadRateLimitPerUser;
+  final int? defaultAutoArchiveDuration;
+  final int? defaultSortOrder;
+  final int? defaultForumLayout;
+  final bool? e2eeRequired;
 
   Map<String, Object?> get json => {
         'name': name,
@@ -5320,7 +5722,39 @@ final class GuildChannelDraft {
         'parent_id': type == ChannelType.category ? null : parentRef?.id.value,
         if (federatedHistoryPolicy != null)
           'federated_history_policy': federatedHistoryPolicy,
+        if (flags != null) 'flags': flags,
+        if (availableTags != null)
+          'available_tags': [
+            for (final tag in availableTags!)
+              <String, Object?>{
+                if (!tag.id.startsWith('new-')) 'id': tag.id,
+                'name': tag.name,
+                'moderated': tag.moderated,
+                if (tag.emojiId?.isNotEmpty == true)
+                  'emoji_id': tag.emojiId
+                else if (tag.emojiName?.isNotEmpty == true)
+                  'emoji_name': tag.emojiName,
+              },
+          ],
+        if (type == ChannelType.forum)
+          'default_reaction_emoji': _forumEmojiJson(defaultReactionEmoji),
+        if (defaultThreadRateLimitPerUser != null)
+          'default_thread_rate_limit_per_user': defaultThreadRateLimitPerUser,
+        if (defaultAutoArchiveDuration != null)
+          'default_auto_archive_duration': defaultAutoArchiveDuration,
+        if (defaultSortOrder != null) 'default_sort_order': defaultSortOrder,
+        if (defaultForumLayout != null)
+          'default_forum_layout': defaultForumLayout,
+        if (e2eeRequired != null) 'e2ee_required': e2eeRequired,
       };
+}
+
+Map<String, Object?>? _forumEmojiJson(Map<String, Object?>? emoji) {
+  final id = '${emoji?['emoji_id'] ?? ''}'.trim();
+  if (id.isNotEmpty) return <String, Object?>{'emoji_id': id};
+  final name = '${emoji?['emoji_name'] ?? ''}'.trim();
+  if (name.isNotEmpty) return <String, Object?>{'emoji_name': name};
+  return null;
 }
 
 /// Base role grants span both guild-wide administration and the default
@@ -5875,5 +6309,9 @@ int _channelNumber(ChannelType type) => switch (type) {
       ChannelType.voice => 2,
       ChannelType.category => 4,
       ChannelType.announcement => 5,
+      ChannelType.announcementThread => 10,
+      ChannelType.publicThread => 11,
+      ChannelType.privateThread => 12,
+      ChannelType.forum => 15,
       ChannelType.unknown => 0
     };

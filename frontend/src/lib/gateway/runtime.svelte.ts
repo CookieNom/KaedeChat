@@ -1,4 +1,5 @@
 import { entityKey } from '$lib/chat/refs';
+import { isThreadChannel, threadMembersUpdateRemovesUser } from '$lib/chat/threads';
 import type {
   Channel,
   CustomEmoji,
@@ -8,6 +9,7 @@ import type {
   PresenceStatus,
   ReadStateStatus,
   Role,
+  ThreadMember,
   UserSummary
 } from '$lib/chat/types';
 import { browserNotifications } from '$lib/notifications/browser.svelte';
@@ -114,7 +116,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
     case 'CHANNEL_UPDATE':
     case 'CHANNEL_ACCESS_GRANTED': {
       const channel = dispatch.d as Channel;
-      chatEntities.channels.upsert(channel, { append: channel.guild_id !== null });
+      chatEntities.upsertGuildChannel(channel);
       return;
     }
     case 'CHANNEL_PERMISSION_UPDATE': {
@@ -131,12 +133,110 @@ function applyEntityDispatch(dispatch: Dispatch): void {
     }
     case 'CHANNEL_ACCESS_REVOKED': {
       const revoked = dispatch.d as { channel_id: string; channel_domain: string };
-      chatEntities.channels.remove(`${revoked.channel_id}@${revoked.channel_domain}`);
+      chatEntities.removeChannel({
+        id: revoked.channel_id,
+        origin_domain: revoked.channel_domain
+      });
       return;
     }
     case 'CHANNEL_DELETE': {
       const channel = dispatch.d as { id: string; origin_domain: string };
-      chatEntities.channels.remove(entityKey(channel));
+      chatEntities.removeChannel(channel);
+      return;
+    }
+    case 'THREAD_CREATE':
+    case 'THREAD_UPDATE': {
+      const data = dispatch.d as {
+        channel?: Channel;
+        thread?: Channel;
+        starter_message?: Message | null;
+      } & Partial<Channel>;
+      const thread = (data.channel ?? data.thread ?? data) as Channel;
+      if (thread.id && thread.origin_domain && isThreadChannel(thread)) {
+        chatEntities.upsertGuildChannel({
+          ...thread,
+          starter_message: data.starter_message ?? thread.starter_message
+        });
+      }
+      return;
+    }
+    case 'THREAD_DELETE': {
+      const data = dispatch.d as {
+        channel?: Channel;
+        thread?: Channel;
+        id?: string;
+        origin_domain?: string;
+        thread_domain?: string;
+      };
+      const thread = data.channel ?? data.thread ?? data;
+      if (thread.id && (thread.origin_domain || data.thread_domain)) {
+        chatEntities.removeChannel({
+          id: thread.id,
+          origin_domain: thread.origin_domain ?? data.thread_domain!
+        });
+      }
+      return;
+    }
+    case 'THREAD_LIST_SYNC': {
+      const update = dispatch.d as { threads?: Channel[]; members?: ThreadMember[] };
+      const members = update.members ?? [];
+      for (const thread of update.threads ?? []) {
+        const member = members.find(
+          (item) =>
+            item.id === thread.id &&
+            (!item.thread_domain || item.thread_domain === thread.origin_domain)
+        );
+        chatEntities.upsertGuildChannel({ ...thread, member: member ?? null });
+      }
+      return;
+    }
+    case 'THREAD_MEMBER_UPDATE': {
+      const member = dispatch.d as ThreadMember & { removed?: boolean };
+      if (!member.id) return;
+      const threadDomain = member.thread_domain;
+      const thread = threadDomain
+        ? chatEntities.channels.get(`${member.id}@${threadDomain}`)
+        : chatEntities.channels.values.find(
+            (item) => item.id === member.id && isThreadChannel(item)
+          );
+      const currentUser = chatEntities.currentUser;
+      if (
+        thread &&
+        currentUser &&
+        member.user_id === currentUser.id &&
+        member.user_domain === currentUser.origin_domain
+      ) {
+        chatEntities.upsertGuildChannel({
+          ...thread,
+          member: member.removed ? null : member
+        });
+      }
+      return;
+    }
+    case 'THREAD_MEMBERS_UPDATE': {
+      const update = dispatch.d as {
+        id: string;
+        thread_domain?: string;
+        guild_domain?: string;
+        member_count?: number;
+        removed_member_ids?: string[];
+        removed_member_refs?: Array<{ id: string; origin_domain: string }>;
+      };
+      const threadDomain = update.thread_domain ?? update.guild_domain;
+      const thread = threadDomain
+        ? chatEntities.channels.get(`${update.id}@${threadDomain}`)
+        : undefined;
+      if (!thread) return;
+      const removesCurrentUser = threadMembersUpdateRemovesUser(update, chatEntities.currentUser);
+      if (removesCurrentUser && thread.type === 12) {
+        chatEntities.removeChannel(thread);
+      } else {
+        chatEntities.upsertGuildChannel({
+          ...thread,
+          member_count: update.member_count ?? thread.member_count,
+          member: removesCurrentUser ? null : thread.member
+        });
+      }
       return;
     }
     case 'GUILD_CREATE':

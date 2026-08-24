@@ -95,19 +95,90 @@ _CONTRACTS = (
         "channel",
         "ATTACH_FILES is additionally required when attachments are committed",
     ),
+    EndpointPermissionContract(
+        "forum.post.create",
+        Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES,
+        "channel",
+        "ATTACH_FILES is additionally required when the starter message has attachments",
+    ),
+    EndpointPermissionContract(
+        "thread.create.public",
+        Permission.VIEW_CHANNEL | Permission.CREATE_PUBLIC_THREADS,
+        "channel",
+        "the source message must belong to the parent channel when one is supplied",
+    ),
+    EndpointPermissionContract(
+        "thread.create.private",
+        Permission.VIEW_CHANNEL | Permission.CREATE_PRIVATE_THREADS,
+        "channel",
+    ),
+    EndpointPermissionContract(
+        "thread.message.create",
+        Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES_IN_THREADS,
+        "channel",
+        "ATTACH_FILES is additionally required when attachments are committed",
+    ),
+    EndpointPermissionContract(
+        "thread.attachment.create",
+        Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES_IN_THREADS | Permission.ATTACH_FILES,
+        "channel",
+    ),
+    EndpointPermissionContract(
+        "thread.update.self",
+        Permission.VIEW_CHANNEL,
+        "channel",
+        (
+            "only the owner may rename/archive/change defaults; any locked-thread mutation "
+            "requires MANAGE_THREADS"
+        ),
+    ),
+    EndpointPermissionContract(
+        "thread.update.other",
+        Permission.VIEW_CHANNEL | Permission.MANAGE_THREADS,
+        "channel",
+    ),
+    EndpointPermissionContract(
+        "thread.delete", Permission.VIEW_CHANNEL | Permission.MANAGE_THREADS, "channel"
+    ),
+    EndpointPermissionContract("thread.member.list", Permission.VIEW_CHANNEL, "channel"),
+    EndpointPermissionContract(
+        "thread.member.join",
+        Permission.VIEW_CHANNEL,
+        "channel",
+        "the thread must be active; private visibility still requires existing membership",
+    ),
+    EndpointPermissionContract(
+        "thread.member.add",
+        Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES_IN_THREADS,
+        "channel",
+        "the thread must be invitable or the actor must have MANAGE_THREADS",
+    ),
+    EndpointPermissionContract("thread.member.remove.self", Permission.VIEW_CHANNEL, "channel"),
+    EndpointPermissionContract(
+        "thread.member.remove.other",
+        Permission.VIEW_CHANNEL | Permission.MANAGE_THREADS,
+        "channel",
+        "the private-thread creator may also remove another member",
+    ),
+    EndpointPermissionContract(
+        "application.command.use",
+        Permission.VIEW_CHANNEL | Permission.USE_APPLICATION_COMMANDS,
+        "channel",
+    ),
     EndpointPermissionContract("message.delete.other", Permission.MANAGE_MESSAGES, "channel"),
     EndpointPermissionContract("message.delete.self", Permission.VIEW_CHANNEL, "channel"),
     EndpointPermissionContract(
         "message.edit.self",
-        Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES,
+        Permission.VIEW_CHANNEL,
         "channel",
         "only the author may edit",
     ),
     EndpointPermissionContract("message.bulk_delete", Permission.MANAGE_MESSAGES, "channel"),
     EndpointPermissionContract(
         "reaction.create",
-        Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY | Permission.ADD_REACTIONS,
+        Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY,
         "channel",
+        "ADD_REACTIONS is required only when the emoji has no existing reaction",
     ),
     EndpointPermissionContract(
         "reaction.list",
@@ -116,13 +187,15 @@ _CONTRACTS = (
     ),
     EndpointPermissionContract("reaction.delete.self", Permission.VIEW_CHANNEL, "channel"),
     EndpointPermissionContract("reaction.delete.other", Permission.MANAGE_MESSAGES, "channel"),
-    EndpointPermissionContract("pin.update", Permission.MANAGE_MESSAGES, "channel"),
+    EndpointPermissionContract(
+        "pin.update",
+        Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY | Permission.PIN_MESSAGES,
+        "channel",
+    ),
     EndpointPermissionContract(
         "pin.list", Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY, "channel"
     ),
-    EndpointPermissionContract(
-        "typing.publish", Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES, "channel"
-    ),
+    EndpointPermissionContract("typing.publish", Permission.VIEW_CHANNEL, "channel"),
     EndpointPermissionContract(
         "read_state.update",
         Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY,

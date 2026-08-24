@@ -1,6 +1,6 @@
 # Core chat
 
-Updated: 2026-08-07
+Updated: 2026-08-24
 
 This document records the current chat implementation: REST, persistence,
 permissions, moderation, direct messages, the gateway, the browser client, and
@@ -110,6 +110,21 @@ runtime scaling.
   channel into one cursor update, applies mention counts transactionally,
   writes through the Redis cursor, and runs a scheduled sweep for lost wake
   signals.
+- Discord-compatible public, private, and announcement threads reuse the
+  channel/message permission and delivery paths. Creation from an existing
+  message preserves the shared snowflake identity; native `/thread` creation,
+  membership, active/archived discovery, locking, pinning, slow mode, counters,
+  automatic archive, Gateway events, federation, and bot routes share one
+  authoritative implementation.
+- Forum channels are available to every guild. Posts are atomic public child
+  threads with a required starter, optional required tags, moderated tags,
+  one pinned post, title search, repeated-tag OR filtering, recently-active or
+  posted-date ordering, and list/gallery presentation. The parent policy and
+  thread metadata remain plaintext.
+- Optional thread E2EE is content-only and future-only. An E2EE-required forum
+  commits the plaintext starter and immediately requires activation of the
+  child MLS group before replies; ordinary threads can be activated explicitly.
+  Bots fail closed until a verified bot-device MLS participant protocol exists.
 
 ## Validation
 
@@ -141,7 +156,8 @@ drift.
 
 ## Scope limits
 
-Group DMs, message search, threads, forums, stages, vanity invites, MLS, and
-MessagePack are outside the current scope. Native Android and iOS clients are
-implemented in `mobile/` and consume the same core-chat contracts. Federation
-behavior is documented in [m3-federation.md](m3-federation.md).
+Stages, vanity invites, and MessagePack are outside the current scope. Native
+Android and iOS clients are implemented in `mobile/` and consume the same
+core-chat contracts. Federation behavior is documented in
+[m3-federation.md](m3-federation.md), and the MLS security boundary is
+documented in [e2ee.md](e2ee.md).

@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -11,11 +12,14 @@ from kaede_bot.models import (
     Channel,
     ChannelDeleteEvent,
     Emoji,
+    Guild,
     Interaction,
     Member,
     Message,
     PresenceEvent,
     ReactionEvent,
+    ThreadListSyncEvent,
+    ThreadMembersUpdateEvent,
     VoiceStateEvent,
 )
 from kaede_bot.refs import EntityRef, User
@@ -621,3 +625,652 @@ async def test_download_attachment_stops_after_the_first_byte_over_limit(
             max_bytes=5,
         )
     assert response.chunks_requested == 2
+
+
+def thread_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "id": "30",
+        "origin_domain": "guild.example",
+        "guild_id": "2",
+        "guild_domain": "guild.example",
+        "parent_id": "20",
+        "parent_domain": "guild.example",
+        "owner_id": "4",
+        "owner_domain": "users.example",
+        "type": 11,
+        "name": "release notes",
+        "created_at": "2026-08-24T11:59:59+00:00",
+        "last_message_id": "31",
+        "last_message_domain": "guild.example",
+        "archived": False,
+        "locked": False,
+        "invitable": None,
+        "auto_archive_duration": 1440,
+        "archive_timestamp": "2026-08-24T12:00:00+00:00",
+        # The starter is intentionally excluded from both Discord thread counters.
+        "message_count": 0,
+        "total_message_sent": 0,
+        "member_count": 2,
+        "applied_tag_ids": [7],
+        "starter_message": {
+            "id": "31",
+            "origin_domain": "guild.example",
+            "channel_id": "30",
+            "channel_domain": "guild.example",
+            "content": "Ship it",
+            "created_at": "2026-08-24T12:00:00+00:00",
+            "attachments": [],
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_forum_and_thread_channel_payloads_are_typed() -> None:
+    bot = client()
+    forum = Channel.from_payload(
+        bot,
+        "https://guild.example",
+        {
+            "id": "20",
+            "origin_domain": "guild.example",
+            "guild_id": "2",
+            "guild_domain": "guild.example",
+            "type": 15,
+            "name": "support",
+            "available_tags": [
+                {
+                    "id": "7",
+                    "name": "Resolved",
+                    "moderated": True,
+                    "emoji_name": "✅",
+                }
+            ],
+            "default_auto_archive_duration": 1440,
+            "default_thread_rate_limit_per_user": 10,
+            "default_sort_order": 0,
+            "default_forum_layout": 2,
+            "e2ee_required": True,
+        },
+    )
+    thread = Channel.from_payload(
+        bot,
+        "https://guild.example",
+        thread_payload(newly_created=True),
+    )
+
+    assert forum.is_forum is True
+    assert forum.available_tags[0].name == "Resolved"
+    assert forum.e2ee_required is True
+    assert thread.is_thread is True
+    assert thread.thread_metadata is not None
+    assert thread.thread_metadata.auto_archive_duration == 1440
+    assert thread.thread_metadata.invitable is None
+    assert thread.message_count == 0
+    assert thread.total_message_sent == 0
+    assert thread.owner_ref == EntityRef(4, "users.example")
+    assert thread.created_at == datetime.fromisoformat("2026-08-24T11:59:59+00:00")
+    assert thread.last_message_ref == EntityRef(31, "guild.example")
+    assert thread.newly_created is True
+    assert thread.starter_message_ref == EntityRef(31, "guild.example")
+    assert thread.starter_message is not None
+    assert thread.starter_message.content == "Ship it"
+
+
+def test_parent_thread_projection_is_typed_on_messages() -> None:
+    bot = client()
+    message = Message.from_payload(
+        bot,
+        "https://guild.example",
+        {
+            "id": "30",
+            "origin_domain": "guild.example",
+            "channel_id": "20",
+            "channel_domain": "guild.example",
+            "author_id": "4",
+            "author_domain": "users.example",
+            "content": "release notes",
+            "message_type": 18,
+            "flags": 1 << 5,
+            "created_at": "2026-08-24T12:00:00+00:00",
+            "attachments": [],
+            "thread": thread_payload(starter_message=None),
+        },
+    )
+
+    assert message.message_type == 18
+    assert message.thread is not None
+    assert message.thread.ref == EntityRef(30, "guild.example")
+
+
+def test_type_21_starter_exposes_its_resolved_parent_message() -> None:
+    bot = client()
+    source = {
+        "id": "31",
+        "origin_domain": "guild.example",
+        "channel_id": "20",
+        "channel_domain": "guild.example",
+        "content": "Ship it",
+        "created_at": "2026-08-24T12:00:00+00:00",
+        "attachments": [],
+    }
+    starter = Message.from_payload(
+        bot,
+        "https://guild.example",
+        {
+            "id": "31",
+            "origin_domain": "guild.example",
+            "channel_id": "30",
+            "channel_domain": "guild.example",
+            "message_type": 21,
+            "content": None,
+            "created_at": "2026-08-24T12:00:00+00:00",
+            "attachments": [],
+            "message_reference": {
+                "message_id": "31",
+                "message_domain": "guild.example",
+                "channel_id": "20",
+                "channel_domain": "guild.example",
+            },
+            "referenced_message": source,
+        },
+    )
+
+    assert starter.content is None
+    assert starter.referenced_message_ref == EntityRef(31, "guild.example")
+    assert starter.referenced_message is not None
+    assert starter.referenced_message.content == "Ship it"
+
+
+def test_redacted_thread_starter_and_null_nonapplicable_defaults_are_safe() -> None:
+    bot = client()
+    thread = Channel.from_payload(
+        bot,
+        "https://guild.example",
+        thread_payload(
+            flags="0",
+            message_count=None,
+            total_message_sent=None,
+            member_count=None,
+            default_auto_archive_duration=None,
+            default_thread_rate_limit_per_user=None,
+            default_forum_layout=None,
+            starter_message={
+                "id": "31",
+                "origin_domain": "guild.example",
+                "channel_id": "30",
+                "channel_domain": "guild.example",
+                "content": None,
+                "attachments": [],
+                "content_unavailable": True,
+            },
+        ),
+    )
+
+    assert thread.message_count == 0
+    assert thread.default_auto_archive_duration is None
+    assert thread.starter_message is not None
+    assert thread.starter_message.content_unavailable is True
+    assert thread.starter_message.created_at is None
+
+
+def test_forum_create_accepts_discord_message_response_alias() -> None:
+    bot = client()
+    starter = thread_payload()["starter_message"]
+    thread = Channel.from_payload(
+        bot,
+        "https://guild.example",
+        thread_payload(starter_message=None, message=starter),
+    )
+
+    assert thread.starter_message is not None
+    assert thread.starter_message.content == "Ship it"
+
+
+@pytest.mark.asyncio
+async def test_start_thread_uses_atomic_nested_starter_payload() -> None:
+    bot = client()
+    bot.request = AsyncMock(return_value=thread_payload())  # type: ignore[method-assign]
+
+    thread = await bot.start_thread(
+        EntityRef(20, "guild.example"),
+        "release notes",
+        target="https://guild.example",
+        type=11,
+        content="Ship it",
+        attachment_ids=[90],
+        applied_tag_ids=[7],
+        auto_archive_duration=1440,
+        client_nonce="nonce-1",
+    )
+
+    assert thread.ref == EntityRef(30, "guild.example")
+    assert bot.request.await_args is not None
+    assert bot.request.await_args.args == (
+        "POST",
+        "/api/v1/bots/channels/20@guild.example/threads",
+    )
+    assert bot.request.await_args.kwargs["json"] == {
+        "name": "release notes",
+        "type": 11,
+        "auto_archive_duration": 1440,
+        "applied_tag_ids": ["7"],
+        "message": {
+            "content": "Ship it",
+            "attachment_ids": ["90"],
+            "client_nonce": "nonce-1",
+        },
+    }
+
+    forum = Channel.from_payload(
+        bot,
+        "https://guild.example",
+        {
+            "id": "20",
+            "origin_domain": "guild.example",
+            "guild_id": "2",
+            "guild_domain": "guild.example",
+            "type": 15,
+            "name": "support",
+        },
+    )
+    with pytest.raises(ValueError, match="2000"):
+        await forum.create_post("Too long", "x" * 2001)
+    with pytest.raises(ValueError, match="content or an attachment"):
+        await forum.create_post("Empty")
+
+
+@pytest.mark.asyncio
+async def test_message_start_thread_uses_message_scoped_route() -> None:
+    bot = client()
+    bot.request = AsyncMock(return_value=thread_payload())  # type: ignore[method-assign]
+    message = Message.from_payload(
+        bot,
+        "https://guild.example",
+        {
+            "id": "31",
+            "origin_domain": "guild.example",
+            "channel_id": "20",
+            "channel_domain": "guild.example",
+            "content": "Ship it",
+            "created_at": "2026-08-24T12:00:00+00:00",
+            "attachments": [],
+        },
+    )
+
+    await message.start_thread("release notes", auto_archive_duration=60)
+
+    assert bot.request.await_args is not None
+    assert bot.request.await_args.args == (
+        "POST",
+        "/api/v1/bots/channels/20@guild.example/messages/31@guild.example/threads",
+    )
+    assert bot.request.await_args.kwargs["json"] == {
+        "name": "release notes",
+        "auto_archive_duration": 60,
+    }
+
+
+@pytest.mark.asyncio
+async def test_thread_delete_uses_thread_scoped_route() -> None:
+    bot = client()
+    bot.request = AsyncMock()  # type: ignore[method-assign]
+    thread = Channel.from_payload(
+        bot,
+        "https://guild.example",
+        thread_payload(),
+    )
+
+    await thread.delete()
+
+    bot.request.assert_awaited_once_with(
+        "DELETE",
+        "/api/v1/bots/channels/30@guild.example",
+        target="https://guild.example",
+    )
+
+
+@pytest.mark.asyncio
+async def test_thread_edit_serializes_applied_tags_as_wire_snowflakes() -> None:
+    bot = client()
+    bot.request = AsyncMock(return_value=thread_payload())  # type: ignore[method-assign]
+    thread = Channel.from_payload(bot, "https://guild.example", thread_payload())
+
+    await thread.edit_thread(applied_tag_ids=[7, 8])
+
+    bot.request.assert_awaited_once_with(
+        "PATCH",
+        "/api/v1/bots/channels/30@guild.example",
+        target="https://guild.example",
+        json={"applied_tag_ids": ["7", "8"]},
+    )
+
+
+@pytest.mark.asyncio
+async def test_thread_membership_exposes_kaede_notification_preferences() -> None:
+    bot = client()
+    bot.request = AsyncMock()  # type: ignore[method-assign]
+    thread = Channel.from_payload(bot, "https://guild.example", thread_payload())
+
+    await thread.join(notification_level="all")
+
+    bot.request.assert_awaited_once_with(
+        "PUT",
+        "/api/v1/bots/channels/30@guild.example/thread-members/@me",
+        target="https://guild.example",
+        json={"flags": 0, "notification_level": "all"},
+    )
+    with pytest.raises(ValueError, match="notification level"):
+        await thread.join(notification_level="loudest")
+
+
+@pytest.mark.asyncio
+async def test_adding_another_thread_member_does_not_set_their_preferences() -> None:
+    bot = client()
+    bot.request = AsyncMock()  # type: ignore[method-assign]
+    thread = Channel.from_payload(bot, "https://guild.example", thread_payload())
+
+    await thread.add_member(EntityRef(9, "users.example"))
+
+    bot.request.assert_awaited_once_with(
+        "PUT",
+        "/api/v1/bots/channels/30@guild.example/thread-members/9@users.example",
+        target="https://guild.example",
+    )
+
+
+@pytest.mark.asyncio
+async def test_thread_member_fetch_and_listing_are_paginated_and_typed() -> None:
+    bot = client()
+    payload = {
+        "id": "30",
+        "thread_domain": "guild.example",
+        "guild_id": "2",
+        "guild_domain": "guild.example",
+        "user_id": "4",
+        "user_domain": "users.example",
+        "join_timestamp": "2026-08-24T12:00:01+00:00",
+        "flags": 0,
+        "member": {
+            "guild_id": "2",
+            "guild_domain": "guild.example",
+            "user": {
+                "id": "4",
+                "origin_domain": "users.example",
+                "username": "alice",
+                "display_name": "Alice",
+            },
+            "nickname": None,
+            "joined_at": "2026-08-24T11:00:00+00:00",
+            "role_ids": [],
+        },
+        "presence": None,
+    }
+    bot.request = AsyncMock(side_effect=[[payload], payload])  # type: ignore[method-assign]
+    thread = Channel.from_payload(bot, "https://guild.example", thread_payload())
+
+    members = await bot.thread_members(
+        thread.ref,
+        target=thread.target,
+        after=EntityRef(3, "users.example"),
+        limit=500,
+        with_member=True,
+    )
+    fetched = await thread.fetch_member(EntityRef(4, "users.example"), with_member=True)
+
+    assert members[0].member is not None
+    assert members[0].member.name == "Alice"
+    assert fetched.user_ref == EntityRef(4, "users.example")
+    assert bot.request.await_args_list[0].kwargs["params"] == {
+        "limit": 100,
+        "with_member": "true",
+        "after": "3@users.example",
+    }
+    assert bot.request.await_args_list[1].args == (
+        "GET",
+        "/api/v1/bots/channels/30@guild.example/thread-members/4@users.example",
+    )
+    assert bot.request.await_args_list[1].kwargs["params"] == {"with_member": "true"}
+
+
+@pytest.mark.asyncio
+async def test_thread_listing_and_membership_use_discord_shaped_envelope() -> None:
+    bot = client()
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "threads": [thread_payload()],
+            "members": [
+                {
+                    "id": "30",
+                    "thread_domain": "guild.example",
+                    "user_id": "4",
+                    "user_domain": "users.example",
+                    "join_timestamp": "2026-08-24T12:00:01+00:00",
+                    "flags": 0,
+                }
+            ],
+            "has_more": True,
+            "next_cursor": "opaque.cursor",
+        }
+    )
+
+    page = await bot.fetch_threads(
+        EntityRef(20, "guild.example"),
+        target="https://guild.example",
+        archived=True,
+        cursor="opaque.previous",
+        limit=500,
+        tag_ids=[7, 8],
+        query="release",
+        sort_order=1,
+    )
+
+    assert page.has_more is True
+    assert page.next_cursor == "opaque.cursor"
+    assert page.threads[0].ref == EntityRef(30, "guild.example")
+    assert page.members[0].user_ref == EntityRef(4, "users.example")
+    assert bot.request.await_args is not None
+    assert bot.request.await_args.kwargs["params"] == {
+        "archived": "true",
+        "cursor": "opaque.previous",
+        "limit": 100,
+        "tag_id": ["7", "8"],
+        "query": "release",
+        "sort_order": 1,
+    }
+
+    with pytest.raises(ValueError, match="before or cursor"):
+        await bot.fetch_threads(
+            EntityRef(20, "guild.example"),
+            before=datetime.fromisoformat("2026-08-24T12:00:00+00:00"),
+            cursor="opaque.previous",
+        )
+
+    await bot.fetch_threads(
+        EntityRef(20, "guild.example"),
+        target="https://guild.example",
+        include_archived=True,
+        sort_order=0,
+    )
+    assert bot.request.await_args is not None
+    assert bot.request.await_args.kwargs["params"] == {
+        "include_archived": "true",
+        "limit": 50,
+        "sort_order": 0,
+    }
+
+    with pytest.raises(ValueError, match="include_archived"):
+        await bot.fetch_threads(
+            EntityRef(20, "guild.example"),
+            archived=True,
+            include_archived=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_guild_active_threads_keeps_the_guild_target() -> None:
+    bot = client()
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value={"threads": [thread_payload()], "members": [], "has_more": False}
+    )
+    guild = Guild.from_payload(
+        bot,
+        "https://guild.example",
+        {
+            "id": "2",
+            "origin_domain": "guild.example",
+            "name": "Guild",
+        },
+    )
+
+    page = await guild.active_threads()
+
+    assert page.threads[0].ref == EntityRef(30, "guild.example")
+    bot.request.assert_awaited_once_with(
+        "GET",
+        "/api/v1/bots/guilds/2@guild.example/threads/active",
+        target="https://guild.example",
+    )
+
+
+@pytest.mark.asyncio
+async def test_thread_gateway_sync_and_member_delta_are_typed() -> None:
+    bot = client()
+    sync: list[ThreadListSyncEvent] = []
+    deltas: list[ThreadMembersUpdateEvent] = []
+
+    @bot.listen("THREAD_LIST_SYNC")
+    async def sync_listener(event: ThreadListSyncEvent) -> None:
+        sync.append(event)
+
+    @bot.listen("THREAD_MEMBERS_UPDATE")
+    async def delta_listener(event: ThreadMembersUpdateEvent) -> None:
+        deltas.append(event)
+
+    member = {
+        "id": "30",
+        "thread_domain": "guild.example",
+        "guild_id": "2",
+        "guild_domain": "guild.example",
+        "user_id": "4",
+        "user_domain": "users.example",
+        "join_timestamp": "2026-08-24T12:00:01+00:00",
+        "flags": 0,
+    }
+    await bot.dispatch(
+        "THREAD_LIST_SYNC",
+        {
+            "guild_id": "2",
+            "guild_domain": "guild.example",
+            "channel_ids": ["20"],
+            "threads": [thread_payload()],
+            "members": [member],
+        },
+        target="https://guild.example",
+    )
+    await bot.dispatch(
+        "THREAD_MEMBERS_UPDATE",
+        {
+            "id": "30",
+            "thread_domain": "guild.example",
+            "guild_id": "2",
+            "guild_domain": "guild.example",
+            "member_count": 2,
+            "added_members": [member],
+            "removed_member_ids": ["5"],
+            "removed_member_refs": [{"id": "5", "origin_domain": "users.example"}],
+        },
+        target="https://guild.example",
+    )
+
+    assert sync[0].channel_refs == (EntityRef(20, "guild.example"),)
+    assert sync[0].threads[0].name == "release notes"
+    assert deltas[0].member_count == 2
+    assert deltas[0].removed_member_refs == (EntityRef(5, "users.example"),)
+
+
+@pytest.mark.asyncio
+async def test_forum_channel_create_serializes_nested_wire_snowflakes() -> None:
+    bot = client()
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "id": "20",
+            "origin_domain": "guild.example",
+            "guild_id": "2",
+            "guild_domain": "guild.example",
+            "type": 15,
+            "name": "support",
+        }
+    )
+
+    available_tags = [{"id": 7, "name": "Resolved", "moderated": True, "emoji_id": 91}]
+    default_reaction = {"emoji_id": 92}
+
+    await bot.create_channel(
+        EntityRef(2, "guild.example"),
+        "support",
+        target="https://guild.example",
+        type=15,
+        topic="Read before posting",
+        available_tags=available_tags,
+        default_reaction_emoji=default_reaction,
+        default_sort_order=0,
+        default_forum_layout=1,
+        e2ee_required=True,
+    )
+
+    assert bot.request.await_args is not None
+    body = bot.request.await_args.kwargs["json"]
+    assert body["type"] == 15
+    assert body["available_tags"] == [
+        {"id": "7", "name": "Resolved", "moderated": True, "emoji_id": "91"}
+    ]
+    assert body["default_reaction_emoji"] == {"emoji_id": "92"}
+    assert body["e2ee_required"] is True
+    assert available_tags[0]["id"] == 7
+    assert available_tags[0]["emoji_id"] == 91
+    assert default_reaction["emoji_id"] == 92
+
+
+@pytest.mark.asyncio
+async def test_forum_channel_edit_serializes_nested_wire_snowflakes() -> None:
+    bot = client()
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "id": "20",
+            "origin_domain": "guild.example",
+            "guild_id": "2",
+            "guild_domain": "guild.example",
+            "type": 15,
+            "name": "support",
+        }
+    )
+
+    await bot.edit_channel(
+        EntityRef(2, "guild.example"),
+        EntityRef(20, "guild.example"),
+        target="https://guild.example",
+        version="channel-v1",
+        available_tags=[
+            {"id": 7, "name": "Resolved", "moderated": True, "emoji_id": 91}
+        ],
+        default_reaction_emoji={"emoji_id": 92},
+    )
+
+    bot.request.assert_awaited_once_with(
+        "PATCH",
+        "/api/v1/bots/guilds/2@guild.example/channels/20@guild.example",
+        target="https://guild.example",
+        json={
+            "available_tags": [
+                {
+                    "id": "7",
+                    "name": "Resolved",
+                    "moderated": True,
+                    "emoji_id": "91",
+                }
+            ],
+            "default_reaction_emoji": {"emoji_id": "92"},
+        },
+        headers={"If-Match": "channel-v1"},
+    )

@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import httpx
 from redis.asyncio import Redis
-from sqlalchemy import and_, case, delete, exists, func, or_, select, tuple_, update
+from sqlalchemy import and_, case, delete, exists, func, or_, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,8 +18,13 @@ from taskiq import SimpleRetryMiddleware
 from taskiq_redis import RedisStreamBroker
 
 from app.chat.events import guild_topic, publish_dispatch, user_topic
-from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
+from app.chat.guild_revision import (
+    federation_channel_state,
+    queue_guild_mutation,
+    wake_queued_guild_federation,
+)
 from app.chat.payloads import (
+    channel_payload,
     dm_channel_payload,
     guild_payload,
     render_message_payload,
@@ -59,6 +64,7 @@ from app.db.models import (
     PushWakeOutbox,
     ReadState,
     Session,
+    ThreadMember,
     User,
     UserSettings,
 )
@@ -165,6 +171,9 @@ if not broker_url:
 broker = RedisStreamBroker(url=broker_url).with_middlewares(
     SimpleRetryMiddleware(default_retry_count=5)
 )
+
+THREAD_TYPES = frozenset({10, 11, 12})
+THREAD_FLAG_PINNED = 1 << 1
 
 SET_LATEST_MESSAGE_SCRIPT = """
 local current = redis.call('GET', KEYS[1])
@@ -575,6 +584,7 @@ async def mobile_push_message(
             ):
                 devices_by_user.setdefault(device.user_id, []).append(device)
             guild_preferences: dict[int, GuildNotificationSetting] = {}
+            thread_preferences: dict[int, ThreadMember] = {}
             if guild is not None:
                 guild_preferences = {
                     item.user_id: item
@@ -587,6 +597,18 @@ async def mobile_push_message(
                         )
                     )
                 }
+                if channel.type in {10, 11, 12}:
+                    thread_preferences = {
+                        item.user_id: item
+                        for item in await session.scalars(
+                            select(ThreadMember).where(
+                                ThreadMember.thread_id == channel.id,
+                                ThreadMember.thread_domain == channel.origin_domain,
+                                ThreadMember.user_id.in_(candidate_ids),
+                                ThreadMember.user_domain == settings.domain,
+                            )
+                        )
+                    }
 
             for user_id in candidate_ids:
                 user = users.get(user_id)
@@ -616,6 +638,21 @@ async def mobile_push_message(
                         continue
                     preference = guild_preferences.get(user_id)
                     level = preference.level if preference is not None else "mentions"
+                    thread_preference = thread_preferences.get(user_id)
+                    if (
+                        channel.type in {10, 11, 12}
+                        and thread_preference is None
+                        and not is_mention
+                    ):
+                        # Guild-wide "all" applies to channels, while thread
+                        # reply pushes are subscription/member scoped. A direct
+                        # mention may still notify a visible non-member.
+                        continue
+                    if (
+                        thread_preference is not None
+                        and thread_preference.notification_level != "inherit"
+                    ):
+                        level = thread_preference.notification_level
                     if level == "none" or (level == "mentions" and not is_mention):
                         continue
                     if is_mention and not bool(notification_settings.get("mentions", True)):
@@ -1172,6 +1209,145 @@ async def message_projection_sweep() -> int:
                 await project_message_record(session, redis, settings, message_id, message_domain)
                 projected += 1
         return projected
+    finally:
+        await redis.aclose()
+        await engine.dispose()
+
+
+async def thread_auto_archive_sweep_in_session(
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+    limit: int = 100,
+) -> int:
+    """Archive one bounded page using the global Guild -> Channel lock order."""
+
+    current = now or datetime.now(UTC)
+    candidate_rows = list(
+        (
+            await session.execute(
+                select(
+                    Channel.id,
+                    Channel.origin_domain,
+                    Channel.guild_id,
+                    Channel.guild_domain,
+                )
+                .join(
+                    Guild,
+                    (Guild.id == Channel.guild_id) & (Guild.origin_domain == Channel.guild_domain),
+                )
+                .where(
+                    Guild.origin_domain == settings.domain,
+                    Guild.unavailable.is_(False),
+                    Channel.type.in_(THREAD_TYPES),
+                    Channel.unavailable.is_(False),
+                    Channel.archived.is_(False),
+                    Channel.flags.op("&")(THREAD_FLAG_PINNED) == 0,
+                    Channel.last_activity_at
+                    + Channel.auto_archive_duration * text("INTERVAL '1 minute'")
+                    <= current,
+                )
+                .order_by(Channel.last_activity_at, Channel.origin_domain, Channel.id)
+                .limit(limit)
+            )
+        ).all()
+    )
+    if not candidate_rows:
+        return 0
+
+    candidates_by_guild: dict[tuple[int, str], list[tuple[int, str]]] = {}
+    for thread_id, thread_domain, guild_id, guild_domain in candidate_rows:
+        if guild_id is None or guild_domain is None:
+            continue
+        candidates_by_guild.setdefault((int(guild_id), str(guild_domain)), []).append(
+            (int(thread_id), str(thread_domain))
+        )
+
+    guilds: dict[tuple[int, str], Guild] = {}
+    archived: list[Channel] = []
+    for guild_ref in sorted(candidates_by_guild, key=lambda item: (item[1], item[0])):
+        # Every ordinary guild mutation locks this same row before its channel.
+        # Selecting candidates lock-free and revalidating after the guild lock
+        # avoids the sweep's former Channel -> Guild inversion.
+        guild = await session.scalar(
+            select(Guild)
+            .where(
+                Guild.id == guild_ref[0],
+                Guild.origin_domain == guild_ref[1],
+                Guild.unavailable.is_(False),
+            )
+            .with_for_update()
+        )
+        if guild is None or guild.origin_domain != settings.domain:
+            continue
+        actor = await session.get(User, (guild.owner_id, guild.owner_domain))
+        if actor is None or not actor.is_local:
+            raise RuntimeError("local guild owner is unavailable for thread auto-archive")
+        refs = candidates_by_guild[guild_ref]
+        due = list(
+            await session.scalars(
+                select(Channel)
+                .where(
+                    tuple_(Channel.id, Channel.origin_domain).in_(refs),
+                    Channel.guild_id == guild.id,
+                    Channel.guild_domain == guild.origin_domain,
+                    Channel.type.in_(THREAD_TYPES),
+                    Channel.unavailable.is_(False),
+                    Channel.archived.is_(False),
+                    Channel.flags.op("&")(THREAD_FLAG_PINNED) == 0,
+                    Channel.last_activity_at
+                    + Channel.auto_archive_duration * text("INTERVAL '1 minute'")
+                    <= current,
+                )
+                .order_by(Channel.last_activity_at, Channel.origin_domain, Channel.id)
+                .with_for_update()
+            )
+        )
+        guilds[guild_ref] = guild
+        for thread in due:
+            thread.archived = True
+            thread.archive_timestamp = current
+            await queue_guild_mutation(
+                session,
+                settings,
+                guild,
+                actor,
+                "guild.channel.update",
+                {"channel": federation_channel_state(thread)},
+                channel=thread,
+            )
+            archived.append(thread)
+
+    if not archived:
+        await session.rollback()
+        return 0
+
+    await session.commit()
+    for guild in guilds.values():
+        await wake_queued_guild_federation(guild)
+    for thread in archived:
+        if thread.guild_id is None or thread.guild_domain is None:
+            continue
+        await publish_dispatch(
+            redis,
+            guild_topic(str(thread.guild_domain), int(thread.guild_id)),
+            "THREAD_UPDATE",
+            channel_payload(thread),
+        )
+    return len(archived)
+
+
+@broker.task(task_name="threads.auto_archive_sweep", schedule=[{"cron": "* * * * *"}])
+@observed_job("threads.auto_archive_sweep")
+async def thread_auto_archive_sweep() -> int:
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        async with sessionmaker() as session:
+            return await thread_auto_archive_sweep_in_session(session, redis, settings)
     finally:
         await redis.aclose()
         await engine.dispose()

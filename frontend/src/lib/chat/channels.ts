@@ -1,4 +1,5 @@
 import { compareEntityRefs, entityKey } from './refs';
+import { ordinaryGuildChannels } from './threads';
 import type { Channel } from './types';
 
 export interface ChannelGroup {
@@ -18,7 +19,7 @@ function belongsTo(channel: Channel, category: Channel): boolean {
 }
 
 export function groupChannels(channels: Channel[]): ChannelGroup[] {
-  const ordered = [...channels].sort(compareChannels);
+  const ordered = ordinaryGuildChannels(channels).sort(compareChannels);
   const categories = ordered.filter((channel) => channel.type === 4);
   const categoryKeys = new Set(categories.map(entityKey));
   const topLevel = ordered.filter(

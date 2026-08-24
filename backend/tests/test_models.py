@@ -34,6 +34,7 @@ def test_complete_v1_schema_is_registered() -> None:
         "roles",
         "member_roles",
         "channels",
+        "thread_members",
         "channel_overwrites",
         "messages",
         "message_projections",
@@ -535,6 +536,101 @@ def test_channel_and_message_references_cannot_cross_owners() -> None:
         ("message_id", "message_domain", "channel_id", "channel_domain"),
         message_target,
     )
+
+
+def test_forum_and_thread_channel_metadata_is_bounded_and_contextual() -> None:
+    channels = Base.metadata.tables["channels"]
+    assert channels.c.topic.type.length == 4096
+    assert channels.c.flags.nullable is False
+    assert channels.c.e2ee_required.nullable is False
+    assert channels.c.available_tags.nullable is False
+    assert channels.c.applied_tag_ids.nullable is False
+    assert has_foreign_key(
+        "channels",
+        ("last_thread_id", "last_thread_domain", "guild_id", "guild_domain"),
+        (
+            "channels.id",
+            "channels.origin_domain",
+            "channels.guild_id",
+            "channels.guild_domain",
+        ),
+    )
+    assert {
+        "ck_channels_thread_requires_unsynced_parent",
+        "ck_channels_thread_metadata_context",
+        "ck_channels_private_thread_invitable_context",
+        "ck_channels_auto_archive_duration_value",
+        "ck_channels_forum_metadata_context",
+        "ck_channels_available_tags_value",
+        "ck_channels_applied_tag_ids_value",
+        "ck_channels_applied_tags_thread_only",
+        "ck_channels_default_reaction_emoji_object",
+        "ck_channels_default_sort_order_value",
+        "ck_channels_default_forum_layout_value",
+        "ck_channels_e2ee_required_context",
+    } <= constraint_names("channels")
+
+    channel_type = next(
+        constraint
+        for constraint in channels.constraints
+        if constraint.name == "ck_channels_channel_type"
+    )
+    assert str(channel_type.sqltext) == "type IN (0,1,2,4,5,10,11,12,15)"
+    indexes = {index.name: index for index in channels.indexes}
+    assert "ix_channels_parent_activity" in indexes
+    assert "ix_channels_thread_archive_due" in indexes
+    starter_index = indexes["uq_channels_thread_starter_message"]
+    assert starter_index.unique is True
+    assert str(starter_index.dialect_options["postgresql"]["where"]) == (
+        "type IN (10,11,12) AND starter_message_id IS NOT NULL"
+    )
+
+
+def test_thread_starter_and_membership_references_are_owner_scoped() -> None:
+    assert {
+        "ck_channels_owner_ref_complete",
+        "ck_channels_starter_message_ref_complete",
+    } <= constraint_names("channels")
+    # Replicated structural snapshots may retain a starter identity without
+    # retaining historical messages, so this is deliberately a checked,
+    # unique logical reference rather than a physical message FK.
+    assert not any(
+        tuple(column.name for column in constraint.columns)
+        == ("starter_message_id", "starter_message_domain")
+        for constraint in Base.metadata.tables["channels"].foreign_key_constraints
+    )
+    assert not any(
+        tuple(column.name for column in constraint.columns) == ("owner_id", "owner_domain")
+        for constraint in Base.metadata.tables["channels"].foreign_key_constraints
+    )
+
+    members = Base.metadata.tables["thread_members"]
+    assert tuple(members.primary_key.columns.keys()) == (
+        "thread_id",
+        "thread_domain",
+        "user_id",
+        "user_domain",
+    )
+    thread = foreign_key_for_columns(
+        "thread_members", ("thread_id", "thread_domain", "guild_id", "guild_domain")
+    )
+    assert tuple(element.target_fullname for element in thread.elements) == (
+        "channels.id",
+        "channels.origin_domain",
+        "channels.guild_id",
+        "channels.guild_domain",
+    )
+    membership = foreign_key_for_columns(
+        "thread_members", ("guild_id", "guild_domain", "user_id", "user_domain")
+    )
+    assert tuple(element.target_fullname for element in membership.elements) == (
+        "guild_members.guild_id",
+        "guild_members.guild_domain",
+        "guild_members.user_id",
+        "guild_members.user_domain",
+    )
+    assert thread.ondelete == membership.ondelete == "CASCADE"
+    assert "ck_thread_members_notification_level_value" in constraint_names("thread_members")
 
 
 def test_invites_webhooks_and_dm_conversations_bind_to_their_channel_identity() -> None:
