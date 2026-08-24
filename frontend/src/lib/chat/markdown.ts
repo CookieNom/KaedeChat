@@ -142,7 +142,10 @@ function roleMentionSpan(token: string, roles: Role[]): HTMLSpanElement {
   span.className = 'chat-token chat-token-mention chat-token-role-mention';
   span.textContent = presentation.text;
   span.title = presentation.title;
-  if (presentation.color) span.style.setProperty('--mention-role-color', presentation.color);
+  // The rendered HTML is inserted through `{@html}` under a strict CSP, so an
+  // inline style attribute would be rejected. Markdown.svelte applies this
+  // validated value through the property-level CSSOM after insertion.
+  if (presentation.color) span.dataset.roleColor = presentation.color;
   return span;
 }
 
