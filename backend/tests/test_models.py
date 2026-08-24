@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from sqlalchemy import CheckConstraint, Computed, ForeignKeyConstraint, UniqueConstraint
+from sqlalchemy.dialects import postgresql
 
 from app.db import models  # noqa: F401
 from app.db.base import Base
@@ -545,6 +546,10 @@ def test_forum_and_thread_channel_metadata_is_bounded_and_contextual() -> None:
     assert channels.c.e2ee_required.nullable is False
     assert channels.c.available_tags.nullable is False
     assert channels.c.applied_tag_ids.nullable is False
+    assert channels.c.default_reaction_emoji.type.none_as_null is True
+    reaction_bind = channels.c.default_reaction_emoji.type.bind_processor(postgresql.dialect())
+    assert reaction_bind is not None
+    assert reaction_bind(None) is None
     assert has_foreign_key(
         "channels",
         ("last_thread_id", "last_thread_domain", "guild_id", "guild_domain"),

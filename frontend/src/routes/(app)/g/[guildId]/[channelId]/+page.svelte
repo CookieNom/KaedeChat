@@ -333,6 +333,7 @@
   let channelDialogType = $state(0);
   let channelDialogParent = $state('');
   let channelDialogBusy = $state(false);
+  let channelDialogError = $state('');
   let channelDialogInput = $state<HTMLInputElement | null>(null);
   let channelDialogElement = $state<HTMLElement | null>(null);
   let channelDialogReturnFocus: HTMLElement | null = null;
@@ -1013,6 +1014,7 @@
         : parent
           ? entityKey(parent)
           : '';
+    channelDialogError = '';
     channelDialogOpen = true;
     void tick().then(() => channelDialogInput?.focus());
   }
@@ -1022,6 +1024,7 @@
     const returnFocus = channelDialogReturnFocus;
     channelDialogOpen = false;
     channelDialogTarget = null;
+    channelDialogError = '';
     channelDialogReturnFocus = null;
     if (restoreFocus && returnFocus?.isConnected) {
       void tick().then(() => returnFocus.focus());
@@ -1215,7 +1218,7 @@
       (item) => entityKey(item) === channelDialogParent && item.type === 4
     );
     channelDialogBusy = true;
-    error = '';
+    channelDialogError = '';
     let saved = false;
     try {
       if (target) {
@@ -1250,7 +1253,7 @@
       saved = true;
     } catch (caught) {
       if (!stillCurrent()) return;
-      error = userErrorMessage(
+      channelDialogError = userErrorMessage(
         caught,
         'Could not save the channel. Check its details and try again.'
       );
@@ -6243,6 +6246,9 @@
               {/each}
             </select>
           </label>
+        {/if}
+        {#if channelDialogError}
+          <p class="form-error" role="alert">{channelDialogError}</p>
         {/if}
         <footer>
           <button

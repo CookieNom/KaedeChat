@@ -1387,7 +1387,10 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
     applied_tag_ids: Mapped[list[str]] = mapped_column(
         JSONB, default=list, server_default="[]", nullable=False
     )
-    default_reaction_emoji: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # PostgreSQL JSONB distinguishes SQL NULL from the JSON literal `null`.
+    # Forum channels without a default reaction need SQL NULL so the database
+    # object-shape constraint treats the optional value as absent.
+    default_reaction_emoji: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     default_sort_order: Mapped[int | None] = mapped_column(SmallInteger)
     default_forum_layout: Mapped[int | None] = mapped_column(SmallInteger)
     e2ee_required: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
