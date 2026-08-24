@@ -4993,7 +4993,13 @@
                     >
                       <span>
                         <Icon
-                          name={item.type === 2 ? 'volume' : item.type === 5 ? 'bell' : 'hash'}
+                          name={item.type === 2
+                            ? 'volume'
+                            : item.type === 5
+                              ? 'bell'
+                              : item.type === 15
+                                ? 'forum'
+                                : 'hash'}
                           size={16}
                         />
                         {item.name}
@@ -5075,7 +5081,13 @@
                 >
                   <span>
                     <Icon
-                      name={item.type === 2 ? 'volume' : item.type === 5 ? 'bell' : 'hash'}
+                      name={item.type === 2
+                        ? 'volume'
+                        : item.type === 5
+                          ? 'bell'
+                          : item.type === 15
+                            ? 'forum'
+                            : 'hash'}
                       size={16}
                     />
                     {item.name}
@@ -5179,7 +5191,9 @@
               <Icon name="volume" size={18} />
             {:else if channel?.type === 5}
               <Icon name="bell" size={18} />
-            {:else if isForumChannel(channel) || isThreadChannel(channel)}
+            {:else if isForumChannel(channel)}
+              <Icon name="forum" size={18} />
+            {:else if isThreadChannel(channel)}
               <Icon name="message" size={18} />
             {:else}
               #

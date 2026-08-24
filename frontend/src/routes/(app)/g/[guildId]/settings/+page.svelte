@@ -2313,7 +2313,7 @@
               name={selectedChannel?.type === 2
                 ? 'volume'
                 : selectedChannel?.type === 15
-                  ? 'message'
+                  ? 'forum'
                   : 'hash'}
               size={16}
             />{/if}
@@ -2733,7 +2733,7 @@
                         : channel.type === 5
                           ? 'bell'
                           : channel.type === 15
-                            ? 'message'
+                            ? 'forum'
                             : 'hash'}
                       size={16}
                     />

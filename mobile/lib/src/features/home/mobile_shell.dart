@@ -2096,7 +2096,9 @@ final class _ChannelDetailsSheetState
                       ? Icons.volume_up_rounded
                       : channel.type == ChannelType.announcement
                           ? Icons.campaign_rounded
-                          : Icons.tag_rounded,
+                          : channel.isForum
+                              ? Icons.forum_outlined
+                              : Icons.tag_rounded,
                   color: KaedeColors.muted,
                 ),
                 const SizedBox(width: 8),
