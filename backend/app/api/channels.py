@@ -28,6 +28,7 @@ from app.chat.channel_access import (
     publish_channel_dispatch,
 )
 from app.chat.custom_emojis import validate_custom_emoji_use
+from app.chat.custom_stickers import validate_custom_sticker_use
 from app.chat.e2ee import MessageEncryptionPolicyError, validate_message_encryption_policy
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import (
@@ -1321,6 +1322,13 @@ async def create_message(
         target_guild=access.guild,
         target_permissions=actor_permissions,
     )
+    await validate_custom_sticker_use(
+        session,
+        auth.user,
+        payload.content,
+        target_guild=access.guild,
+        target_permissions=actor_permissions,
+    )
     await require_dm_send(session, access, auth.user)
     if channel.type not in {0, 1, 5, *THREAD_CHANNEL_TYPES}:
         raise HTTPException(status_code=400, detail={"code": "NOT_TEXT_CHANNEL"})
@@ -2239,6 +2247,13 @@ async def edit_message(
     ):
         raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_INVALID"})
     await validate_custom_emoji_use(
+        session,
+        auth.user,
+        payload.content,
+        target_guild=access.guild,
+        target_permissions=actor_permissions,
+    )
+    await validate_custom_sticker_use(
         session,
         auth.user,
         payload.content,

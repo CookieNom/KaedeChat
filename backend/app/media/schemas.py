@@ -45,5 +45,28 @@ class EmojiCommitRequest(AssetCommitRequest):
     name: str = Field(pattern=r"^[A-Za-z0-9_]{2,32}$")
 
 
+class StickerCrop(BaseModel):
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+
+    @model_validator(mode="after")
+    def contained(self) -> StickerCrop:
+        if self.x + self.width > 1.000001 or self.y + self.height > 1.000001:
+            raise ValueError("crop must be contained inside the image")
+        return self
+
+
+class StickerTicketRequest(UploadTicketRequest):
+    crop: StickerCrop | None = None
+    remove_background: bool = False
+
+
+class StickerCommitRequest(AssetCommitRequest):
+    name: str = Field(pattern=r"^[A-Za-z0-9_]{2,32}$")
+    description: str | None = Field(default=None, max_length=100)
+
+
 AssetKind = Literal["avatar", "banner"]
 GuildAssetKind = Literal["icon", "banner"]

@@ -30,7 +30,7 @@ from app.api.guilds import local_guild
 from app.chat.channel_access import load_channel_access
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
-from app.chat.payloads import emoji_payload, guild_payload, user_payload
+from app.chat.payloads import emoji_payload, guild_payload, sticker_payload, user_payload
 from app.chat.permissions import require_permissions
 from app.core.metrics import increment_metric
 from app.core.permission_contract import required_permissions
@@ -53,6 +53,7 @@ from app.db.models import (
     RemoteMediaCache,
     RemoteMediaOrphan,
     RemoteMediaTombstone,
+    Sticker,
     TerminalRoomDeletion,
     User,
 )
@@ -79,6 +80,8 @@ from app.media.schemas import (
     AssetKind,
     EmojiCommitRequest,
     GuildAssetKind,
+    StickerCommitRequest,
+    StickerTicketRequest,
     UploadTicketRequest,
 )
 from app.media.service import (
@@ -745,6 +748,202 @@ async def available_emojis(
     return [{**emoji_payload(emoji), "guild_name": guild_name} for emoji, guild_name in rows]
 
 
+@router.post("/api/v1/guilds/{guild_id}/stickers/tickets", status_code=201)
+async def create_sticker_ticket(
+    guild_id: EntityRef,
+    payload: StickerTicketRequest,
+    response: Response,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    require_image_type(payload.content_type)
+    if payload.size > settings.media_max_sticker_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": "STICKER_TOO_LARGE", "max_bytes": settings.media_max_sticker_bytes},
+        )
+    if payload.remove_background and not settings.media_sticker_background_removal_enabled:
+        raise HTTPException(
+            status_code=409, detail={"code": "STICKER_BACKGROUND_REMOVAL_UNAVAILABLE"}
+        )
+    await enforce_client_rate_limit(
+        redis,
+        response,
+        CLIENT_RATE_LIMITS["upload_ticket"],
+        user_id=auth.user.id,
+        user_domain=auth.user.origin_domain,
+    )
+    guild = await local_guild(session, settings, guild_id)
+    await require_permissions(
+        session, redis, guild, auth.user, required_permissions("guild.emoji.manage")
+    )
+    transform: dict[str, object] = {"remove_background": payload.remove_background}
+    if payload.crop is not None:
+        transform["crop"] = payload.crop.model_dump()
+    attachment, upload_url = await create_upload_ticket(
+        session,
+        settings,
+        snowflake,
+        auth.user,
+        filename=payload.filename,
+        content_type=payload.content_type,
+        size=payload.size,
+        purpose="sticker",
+        media_transform=transform,
+    )
+    await session.commit()
+    return ticket_payload(attachment, upload_url)
+
+
+@router.post("/api/v1/guilds/{guild_id}/stickers", status_code=201)
+async def create_sticker(
+    guild_id: EntityRef,
+    payload: StickerCommitRequest,
+    response: Response,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    guild = await local_guild(session, settings, guild_id, for_update=True)
+    await require_permissions(
+        session, redis, guild, auth.user, required_permissions("guild.emoji.manage")
+    )
+    attachment = await finalize_attachment(
+        session, settings, auth.user, int(payload.attachment_id), required_purpose="sticker"
+    )
+    if attachment.scan_status != "clean":
+        await session.commit()
+        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
+        response.status_code = status.HTTP_202_ACCEPTED
+        return attachment_payload(attachment)
+    require_image_type(attachment.detected_content_type)
+    existing = list(
+        await session.scalars(
+            select(Sticker)
+            .where(Sticker.guild_id == guild.id, Sticker.guild_domain == guild.origin_domain)
+            .limit(settings.media_sticker_limit)
+        )
+    )
+    if len(existing) >= settings.media_sticker_limit:
+        raise HTTPException(status_code=409, detail={"code": "STICKER_LIMIT_REACHED"})
+    if any(item.name.casefold() == payload.name.casefold() for item in existing):
+        raise HTTPException(status_code=409, detail={"code": "STICKER_NAME_TAKEN"})
+    variant = attachment.variants.get("thumbnail_512")
+    if not isinstance(variant, dict) or not isinstance(variant.get("object_key"), str):
+        raise RuntimeError("clean sticker media is missing its object key")
+    sticker = Sticker(
+        id=await snowflake.mint(),
+        origin_domain=settings.domain,
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        name=payload.name,
+        description=payload.description.strip() if payload.description else None,
+        media_hash=attachment.content_sha256,
+        animated=attachment.detected_content_type in {"image/gif", "image/webp"},
+        creator_id=auth.user.id,
+        creator_domain=auth.user.origin_domain,
+    )
+    await bind_asset(session, attachment, f"sticker:{guild.origin_domain}:{sticker.id}")
+    session.add(sticker)
+    await session.flush()
+    rendered = sticker_payload(sticker)
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        auth.user,
+        "guild.sticker.create",
+        {"sticker": rendered},
+    )
+    await session.commit()
+    await wake_queued_guild_federation(guild)
+    await publish_dispatch(
+        redis, guild_topic(guild.origin_domain, guild.id), "GUILD_STICKER_CREATE", rendered
+    )
+    return rendered
+
+
+@router.delete("/api/v1/guilds/{guild_id}/stickers/{sticker_id}", status_code=204)
+async def delete_sticker(
+    guild_id: EntityRef,
+    sticker_id: Snowflake,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    guild = await local_guild(session, settings, guild_id, for_update=True)
+    await require_permissions(
+        session, redis, guild, auth.user, required_permissions("guild.emoji.manage")
+    )
+    sticker = await session.get(Sticker, (int(sticker_id), settings.domain))
+    if sticker is None or (sticker.guild_id, sticker.guild_domain) != (
+        guild.id,
+        guild.origin_domain,
+    ):
+        raise HTTPException(status_code=404, detail={"code": "STICKER_NOT_FOUND"})
+    attachment = await session.scalar(
+        select(Attachment)
+        .where(Attachment.asset_binding == f"sticker:{sticker.origin_domain}:{sticker.id}")
+        .with_for_update()
+    )
+    rendered = sticker_payload(sticker)
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        auth.user,
+        "guild.sticker.delete",
+        {"sticker": rendered},
+    )
+    await session.delete(sticker)
+    if attachment is not None:
+        attachment.asset_binding = None
+    await session.commit()
+    await wake_queued_guild_federation(guild)
+    await publish_dispatch(
+        redis, guild_topic(guild.origin_domain, guild.id), "GUILD_STICKER_DELETE", rendered
+    )
+    if attachment is not None:
+        await enqueue_best_effort(media_local_purge, attachment.id, attachment.origin_domain)
+    return Response(status_code=204)
+
+
+@router.get("/api/v1/users/@me/stickers")
+async def available_stickers(
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, object]]:
+    rows = (
+        await session.execute(
+            select(Sticker, Guild.name)
+            .join(
+                Guild,
+                (Guild.id == Sticker.guild_id) & (Guild.origin_domain == Sticker.guild_domain),
+            )
+            .join(
+                GuildMember,
+                (GuildMember.guild_id == Sticker.guild_id)
+                & (GuildMember.guild_domain == Sticker.guild_domain),
+            )
+            .where(
+                GuildMember.user_id == auth.user.id,
+                GuildMember.user_domain == auth.user.origin_domain,
+                Guild.unavailable.is_(False),
+                Sticker.media_hash.is_not(None),
+            )
+            .order_by(Guild.name, Sticker.name, Sticker.id)
+            .limit(5000)
+        )
+    ).tuples()
+    return [{**sticker_payload(item), "guild_name": guild_name} for item, guild_name in rows]
+
+
 @router.get("/api/v1/attachments/{attachment_id}")
 async def get_attachment_status(
     attachment_id: Snowflake,
@@ -920,6 +1119,61 @@ async def public_emoji(
         is not None
     ):
         raise HTTPException(status_code=404, detail={"code": "EMOJI_NOT_FOUND"})
+    response = redirect_to_object(settings, attachment, variant, public=True)
+    await session.commit()
+    return response
+
+
+@router.get("/media/stickers/{sticker_id}/{variant}")
+async def public_sticker(
+    sticker_id: Snowflake,
+    variant: str = Path(pattern=r"^(thumbnail_128|thumbnail_512)$"),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> RedirectResponse:
+    sticker = await session.get(Sticker, (int(sticker_id), settings.domain))
+    if sticker is None:
+        raise HTTPException(status_code=404, detail={"code": "STICKER_NOT_FOUND"})
+    digest = sticker.media_hash
+    if not valid_content_digest(digest):
+        raise HTTPException(status_code=404, detail={"code": "STICKER_NOT_FOUND"})
+    await lock_asset_digest(session, digest)
+    sticker = await session.scalar(
+        select(Sticker)
+        .where(
+            Sticker.id == int(sticker_id),
+            Sticker.origin_domain == settings.domain,
+            Sticker.media_hash == digest,
+        )
+        .execution_options(populate_existing=True)
+    )
+    if sticker is None:
+        raise HTTPException(status_code=404, detail={"code": "STICKER_NOT_FOUND"})
+    terminal_duplicate = aliased(Attachment)
+    attachment = await session.scalar(
+        select(Attachment)
+        .where(
+            Attachment.asset_binding == f"sticker:{sticker.origin_domain}:{sticker.id}",
+            Attachment.origin_domain == settings.domain,
+            Attachment.content_sha256 == digest,
+            Attachment.scan_status == "clean",
+            Attachment.deleted_at.is_(None),
+            ~exists(
+                select(terminal_duplicate.id).where(
+                    terminal_duplicate.origin_domain == settings.domain,
+                    terminal_duplicate.content_sha256 == Attachment.content_sha256,
+                    terminal_duplicate.scan_status.in_(DIGEST_REVOCATION_STATUSES),
+                )
+            ),
+        )
+        .with_for_update(read=True)
+    )
+    if (
+        attachment is None
+        or await session.get(MediaTombstoneSource, (attachment.id, attachment.origin_domain))
+        is not None
+    ):
+        raise HTTPException(status_code=404, detail={"code": "STICKER_NOT_FOUND"})
     response = redirect_to_object(settings, attachment, variant, public=True)
     await session.commit()
     return response

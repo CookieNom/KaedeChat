@@ -42,6 +42,8 @@ from .models import (
     ReadyEvent,
     Role,
     RoleDeleteEvent,
+    Sticker,
+    StickerDeleteEvent,
     ThreadDeleteEvent,
     ThreadListSyncEvent,
     ThreadMember,
@@ -1521,6 +1523,108 @@ class Client:
             target=target,
         )
 
+    async def stickers(
+        self, guild: EntityRef, *, target: str | None = None
+    ) -> list[Sticker]:
+        origin = self._target(target)
+        raw = await self.request(
+            "GET", f"/api/v1/bots/guilds/{guild}/stickers", target=origin
+        )
+        return [Sticker.from_payload(self, origin, item) for item in raw]
+
+    async def upload_sticker(
+        self,
+        guild: EntityRef,
+        data: bytes,
+        *,
+        filename: str,
+        content_type: str,
+        crop: dict[str, float] | None = None,
+        remove_background: bool = False,
+        target: str | None = None,
+    ) -> Attachment:
+        origin = self._target(target)
+        raw = await self.request(
+            "POST",
+            f"/api/v1/bots/guilds/{guild}/stickers/tickets",
+            target=origin,
+            json={
+                "filename": filename,
+                "content_type": content_type,
+                "size": len(data),
+                "encryption_mode": "plaintext",
+                "encryption_protocol": None,
+                "crop": crop,
+                "remove_background": remove_background,
+            },
+        )
+        attachment = Attachment.from_payload(self, origin, raw)
+        if not attachment.upload_url:
+            raise ApiError(502, "UPLOAD_TICKET_INVALID", "Upload ticket has no URL")
+        parsed = urlsplit(attachment.upload_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ApiError(502, "UPLOAD_TICKET_INVALID", "Upload URL is not safe HTTPS")
+        async with httpx.AsyncClient(
+            timeout=60, follow_redirects=False, trust_env=False
+        ) as upload_client:
+            response = await upload_client.put(
+                attachment.upload_url,
+                content=data,
+                headers={
+                    "Content-Type": content_type,
+                    "Content-Length": str(len(data)),
+                },
+            )
+        if response.is_redirect:
+            raise ApiError(
+                502, "UPLOAD_REDIRECT_REJECTED", "Upload URL redirected unexpectedly"
+            )
+        response.raise_for_status()
+        return attachment
+
+    async def commit_sticker(
+        self,
+        guild: EntityRef,
+        attachment: EntityRef,
+        name: str,
+        *,
+        description: str | None = None,
+        target: str | None = None,
+    ) -> Sticker | Attachment:
+        origin = self._target(target)
+        raw = await self.request(
+            "POST",
+            f"/api/v1/bots/guilds/{guild}/stickers",
+            target=origin,
+            json={
+                "attachment_id": str(attachment.id),
+                "name": name,
+                "description": description,
+            },
+        )
+        if isinstance(raw, dict) and raw.get("guild_id") is not None:
+            return Sticker.from_payload(self, origin, raw)
+        return Attachment.from_payload(self, origin, raw)
+
+    async def delete_sticker(
+        self,
+        guild: EntityRef,
+        sticker_id: int,
+        *,
+        target: str | None = None,
+    ) -> None:
+        await self.request(
+            "DELETE",
+            f"/api/v1/bots/guilds/{guild}/stickers/{sticker_id}",
+            target=target,
+        )
+
     async def set_voice_moderation(
         self,
         guild: EntityRef,
@@ -1612,6 +1716,22 @@ class Client:
         message = Message.from_payload(self, origin, raw)
         message.bot_installation_id = installation_id
         return message
+
+    async def send_sticker(
+        self,
+        channel: EntityRef,
+        sticker: Sticker,
+        *,
+        target: str | None = None,
+        installation_id: int | None = None,
+    ) -> Message:
+        """Send a sticker using the ordinary permission-checked message API."""
+        return await self.send_message(
+            channel,
+            sticker.token,
+            target=target,
+            installation_id=installation_id,
+        )
 
     async def history(
         self,
@@ -2102,6 +2222,14 @@ class Client:
             return Emoji.from_payload(self, target, data)
         if event_type == "GUILD_EMOJI_DELETE":
             return EmojiDeleteEvent(
+                target,
+                EntityRef(int(data["id"]), str(data["origin_domain"])),
+                EntityRef(int(data["guild_id"]), str(data["guild_domain"])),
+            )
+        if event_type == "GUILD_STICKER_CREATE" and data.get("name") is not None:
+            return Sticker.from_payload(self, target, data)
+        if event_type == "GUILD_STICKER_DELETE":
+            return StickerDeleteEvent(
                 target,
                 EntityRef(int(data["id"]), str(data["origin_domain"])),
                 EntityRef(int(data["guild_id"]), str(data["guild_domain"])),

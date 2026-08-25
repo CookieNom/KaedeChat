@@ -121,6 +121,8 @@ members = await guild.members(limit=250)
 roles = await guild.roles()
 
 await channels[0].send("Deployment complete")
+stickers = await guild.stickers()
+await channels[0].send_sticker(stickers[0])
 await channels[0].trigger_typing()
 pins = await channels[0].pins()
 occupancy = await channels[0].voice_occupancy()
@@ -136,7 +138,34 @@ created = await created.edit(topic="Current release automation")
 # Requires roles.manage and the relevant live role permissions/hierarchy.
 release_role = await guild.create_role("release-manager", permissions=0)
 await members[0].add_role(release_role.ref)
+
+# Requires emojis.manage, attachments.write, and the live MANAGE_EMOJIS
+# permission (which covers guild emoji and stickers).
+ticket = await bot.upload_sticker(
+    guild.ref,
+    sticker_bytes,
+    filename="release-party.png",
+    content_type="image/png",
+    crop={"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+    remove_background=True,
+    target=guild.target,
+)
+sticker = await bot.commit_sticker(
+    guild.ref,
+    ticket.ref,
+    "release_party",
+    description="The release is live",
+    target=guild.target,
+)
 ```
+
+Sticker discovery only needs `guilds.read`; sending uses `messages.send` and
+the same source-guild membership and external-sticker permission checks as a
+human account. `Sticker.token` is federation-qualified, and
+`GUILD_STICKER_CREATE` / `GUILD_STICKER_DELETE` are exposed as typed SDK
+events. Sticker creation is scanned before commit, so production bots should
+poll and retry `commit_sticker` when it returns an `Attachment` instead of a
+`Sticker`.
 
 Fetched guilds, channels, and roles keep their server `version`, and their
 `edit()` methods send it as `If-Match` for you. A stale resource fails instead

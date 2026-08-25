@@ -29,6 +29,7 @@
   import { gifFavoriteForUrl, isGifFavorite, klipyGifUrl, toggleGifFavorite } from '$lib/chat/gifs';
   import { previewableLink } from '$lib/chat/links';
   import { recentReactions, rememberReaction } from '$lib/chat/reactions';
+  import { stickerFromToken, stickerUrl } from '$lib/chat/stickers';
   import { placeContextMenu } from '$lib/ui/context-menu';
   import { DISMISS_FLOATING_LAYERS_EVENT, dismissFloatingLayers } from '$lib/ui/floating-layers';
   import { portal } from '$lib/ui/portal';
@@ -187,6 +188,7 @@
     previewableContent ? botInvitesInMessage(previewableContent) : []
   );
   const gifUrl = $derived(klipyGifUrl(previewableContent));
+  const sticker = $derived(renderedContent ? stickerFromToken(renderedContent) : null);
   let gifFavorited = $derived(gifUrl ? isGifFavorite(gifUrl) : false);
   const linkPreviewUrl = $derived(previewableLink(previewableContent));
 
@@ -738,6 +740,14 @@
           the room’s encryption version.
         </span>
       </div>
+    {:else if sticker}
+      <a
+        class="message-sticker"
+        href={stickerUrl(sticker.id, sticker.domain)}
+        aria-label={`Sticker: ${sticker.name}`}
+      >
+        <img src={stickerUrl(sticker.id, sticker.domain)} alt={sticker.name} loading="lazy" />
+      </a>
     {:else if gifUrl}
       <div class="klipy-gif-wrap">
         <a class="klipy-gif" href={gifUrl} target="_blank" rel="noopener noreferrer">

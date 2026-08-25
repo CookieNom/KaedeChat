@@ -837,6 +837,10 @@ final class KaedeGuild {
     this.bannerHash,
     this.channels = const <KaedeChannel>[],
     this.roles = const <KaedeRole>[],
+    this.stickers = const <Json>[],
+    this.stickerLimit = 60,
+    this.stickerMaxBytes = 2 * 1024 * 1024,
+    this.stickerBackgroundRemovalEnabled = false,
     this.federatedHistoryPolicy = 'disabled',
     this.actorHighestRoleId,
     this.syncStatus,
@@ -863,6 +867,11 @@ final class KaedeGuild {
       unavailable: _boolean(json['unavailable']),
       channels: _objects(json['channels']).map(KaedeChannel.fromJson).toList(),
       roles: _objects(json['roles']).map(KaedeRole.fromJson).toList(),
+      stickers: _objects(json['stickers']).toList(growable: false),
+      stickerLimit: _integer(json['sticker_limit'], 60),
+      stickerMaxBytes: _integer(json['sticker_max_bytes'], 2 * 1024 * 1024),
+      stickerBackgroundRemovalEnabled:
+          _boolean(json['sticker_background_removal_enabled']),
       federatedHistoryPolicy:
           _string(json['federated_history_policy']) ?? 'disabled',
       actorHighestRoleId: _string(json['actor_highest_role_id']),
@@ -887,6 +896,10 @@ final class KaedeGuild {
   final bool unavailable;
   final List<KaedeChannel> channels;
   final List<KaedeRole> roles;
+  final List<Json> stickers;
+  final int stickerLimit;
+  final int stickerMaxBytes;
+  final bool stickerBackgroundRemovalEnabled;
   final String federatedHistoryPolicy;
   final String? actorHighestRoleId;
   final String? syncStatus;
@@ -912,6 +925,10 @@ final class KaedeGuild {
         'unavailable': unavailable,
         'channels': channels.map((channel) => channel.toJson()).toList(),
         'roles': roles.map((role) => role.toJson()).toList(),
+        'stickers': stickers,
+        'sticker_limit': stickerLimit,
+        'sticker_max_bytes': stickerMaxBytes,
+        'sticker_background_removal_enabled': stickerBackgroundRemovalEnabled,
         'federated_history_policy': federatedHistoryPolicy,
         'actor_highest_role_id': actorHighestRoleId,
         'sync_status': syncStatus,
@@ -943,6 +960,10 @@ final class KaedeGuild {
         unavailable: unavailable,
         channels: channels,
         roles: roles,
+        stickers: stickers,
+        stickerLimit: stickerLimit,
+        stickerMaxBytes: stickerMaxBytes,
+        stickerBackgroundRemovalEnabled: stickerBackgroundRemovalEnabled,
         federatedHistoryPolicy: federatedHistoryPolicy,
         actorHighestRoleId: actorHighestRoleId,
         syncStatus: syncStatus,
@@ -969,6 +990,10 @@ final class KaedeGuild {
         unavailable: unavailable,
         channels: channels,
         roles: roles,
+        stickers: stickers,
+        stickerLimit: stickerLimit,
+        stickerMaxBytes: stickerMaxBytes,
+        stickerBackgroundRemovalEnabled: stickerBackgroundRemovalEnabled,
         federatedHistoryPolicy: federatedHistoryPolicy,
         actorHighestRoleId: actorHighestRoleId,
         syncStatus: syncStatus,

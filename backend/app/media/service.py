@@ -112,6 +112,7 @@ async def create_upload_ticket(
     encryption_mode: str = "plaintext",
     encryption_protocol: str | None = None,
     bot_installation: BotInstallation | None = None,
+    media_transform: dict[str, object] | None = None,
 ) -> tuple[Attachment, str]:
     if size <= 0 or size > settings.media_max_attachment_bytes:
         raise HTTPException(status_code=413, detail={"code": "ATTACHMENT_TOO_LARGE"})
@@ -172,6 +173,7 @@ async def create_upload_ticket(
         purpose=purpose,
         upload_expires_at=expires_at,
         variants={},
+        media_transform=media_transform,
     )
     session.add(attachment)
     if isinstance(usage, UserStorageUsage):

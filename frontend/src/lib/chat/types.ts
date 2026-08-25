@@ -125,6 +125,10 @@ export interface Guild {
   emojis?: CustomEmoji[];
   emoji_limit?: number;
   emoji_max_bytes?: number;
+  stickers?: GuildSticker[];
+  sticker_limit?: number;
+  sticker_max_bytes?: number;
+  sticker_background_removal_enabled?: boolean;
   version?: string | null;
 }
 
@@ -135,6 +139,19 @@ export interface CustomEmoji {
   guild_domain: string;
   guild_name?: string;
   name: string;
+  animated: boolean;
+  media_hash: string | null;
+  version?: string | null;
+}
+
+export interface GuildSticker {
+  id: string;
+  origin_domain: string;
+  guild_id: string;
+  guild_domain: string;
+  guild_name?: string;
+  name: string;
+  description: string | null;
   animated: boolean;
   media_hash: string | null;
   version?: string | null;

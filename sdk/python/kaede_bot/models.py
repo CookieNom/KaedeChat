@@ -215,6 +215,9 @@ class Guild:
     async def emojis(self) -> list[Emoji]:
         return await self.client.emojis(self.ref, target=self.target)
 
+    async def stickers(self) -> list[Sticker]:
+        return await self.client.stickers(self.ref, target=self.target)
+
     async def open_dm(self, handle: str) -> Channel:
         if self.installation_id is None:
             raise ValueError("guild payload does not include a bot installation")
@@ -530,6 +533,15 @@ class Channel:
             reply_to=reply_to,
             attachment_ids=attachment_ids,
             e2ee=e2ee,
+            installation_id=self.bot_installation_id,
+        )
+
+    async def send_sticker(self, sticker: Sticker) -> Message:
+        """Send one canonical sticker message in this channel."""
+        return await self.client.send_sticker(
+            self.ref,
+            sticker,
+            target=self.target,
             installation_id=self.bot_installation_id,
         )
 
@@ -1211,6 +1223,58 @@ class Emoji:
 
 
 @dataclass(slots=True)
+class Sticker:
+    client: Client
+    target: str
+    ref: EntityRef
+    guild_ref: EntityRef
+    name: str
+    description: str | None = None
+    animated: bool = False
+    media_hash: str | None = None
+    version: str | None = None
+
+    @classmethod
+    def from_payload(
+        cls, client: Client, target: str, payload: dict[str, Any]
+    ) -> Sticker:
+        return cls(
+            client=client,
+            target=target,
+            ref=EntityRef(int(payload["id"]), str(payload["origin_domain"])),
+            guild_ref=EntityRef(int(payload["guild_id"]), str(payload["guild_domain"])),
+            name=str(payload["name"]),
+            description=(
+                str(payload["description"])
+                if payload.get("description") is not None
+                else None
+            ),
+            animated=bool(payload.get("animated", False)),
+            media_hash=(
+                str(payload["media_hash"])
+                if payload.get("media_hash") is not None
+                else None
+            ),
+            version=(
+                str(payload["version"]) if payload.get("version") is not None else None
+            ),
+        )
+
+    @property
+    def token(self) -> str:
+        return f"<sticker:{self.name}:{self.ref}>"
+
+    @property
+    def media_url(self) -> str:
+        return f"https://{self.ref.domain}/media/stickers/{self.ref.id}/thumbnail_512"
+
+    async def delete(self) -> None:
+        await self.client.delete_sticker(
+            self.guild_ref, self.ref.id, target=self.target
+        )
+
+
+@dataclass(slots=True)
 class Attachment:
     client: Client
     target: str
@@ -1589,6 +1653,13 @@ class RoleDeleteEvent:
 class EmojiDeleteEvent:
     target: str
     emoji_ref: EntityRef
+    guild_ref: EntityRef
+
+
+@dataclass(frozen=True, slots=True)
+class StickerDeleteEvent:
+    target: str
+    sticker_ref: EntityRef
     guild_ref: EntityRef
 
 

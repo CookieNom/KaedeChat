@@ -7,10 +7,10 @@ from sqlalchemy import and_, exists, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.guild_revision import queue_guild_mutation
-from app.chat.payloads import emoji_payload
+from app.chat.payloads import emoji_payload, sticker_payload
 from app.core.settings import Settings
 from app.core.types import MAX_SNOWFLAKE
-from app.db.models import Attachment, Emoji, Guild, MediaTombstoneSource, User
+from app.db.models import Attachment, Emoji, Guild, MediaTombstoneSource, Sticker, User
 from app.federation.relationships import queue_friend_profile_updates
 from app.media.digest_revocation import (
     DIGEST_REVOCATION_STATUSES,
@@ -189,6 +189,54 @@ async def _invalidate_emoji_asset(
     )
 
 
+async def _invalidate_sticker_asset(
+    session: AsyncSession,
+    settings: Settings,
+    attachment: Attachment,
+    parts: list[str],
+) -> TerminalAssetInvalidation | None:
+    if len(parts) != 3 or parts[1] != settings.domain:
+        return None
+    sticker_id = _binding_id(parts[2])
+    if sticker_id is None:
+        return None
+    candidate = await session.get(Sticker, (sticker_id, parts[1]))
+    if candidate is None:
+        return None
+    guild = await _locked_guild_nowait(session, candidate.guild_id, candidate.guild_domain)
+    if guild is None:
+        return None
+    sticker = await session.scalar(
+        select(Sticker)
+        .where(Sticker.id == sticker_id, Sticker.origin_domain == parts[1])
+        .with_for_update(nowait=True)
+        .execution_options(populate_existing=True)
+    )
+    if sticker is None or (sticker.guild_id, sticker.guild_domain) != (
+        guild.id,
+        guild.origin_domain,
+    ):
+        return None
+    if attachment.content_sha256 is None or sticker.media_hash != attachment.content_sha256:
+        return None
+    actor = await _guild_owner(session, settings, guild)
+    rendered = sticker_payload(sticker)
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        actor,
+        "guild.sticker.delete",
+        {"sticker": rendered},
+    )
+    await session.delete(sticker)
+    return TerminalAssetInvalidation(
+        guild=guild,
+        dispatch_type="GUILD_STICKER_DELETE",
+        dispatch_payload=rendered,
+    )
+
+
 async def _invalidate_one_terminal_asset_binding(
     session: AsyncSession,
     settings: Settings,
@@ -204,6 +252,8 @@ async def _invalidate_one_terminal_asset_binding(
         result = await _invalidate_guild_asset(session, settings, attachment, parts)
     elif parts[0] == "emoji":
         result = await _invalidate_emoji_asset(session, settings, attachment, parts)
+    elif parts[0] == "sticker":
+        result = await _invalidate_sticker_asset(session, settings, attachment, parts)
     else:
         result = None
     # A terminal attachment must never remain publicly bound, including when a

@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
@@ -8,6 +11,58 @@ import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 
 void main() {
+  testWidgets('sticker editor crops and enables optional background removal',
+      (tester) async {
+    final directory = Directory.systemTemp.createTempSync('kaede-sticker-');
+    addTearDown(() => directory.deleteSync(recursive: true));
+    final file = File('${directory.path}/sticker.png');
+    file.writeAsBytesSync(base64Decode(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    ));
+    StickerEdit? result;
+
+    await tester.pumpWidget(MaterialApp(
+      theme: kaedeTheme(),
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: FilledButton(
+            onPressed: () async {
+              result = await showStickerEditor(
+                context,
+                file: file,
+                animated: false,
+                backgroundRemovalAvailable: true,
+              );
+            },
+            child: const Text('Open sticker editor'),
+          ),
+        ),
+      ),
+    ));
+
+    await tester.tap(find.text('Open sticker editor'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byKey(const ValueKey('sticker-crop-preview')), findsOneWidget);
+    await tester.enterText(
+        find.byKey(const ValueKey('sticker-name')), 'party_blob');
+    final removeBackground =
+        find.byKey(const ValueKey('sticker-remove-background'));
+    final removeBackgroundTile =
+        tester.widget<SwitchListTile>(removeBackground);
+    expect(removeBackgroundTile.onChanged, isNotNull);
+    removeBackgroundTile.onChanged!(true);
+    await tester.pump();
+    await tester.tap(find.text('Create'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(result?.name, 'party_blob');
+    expect(result?.removeBackground, isTrue);
+    expect(result?.cropSize, 1);
+    expect(tester.takeException(), isNull);
+  });
+
   group('guild channel drafts', () {
     testWidgets('editor stays usable above a phone keyboard', (tester) async {
       tester.view.physicalSize = const Size(1080, 2160);

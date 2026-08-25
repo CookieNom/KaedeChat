@@ -17,6 +17,8 @@
   import type { PendingUpload } from '$lib/media/uploads';
   import { attachmentMediaPath, authenticatedMedia } from '$lib/media/authenticated';
   import { guildChannelPath } from '$lib/navigation/routes';
+  import { tick } from 'svelte';
+  import EmojiPicker from './EmojiPicker.svelte';
   import Icon from './Icon.svelte';
   import ForumTagEmoji from './ForumTagEmoji.svelte';
   import UploadPreviewTray from './UploadPreviewTray.svelte';
@@ -77,7 +79,10 @@
   let title = $state('');
   let message = $state('');
   let postTags = $state<string[]>([]);
+  let guidelinesVisible = $state(true);
+  let emojiPickerOpen = $state(false);
   let fileInput = $state<HTMLInputElement | null>(null);
+  let messageInput = $state<HTMLTextAreaElement | null>(null);
   let configuredForum = '';
   let emittedFilters = '';
 
@@ -108,6 +113,8 @@
     title = '';
     message = '';
     postTags = [];
+    guidelinesVisible = true;
+    emojiPickerOpen = false;
     emittedFilters = JSON.stringify({ query, selectedTagIds: selectedTags, sort });
   });
 
@@ -144,7 +151,21 @@
     title = '';
     message = '';
     postTags = [];
+    emojiPickerOpen = false;
     composerOpen = false;
+  }
+
+  function insertEmoji(value: string) {
+    const start = messageInput?.selectionStart ?? message.length;
+    const end = messageInput?.selectionEnd ?? start;
+    const next = `${message.slice(0, start)}${value}${message.slice(end)}`;
+    if (next.length > FORUM_POST_CONTENT_MAX_LENGTH) return;
+    message = next;
+    emojiPickerOpen = false;
+    void tick().then(() => {
+      messageInput?.focus();
+      messageInput?.setSelectionRange(start + value.length, start + value.length);
+    });
   }
 
   function preview(post: Channel): string {
@@ -186,55 +207,57 @@
   aria-label={`${forum.name ?? 'Forum'} posts`}
   onscroll={forumScrolled}
 >
-  <div class="forum-toolbar">
-    <label class="forum-search">
-      <Icon name="search" size={19} />
-      <input bind:value={query} aria-label="Search post titles" placeholder="Search" />
-    </label>
-    <details class="sort-view-menu">
-      <summary>↕ Sort &amp; View <Icon name="chevron-down" size={15} /></summary>
-      <div class="sort-view-popover">
-        <fieldset>
-          <legend>Sort By</legend>
-          <label
-            ><input type="radio" bind:group={sort} value="recent_activity" />Recently Active</label
-          >
-          <label><input type="radio" bind:group={sort} value="creation_date" />Date Posted</label>
-        </fieldset>
-        <fieldset>
-          <legend>View As</legend>
-          <label><input type="radio" bind:group={layout} value="list" />List</label>
-          <label><input type="radio" bind:group={layout} value="gallery" />Gallery</label>
-        </fieldset>
-        <button type="button" onclick={resetSortAndView}>Reset to default</button>
-      </div>
-    </details>
-    {#if canCreate}
-      <button class="new-post" type="button" onclick={() => (composerOpen = !composerOpen)}>
-        <Icon name="message" size={17} />New Post
-      </button>
-    {/if}
-  </div>
-
-  {#if tags.length}
-    <div class="tag-filters" aria-label="Filter by tags">
-      {#each tags as tag (tag.id)}
-        <button
-          class:active={selectedTags.includes(tag.id)}
-          type="button"
-          aria-pressed={selectedTags.includes(tag.id)}
-          onclick={() => (selectedTags = toggle(selectedTags, tag.id))}
-        >
-          <ForumTagEmoji
-            {tag}
-            guildId={forum.guild_id}
-            guildDomain={forum.guild_domain}
-            {customEmojis}
-          />
-          {tag.name}
+  {#if !composerOpen}
+    <div class="forum-toolbar">
+      <label class="forum-search">
+        <Icon name="search" size={19} />
+        <input bind:value={query} aria-label="Search post titles" placeholder="Search" />
+      </label>
+      <details class="sort-view-menu">
+        <summary>↕ Sort &amp; View <Icon name="chevron-down" size={15} /></summary>
+        <div class="sort-view-popover">
+          <fieldset>
+            <legend>Sort By</legend>
+            <label
+              ><input type="radio" bind:group={sort} value="recent_activity" />Recently Active</label
+            >
+            <label><input type="radio" bind:group={sort} value="creation_date" />Date Posted</label>
+          </fieldset>
+          <fieldset>
+            <legend>View As</legend>
+            <label><input type="radio" bind:group={layout} value="list" />List</label>
+            <label><input type="radio" bind:group={layout} value="gallery" />Gallery</label>
+          </fieldset>
+          <button type="button" onclick={resetSortAndView}>Reset to default</button>
+        </div>
+      </details>
+      {#if canCreate}
+        <button class="new-post" type="button" onclick={() => (composerOpen = true)}>
+          <Icon name="message" size={17} />New Post
         </button>
-      {/each}
+      {/if}
     </div>
+
+    {#if tags.length}
+      <div class="tag-filters" aria-label="Filter by tags">
+        {#each tags as tag (tag.id)}
+          <button
+            class:active={selectedTags.includes(tag.id)}
+            type="button"
+            aria-pressed={selectedTags.includes(tag.id)}
+            onclick={() => (selectedTags = toggle(selectedTags, tag.id))}
+          >
+            <ForumTagEmoji
+              {tag}
+              guildId={forum.guild_id}
+              guildDomain={forum.guild_domain}
+              {customEmojis}
+            />
+            {tag.name}
+          </button>
+        {/each}
+      </div>
+    {/if}
   {/if}
 
   {#if composerOpen}
@@ -246,26 +269,60 @@
       }}
     >
       <div class="post-fields">
+        <button
+          class="close-composer"
+          type="button"
+          disabled={busy}
+          aria-label="Close new post"
+          onclick={() => {
+            emojiPickerOpen = false;
+            composerOpen = false;
+          }}
+        >
+          <Icon name="x" size={21} />
+        </button>
+        <div class="post-copy-fields">
+          <input
+            bind:value={title}
+            maxlength="100"
+            required
+            placeholder="Title"
+            aria-label="Post title"
+          />
+          <textarea
+            bind:this={messageInput}
+            bind:value={message}
+            maxlength={FORUM_POST_CONTENT_MAX_LENGTH}
+            rows="5"
+            placeholder="Enter a message…"
+            aria-label="Post message"
+          ></textarea>
+        </div>
         <input
-          bind:value={title}
-          maxlength="100"
-          required
-          placeholder="Title"
-          aria-label="Post title"
+          bind:this={fileInput}
+          class="visually-hidden"
+          type="file"
+          multiple
+          onchange={(event) => {
+            if (event.currentTarget.files) void onFiles?.(event.currentTarget.files);
+            event.currentTarget.value = '';
+          }}
         />
-        <textarea
-          bind:value={message}
-          maxlength={FORUM_POST_CONTENT_MAX_LENGTH}
-          rows="3"
-          placeholder="Enter a message…"
-          aria-label="Post message"
-        ></textarea>
+        <button
+          class="attach-post"
+          type="button"
+          disabled={!onFiles || busy}
+          aria-label="Add images or files"
+          title="Add images or files"
+          onclick={() => fileInput?.click()}
+        >
+          <Icon name="image-plus" size={34} />
+        </button>
       </div>
-      {#if forum.topic}
-        <aside class="post-guidelines">
-          <div><Icon name="check" size={18} /><strong>Post Guidelines</strong></div>
-          <p>{forum.topic}</p>
-        </aside>
+      {#if uploads.length && onRemoveUpload}
+        <div class="composer-uploads">
+          <UploadPreviewTray {uploads} onRemove={onRemoveUpload} />
+        </div>
       {/if}
       {#if tags.length}
         <div class="post-tags" aria-label="Post tags">
@@ -293,29 +350,37 @@
           {#if requireTag && !postTags.length}<small>Select at least one tag.</small>{/if}
         </div>
       {/if}
-      {#if uploads.length && onRemoveUpload}
-        <UploadPreviewTray {uploads} onRemove={onRemoveUpload} />
-      {/if}
       <footer>
-        <input
-          bind:this={fileInput}
-          class="visually-hidden"
-          type="file"
-          multiple
-          onchange={(event) => {
-            if (event.currentTarget.files) void onFiles?.(event.currentTarget.files);
-            event.currentTarget.value = '';
-          }}
-        />
-        <button
-          class="attach-post"
-          type="button"
-          disabled={!onFiles || busy}
-          aria-label="Attach files"
-          onclick={() => fileInput?.click()}><Icon name="image" size={18} /></button
-        >
+        <div class="forum-emoji-control">
+          <button
+            class:active={emojiPickerOpen}
+            type="button"
+            disabled={busy}
+            aria-label="Choose an emoji"
+            aria-expanded={emojiPickerOpen}
+            onclick={() => (emojiPickerOpen = !emojiPickerOpen)}>☺</button
+          >
+          {#if emojiPickerOpen}
+            <EmojiPicker
+              {customEmojis}
+              onSelect={insertEmoji}
+              onClose={() => (emojiPickerOpen = false)}
+            />
+          {/if}
+        </div>
         <span></span>
-        <button type="button" disabled={busy} onclick={() => (composerOpen = false)}>Cancel</button>
+        {#if forum.topic}
+          <button
+            class:active={guidelinesVisible}
+            class="guidelines-toggle"
+            type="button"
+            aria-label={guidelinesVisible ? 'Hide post guidelines' : 'Show post guidelines'}
+            aria-pressed={guidelinesVisible}
+            onclick={() => (guidelinesVisible = !guidelinesVisible)}
+          >
+            <Icon name="check" size={18} />
+          </button>
+        {/if}
         <button
           class="submit-post"
           disabled={busy ||
@@ -328,6 +393,21 @@
         </button>
       </footer>
     </form>
+    {#if forum.topic && guidelinesVisible}
+      <aside class="post-guidelines">
+        <div>
+          <span><Icon name="check" size={18} /><strong>Post Guidelines</strong></span>
+          <button
+            type="button"
+            aria-label="Hide post guidelines"
+            onclick={() => (guidelinesVisible = false)}
+          >
+            <Icon name="x" size={17} />
+          </button>
+        </div>
+        <p>{forum.topic}</p>
+      </aside>
+    {/if}
   {/if}
 
   {#if error}<p class="forum-error" role="alert">{error}</p>{/if}
@@ -571,10 +651,10 @@
   }
 
   .forum-composer {
+    position: relative;
     display: grid;
-    gap: 0.75rem;
     margin-bottom: 1rem;
-    overflow: hidden;
+    overflow: visible;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface-subtle);
@@ -582,37 +662,111 @@
 
   .post-fields {
     display: grid;
+    min-height: 250px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 0.65rem;
+    padding: 0.9rem;
   }
 
-  .post-fields input,
-  .post-fields textarea {
+  .post-copy-fields {
+    display: grid;
+    min-width: 0;
+    align-self: stretch;
+    grid-template-rows: auto 1fr;
+  }
+
+  .post-copy-fields input,
+  .post-copy-fields textarea {
     border: 0;
-    border-bottom: 1px solid var(--line);
     border-radius: 0;
-    padding: 0.8rem;
+    padding: 0;
     color: var(--text);
     background: transparent;
     outline: 0;
-    resize: vertical;
   }
 
-  .post-fields input {
-    font-size: 1rem;
+  .post-copy-fields input {
+    min-height: 34px;
+    font-size: 1.05rem;
     font-weight: 750;
   }
 
-  .post-guidelines {
-    margin: 0 0.75rem;
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    padding: 0.75rem;
-    background: var(--surface-raised);
+  .post-copy-fields textarea {
+    min-height: 170px;
+    padding-top: 0.2rem;
+    resize: none;
+    line-height: 1.45;
   }
 
-  .post-guidelines div {
+  .close-composer {
+    display: grid;
+    width: 28px;
+    height: 34px;
+    place-items: center;
+    border: 0;
+    padding: 0;
+    color: var(--text-muted);
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .post-fields > .attach-post {
+    display: grid;
+    width: 104px;
+    height: 104px;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    color: var(--text-muted);
+    background: var(--surface-raised);
+    cursor: pointer;
+  }
+
+  .post-fields > .attach-post:hover:not(:disabled),
+  .post-fields > .attach-post:focus-visible {
+    color: var(--text-soft);
+    background: var(--surface-hover);
+  }
+
+  .post-fields > .attach-post:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .composer-uploads {
+    border-top: 1px solid var(--line);
+    padding: 0 0.85rem 0.7rem;
+  }
+
+  .post-guidelines {
+    margin: -0.35rem 0 1rem;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 0.85rem;
+    background: var(--surface-subtle);
+  }
+
+  .post-guidelines > div,
+  .post-guidelines > div > span {
     display: flex;
     align-items: center;
     gap: 0.45rem;
+  }
+
+  .post-guidelines > div {
+    justify-content: space-between;
+  }
+
+  .post-guidelines button {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    border: 0;
+    color: var(--text-muted);
+    background: transparent;
+    cursor: pointer;
   }
 
   .post-guidelines p {
@@ -623,7 +777,7 @@
   }
 
   .post-tags {
-    padding: 0 0.75rem;
+    padding: 0 0.9rem 0.85rem 3.6rem;
   }
 
   .post-tags label,
@@ -652,7 +806,8 @@
     grid-template-columns: auto 1fr auto auto;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.65rem 0.75rem;
+    border-top: 1px solid var(--line);
+    padding: 0.7rem 0.85rem;
   }
 
   .forum-composer footer button {
@@ -665,10 +820,39 @@
     font-weight: 750;
   }
 
-  .forum-composer footer .attach-post {
-    width: 36px;
+  .forum-composer footer .guidelines-toggle {
+    width: 38px;
     padding: 0;
     background: var(--surface-raised);
+  }
+
+  .forum-composer footer .guidelines-toggle.active {
+    color: var(--accent-text);
+    background: color-mix(in srgb, var(--accent) 15%, var(--surface-raised));
+  }
+
+  .forum-emoji-control {
+    position: relative;
+  }
+
+  .forum-emoji-control > button {
+    width: 38px;
+    padding: 0;
+    color: var(--text-muted);
+    background: transparent;
+    font-size: 1.2rem;
+  }
+
+  .forum-emoji-control > button:hover,
+  .forum-emoji-control > button.active {
+    color: var(--text);
+    background: var(--surface-hover);
+  }
+
+  .forum-emoji-control :global(.emoji-picker) {
+    right: auto;
+    left: 0;
+    bottom: calc(100% + 10px);
   }
 
   .forum-composer footer .submit-post {
@@ -818,6 +1002,21 @@
 
     .forum-posts.gallery {
       grid-template-columns: 1fr;
+    }
+
+    .post-fields {
+      min-height: 220px;
+      grid-template-columns: auto minmax(0, 1fr) 76px;
+      padding: 0.75rem;
+    }
+
+    .post-fields > .attach-post {
+      width: 76px;
+      height: 76px;
+    }
+
+    .post-tags {
+      padding-left: 3.2rem;
     }
   }
 </style>

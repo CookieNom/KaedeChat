@@ -18,6 +18,8 @@ from kaede_bot.models import (
     Message,
     PresenceEvent,
     ReactionEvent,
+    Sticker,
+    StickerDeleteEvent,
     ThreadListSyncEvent,
     ThreadMembersUpdateEvent,
     VoiceStateEvent,
@@ -376,6 +378,91 @@ def test_emoji_token_is_canonical_and_federation_qualified() -> None:
         },
     )
     assert emoji.token == "<a:dance:7@guild.example>"
+
+
+@pytest.mark.asyncio
+async def test_sticker_is_typed_discoverable_and_sendable() -> None:
+    bot = client()
+    payload = {
+        "id": "8",
+        "origin_domain": "guild.example",
+        "guild_id": "2",
+        "guild_domain": "guild.example",
+        "name": "party_blob",
+        "description": "Celebrating",
+        "animated": True,
+        "media_hash": "abc",
+    }
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[[payload], {**payload, "id": "9", "content": None}]
+    )
+
+    stickers = await bot.stickers(
+        EntityRef(2, "guild.example"), target="https://guild.example"
+    )
+    sticker = stickers[0]
+    assert isinstance(sticker, Sticker)
+    assert sticker.token == "<sticker:party_blob:8@guild.example>"
+    assert sticker.media_url.endswith("/media/stickers/8/thumbnail_512")
+
+    bot.send_message = AsyncMock(
+        return_value=Message.from_payload(  # type: ignore[method-assign]
+            bot,
+            "https://guild.example",
+            {
+                "id": "9",
+                "origin_domain": "guild.example",
+                "channel_id": "3",
+                "channel_domain": "guild.example",
+                "content": sticker.token,
+                "created_at": "2026-08-24T00:00:00+00:00",
+                "attachments": [],
+            },
+        )
+    )
+    await bot.send_sticker(
+        EntityRef(3, "guild.example"),
+        sticker,
+        target="https://guild.example",
+        installation_id=77,
+    )
+    bot.send_message.assert_awaited_once_with(
+        EntityRef(3, "guild.example"),
+        sticker.token,
+        target="https://guild.example",
+        installation_id=77,
+    )
+
+
+def test_sticker_gateway_events_are_typed() -> None:
+    bot = client()
+    created = bot._event_model(
+        "GUILD_STICKER_CREATE",
+        {
+            "id": "8",
+            "origin_domain": "guild.example",
+            "guild_id": "2",
+            "guild_domain": "guild.example",
+            "name": "wave",
+        },
+        target="https://guild.example",
+        topic="guild:guild.example:2",
+        sequence=1,
+    )
+    deleted = bot._event_model(
+        "GUILD_STICKER_DELETE",
+        {
+            "id": "8",
+            "origin_domain": "guild.example",
+            "guild_id": "2",
+            "guild_domain": "guild.example",
+        },
+        target="https://guild.example",
+        topic="guild:guild.example:2",
+        sequence=2,
+    )
+    assert isinstance(created, Sticker)
+    assert isinstance(deleted, StickerDeleteEvent)
 
 
 @pytest.mark.asyncio

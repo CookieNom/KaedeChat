@@ -12,6 +12,7 @@
     type CustomEmojiOption,
     type EmojiOption
   } from '$lib/chat/emojis';
+  import { stickerOptions, type StickerOption } from '$lib/chat/stickers';
   import { autosizeTextarea } from '$lib/ui/autosize';
   import {
     channelCompletions,
@@ -97,6 +98,7 @@
     Channel,
     CustomEmoji,
     Guild,
+    GuildSticker,
     GuildMemberSummary,
     Message,
     ReadStateStatus,
@@ -123,6 +125,7 @@
   import { memberRoleColor } from '$lib/chat/members';
   import EmojiPicker from '$lib/components/EmojiPicker.svelte';
   import GifPicker from '$lib/components/GifPicker.svelte';
+  import StickerPicker from '$lib/components/StickerPicker.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import MessageRow from '$lib/components/MessageRow.svelte';
   import MessageSearch from '$lib/components/MessageSearch.svelte';
@@ -254,6 +257,8 @@
   let featureController: AbortController | null = null;
   let emojiPickerOpen = $state(false);
   let availableEmojis = $state<CustomEmoji[]>([]);
+  let stickerPickerOpen = $state(false);
+  let availableStickers = $state<GuildSticker[]>([]);
   let unicodeEmojis = $state<EmojiOption[]>([]);
   let emojiCatalogLoading = false;
   let slowmodeRemaining = $state(0);
@@ -485,6 +490,18 @@
         value: customEmojiToken(emoji)
       }))
       .filter((emoji) => Boolean(emoji.url && emoji.value));
+  });
+  const pickerStickers = $derived.by((): StickerOption[] => {
+    if (!guild || !channel) return [];
+    const mayUseExternal = channelHasPermission(channel, Permission.USE_EXTERNAL_EMOJIS);
+    return stickerOptions(
+      availableStickers.filter(
+        (sticker) =>
+          (sticker.guild_id === guild?.id && sticker.guild_domain === guild?.origin_domain) ||
+          mayUseExternal
+      ),
+      guild
+    );
   });
   const currentReadState = $derived(channel ? unreadFor(channel) : undefined);
   const channelGroups = $derived(groupChannels(guild?.channels ?? []));
@@ -2396,9 +2413,23 @@
     } else if (dispatch.t === 'GUILD_EMOJI_DELETE') {
       const emoji = dispatch.d as CustomEmoji;
       availableEmojis = availableEmojis.filter((item) => entityKey(item) !== entityKey(emoji));
+    } else if (dispatch.t === 'GUILD_STICKER_CREATE') {
+      const sticker = dispatch.d as GuildSticker;
+      availableStickers = [
+        ...availableStickers.filter((item) => entityKey(item) !== entityKey(sticker)),
+        sticker
+      ];
+    } else if (dispatch.t === 'GUILD_STICKER_DELETE') {
+      const sticker = dispatch.d as GuildSticker;
+      availableStickers = availableStickers.filter(
+        (item) => entityKey(item) !== entityKey(sticker)
+      );
     } else if (dispatch.t === 'GUILD_DELETE') {
       const removed = dispatch.d as { id: string; origin_domain: string };
       availableEmojis = availableEmojis.filter(
+        (item) => item.guild_id !== removed.id || item.guild_domain !== removed.origin_domain
+      );
+      availableStickers = availableStickers.filter(
         (item) => item.guild_id !== removed.id || item.guild_domain !== removed.origin_domain
       );
     } else if (dispatch.t === 'GUILD_MEMBER_UPDATE') {
@@ -2784,6 +2815,14 @@
     });
   }
 
+  function chooseSticker(value: string) {
+    if (busy || !channelReady || !channel || !canSendMessages || editingMessage) return;
+    stickerPickerOpen = false;
+    emojiPickerOpen = false;
+    gifPickerOpen = false;
+    void send(pendingMessageSend(value, [], []));
+  }
+
   function startSlowmode(milliseconds: number) {
     const deadline = Date.now() + Math.max(1000, milliseconds);
     try {
@@ -2998,6 +3037,7 @@
         loadedReadStates,
         loadedCurrentUser,
         loadedEmojis,
+        loadedStickers,
         loadedPins,
         loadedCommands,
         routeChannel,
@@ -3011,6 +3051,7 @@
         api<ReadStateStatus[]>('/users/@me/read-states'),
         api<UserSummary>('/users/@me'),
         api<CustomEmoji[]>('/users/@me/emojis'),
+        api<GuildSticker[]>('/users/@me/stickers'),
         api<Message[]>(`/channels/${encodeURIComponent(targetChannel)}/pins`).catch(() => []),
         api<ApplicationCommand[]>(
           `/guilds/${encodeURIComponent(targetGuild)}/application-commands`
@@ -3042,6 +3083,7 @@
       guild = preserveHistorySync(loadedGuild);
       loadedRouteChannel = loadedChannel;
       availableEmojis = loadedEmojis;
+      availableStickers = loadedStickers;
       pinnedMessages = loadedPins;
       applicationCommands = loadedCommands;
       setGuilds(loadedGuilds);
@@ -5661,6 +5703,7 @@
                     onclick={() => {
                       gifPickerOpen = !gifPickerOpen;
                       emojiPickerOpen = false;
+                      stickerPickerOpen = false;
                     }}>GIF</button
                   >
                 {/if}
@@ -5675,7 +5718,21 @@
                     onclick={() => {
                       emojiPickerOpen = !emojiPickerOpen;
                       gifPickerOpen = false;
+                      stickerPickerOpen = false;
                     }}>☺</button
+                  >
+                  <button
+                    class="sticker-button"
+                    class:active={stickerPickerOpen}
+                    type="button"
+                    disabled={busy || !channelReady || !channel || !canSendMessages}
+                    aria-label="Choose a sticker"
+                    aria-expanded={stickerPickerOpen}
+                    onclick={() => {
+                      stickerPickerOpen = !stickerPickerOpen;
+                      emojiPickerOpen = false;
+                      gifPickerOpen = false;
+                    }}>▱</button
                   >
                 {/if}
                 {#if nativeThreadComposer || selectedApplicationCommand}
@@ -5739,6 +5796,13 @@
                   customEmojis={pickerEmojis}
                   onSelect={chooseEmoji}
                   onClose={() => (emojiPickerOpen = false)}
+                />
+              {/if}
+              {#if stickerPickerOpen}
+                <StickerPicker
+                  stickers={pickerStickers}
+                  onSelect={chooseSticker}
+                  onClose={() => (stickerPickerOpen = false)}
                 />
               {/if}
               {#if uploads.length && !editingMessage}

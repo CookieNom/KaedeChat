@@ -14,6 +14,7 @@
     | 'headphones-off'
     | 'home'
     | 'image'
+    | 'image-plus'
     | 'key'
     | 'lock'
     | 'logout'
@@ -37,7 +38,8 @@
     | 'users'
     | 'video'
     | 'video-off'
-    | 'volume';
+    | 'volume'
+    | 'x';
 
   let {
     name,
@@ -97,6 +99,10 @@
     <rect x="3" y="4" width="18" height="16" rx="2" />
     <circle cx="8.5" cy="9" r="1.5" />
     <path d="m21 15-5-5L5 20" />
+  {:else if name === 'image-plus'}
+    <rect x="3" y="4" width="15" height="16" rx="2" />
+    <circle cx="8" cy="9" r="1.5" />
+    <path d="m18 15-4-4L5 20M21 8v6M18 11h6" />
   {:else if name === 'key'}
     <circle cx="8" cy="15" r="4" />
     <path d="m11 12 9-9M15 8l3 3M17 6l2 2" />
@@ -176,5 +182,7 @@
     />
   {:else if name === 'volume'}
     <path d="M11 5 6 9H3v6h3l5 4ZM15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12" />
+  {:else if name === 'x'}
+    <path d="M6 6l12 12M18 6 6 18" />
   {/if}
 </svg>

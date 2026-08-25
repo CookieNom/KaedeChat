@@ -146,6 +146,16 @@ and after a failed sign-in attempt. The API key and Turnstile secret belong
 only in backend environments; neither appears in public configuration
 responses.
 
+Guild stickers use the ordinary scanned media pipeline. Configure the per-guild
+and per-file bounds with `KAEDE_MEDIA_STICKER_LIMIT` and
+`KAEDE_MEDIA_MAX_STICKER_BYTES`. Cropping is always available and preserves GIF
+animation. Background removal is deliberately opt-in because rembg loads an
+ONNX model and materially increases worker memory: set `REMBG_HOME`, preseed that model cache
+for every media worker, size worker memory for the selected model, then set
+`KAEDE_MEDIA_STICKER_BACKGROUND_REMOVAL_ENABLED=true`. Keep it disabled when the
+model is not locally available; production workers must not depend on a runtime
+model download.
+
 Closed-app notifications normally use the public Kaede relay. Set
 `KAEDE_PUSH_RELAY_ENABLED=true`; an ordinary home needs no Firebase
 credential. The relay URL and logical origin are pinned separately because

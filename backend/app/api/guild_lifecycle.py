@@ -317,7 +317,8 @@ async def _prepare_guild_content_deletion(
     message_refs = select(Message.id, Message.origin_domain).where(
         tuple_(Message.channel_id, Message.channel_domain).in_(channel_refs)
     )
-    asset_prefix = f"emoji:{guild.origin_domain}:"
+    emoji_asset_prefix = f"emoji:{guild.origin_domain}:"
+    sticker_asset_prefix = f"sticker:{guild.origin_domain}:"
     routed_refs = select(
         MediaTombstoneDestination.attachment_id,
         MediaTombstoneDestination.attachment_domain,
@@ -339,7 +340,8 @@ async def _prepare_guild_content_deletion(
                                 f"guild:{guild.origin_domain}:{guild.id}:banner",
                             )
                         ),
-                        Attachment.asset_binding.startswith(asset_prefix),
+                        Attachment.asset_binding.startswith(emoji_asset_prefix),
+                        Attachment.asset_binding.startswith(sticker_asset_prefix),
                     )
                 )
             )

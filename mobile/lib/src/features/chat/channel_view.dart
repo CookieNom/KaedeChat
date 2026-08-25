@@ -156,6 +156,24 @@ final _roleMentionToken = RegExp(
 final _customEmojiToken = RegExp(
   r'^<(?:(a)?):([A-Za-z0-9_]{2,32}):([1-9][0-9]{0,18})@([A-Za-z0-9.-]{1,253})>$',
 );
+final _stickerToken = RegExp(
+  r'^<sticker:([A-Za-z0-9_]{2,32}):([1-9][0-9]{0,18})@([A-Za-z0-9.-]{1,253})>$',
+);
+
+@visibleForTesting
+({String name, EntityRef ref})? messageSticker(String? content) {
+  final match =
+      content == null ? null : _stickerToken.firstMatch(content.trim());
+  if (match == null) return null;
+  try {
+    return (
+      name: match.group(1)!,
+      ref: EntityRef(Snowflake(match.group(2)!), Domain(match.group(3)!)),
+    );
+  } on FormatException {
+    return null;
+  }
+}
 
 final class MessageSpoilerSyntax extends md.InlineSyntax {
   MessageSpoilerSyntax()
@@ -626,6 +644,42 @@ final class KaedeMessageMarkdown extends StatelessWidget {
       },
     );
   }
+}
+
+final class _StickerMessage extends StatelessWidget {
+  const _StickerMessage({required this.sticker});
+
+  final ({String name, EntityRef ref}) sticker;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        image: true,
+        label: 'Sticker: ${sticker.name}',
+        child: CachedNetworkImage(
+          key: ValueKey('message-sticker-${sticker.ref.wire}'),
+          imageUrl: Uri.https(
+            sticker.ref.domain.value,
+            '/media/stickers/${sticker.ref.id.value}/thumbnail_512',
+          ).toString(),
+          width: 240,
+          height: 240,
+          fit: BoxFit.contain,
+          alignment: Alignment.centerLeft,
+          placeholder: (_, __) => const SizedBox(
+            width: 240,
+            height: 240,
+            child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+          ),
+          errorWidget: (_, __, ___) => SizedBox(
+            width: 240,
+            height: 80,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(':${sticker.name}:'),
+            ),
+          ),
+        ),
+      );
 }
 
 final class ChannelView extends ConsumerStatefulWidget {
@@ -1108,6 +1162,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                     _runComposerAction(channel, ComposerAction.attach),
                 onEmoji: () =>
                     _runComposerAction(channel, ComposerAction.emoji),
+                onSticker: () =>
+                    _runComposerAction(channel, ComposerAction.sticker),
                 onGif: () => _runComposerAction(channel, ComposerAction.gif),
                 onSend: _send,
               ),
@@ -1532,6 +1588,15 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         }
         _insertComposerText(emoji);
         break;
+      case ComposerAction.sticker:
+        final sticker = await showComposerStickerPicker(
+          context,
+          repository: ref.read(mobileControllerProvider.notifier).repository,
+          channel: channel,
+        );
+        if (!mounted || sticker == null) return;
+        await _sendSticker(channel, sticker);
+        break;
       case ComposerAction.gif:
         if (!composerAllowsGifs(channel)) {
           _showGifUnavailable();
@@ -1567,6 +1632,57 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         'GIF search is unavailable in end-to-end encrypted conversations.',
       ),
     ));
+  }
+
+  Future<void> _sendSticker(
+    KaedeChannel channel,
+    ComposerSticker sticker,
+  ) async {
+    final active = ref.read(mobileControllerProvider).activeChannel;
+    if (_sending ||
+        active?.ref != channel.ref ||
+        _composerChannel != channel.ref) {
+      return;
+    }
+    final remaining = _slowModeRemaining(channel);
+    if (remaining > Duration.zero) {
+      final seconds = (remaining.inMilliseconds / 1000).ceil();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Slow mode is active. Try again in $seconds seconds.'),
+      ));
+      return;
+    }
+    setState(() => _sending = true);
+    try {
+      await ref
+          .read(mobileControllerProvider.notifier)
+          .send(channel.ref, sticker.token);
+      if (channel.slowModeSeconds > 0) {
+        _startSlowMode(channel, Duration(seconds: channel.slowModeSeconds));
+      }
+      await WidgetsBinding.instance.endOfFrame;
+      if (_composerChannel == channel.ref && _scroll.hasClients) {
+        await _scroll.animateTo(
+          _scroll.position.minScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    } on Object catch (error) {
+      if (error is KaedeException && error.retryAfter != null) {
+        _startSlowMode(channel, error.retryAfter!);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(userFacingError(
+            error,
+            summary: 'Could not send that sticker',
+          )),
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
   }
 
   Future<void> _sendGif(KaedeChannel channel, ComposerGif gif) async {
@@ -3784,6 +3900,9 @@ final class _MessageTile extends StatelessWidget {
                   else if (displayedMessage.e2ee != null &&
                       displayedMessage.content == null)
                     const _UndecryptableNotice()
+                  else if (messageSticker(displayedMessage.content)
+                      case final sticker?)
+                    _StickerMessage(sticker: sticker)
                   else if (displayedMessage.content case final content?
                       when content.isNotEmpty)
                     KaedeMessageMarkdown(
@@ -5363,6 +5482,7 @@ final class _Composer extends StatelessWidget {
       required this.onMore,
       required this.onAttach,
       required this.onEmoji,
+      required this.onSticker,
       required this.onGif,
       required this.onSend});
   final TextEditingController controller;
@@ -5385,6 +5505,7 @@ final class _Composer extends StatelessWidget {
   final VoidCallback onMore;
   final VoidCallback onAttach;
   final VoidCallback onEmoji;
+  final VoidCallback onSticker;
   final VoidCallback onGif;
   final VoidCallback onSend;
 
@@ -5498,6 +5619,12 @@ final class _Composer extends StatelessWidget {
                       icon: Icons.emoji_emotions_outlined,
                       tooltip: 'Emoji',
                       onPressed: sending ? null : onEmoji,
+                    ),
+                  if (!compact)
+                    _ComposerButton(
+                      icon: Icons.sticky_note_2_outlined,
+                      tooltip: 'Stickers',
+                      onPressed: sending ? null : onSticker,
                     ),
                   if (!compact)
                     _ComposerButton(

@@ -11,6 +11,7 @@
     type CustomEmojiOption,
     type EmojiOption
   } from '$lib/chat/emojis';
+  import { stickerOptions, type StickerOption } from '$lib/chat/stickers';
   import { autosizeTextarea } from '$lib/ui/autosize';
   import { firstNavigableChannel } from '$lib/chat/channels';
   import { dmTitle, groupDmSubtitle, isGroupDm, ownsGroupDm } from '$lib/chat/direct-messages';
@@ -46,6 +47,7 @@
     Channel,
     CustomEmoji,
     Guild,
+    GuildSticker,
     Message,
     ReadStateStatus,
     UserSummary
@@ -64,6 +66,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import EmojiPicker from '$lib/components/EmojiPicker.svelte';
   import GifPicker from '$lib/components/GifPicker.svelte';
+  import StickerPicker from '$lib/components/StickerPicker.svelte';
   import MessageRow from '$lib/components/MessageRow.svelte';
   import MessageSearch from '$lib/components/MessageSearch.svelte';
   import NewMessageDialog from '$lib/components/NewMessageDialog.svelte';
@@ -119,6 +122,8 @@
   let featureController: AbortController | null = null;
   let emojiPickerOpen = $state(false);
   let availableEmojis = $state<CustomEmoji[]>([]);
+  let stickerPickerOpen = $state(false);
+  let availableStickers = $state<GuildSticker[]>([]);
   let unicodeEmojis = $state<EmojiOption[]>([]);
   let emojiCatalogLoading = false;
   const pickerEmojis = $derived(
@@ -131,6 +136,7 @@
       }))
       .filter((emoji) => Boolean(emoji.url && emoji.value))
   );
+  const pickerStickers = $derived<StickerOption[]>(stickerOptions(availableStickers));
   let error = $state('');
   let busy = $state(false);
   let channelReady = $state(false);
@@ -608,9 +614,23 @@
     } else if (dispatch.t === 'GUILD_EMOJI_DELETE') {
       const emoji = dispatch.d as CustomEmoji;
       availableEmojis = availableEmojis.filter((item) => entityKey(item) !== entityKey(emoji));
+    } else if (dispatch.t === 'GUILD_STICKER_CREATE') {
+      const sticker = dispatch.d as GuildSticker;
+      availableStickers = [
+        ...availableStickers.filter((item) => entityKey(item) !== entityKey(sticker)),
+        sticker
+      ];
+    } else if (dispatch.t === 'GUILD_STICKER_DELETE') {
+      const sticker = dispatch.d as GuildSticker;
+      availableStickers = availableStickers.filter(
+        (item) => entityKey(item) !== entityKey(sticker)
+      );
     } else if (dispatch.t === 'GUILD_DELETE') {
       const removed = dispatch.d as { id: string; origin_domain: string };
       availableEmojis = availableEmojis.filter(
+        (item) => item.guild_id !== removed.id || item.guild_domain !== removed.origin_domain
+      );
+      availableStickers = availableStickers.filter(
         (item) => item.guild_id !== removed.id || item.guild_domain !== removed.origin_domain
       );
     } else if (dispatch.t === 'TYPING_START') {
@@ -766,6 +786,14 @@
     });
   }
 
+  function chooseSticker(value: string) {
+    if (busy || !channelReady || !channel || editingMessage) return;
+    stickerPickerOpen = false;
+    emojiPickerOpen = false;
+    gifPickerOpen = false;
+    void send(pendingMessageSend(value, [], []));
+  }
+
   $effect(() => {
     const targetRef = dmId;
     const targetAround = aroundMessage;
@@ -846,6 +874,7 @@
         loadedCurrentUser,
         loadedCall,
         loadedEmojis,
+        loadedStickers,
         loadedPins
       ] = await Promise.all([
         api<Channel[]>('/users/@me/channels'),
@@ -862,6 +891,7 @@
           })
         ),
         api<CustomEmoji[]>('/users/@me/emojis'),
+        api<GuildSticker[]>('/users/@me/stickers'),
         api<Message[]>(`/channels/${encodeURIComponent(targetRef)}/pins`).catch(() => [])
       ]);
       if (
@@ -874,6 +904,7 @@
       setGuilds(loadedGuilds);
       setReadStates(loadedReadStates);
       availableEmojis = loadedEmojis;
+      availableStickers = loadedStickers;
       pinnedMessages = loadedPins;
       entities.ingestCurrentUser(loadedCurrentUser);
       const preferredPresence = myPresencePreference();
@@ -2342,6 +2373,7 @@
             onclick={() => {
               gifPickerOpen = !gifPickerOpen;
               emojiPickerOpen = false;
+              stickerPickerOpen = false;
             }}>GIF</button
           >
         {/if}
@@ -2356,7 +2388,21 @@
             onclick={() => {
               emojiPickerOpen = !emojiPickerOpen;
               gifPickerOpen = false;
+              stickerPickerOpen = false;
             }}>☺</button
+          >
+          <button
+            class="sticker-button"
+            class:active={stickerPickerOpen}
+            type="button"
+            disabled={busy || !channelReady || !channel}
+            aria-label="Choose a sticker"
+            aria-expanded={stickerPickerOpen}
+            onclick={() => {
+              stickerPickerOpen = !stickerPickerOpen;
+              emojiPickerOpen = false;
+              gifPickerOpen = false;
+            }}>▱</button
           >
         {/if}
         <small class="composer-count">{content.length}/4000</small>
@@ -2397,6 +2443,13 @@
           customEmojis={pickerEmojis}
           onSelect={chooseEmoji}
           onClose={() => (emojiPickerOpen = false)}
+        />
+      {/if}
+      {#if stickerPickerOpen}
+        <StickerPicker
+          stickers={pickerStickers}
+          onSelect={chooseSticker}
+          onClose={() => (stickerPickerOpen = false)}
         />
       {/if}
       {#if uploads.length && !editingMessage}

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/chat/channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
@@ -114,6 +115,75 @@ void main() {
       );
       expect(withPermission.map((item) => item.name),
           <String>['party_blob', 'remote_wave']);
+    });
+  });
+
+  group('guild stickers', () {
+    final currentGuild = EntityRef.parse('20@home.example');
+
+    KaedeChannel channel({required bool external}) => KaedeChannel(
+          ref: EntityRef.parse('30@home.example'),
+          guildRef: currentGuild,
+          type: ChannelType.text,
+          position: 0,
+          permissions: external
+              ? BigInt.from(Permission.useExternalEmojis)
+              : BigInt.zero,
+        );
+
+    Map<String, Object?> sticker({
+      required String id,
+      required String origin,
+      required String guildId,
+      required String guildDomain,
+      required String guildName,
+      required String name,
+    }) =>
+        <String, Object?>{
+          'id': id,
+          'origin_domain': origin,
+          'guild_id': guildId,
+          'guild_domain': guildDomain,
+          'guild_name': guildName,
+          'name': name,
+          'animated': false,
+          'media_hash': 'abc',
+        };
+
+    test('filters external stickers and keeps the current guild first', () {
+      final local = sticker(
+        id: '41',
+        origin: 'home.example',
+        guildId: '20',
+        guildDomain: 'home.example',
+        guildName: 'Z Local',
+        name: 'wave',
+      );
+      final external = sticker(
+        id: '42',
+        origin: 'remote.example',
+        guildId: '21',
+        guildDomain: 'remote.example',
+        guildName: 'A Remote',
+        name: 'party',
+      );
+
+      expect(composerStickers([local, external], channel(external: false)),
+          hasLength(1));
+      final visible = composerStickers(
+        [external, local],
+        channel(external: true),
+      );
+      expect(visible.map((item) => item.guildName), ['Z Local', 'A Remote']);
+      expect(visible.first.token, '<sticker:wave:41@home.example>');
+    });
+
+    test('parses only exact canonical sticker messages', () {
+      final parsed = messageSticker('<sticker:wave:41@home.example>');
+      expect(parsed?.name, 'wave');
+      expect(parsed?.ref, EntityRef.parse('41@home.example'));
+      expect(messageSticker('hello <sticker:wave:41@home.example>'), isNull);
+      expect(messageSticker('<sticker:bad name:41@home.example>'), isNull);
     });
   });
 

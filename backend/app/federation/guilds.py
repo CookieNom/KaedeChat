@@ -50,6 +50,7 @@ from app.db.models import (
     RemoteGuildMembershipIntent,
     RemoteMediaCache,
     Role,
+    Sticker,
     TerminalRoomDeletion,
     ThreadMember,
     User,
@@ -105,6 +106,8 @@ GUILD_MUTATION_EVENT_TYPES = frozenset(
         "guild.role.delete",
         "guild.emoji.create",
         "guild.emoji.delete",
+        "guild.sticker.create",
+        "guild.sticker.delete",
         "guild.overwrite.upsert",
         "guild.overwrite.delete",
         "guild.member.update",
@@ -2100,6 +2103,69 @@ async def apply_guild_mutation_event(
                 await session.delete(emoji)
             dispatch_type = "GUILD_EMOJI_DELETE"
         dispatch = dict(raw)
+    elif event_type in {"guild.sticker.create", "guild.sticker.delete"}:
+        raw = content.get("sticker")
+        sticker_ref = _event_ref(raw, "sticker")
+        if not isinstance(raw, dict) or sticker_ref[1] != locked.origin_domain:
+            raise ValueError("sticker mutation identity is invalid")
+        if (
+            database_snowflake(raw.get("guild_id"), "sticker guild id"),
+            normalize_domain(str(raw.get("guild_domain", ""))),
+        ) != (locked.id, locked.origin_domain):
+            raise ValueError("sticker mutation references the wrong guild")
+        if event_type.endswith("create"):
+            name = raw.get("name")
+            description = raw.get("description")
+            media_hash = raw.get("media_hash")
+            if (
+                not isinstance(name, str)
+                or re.fullmatch(r"[A-Za-z0-9_]{2,32}", name) is None
+                or (
+                    description is not None
+                    and (not isinstance(description, str) or len(description) > 100)
+                )
+                or not isinstance(media_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", media_hash) is None
+                or not isinstance(raw.get("animated"), bool)
+            ):
+                raise ValueError("sticker mutation fields are invalid")
+            duplicate_name = await session.scalar(
+                select(Sticker.id).where(
+                    Sticker.guild_id == locked.id,
+                    Sticker.guild_domain == locked.origin_domain,
+                    func.lower(Sticker.name) == name.casefold(),
+                    (Sticker.id != sticker_ref[0]) | (Sticker.origin_domain != sticker_ref[1]),
+                )
+            )
+            if duplicate_name is not None:
+                raise ValueError("sticker mutation name conflicts with another sticker")
+            sticker = await session.get(Sticker, sticker_ref)
+            if sticker is None:
+                sticker = Sticker(
+                    id=sticker_ref[0],
+                    origin_domain=sticker_ref[1],
+                    guild_id=locked.id,
+                    guild_domain=locked.origin_domain,
+                    name=name,
+                    creator_id=actor.id,
+                    creator_domain=actor.origin_domain,
+                )
+                session.add(sticker)
+            elif (sticker.guild_id, sticker.guild_domain) != (locked.id, locked.origin_domain):
+                raise ValueError("sticker mutation conflicts with another guild")
+            sticker.name = name
+            sticker.description = description
+            sticker.animated = bool(raw["animated"])
+            sticker.media_hash = media_hash
+            dispatch_type = "GUILD_STICKER_CREATE"
+        else:
+            sticker = await session.get(Sticker, sticker_ref)
+            if sticker is not None:
+                if (sticker.guild_id, sticker.guild_domain) != (locked.id, locked.origin_domain):
+                    raise ValueError("sticker deletion references the wrong guild")
+                await session.delete(sticker)
+            dispatch_type = "GUILD_STICKER_DELETE"
+        dispatch = dict(raw)
     elif event_type in {"guild.overwrite.upsert", "guild.overwrite.delete"}:
         raw = content.get("overwrite")
         if not isinstance(raw, dict):
@@ -2878,7 +2944,7 @@ async def fetch_guild_snapshot(
                 raise RuntimeError(
                     "guild structural generation changed while its snapshot was paged"
                 )
-            for field in ("guild", "roles", "channels", "overwrites", "emojis"):
+            for field in ("guild", "roles", "channels", "overwrites", "emojis", "stickers"):
                 if payload.get(field) != combined.get(field):
                     raise RuntimeError("guild structure changed while its snapshot was paged")
             combined["members"].extend(members)
@@ -3176,6 +3242,7 @@ def validate_guild_snapshot(
     member_roles = snapshot.get("member_roles")
     overwrites = snapshot.get("overwrites")
     emojis = snapshot.get("emojis", [])
+    stickers = snapshot.get("stickers", [])
     thread_members = snapshot.get("thread_members", [])
     if (
         not isinstance(roles, list)
@@ -3184,6 +3251,7 @@ def validate_guild_snapshot(
         or not isinstance(member_roles, list)
         or not isinstance(overwrites, list)
         or not isinstance(emojis, list)
+        or not isinstance(stickers, list)
         or not isinstance(thread_members, list)
     ):
         raise ValueError("guild snapshot collections are invalid")
@@ -3194,6 +3262,7 @@ def validate_guild_snapshot(
         or len(member_roles) > MAX_SNAPSHOT_MEMBER_ROLES
         or len(overwrites) > MAX_SNAPSHOT_OVERWRITES
         or len(emojis) > 1000
+        or len(stickers) > 1000
         or len(thread_members) > MAX_SNAPSHOT_THREAD_MEMBERS
     ):
         raise ValueError("guild snapshot collection exceeds its protocol bound")
@@ -3476,6 +3545,37 @@ def validate_guild_snapshot(
             raise ValueError("guild snapshot emoji animation flag is invalid")
         emoji_refs.add(ref)
         emoji_names.add(name.casefold())
+    sticker_refs: set[tuple[int, str]] = set()
+    sticker_names: set[str] = set()
+    for raw in stickers:
+        if not isinstance(raw, dict):
+            raise ValueError("guild snapshot sticker is invalid")
+        ref = _event_ref(raw, "sticker")
+        if ref[1] != origin or ref in sticker_refs:
+            raise ValueError("guild snapshot sticker identity is invalid")
+        if (
+            database_snowflake(raw.get("guild_id"), "sticker guild id"),
+            normalize_domain(str(raw.get("guild_domain", ""))),
+        ) != (guild_id, origin):
+            raise ValueError("guild snapshot sticker references the wrong guild")
+        name = raw.get("name")
+        description = raw.get("description")
+        media_hash = raw.get("media_hash")
+        if (
+            not isinstance(name, str)
+            or re.fullmatch(r"[A-Za-z0-9_]{2,32}", name) is None
+            or name.casefold() in sticker_names
+            or (
+                description is not None
+                and (not isinstance(description, str) or len(description) > 100)
+            )
+            or not isinstance(media_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", media_hash) is None
+            or not isinstance(raw.get("animated"), bool)
+        ):
+            raise ValueError("guild snapshot sticker fields are invalid")
+        sticker_refs.add(ref)
+        sticker_names.add(name.casefold())
 
 
 def tombstone_omitted_replicated_channel(channel: Channel) -> None:
@@ -3807,6 +3907,7 @@ def guild_snapshot_payload(
     overwrites: list[ChannelOverwrite],
     *,
     emojis: list[Emoji] | None = None,
+    stickers: list[Sticker] | None = None,
     thread_members: list[ThreadMember] | None = None,
     member_snapshot_at: datetime,
     next_member_cursor: tuple[str, int] | None = None,
@@ -3994,6 +4095,20 @@ def guild_snapshot_payload(
             for item in (emojis or [])
             if item.media_hash is not None
         ],
+        "stickers": [
+            {
+                "id": str(item.id),
+                "origin_domain": item.origin_domain,
+                "guild_id": str(item.guild_id),
+                "guild_domain": item.guild_domain,
+                "name": item.name,
+                "description": item.description,
+                "animated": item.animated,
+                "media_hash": item.media_hash,
+            }
+            for item in (stickers or [])
+            if item.media_hash is not None
+        ],
     }
 
 
@@ -4175,6 +4290,17 @@ async def apply_guild_snapshot(
     for emoji in existing_emojis:
         if (emoji.id, emoji.origin_domain) not in emoji_refs:
             await session.delete(emoji)
+    sticker_refs = {
+        (int(raw["id"]), str(raw["origin_domain"])) for raw in snapshot.get("stickers", [])
+    }
+    existing_stickers = list(
+        await session.scalars(
+            select(Sticker).where(Sticker.guild_id == guild.id, Sticker.guild_domain == origin)
+        )
+    )
+    for sticker in existing_stickers:
+        if (sticker.id, sticker.origin_domain) not in sticker_refs:
+            await session.delete(sticker)
     for raw in snapshot["roles"]:
         loaded_role = await session.get(Role, (int(raw["id"]), str(raw["origin_domain"])))
         if loaded_role is None:
@@ -4272,6 +4398,25 @@ async def apply_guild_snapshot(
         loaded_emoji.name = str(raw["name"])
         loaded_emoji.animated = bool(raw["animated"])
         loaded_emoji.media_hash = str(raw["media_hash"])
+    for raw in snapshot.get("stickers", []):
+        loaded_sticker = await session.get(Sticker, (int(raw["id"]), str(raw["origin_domain"])))
+        if loaded_sticker is None:
+            loaded_sticker = Sticker(
+                id=int(raw["id"]),
+                origin_domain=str(raw["origin_domain"]),
+                guild_id=guild.id,
+                guild_domain=guild.origin_domain,
+                name=str(raw["name"]),
+                creator_id=guild.owner_id,
+                creator_domain=guild.owner_domain,
+            )
+            session.add(loaded_sticker)
+        elif (loaded_sticker.guild_id, loaded_sticker.guild_domain) != (guild.id, origin):
+            raise ValueError("snapshot sticker identity conflicts with another guild")
+        loaded_sticker.name = str(raw["name"])
+        loaded_sticker.description = raw.get("description")
+        loaded_sticker.animated = bool(raw["animated"])
+        loaded_sticker.media_hash = str(raw["media_hash"])
     await session.flush()
     if channel_refs:
         await session.execute(

@@ -9,6 +9,7 @@ from collections.abc import AsyncIterable, AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import blurhash  # type: ignore[import-untyped]
 import imagehash
@@ -201,6 +202,7 @@ def image_derivatives(
     data: bytes,
     *,
     sizes: tuple[int, ...] = IMAGE_DERIVATIVE_SIZES,
+    transform: dict[str, Any] | None = None,
 ) -> tuple[list[Derivative], str, str, int, int]:
     try:
         image = pyvips.Image.new_from_buffer(data, "", access="random", fail_on="error", n=-1)
@@ -218,6 +220,67 @@ def image_derivatives(
     if width <= 0 or height <= 0 or width * height * pages > 100_000_000:
         raise MediaValidationError("image dimensions exceed the processing limit")
     image = image.autorot()
+    if transform:
+        raw_crop = transform.get("crop")
+        if raw_crop is not None:
+            if not isinstance(raw_crop, dict):
+                raise MediaValidationError("sticker crop is invalid")
+            try:
+                crop_x = float(raw_crop["x"])
+                crop_y = float(raw_crop["y"])
+                crop_width = float(raw_crop["width"])
+                crop_height = float(raw_crop["height"])
+            except (KeyError, TypeError, ValueError):
+                raise MediaValidationError("sticker crop is invalid") from None
+            if (
+                crop_x < 0
+                or crop_y < 0
+                or crop_width <= 0
+                or crop_height <= 0
+                or crop_x + crop_width > 1.000001
+                or crop_y + crop_height > 1.000001
+            ):
+                raise MediaValidationError("sticker crop is outside the image")
+            left = min(width - 1, round(crop_x * width))
+            top = min(height - 1, round(crop_y * height))
+            crop_pixel_width = max(1, min(width - left, round(crop_width * width)))
+            crop_pixel_height = max(1, min(height - top, round(crop_height * height)))
+            frames = [
+                image.crop(left, (frame * page_height) + top, crop_pixel_width, crop_pixel_height)
+                for frame in range(pages)
+            ]
+            delays = image.get("delay") if image.get_typeof("delay") else None
+            loop = int(image.get("loop")) if image.get_typeof("loop") else None
+            image = frames[0] if pages == 1 else pyvips.Image.arrayjoin(frames, across=1)
+            if pages > 1:
+                image.set_type(pyvips.GValue.gint_type, "page-height", crop_pixel_height)
+                if isinstance(delays, list):
+                    image.set_type(pyvips.GValue.array_int_type, "delay", delays)
+                if loop is not None:
+                    image.set_type(pyvips.GValue.gint_type, "loop", loop)
+            width = crop_pixel_width
+            height = crop_pixel_height
+            page_height = crop_pixel_height
+        if transform.get("remove_background"):
+            if pages > 1:
+                raise MediaValidationError(
+                    "background removal is currently available for static stickers only"
+                )
+            try:
+                from rembg import remove  # type: ignore[import-not-found]
+            except ImportError as exc:
+                raise MediaValidationError("background removal is unavailable") from exc
+            try:
+                source = image.write_to_buffer(".png", strip=True)
+                removed = remove(source)
+                if not isinstance(removed, bytes):
+                    raise TypeError("background remover returned a non-byte result")
+                image = pyvips.Image.new_from_buffer(removed, "", access="random", fail_on="error")
+                width = int(image.width)
+                height = int(image.height)
+                page_height = height
+            except (TypeError, ValueError, pyvips.Error) as exc:
+                raise MediaValidationError("background removal failed") from exc
     derivatives: list[Derivative] = []
     encoded_outputs: dict[tuple[int, int], bytes] = {}
     for size in sizes:

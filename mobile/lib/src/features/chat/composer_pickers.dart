@@ -12,9 +12,10 @@ import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-enum ComposerAction { attach, emoji, gif }
+enum ComposerAction { attach, emoji, sticker, gif }
 
 typedef ComposerEmojiLoader = Future<List<Map<String, Object?>>> Function();
+typedef ComposerStickerLoader = Future<List<Map<String, Object?>>> Function();
 typedef ComposerGifLoader = Future<Map<String, Object?>> Function({
   String? query,
   int page,
@@ -224,6 +225,132 @@ List<ComposerCustomEmoji> composerCustomEmojis(
   return List.unmodifiable(items);
 }
 
+final class ComposerSticker {
+  const ComposerSticker({
+    required this.ref,
+    required this.guildRef,
+    required this.guildName,
+    required this.name,
+    required this.animated,
+    required this.mediaHash,
+    this.description,
+  });
+
+  static final _namePattern = RegExp(r'^[A-Za-z0-9_]{2,32}$');
+
+  static ComposerSticker? tryParse(Map<String, Object?> json) {
+    try {
+      final name = '${json['name'] ?? ''}'.trim();
+      final mediaHash = '${json['media_hash'] ?? ''}'.trim();
+      final guildName = '${json['guild_name'] ?? ''}'.trim();
+      if (!_namePattern.hasMatch(name) || mediaHash.isEmpty) return null;
+      return ComposerSticker(
+        ref: EntityRef(
+          Snowflake('${json['id']}'),
+          Domain('${json['origin_domain']}'),
+        ),
+        guildRef: EntityRef(
+          Snowflake('${json['guild_id']}'),
+          Domain('${json['guild_domain']}'),
+        ),
+        guildName: guildName.isEmpty ? '${json['guild_domain']}' : guildName,
+        name: name,
+        description: '${json['description'] ?? ''}'.trim().isEmpty
+            ? null
+            : '${json['description']}'.trim(),
+        animated: json['animated'] == true,
+        mediaHash: mediaHash,
+      );
+    } on FormatException {
+      return null;
+    }
+  }
+
+  final EntityRef ref;
+  final EntityRef guildRef;
+  final String guildName;
+  final String name;
+  final String? description;
+  final bool animated;
+  final String mediaHash;
+
+  String get token => '<sticker:$name:${ref.wire}>';
+
+  Uri uri({String variant = 'thumbnail_512'}) => Uri.https(
+        ref.domain.value,
+        '/media/stickers/${ref.id.value}/$variant',
+      );
+}
+
+bool customStickerAvailableInChannel(
+  ComposerSticker sticker,
+  KaedeChannel channel,
+) {
+  final guild = channel.guildRef;
+  if (guild == null || sticker.guildRef == guild) return true;
+  return channel.allows(Permission.useExternalEmojis);
+}
+
+List<ComposerSticker> composerStickers(
+  Iterable<Map<String, Object?>> response,
+  KaedeChannel channel,
+) {
+  final items = response
+      .map(ComposerSticker.tryParse)
+      .whereType<ComposerSticker>()
+      .where((sticker) => customStickerAvailableInChannel(sticker, channel))
+      .toList();
+  items.sort((left, right) {
+    final leftLocal = left.guildRef == channel.guildRef;
+    final rightLocal = right.guildRef == channel.guildRef;
+    if (leftLocal != rightLocal) return leftLocal ? -1 : 1;
+    final guildOrder =
+        left.guildName.toLowerCase().compareTo(right.guildName.toLowerCase());
+    if (guildOrder != 0) return guildOrder;
+    return left.name.toLowerCase().compareTo(right.name.toLowerCase());
+  });
+  return List.unmodifiable(items);
+}
+
+final class StickerImage extends StatelessWidget {
+  const StickerImage({
+    required this.sticker,
+    this.size = 96,
+    super.key,
+  });
+
+  final ComposerSticker sticker;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        image: true,
+        label: 'Sticker: ${sticker.name}',
+        child: CachedNetworkImage(
+          imageUrl: sticker.uri().toString(),
+          width: size,
+          height: size,
+          fit: BoxFit.contain,
+          placeholder: (_, __) => SizedBox.square(
+            dimension: size,
+            child:
+                const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+          ),
+          errorWidget: (_, __, ___) => SizedBox.square(
+            dimension: size,
+            child: Center(
+              child: Text(
+                ':${sticker.name}:',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
 final class ComposerGif {
   const ComposerGif({
     required this.id,
@@ -393,42 +520,51 @@ Future<ComposerAction?> showComposerActionPicker(
       showDragHandle: true,
       builder: (context) => SafeArea(
         top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              key: const ValueKey('composer-action-attach'),
-              leading: const Icon(Icons.attach_file_rounded),
-              title: const Text('Attach files'),
-              subtitle: Text(canAttach
-                  ? 'Upload images, video, audio, or documents'
-                  : 'You do not have permission to attach files'),
-              enabled: canAttach,
-              onTap: canAttach
-                  ? () => Navigator.pop(context, ComposerAction.attach)
-                  : null,
-            ),
-            ListTile(
-              key: const ValueKey('composer-action-emoji'),
-              leading: const Icon(Icons.emoji_emotions_outlined),
-              title: const Text('Emoji'),
-              subtitle: const Text('Choose Unicode or guild emoji'),
-              onTap: () => Navigator.pop(context, ComposerAction.emoji),
-            ),
-            ListTile(
-              key: const ValueKey('composer-action-gif'),
-              leading: const Icon(Icons.gif_box_outlined),
-              title: const Text('GIF'),
-              subtitle: Text(gifsAllowed
-                  ? 'Search the GIF library'
-                  : 'Unavailable in end-to-end encrypted conversations'),
-              enabled: gifsAllowed,
-              onTap: gifsAllowed
-                  ? () => Navigator.pop(context, ComposerAction.gif)
-                  : null,
-            ),
-            const SizedBox(height: 4),
-          ],
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                key: const ValueKey('composer-action-attach'),
+                leading: const Icon(Icons.attach_file_rounded),
+                title: const Text('Attach files'),
+                subtitle: Text(canAttach
+                    ? 'Upload images, video, audio, or documents'
+                    : 'You do not have permission to attach files'),
+                enabled: canAttach,
+                onTap: canAttach
+                    ? () => Navigator.pop(context, ComposerAction.attach)
+                    : null,
+              ),
+              ListTile(
+                key: const ValueKey('composer-action-emoji'),
+                leading: const Icon(Icons.emoji_emotions_outlined),
+                title: const Text('Emoji'),
+                subtitle: const Text('Choose Unicode or guild emoji'),
+                onTap: () => Navigator.pop(context, ComposerAction.emoji),
+              ),
+              ListTile(
+                key: const ValueKey('composer-action-sticker'),
+                leading: const Icon(Icons.sticky_note_2_outlined),
+                title: const Text('Stickers'),
+                subtitle: const Text('Choose a sticker from your guilds'),
+                onTap: () => Navigator.pop(context, ComposerAction.sticker),
+              ),
+              ListTile(
+                key: const ValueKey('composer-action-gif'),
+                leading: const Icon(Icons.gif_box_outlined),
+                title: const Text('GIF'),
+                subtitle: Text(gifsAllowed
+                    ? 'Search the GIF library'
+                    : 'Unavailable in end-to-end encrypted conversations'),
+                enabled: gifsAllowed,
+                onTap: gifsAllowed
+                    ? () => Navigator.pop(context, ComposerAction.gif)
+                    : null,
+              ),
+              const SizedBox(height: 4),
+            ],
+          ),
         ),
       ),
     );
@@ -464,6 +600,206 @@ Future<ComposerGif?> showComposerGifPicker(
       showDragHandle: true,
       builder: (context) => ComposerGifPicker(loader: repository.gifs),
     );
+
+Future<ComposerSticker?> showComposerStickerPicker(
+  BuildContext context, {
+  required KaedeRepository repository,
+  required KaedeChannel channel,
+}) =>
+    showModalBottomSheet<ComposerSticker>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (context) => ComposerStickerPicker(
+        loader: repository.stickers,
+        channel: channel,
+      ),
+    );
+
+final class ComposerStickerPicker extends StatefulWidget {
+  const ComposerStickerPicker({
+    super.key,
+    required this.loader,
+    required this.channel,
+  });
+
+  final ComposerStickerLoader loader;
+  final KaedeChannel channel;
+
+  @override
+  State<ComposerStickerPicker> createState() => _ComposerStickerPickerState();
+}
+
+final class _ComposerStickerPickerState extends State<ComposerStickerPicker> {
+  final _search = TextEditingController();
+  List<ComposerSticker> _items = const [];
+  Object? _error;
+  var _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final response = await widget.loader();
+      if (!mounted) return;
+      setState(() {
+        _items = composerStickers(response, widget.channel);
+        _loading = false;
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error;
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final query = _search.text.trim().toLowerCase();
+    final filtered = _items
+        .where((item) =>
+            query.isEmpty ||
+            item.name.toLowerCase().contains(query) ||
+            item.guildName.toLowerCase().contains(query) ||
+            (item.description?.toLowerCase().contains(query) ?? false))
+        .toList(growable: false);
+    final groups = <EntityRef, List<ComposerSticker>>{};
+    for (final item in filtered) {
+      groups.putIfAbsent(item.guildRef, () => <ComposerSticker>[]).add(item);
+    }
+    return _KeyboardSafePickerSheet(
+      maxHeight: 620,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+        child: Column(
+          children: [
+            TextField(
+              key: const ValueKey('composer-sticker-search'),
+              controller: _search,
+              textInputAction: TextInputAction.search,
+              decoration: const InputDecoration(
+                hintText: 'Search stickers',
+                prefixIcon: Icon(Icons.search_rounded),
+                isDense: true,
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: _loading
+                  ? const _PickerStatus(
+                      icon: CircularProgressIndicator(strokeWidth: 2),
+                      message: 'Loading stickers…',
+                    )
+                  : _error != null
+                      ? _PickerError(
+                          message: userFacingError(_error!,
+                              summary: 'Could not load stickers'),
+                          onRetry: _load,
+                        )
+                      : groups.isEmpty
+                          ? const _PickerStatus(
+                              icon: Icon(Icons.sticky_note_2_outlined),
+                              message: 'No stickers found.',
+                            )
+                          : ListView.builder(
+                              key: const ValueKey('composer-sticker-groups'),
+                              keyboardDismissBehavior:
+                                  ScrollViewKeyboardDismissBehavior.onDrag,
+                              itemCount: groups.length,
+                              itemBuilder: (context, index) {
+                                final stickers = groups.values.elementAt(index);
+                                final guildName = stickers.first.guildName;
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 14),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 4, vertical: 6),
+                                        child: Text(
+                                          guildName,
+                                          style: const TextStyle(
+                                            color: KaedeColors.muted,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                      GridView.builder(
+                                        shrinkWrap: true,
+                                        physics:
+                                            const NeverScrollableScrollPhysics(),
+                                        gridDelegate:
+                                            const SliverGridDelegateWithMaxCrossAxisExtent(
+                                          maxCrossAxisExtent: 112,
+                                          mainAxisExtent: 116,
+                                          mainAxisSpacing: 6,
+                                          crossAxisSpacing: 6,
+                                        ),
+                                        itemCount: stickers.length,
+                                        itemBuilder: (context, stickerIndex) {
+                                          final sticker =
+                                              stickers[stickerIndex];
+                                          return Tooltip(
+                                            message: sticker.description ??
+                                                sticker.name,
+                                            child: InkWell(
+                                              onTap: () => Navigator.pop(
+                                                  context, sticker),
+                                              borderRadius:
+                                                  BorderRadius.circular(10),
+                                              child: Column(
+                                                mainAxisAlignment:
+                                                    MainAxisAlignment.center,
+                                                children: [
+                                                  StickerImage(
+                                                      sticker: sticker,
+                                                      size: 82),
+                                                  Text(
+                                                    sticker.name,
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                    style: const TextStyle(
+                                                        fontSize: 11),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 final class ComposerEmojiPicker extends StatefulWidget {
   const ComposerEmojiPicker({

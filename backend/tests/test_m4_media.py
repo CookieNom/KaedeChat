@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
+import pyvips  # type: ignore[import-untyped]
 from fastapi import Response
 from PIL import Image
 
@@ -543,3 +544,26 @@ def test_image_pipeline_emits_safe_metadata_and_preserves_animation() -> None:
     # Variants that resolve to the same dimensions reuse one expensive
     # animated WebP encode while retaining both public variant names.
     assert derivatives[1].content is derivatives[2].content
+
+
+def test_sticker_crop_preserves_animation_timing() -> None:
+    source = io.BytesIO()
+    frames = [Image.new("RGBA", (120, 80), color) for color in ("red", "blue")]
+    frames[0].save(
+        source,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=[120, 280],
+        loop=0,
+    )
+    derivatives, _, _, width, height = image_derivatives(
+        source.getvalue(),
+        transform={"crop": {"x": 0.25, "y": 0, "width": 0.5, "height": 1}},
+    )
+    assert (width, height) == (60, 80)
+    with Image.open(io.BytesIO(derivatives[0].content)) as rendered:
+        assert rendered.size == (60, 80)
+        assert rendered.n_frames == 2
+    rendered_vips = pyvips.Image.new_from_buffer(derivatives[0].content, "", n=-1)
+    assert rendered_vips.get("delay") == [120, 280]

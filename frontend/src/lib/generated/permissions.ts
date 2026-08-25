@@ -221,8 +221,8 @@ export const PERMISSION_METADATA = [
   {
     permission: 'USE_EXTERNAL_EMOJIS',
     bit: 262144n,
-    label: "Use external emoji",
-    description: "Use emoji originating outside this guild.",
+    label: "Use external emoji and stickers",
+    description: "Use emoji and stickers originating outside this guild.",
     group: "Text",
     resourceScopes: ["channel"],
     channelTypes: [0, 5, 10, 11, 12, 15],
@@ -342,8 +342,8 @@ export const PERMISSION_METADATA = [
   {
     permission: 'MANAGE_EMOJIS',
     bit: 1073741824n,
-    label: "Manage emoji",
-    description: "Create and remove guild emoji.",
+    label: "Manage emoji and stickers",
+    description: "Create and remove guild emoji and stickers.",
     group: "Management",
     resourceScopes: ["guild"],
     channelTypes: [],

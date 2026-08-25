@@ -1182,6 +1182,8 @@ def test_complete_guild_mutation_registry_and_snapshot_fences() -> None:
         "guild.role.delete",
         "guild.emoji.create",
         "guild.emoji.delete",
+        "guild.sticker.create",
+        "guild.sticker.delete",
         "guild.overwrite.upsert",
         "guild.overwrite.delete",
         "guild.member.update",

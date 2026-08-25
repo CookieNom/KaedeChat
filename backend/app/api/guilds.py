@@ -24,7 +24,13 @@ from app.chat.guild_revision import (
     wake_queued_guild_federation,
 )
 from app.chat.hierarchy import highest_role, require_can_manage_member, require_can_manage_role
-from app.chat.payloads import channel_payload, emoji_payload, guild_payload, role_payload
+from app.chat.payloads import (
+    channel_payload,
+    emoji_payload,
+    guild_payload,
+    role_payload,
+    sticker_payload,
+)
 from app.chat.permissions import get_permissions, require_permissions
 from app.chat.schemas import (
     ChannelCreate,
@@ -47,6 +53,7 @@ from app.db.models import (
     GuildMember,
     GuildNotificationSetting,
     Role,
+    Sticker,
     User,
 )
 
@@ -482,6 +489,13 @@ async def get_guild(
             .order_by(Emoji.name, Emoji.id)
         )
     )
+    stickers = list(
+        await session.scalars(
+            select(Sticker)
+            .where(Sticker.guild_id == guild.id, Sticker.guild_domain == guild.origin_domain)
+            .order_by(Sticker.name, Sticker.id)
+        )
+    )
     permissions = await get_permissions(session, redis, guild, auth.user)
     actor_highest_role = await highest_role(session, guild, auth.user.id, auth.user.origin_domain)
     return {
@@ -498,6 +512,10 @@ async def get_guild(
         "emojis": [emoji_payload(emoji) for emoji in emojis],
         "emoji_limit": settings.media_emoji_limit,
         "emoji_max_bytes": settings.media_max_emoji_bytes,
+        "stickers": [sticker_payload(sticker) for sticker in stickers],
+        "sticker_limit": settings.media_sticker_limit,
+        "sticker_max_bytes": settings.media_max_sticker_bytes,
+        "sticker_background_removal_enabled": settings.media_sticker_background_removal_enabled,
     }
 
 

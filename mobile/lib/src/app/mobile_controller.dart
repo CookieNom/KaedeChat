@@ -3508,6 +3508,8 @@ final class MobileController extends StateNotifier<MobileState> {
             'GUILD_AVAILABILITY_UPDATE' ||
             'GUILD_EMOJI_CREATE' ||
             'GUILD_EMOJI_DELETE' ||
+            'GUILD_STICKER_CREATE' ||
+            'GUILD_STICKER_DELETE' ||
             'VOICE_STATE_UPDATE' ||
             'VOICE_CHANNEL_MOVE' ||
             'RESUMED' ||

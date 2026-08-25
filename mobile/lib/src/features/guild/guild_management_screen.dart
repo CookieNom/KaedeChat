@@ -15,6 +15,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/client.dart';
 import 'package:kaede_mobile/src/e2ee/disclosures.dart';
+import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
@@ -170,6 +171,17 @@ final class _GuildManagementScreenState
           description: 'Custom emoji available in this guild.',
           icon: Icons.emoji_emotions_outlined,
           page: _EmojiTab(
+            guild: _guild,
+            repository: _repository,
+            canManage: isOwner || _guild.allows(Permission.manageEmojis),
+          )
+        ),
+      if (isOwner || _guild.allows(Permission.manageEmojis))
+        (
+          label: 'Stickers',
+          description: 'Static and animated stickers available in this guild.',
+          icon: Icons.sticky_note_2_outlined,
+          page: _StickersTab(
             guild: _guild,
             repository: _repository,
             canManage: isOwner || _guild.allows(Permission.manageEmojis),
@@ -2854,7 +2866,7 @@ final class _EmojiTabState extends State<_EmojiTab> {
             ),
       floatingActionButton: FloatingActionButton.extended(
           onPressed: widget.canManage ? _upload : null,
-          icon: const Icon(Icons.upload_rounded),
+          icon: const Icon(Icons.add_photo_alternate_outlined),
           label: const Text('Upload emoji')));
   Future<void> _upload() async {
     final name = await _prompt(context, 'Emoji name', 'lowercase_name');
@@ -2881,6 +2893,346 @@ final class _EmojiTabState extends State<_EmojiTab> {
       if (mounted) _tabError(context, 'Could not upload emoji', error);
     }
   }
+}
+
+final class _StickersTab extends StatefulWidget {
+  const _StickersTab({
+    required this.guild,
+    required this.repository,
+    required this.canManage,
+  });
+
+  final KaedeGuild guild;
+  final KaedeRepository repository;
+  final bool canManage;
+
+  @override
+  State<_StickersTab> createState() => _StickersTabState();
+}
+
+final class _StickersTabState extends State<_StickersTab> {
+  List<ComposerSticker> _items = const [];
+  var _loading = true;
+  var _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  @override
+  void didUpdateWidget(covariant _StickersTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.guild.ref != widget.guild.ref ||
+        oldWidget.guild.version != widget.guild.version) {
+      setState(() => _loading = true);
+      unawaited(_load());
+    }
+  }
+
+  Future<void> _load() async {
+    try {
+      final response = await widget.repository.stickers();
+      final items = response
+          .map(ComposerSticker.tryParse)
+          .whereType<ComposerSticker>()
+          .where((item) => item.guildRef == widget.guild.ref)
+          .toList(growable: false);
+      if (!mounted) return;
+      setState(() {
+        _items = items;
+        _loading = false;
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      _tabError(context, 'Could not load stickers', error);
+      setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: kSettingsSurface,
+        body: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : ListView(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 90),
+                children: [
+                  _TabHint(
+                    'Crop an image in the app and optionally remove its '
+                    'background. Animated GIF stickers keep their animation. '
+                    '${_items.length} of ${widget.guild.stickerLimit} used.',
+                  ),
+                  if (_items.isEmpty)
+                    _TabEmpty(
+                      icon: Icons.sticky_note_2_outlined,
+                      title: 'No stickers yet',
+                      body: 'Upload a PNG, JPEG, GIF or WebP up to '
+                          '${(widget.guild.stickerMaxBytes / 1048576).ceil()} MiB.',
+                    ),
+                  for (final sticker in _items)
+                    _ManagementRow(
+                      leading: StickerImage(sticker: sticker, size: 46),
+                      title: sticker.name,
+                      subtitle: sticker.description ??
+                          (sticker.animated ? 'Animated sticker' : 'Sticker'),
+                      trailing: IconButton(
+                        tooltip: 'Delete sticker',
+                        style: IconButton.styleFrom(
+                          foregroundColor: KaedeColors.danger,
+                        ),
+                        onPressed: !widget.canManage || _busy
+                            ? null
+                            : () => _delete(sticker),
+                        icon:
+                            const Icon(Icons.delete_outline_rounded, size: 18),
+                      ),
+                    ),
+                ],
+              ),
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: widget.canManage &&
+                  !_busy &&
+                  _items.length < widget.guild.stickerLimit
+              ? _upload
+              : null,
+          icon: const Icon(Icons.add_photo_alternate_outlined),
+          label: Text(_busy ? 'Creating…' : 'Create sticker'),
+        ),
+      );
+
+  Future<void> _delete(ComposerSticker sticker) async {
+    if (!await _confirm(
+      context,
+      'Delete ${sticker.name}?',
+      'Messages that already use it will show the sticker name instead.',
+      destructive: true,
+    )) {
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await widget.repository.deleteSticker(widget.guild.ref, sticker.ref);
+      await _load();
+    } on Object catch (error) {
+      if (mounted) _tabError(context, 'Could not delete sticker', error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _upload() async {
+    final selected = await ImagePicker().pickImage(source: ImageSource.gallery);
+    if (selected == null || !mounted) return;
+    final contentType = imageUploadContentType(
+      selected.name,
+      reportedType: selected.mimeType,
+    );
+    if (contentType == null) {
+      _tabError(context, 'Could not create sticker',
+          'Choose a PNG, JPEG, GIF, or WebP image.');
+      return;
+    }
+    final file = File(selected.path);
+    if (await file.length() > widget.guild.stickerMaxBytes) {
+      if (mounted) {
+        _tabError(context, 'Could not create sticker',
+            'Sticker images can be at most ${(widget.guild.stickerMaxBytes / 1048576).ceil()} MiB.');
+      }
+      return;
+    }
+    if (!mounted) return;
+    final edit = await showStickerEditor(
+      context,
+      file: file,
+      animated: contentType == 'image/gif',
+      backgroundRemovalAvailable: widget.guild.stickerBackgroundRemovalEnabled,
+    );
+    if (edit == null || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await widget.repository.uploadSticker(
+        guild: widget.guild.ref,
+        name: edit.name,
+        description: edit.description,
+        filename: selected.name,
+        contentType: contentType,
+        file: file,
+        cropX: edit.cropX,
+        cropY: edit.cropY,
+        cropWidth: edit.cropSize,
+        cropHeight: edit.cropSize,
+        removeBackground: edit.removeBackground,
+      );
+      await _load();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${edit.name} is ready to use.')),
+        );
+      }
+    } on Object catch (error) {
+      if (mounted) _tabError(context, 'Could not create sticker', error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+}
+
+typedef StickerEdit = ({
+  String name,
+  String? description,
+  double cropX,
+  double cropY,
+  double cropSize,
+  bool removeBackground,
+});
+
+Future<StickerEdit?> showStickerEditor(
+  BuildContext context, {
+  required File file,
+  required bool animated,
+  required bool backgroundRemovalAvailable,
+}) {
+  var name = '';
+  var description = '';
+  var cropSize = 1.0;
+  var cropX = 0.0;
+  var cropY = 0.0;
+  var removeBackground = false;
+  return showDialog<StickerEdit>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setDialogState) {
+        final validName = RegExp(r'^[A-Za-z0-9_]{2,32}$').hasMatch(name.trim());
+        return AlertDialog(
+          title: const Text('Create sticker'),
+          content: SizedBox(
+            width: 430,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  TextField(
+                    key: const ValueKey('sticker-name'),
+                    maxLength: 32,
+                    decoration: const InputDecoration(
+                      labelText: 'Name',
+                      helperText: '2–32 letters, numbers, or underscores',
+                    ),
+                    onChanged: (value) => setDialogState(() => name = value),
+                  ),
+                  TextField(
+                    key: const ValueKey('sticker-description'),
+                    maxLength: 100,
+                    decoration: const InputDecoration(
+                      labelText: 'Description (optional)',
+                    ),
+                    onChanged: (value) => description = value,
+                  ),
+                  const SizedBox(height: 12),
+                  Center(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: Container(
+                        key: const ValueKey('sticker-crop-preview'),
+                        width: 240,
+                        height: 240,
+                        color: KaedeColors.rail,
+                        child: ClipRect(
+                          child: Stack(
+                            children: [
+                              Positioned(
+                                left: -(cropX / cropSize) * 240,
+                                top: -(cropY / cropSize) * 240,
+                                width: 240 / cropSize,
+                                height: 240 / cropSize,
+                                child: Image.file(file, fit: BoxFit.fill),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text('Crop size: ${(cropSize * 100).round()}%'),
+                  Slider(
+                    key: const ValueKey('sticker-crop-size'),
+                    value: cropSize,
+                    min: .25,
+                    max: 1,
+                    divisions: 75,
+                    onChanged: (value) => setDialogState(() {
+                      cropSize = value;
+                      cropX = cropX.clamp(0, 1 - cropSize).toDouble();
+                      cropY = cropY.clamp(0, 1 - cropSize).toDouble();
+                    }),
+                  ),
+                  const Text('Horizontal position'),
+                  Slider(
+                    key: const ValueKey('sticker-crop-x'),
+                    value: cropX,
+                    max: 1 - cropSize,
+                    onChanged: cropSize == 1
+                        ? null
+                        : (value) => setDialogState(() => cropX = value),
+                  ),
+                  const Text('Vertical position'),
+                  Slider(
+                    key: const ValueKey('sticker-crop-y'),
+                    value: cropY,
+                    max: 1 - cropSize,
+                    onChanged: cropSize == 1
+                        ? null
+                        : (value) => setDialogState(() => cropY = value),
+                  ),
+                  SwitchListTile(
+                    key: const ValueKey('sticker-remove-background'),
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Remove background'),
+                    subtitle: Text(animated
+                        ? 'Background removal is unavailable for animated GIFs.'
+                        : backgroundRemovalAvailable
+                            ? 'Creates a transparent cutout on the server.'
+                            : 'This server has not enabled background removal.'),
+                    value: removeBackground,
+                    onChanged: animated || !backgroundRemovalAvailable
+                        ? null
+                        : (value) =>
+                            setDialogState(() => removeBackground = value),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton.icon(
+              onPressed: validName
+                  ? () => Navigator.pop(dialogContext, (
+                        name: name.trim(),
+                        description: description.trim().isEmpty
+                            ? null
+                            : description.trim(),
+                        cropX: cropX,
+                        cropY: cropY,
+                        cropSize: cropSize,
+                        removeBackground: removeBackground,
+                      ))
+                  : null,
+              icon: const Icon(Icons.add_photo_alternate_outlined),
+              label: const Text('Create'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
 }
 
 final class _BotIntegrationsTab extends StatefulWidget {

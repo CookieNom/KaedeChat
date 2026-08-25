@@ -4,6 +4,7 @@ import type {
   Channel,
   CustomEmoji,
   Guild,
+  GuildSticker,
   GuildMemberSummary,
   Message,
   PresenceStatus,
@@ -304,6 +305,29 @@ function applyEntityDispatch(dispatch: Dispatch): void {
         ...guild,
         emojis: (guild.emojis ?? []).filter(
           (candidate) => entityKey(candidate) !== entityKey(emoji)
+        )
+      }));
+      return;
+    }
+    case 'GUILD_STICKER_CREATE': {
+      const sticker = dispatch.d as GuildSticker;
+      chatEntities.guilds.update(`${sticker.guild_id}@${sticker.guild_domain}`, (guild) => ({
+        ...guild,
+        stickers: [
+          ...(guild.stickers ?? []).filter(
+            (candidate) => entityKey(candidate) !== entityKey(sticker)
+          ),
+          sticker
+        ]
+      }));
+      return;
+    }
+    case 'GUILD_STICKER_DELETE': {
+      const sticker = dispatch.d as GuildSticker;
+      chatEntities.guilds.update(`${sticker.guild_id}@${sticker.guild_domain}`, (guild) => ({
+        ...guild,
+        stickers: (guild.stickers ?? []).filter(
+          (candidate) => entityKey(candidate) !== entityKey(sticker)
         )
       }));
       return;

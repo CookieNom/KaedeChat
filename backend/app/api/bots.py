@@ -51,7 +51,9 @@ from app.api.management import (
 from app.api.media import (
     authorized_attachment,
     create_emoji,
+    create_sticker,
     delete_emoji,
+    delete_sticker,
     require_image_type,
     ticket_payload,
 )
@@ -85,6 +87,7 @@ from app.chat.payloads import (
     emoji_payload,
     guild_payload,
     role_payload,
+    sticker_payload,
     user_payload,
 )
 from app.chat.permissions import get_permissions
@@ -121,10 +124,16 @@ from app.db.models import (
     Invite,
     Message,
     Role,
+    Sticker,
     User,
     Webhook,
 )
-from app.media.schemas import EmojiCommitRequest, UploadTicketRequest
+from app.media.schemas import (
+    EmojiCommitRequest,
+    StickerCommitRequest,
+    StickerTicketRequest,
+    UploadTicketRequest,
+)
 from app.media.service import attachment_payload, create_upload_ticket
 from app.voice.schemas import VoiceModerationUpdate, VoiceMoveRequest
 
@@ -1369,6 +1378,127 @@ async def bot_delete_emoji(
 ) -> Response:
     await installation_for_guild(session, settings, principal, guild_ref, "emojis.manage")
     return await delete_emoji(guild_ref, emoji_id, user_auth(principal), session, redis, settings)
+
+
+@router.get("/guilds/{guild_ref}/stickers")
+async def bot_list_stickers(
+    guild_ref: EntityRef,
+    principal: Annotated[BotPrincipal, Depends(require_bot)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> list[dict[str, object]]:
+    guild, _ = await installation_for_guild(session, settings, principal, guild_ref, "guilds.read")
+    rows = await session.scalars(
+        select(Sticker)
+        .where(Sticker.guild_id == guild.id, Sticker.guild_domain == guild.origin_domain)
+        .order_by(Sticker.name, Sticker.id)
+    )
+    return [sticker_payload(sticker) for sticker in rows]
+
+
+@router.post("/guilds/{guild_ref}/stickers/tickets", status_code=201)
+async def bot_create_sticker_ticket(
+    guild_ref: EntityRef,
+    payload: StickerTicketRequest,
+    response: Response,
+    principal: Annotated[BotPrincipal, Depends(require_bot)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    redis: Annotated[Redis, Depends(get_redis)],
+    snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, object]:
+    guild, installation = await installation_for_guild(
+        session, settings, principal, guild_ref, "emojis.manage"
+    )
+    require_installation_scope(principal, installation, "attachments.write")
+    require_image_type(payload.content_type)
+    if payload.encryption_mode != "plaintext":
+        raise HTTPException(status_code=409, detail={"code": "E2EE_NOT_ENABLED"})
+    if payload.size > settings.media_max_sticker_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": "STICKER_TOO_LARGE", "max_bytes": settings.media_max_sticker_bytes},
+        )
+    if payload.remove_background and not settings.media_sticker_background_removal_enabled:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "STICKER_BACKGROUND_REMOVAL_UNAVAILABLE"},
+        )
+    permissions = await get_permissions(session, redis, guild, principal.user)
+    if not permissions & Permission.MANAGE_EMOJIS:
+        raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
+    await enforce_client_rate_limit(
+        redis,
+        response,
+        CLIENT_RATE_LIMITS["upload_ticket"],
+        user_id=principal.user.id,
+        user_domain=principal.user.origin_domain,
+    )
+    transform: dict[str, object] = {"remove_background": payload.remove_background}
+    if payload.crop is not None:
+        transform["crop"] = payload.crop.model_dump()
+    attachment, upload_url = await create_upload_ticket(
+        session,
+        settings,
+        snowflake,
+        principal.user,
+        filename=payload.filename,
+        content_type=payload.content_type,
+        size=payload.size,
+        purpose="sticker",
+        media_transform=transform,
+        bot_installation=installation,
+    )
+    await session.commit()
+    return ticket_payload(attachment, upload_url)
+
+
+@router.post("/guilds/{guild_ref}/stickers", status_code=201)
+async def bot_create_sticker(
+    guild_ref: EntityRef,
+    payload: StickerCommitRequest,
+    response: Response,
+    principal: Annotated[BotPrincipal, Depends(require_bot)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    redis: Annotated[Redis, Depends(get_redis)],
+    snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, object]:
+    _, installation = await installation_for_guild(
+        session, settings, principal, guild_ref, "emojis.manage"
+    )
+    await require_owned_attachments_for_installation(
+        session,
+        settings,
+        principal,
+        installation,
+        [int(payload.attachment_id)],
+    )
+    return await create_sticker(
+        guild_ref,
+        payload,
+        response,
+        user_auth(principal),
+        session,
+        redis,
+        snowflake,
+        settings,
+    )
+
+
+@router.delete("/guilds/{guild_ref}/stickers/{sticker_id}", status_code=204)
+async def bot_delete_sticker(
+    guild_ref: EntityRef,
+    sticker_id: int,
+    principal: Annotated[BotPrincipal, Depends(require_bot)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    redis: Annotated[Redis, Depends(get_redis)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Response:
+    await installation_for_guild(session, settings, principal, guild_ref, "emojis.manage")
+    return await delete_sticker(
+        guild_ref, sticker_id, user_auth(principal), session, redis, settings
+    )
 
 
 @router.patch("/guilds/{guild_ref}/members/{user_ref}/voice", status_code=204)

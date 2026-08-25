@@ -163,6 +163,7 @@ from app.db.models import (
     RemoteMediaTombstone,
     Role,
     RoomFederationRecipient,
+    Sticker,
     TerminalRoomDeletion,
     ThreadMember,
     User,
@@ -6528,6 +6529,16 @@ async def federation_guild_snapshot(
     )
     if len(emojis) > 1000:
         raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+    stickers = list(
+        await session.scalars(
+            select(Sticker)
+            .where(Sticker.guild_id == guild.id, Sticker.guild_domain == guild.origin_domain)
+            .order_by(Sticker.name, Sticker.id)
+            .limit(1001)
+        )
+    )
+    if len(stickers) > 1000:
+        raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
     payload = guild_snapshot_payload(
         guild,
         roles,
@@ -6536,6 +6547,7 @@ async def federation_guild_snapshot(
         member_roles,
         overwrites,
         emojis=emojis,
+        stickers=stickers,
         thread_members=thread_members,
         member_snapshot_at=snapshot_at,
         next_member_cursor=next_member_cursor,

@@ -2244,6 +2244,10 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
     perceptual_hash: Mapped[str | None] = mapped_column(String(64))
     detected_content_type: Mapped[str | None] = mapped_column(String(255))
     variants: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
+    # Immutable, server-validated presentation transform requested before the
+    # upload is finalized. Public sticker derivatives are generated from this
+    # recipe after malware and PhotoDNA checks pass.
+    media_transform: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     purpose: Mapped[str] = mapped_column(String(24), server_default="attachment")
     asset_binding: Mapped[str | None] = mapped_column(String(600))
     scan_status: Mapped[str] = mapped_column(String(16), server_default="pending")
@@ -2297,8 +2301,12 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
         ),
         CheckConstraint(
             "purpose IN ('attachment','avatar','banner','guild_icon',"
-            "'guild_banner','emoji','webhook_avatar')",
+            "'guild_banner','emoji','sticker','webhook_avatar')",
             name="purpose_value",
+        ),
+        CheckConstraint(
+            "media_transform IS NULL OR jsonb_typeof(media_transform) = 'object'",
+            name="media_transform_object",
         ),
         CheckConstraint(
             "content_sha256 IS NULL OR char_length(content_sha256) = 64",
@@ -2723,6 +2731,31 @@ class Emoji(Base, FederatedIdMixin, TimestampMixin):
         ForeignKeyConstraint(["creator_id", "creator_domain"], ["users.id", "users.origin_domain"]),
         CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
         UniqueConstraint("guild_id", "guild_domain", "name", name="uq_emojis_guild_name"),
+        CheckConstraint(
+            "media_hash IS NULL OR media_hash ~ '^[0-9a-f]{64}$'",
+            name="media_hash_format",
+        ),
+    )
+
+
+class Sticker(Base, FederatedIdMixin, TimestampMixin):
+    __tablename__ = "stickers"
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    name: Mapped[str] = mapped_column(String(32))
+    description: Mapped[str | None] = mapped_column(String(100))
+    media_hash: Mapped[str | None] = mapped_column(String(64))
+    animated: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    creator_id: Mapped[int] = mapped_column(BigInteger)
+    creator_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "origin_domain"),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain"], ["guilds.id", "guilds.origin_domain"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(["creator_id", "creator_domain"], ["users.id", "users.origin_domain"]),
+        CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
+        UniqueConstraint("guild_id", "guild_domain", "name", name="uq_stickers_guild_name"),
         CheckConstraint(
             "media_hash IS NULL OR media_hash ~ '^[0-9a-f]{64}$'",
             name="media_hash_format",

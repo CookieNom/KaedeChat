@@ -1040,6 +1040,11 @@ final class KaedeRepository {
       api.getList('/api/v1/users/@me/emojis');
   Future<void> deleteEmoji(EntityRef guild, EntityRef emoji) => api.sendJson(
       'DELETE', '/api/v1/guilds/${guild.wire}/emojis/${emoji.wire}');
+  Future<List<Map<String, Object?>>> stickers() =>
+      api.getList('/api/v1/users/@me/stickers');
+  Future<void> deleteSticker(EntityRef guild, EntityRef sticker) =>
+      api.sendJson('DELETE',
+          '/api/v1/guilds/${guild.wire}/stickers/${sticker.id.value}');
 
   Future<Map<String, Object?>> uploadUserAsset({
     required String kind,
@@ -1114,6 +1119,55 @@ final class KaedeRepository {
             'attachment_id': attachmentId,
             'name': name,
           }),
+      status: () => api.getJson('/api/v1/attachments/$attachmentId'),
+    );
+  }
+
+  Future<Map<String, Object?>> uploadSticker({
+    required EntityRef guild,
+    required String name,
+    required String filename,
+    required String contentType,
+    required File file,
+    String? description,
+    double cropX = 0,
+    double cropY = 0,
+    double cropWidth = 1,
+    double cropHeight = 1,
+    bool removeBackground = false,
+  }) async {
+    final size = await file.length();
+    final ticket = await api.sendJson(
+      'POST',
+      '/api/v1/guilds/${guild.wire}/stickers/tickets',
+      data: <String, Object?>{
+        'filename': filename,
+        'content_type': contentType,
+        'size': size,
+        'crop': <String, Object?>{
+          'x': cropX,
+          'y': cropY,
+          'width': cropWidth,
+          'height': cropHeight,
+        },
+        'remove_background': removeBackground,
+      },
+    );
+    await api.putPresignedFile(ticket['upload_url']! as String, file,
+        contentType: contentType);
+    final attachmentId = '${ticket['id']}';
+    return commitScannedMedia(
+      commit: () => api.sendJson(
+        'POST',
+        '/api/v1/guilds/${guild.wire}/stickers',
+        data: <String, Object?>{
+          'attachment_id': attachmentId,
+          'name': name,
+          'description': description?.trim().isNotEmpty == true
+              ? description!.trim()
+              : null,
+        },
+      ),
       status: () => api.getJson('/api/v1/attachments/$attachmentId'),
     );
   }

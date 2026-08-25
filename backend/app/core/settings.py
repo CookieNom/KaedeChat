@@ -277,6 +277,9 @@ class Settings(BaseSettings):
     media_retention_days: int | None = Field(default=None, ge=1)
     media_emoji_limit: int = Field(default=100, ge=1, le=1000)
     media_max_emoji_bytes: int = Field(default=512 * 1024, ge=1024, le=15 * 1024 * 1024)
+    media_sticker_limit: int = Field(default=60, ge=1, le=1000)
+    media_max_sticker_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=15 * 1024 * 1024)
+    media_sticker_background_removal_enabled: bool = False
 
     # Voice, video, and calls
     voice_enabled: bool = False

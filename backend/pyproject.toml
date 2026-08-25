@@ -29,6 +29,7 @@ dependencies = [
   "pyotp>=2.9,<3",
   "pyvips>=3,<4",
   "redis>=5.2,<7",
+  "rembg[cpu]>=2.0.67,<3",
   "sqlalchemy[asyncio]>=2.0.36,<3",
   "structlog>=24.4,<26",
   "taskiq[reload]>=0.11,<1",

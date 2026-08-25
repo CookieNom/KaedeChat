@@ -20,6 +20,7 @@ from app.db.models import (
     Message,
     Relationship,
     Role,
+    Sticker,
     ThreadMember,
     User,
 )
@@ -109,6 +110,20 @@ def emoji_payload(emoji: Emoji) -> dict[str, object]:
         "animated": emoji.animated,
         "media_hash": emoji.media_hash,
         "version": resource_version(emoji),
+    }
+
+
+def sticker_payload(sticker: Sticker) -> dict[str, object]:
+    return {
+        "id": str(sticker.id),
+        "origin_domain": sticker.origin_domain,
+        "guild_id": str(sticker.guild_id),
+        "guild_domain": sticker.guild_domain,
+        "name": sticker.name,
+        "description": sticker.description,
+        "animated": sticker.animated,
+        "media_hash": sticker.media_hash,
+        "version": resource_version(sticker),
     }
 
 

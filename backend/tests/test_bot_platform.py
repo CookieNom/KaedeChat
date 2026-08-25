@@ -94,6 +94,7 @@ from app.db.models import (
     InstanceBlock,
     MemberRole,
     Role,
+    Sticker,
     User,
 )
 
@@ -261,6 +262,58 @@ def test_supported_scopes_cover_runtime_resource_contracts() -> None:
         "emojis.manage",
         "dm.send",
     } <= SUPPORTED_SCOPES
+
+
+@pytest.mark.asyncio
+async def test_bot_sticker_discovery_uses_read_scope_and_returns_typed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = principal(scopes={"guilds.read"}, intents=set())
+    guild = Guild(
+        id=70,
+        origin_domain="guild.example",
+        name="Guild",
+        owner_id=80,
+        owner_domain="guild.example",
+    )
+    installed = installation(scopes={"guilds.read"})
+    sticker = Sticker(
+        id=90,
+        origin_domain="guild.example",
+        guild_id=70,
+        guild_domain="guild.example",
+        name="wave",
+        description="Hello",
+        media_hash="a" * 64,
+        animated=True,
+        creator_id=10,
+        creator_domain="apps.example",
+    )
+    authorize = AsyncMock(return_value=(guild, installed))
+    monkeypatch.setattr(bots_api, "installation_for_guild", authorize)
+    session = SimpleNamespace(scalars=AsyncMock(return_value=[sticker]))
+
+    response = await bots_api.bot_list_stickers(
+        EntityRef("70@guild.example"),
+        bot,
+        session,
+        SimpleNamespace(domain="guild.example"),
+    )
+
+    assert response == [
+        {
+            "id": "90",
+            "origin_domain": "guild.example",
+            "guild_id": "70",
+            "guild_domain": "guild.example",
+            "name": "wave",
+            "description": "Hello",
+            "animated": True,
+            "media_hash": "a" * 64,
+            "version": None,
+        }
+    ]
+    assert authorize.await_args.args[-1] == "guilds.read"
 
 
 def test_target_policy_explicit_deny_always_wins() -> None:

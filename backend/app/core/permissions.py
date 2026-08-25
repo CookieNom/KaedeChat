@@ -214,8 +214,8 @@ PERMISSION_METADATA = (
     ),
     _permission(
         Permission.USE_EXTERNAL_EMOJIS,
-        "Use external emoji",
-        "Use emoji originating outside this guild.",
+        "Use external emoji and stickers",
+        "Use emoji and stickers originating outside this guild.",
         "Text",
         ("channel",),
         channel_types=(0, 5, 10, 11, 12, 15),
@@ -312,8 +312,8 @@ PERMISSION_METADATA = (
     ),
     _permission(
         Permission.MANAGE_EMOJIS,
-        "Manage emoji",
-        "Create and remove guild emoji.",
+        "Manage emoji and stickers",
+        "Create and remove guild emoji and stickers.",
         "Management",
         ("guild",),
         danger="elevated",

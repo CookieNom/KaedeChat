@@ -5348,6 +5348,20 @@ progress {
   vertical-align: -0.34em;
 }
 
+.message-sticker {
+  display: block;
+  width: min(240px, 55vw);
+  margin-top: 4px;
+}
+
+.message-sticker img {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  object-position: left center;
+}
+
 .emoji-management-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -5384,6 +5398,99 @@ progress {
 
 .emoji-management-item small {
   color: var(--text-muted);
+}
+
+.sticker-create-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.sticker-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.8rem;
+}
+
+.sticker-editor {
+  display: grid;
+  grid-template-columns: minmax(160px, 240px) minmax(220px, 1fr);
+  align-items: center;
+  gap: 1.25rem;
+  padding: 1rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  background: var(--surface-subtle);
+}
+
+.sticker-crop-preview {
+  position: relative;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 12px;
+  background-color: #eee;
+  background-image:
+    linear-gradient(45deg, #ccc 25%, transparent 25%),
+    linear-gradient(-45deg, #ccc 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #ccc 75%),
+    linear-gradient(-45deg, transparent 75%, #ccc 75%);
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+  background-size: 16px 16px;
+}
+
+.sticker-crop-preview img {
+  position: absolute;
+  height: auto;
+  max-width: none;
+  object-fit: cover;
+}
+
+.sticker-crop-controls {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.sticker-crop-controls > label:not(.toggle-row) {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.sticker-management-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.7rem;
+  margin-top: 1rem;
+}
+
+.sticker-management-item {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: var(--surface-subtle);
+}
+
+.sticker-management-item img {
+  width: 76px;
+  height: 76px;
+  object-fit: contain;
+}
+.sticker-management-item span,
+.sticker-management-item small {
+  display: block;
+  min-width: 0;
+}
+.sticker-management-item small {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 .chat-token-mention[role='button'] {
@@ -5749,6 +5856,7 @@ progress {
 .attach-button,
 .gif-button,
 .emoji-button,
+.sticker-button,
 .send-button {
   display: grid;
   width: 42px;
@@ -5778,7 +5886,9 @@ progress {
 .gif-button:hover:not(:disabled),
 .gif-button.active,
 .emoji-button:hover:not(:disabled),
-.emoji-button.active {
+.emoji-button.active,
+.sticker-button:hover:not(:disabled),
+.sticker-button.active {
   color: var(--accent-text);
   background: var(--accent-soft);
 }
@@ -5795,6 +5905,7 @@ progress {
 .attach-button:disabled,
 .gif-button:disabled,
 .emoji-button:disabled,
+.sticker-button:disabled,
 .send-button:disabled {
   cursor: not-allowed;
   opacity: 0.42;

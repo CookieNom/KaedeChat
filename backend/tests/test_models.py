@@ -63,6 +63,7 @@ def test_complete_v1_schema_is_registered() -> None:
         "bans",
         "audit_log_entries",
         "emojis",
+        "stickers",
         "webhooks",
         "federation_events",
         "federation_outbox",

@@ -9,6 +9,7 @@
   import type {
     Channel,
     CustomEmoji,
+    GuildSticker,
     ForumTag,
     Guild,
     GuildMemberSummary,
@@ -17,6 +18,7 @@
   } from '$lib/chat/types';
   import { userDisplayName, userPublicHandle } from '$lib/chat/users';
   import Icon from '$lib/components/Icon.svelte';
+  import ImageUploadField from '$lib/components/ImageUploadField.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { initializeE2EE } from '$lib/e2ee/client';
   import { acknowledgeEncryptedRoom } from '$lib/e2ee/disclosures';
@@ -32,7 +34,7 @@
   import { guildChannelPath, type ChannelSettingsPanel } from '$lib/navigation/routes';
   import { formatDateTime } from '$lib/ui/locale';
   import { portal } from '$lib/ui/portal';
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
 
   interface GuildView extends Guild {
     banner_hash: string | null;
@@ -209,6 +211,20 @@
   let emojiFile = $state<File | null>(null);
   let emojiInput = $state<HTMLInputElement | null>(null);
   let emojiBusy = $state(false);
+  let stickerName = $state('');
+  let stickerDescription = $state('');
+  let stickerFile = $state<File | null>(null);
+  let stickerInput = $state<HTMLInputElement | null>(null);
+  let stickerBusy = $state(false);
+  let stickerPreviewUrl = $state('');
+  let stickerCropX = $state(0);
+  let stickerCropY = $state(0);
+  let stickerCropSize = $state(1);
+  let stickerRemoveBackground = $state(false);
+
+  onDestroy(() => {
+    if (stickerPreviewUrl) URL.revokeObjectURL(stickerPreviewUrl);
+  });
 
   let name = $state('');
   let description = $state('');
@@ -1304,6 +1320,123 @@
     }
   }
 
+  function selectStickerFile(file: File | null, input: HTMLInputElement) {
+    if (stickerPreviewUrl) URL.revokeObjectURL(stickerPreviewUrl);
+    stickerFile = file;
+    stickerInput = input;
+    stickerPreviewUrl = file ? URL.createObjectURL(file) : '';
+    stickerCropX = 0;
+    stickerCropY = 0;
+    stickerCropSize = 1;
+    stickerRemoveBackground = false;
+  }
+
+  async function createSticker(event: SubmitEvent) {
+    event.preventDefault();
+    const signal = routeController?.signal;
+    if (!guild || !stickerFile || !canManageEmojis || stickerBusy || !signal) return;
+    const file = stickerFile;
+    if (!acceptedImageTypes.has(file.type)) {
+      error = 'Choose a PNG, JPEG, GIF, or WebP image.';
+      return;
+    }
+    if (file.size > (guild.sticker_max_bytes ?? 2097152)) {
+      error = `Sticker images can be at most ${Math.ceil((guild.sticker_max_bytes ?? 2097152) / 1048576)} MiB.`;
+      return;
+    }
+    stickerBusy = true;
+    error = '';
+    notice = '';
+    try {
+      const ticket = await api<UploadTicket>(
+        `/guilds/${encodeURIComponent(guildId)}/stickers/tickets`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            filename: file.name,
+            content_type: file.type,
+            size: file.size,
+            crop: {
+              x: stickerCropX,
+              y: stickerCropY,
+              width: stickerCropSize,
+              height: stickerCropSize
+            },
+            remove_background: stickerRemoveBackground
+          })
+        }
+      );
+      await uploadObject(ticket, file, () => undefined, signal);
+      const commit = () =>
+        api<GuildSticker>(`/guilds/${encodeURIComponent(guildId)}/stickers`, {
+          method: 'POST',
+          body: JSON.stringify({
+            attachment_id: ticket.id,
+            name: stickerName.trim(),
+            description: stickerDescription.trim() || null
+          })
+        });
+      let created = await commit();
+      if (!created.media_hash) {
+        for (let attempt = 0; attempt < 45; attempt += 1) {
+          await cancelableDelay(1000, signal);
+          const status = await api<{ scan_status: string }>(`/attachments/${ticket.id}`);
+          if (status.scan_status === 'clean') {
+            created = await commit();
+            break;
+          }
+          if (['rejected', 'infected', 'failed'].includes(status.scan_status)) {
+            throw new Error('The sticker did not pass media processing.');
+          }
+        }
+      }
+      if (!created.media_hash)
+        throw new Error('Sticker processing is taking longer than expected.');
+      guild = {
+        ...guild,
+        stickers: [
+          ...(guild.stickers ?? []).filter((item) => entityKey(item) !== entityKey(created)),
+          created
+        ]
+      };
+      stickerName = '';
+      stickerDescription = '';
+      if (stickerPreviewUrl) URL.revokeObjectURL(stickerPreviewUrl);
+      stickerPreviewUrl = '';
+      stickerFile = null;
+      if (stickerInput) stickerInput.value = '';
+      notice = `${created.name} is ready to use.`;
+    } catch (caught) {
+      error = userErrorMessage(
+        caught,
+        'Could not create the sticker. Choose the file again and retry.'
+      );
+    } finally {
+      stickerBusy = false;
+    }
+  }
+
+  async function deleteSticker(sticker: GuildSticker) {
+    if (!guild || !canManageEmojis || stickerBusy) return;
+    stickerBusy = true;
+    error = '';
+    try {
+      await api(
+        `/guilds/${encodeURIComponent(guildId)}/stickers/${encodeURIComponent(sticker.id)}`,
+        { method: 'DELETE' }
+      );
+      guild = {
+        ...guild,
+        stickers: (guild.stickers ?? []).filter((item) => entityKey(item) !== entityKey(sticker))
+      };
+      notice = `${sticker.name} was deleted.`;
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not delete the sticker. Try again.');
+    } finally {
+      stickerBusy = false;
+    }
+  }
+
   function createChannel() {
     if (!canManageChannels) return;
     return run(async (targetGuild, generation) => {
@@ -2396,6 +2529,7 @@
         {/if}
         {#if canManageEmojis}
           <a href="#emoji"><span aria-hidden="true">☺</span>Emoji</a>
+          <a href="#stickers"><span aria-hidden="true">▱</span>Stickers</a>
         {/if}
         {#if canViewMembers}
           <p>Community</p>
@@ -3526,14 +3660,14 @@
               </label>
               <label class="form-field compact-field">
                 <span>Image</span>
-                <input
-                  bind:this={emojiInput}
-                  type="file"
-                  accept="image/png,image/jpeg,image/gif,image/webp"
+                <ImageUploadField
+                  id="emoji-image"
+                  file={emojiFile}
                   required
                   disabled={emojiBusy}
-                  onchange={(event) => {
-                    emojiFile = event.currentTarget.files?.[0] ?? null;
+                  onSelect={(file, input) => {
+                    emojiFile = file;
+                    emojiInput = input;
                   }}
                 />
               </label>
@@ -3566,6 +3700,159 @@
                 </article>
               {:else}
                 <p class="empty-copy">This guild has no custom emoji yet.</p>
+              {/each}
+            </div>
+          </div>
+        </section>
+
+        <section id="stickers" class="settings-section">
+          <div class="settings-section-heading">
+            <span class="section-icon" aria-hidden="true">▱</span>
+            <div>
+              <h2>Guild stickers</h2>
+              <p>
+                Create transparent static or animated stickers members can send from the sticker
+                menu.
+              </p>
+            </div>
+          </div>
+          <div class="settings-card">
+            <div class="settings-list-heading">
+              <div>
+                <strong>Sticker collection</strong>
+                <p>{guild?.stickers?.length ?? 0} of {guild?.sticker_limit ?? 60} used</p>
+              </div>
+            </div>
+            <form class="sticker-create-form" onsubmit={createSticker}>
+              <div class="sticker-fields">
+                <label class="form-field compact-field">
+                  <span>Name</span>
+                  <input
+                    bind:value={stickerName}
+                    pattern={'[A-Za-z0-9_]{2,32}'}
+                    minlength="2"
+                    maxlength="32"
+                    placeholder="hello_wave"
+                    required
+                    disabled={stickerBusy}
+                  />
+                </label>
+                <label class="form-field compact-field">
+                  <span>Description <small>Optional</small></span>
+                  <input
+                    bind:value={stickerDescription}
+                    maxlength="100"
+                    placeholder="A friendly wave"
+                    disabled={stickerBusy}
+                  />
+                </label>
+                <label class="form-field compact-field">
+                  <span>Image</span>
+                  <ImageUploadField
+                    id="sticker-image"
+                    file={stickerFile}
+                    required
+                    disabled={stickerBusy}
+                    onSelect={selectStickerFile}
+                  />
+                </label>
+              </div>
+              {#if stickerPreviewUrl}
+                <div class="sticker-editor">
+                  <div class="sticker-crop-preview" aria-label="Sticker crop preview">
+                    <img
+                      src={stickerPreviewUrl}
+                      alt=""
+                      style:width={`${100 / stickerCropSize}%`}
+                      style:left={`${(-stickerCropX / stickerCropSize) * 100}%`}
+                      style:top={`${(-stickerCropY / stickerCropSize) * 100}%`}
+                    />
+                  </div>
+                  <div class="sticker-crop-controls">
+                    <label
+                      ><span>Crop size</span><input
+                        type="range"
+                        min="0.2"
+                        max="1"
+                        step="0.01"
+                        bind:value={stickerCropSize}
+                        oninput={() => {
+                          stickerCropX = Math.min(stickerCropX, 1 - stickerCropSize);
+                          stickerCropY = Math.min(stickerCropY, 1 - stickerCropSize);
+                        }}
+                      /></label
+                    >
+                    <label
+                      ><span>Horizontal position</span><input
+                        type="range"
+                        min="0"
+                        max={1 - stickerCropSize}
+                        step="0.01"
+                        bind:value={stickerCropX}
+                        disabled={stickerCropSize === 1}
+                      /></label
+                    >
+                    <label
+                      ><span>Vertical position</span><input
+                        type="range"
+                        min="0"
+                        max={1 - stickerCropSize}
+                        step="0.01"
+                        bind:value={stickerCropY}
+                        disabled={stickerCropSize === 1}
+                      /></label
+                    >
+                    <label class="toggle-row">
+                      <input
+                        type="checkbox"
+                        bind:checked={stickerRemoveBackground}
+                        disabled={stickerBusy ||
+                          stickerFile?.type === 'image/gif' ||
+                          !guild?.sticker_background_removal_enabled}
+                      />
+                      <span
+                        >Remove background <small
+                          >{stickerFile?.type === 'image/gif'
+                            ? 'Static images only'
+                            : guild?.sticker_background_removal_enabled
+                              ? 'Powered by rembg'
+                              : 'Not enabled on this server'}</small
+                        ></span
+                      >
+                    </label>
+                  </div>
+                </div>
+              {/if}
+              <button
+                class="primary-button"
+                disabled={stickerBusy ||
+                  !stickerFile ||
+                  (guild?.stickers?.length ?? 0) >= (guild?.sticker_limit ?? 60)}
+                >{stickerBusy ? 'Creating sticker…' : 'Create sticker'}</button
+              >
+            </form>
+            <div class="sticker-management-grid">
+              {#each guild?.stickers ?? [] as sticker (entityKey(sticker))}
+                <article class="sticker-management-item">
+                  {#if sticker.media_hash}<img
+                      src={assetUrl(sticker.media_hash, 'thumbnail_512', sticker.origin_domain)}
+                      alt={sticker.name}
+                    />{/if}
+                  <span
+                    ><strong>{sticker.name}</strong><small
+                      >{sticker.description ??
+                        (sticker.animated ? 'Animated sticker' : 'Static sticker')}</small
+                    ></span
+                  >
+                  <button
+                    class="secondary-button danger-button"
+                    type="button"
+                    disabled={stickerBusy}
+                    onclick={() => void deleteSticker(sticker)}>Delete</button
+                  >
+                </article>
+              {:else}
+                <p class="empty-copy">This guild has no stickers yet.</p>
               {/each}
             </div>
           </div>

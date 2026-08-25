@@ -356,7 +356,13 @@ async def process_attachment_record(
         derivatives: list[Derivative] = []
         if detected in IMAGE_TYPES:
             derivatives, attachment.blurhash, attachment.perceptual_hash, width, height = (
-                image_derivatives(data, sizes=image_derivative_sizes(attachment.purpose))
+                image_derivatives(
+                    data,
+                    sizes=image_derivative_sizes(attachment.purpose),
+                    transform=(
+                        attachment.media_transform if attachment.purpose == "sticker" else None
+                    ),
+                )
             )
             attachment.width = width
             attachment.height = height
