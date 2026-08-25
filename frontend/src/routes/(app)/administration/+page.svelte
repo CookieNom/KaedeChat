@@ -3,7 +3,7 @@
   import { hasAdminCapability } from '$lib/admin/capabilities';
   import { api, userErrorMessage } from '$lib/api/client';
   import Icon, { type IconName } from '$lib/components/Icon.svelte';
-  import { authenticatedMedia } from '$lib/media/authenticated';
+  import { authenticatedMedia, downloadAuthenticatedMedia } from '$lib/media/authenticated';
   import { onMount } from 'svelte';
 
   type View =
@@ -43,6 +43,8 @@
     source?: 'user' | 'photodna' | string;
     severity?: string;
     reporter_ref?: string | null;
+    reporter_user?: ReportIdentity | null;
+    subject_user?: ReportIdentity | null;
     target_type: string;
     target_ref: string;
     category: string;
@@ -62,6 +64,14 @@
     created_at: string;
     updated_at?: string;
     resolution: string | null;
+  }
+
+  interface ReportIdentity {
+    ref: string;
+    username: string;
+    display_name: string | null;
+    handle: string;
+    profile_resolved: boolean;
   }
 
   interface ReportDraft {
@@ -247,6 +257,7 @@
   let reports = $state<Report[]>([]);
   let reportDrafts = $state<Record<string, ReportDraft>>({});
   let enforcementDrafts = $state<Record<string, EnforcementDraft>>({});
+  let reportedAttachmentErrors = $state<Record<string, string>>({});
   let blocks = $state<Block[]>([]);
   let operators = $state<Operator[]>([]);
   let audits = $state<Audit[]>([]);
@@ -331,6 +342,14 @@
     );
   }
 
+  function retainReportIdentities(current: Report, updated: Report): Report {
+    return {
+      ...updated,
+      reporter_user: updated.reporter_user ?? current.reporter_user,
+      subject_user: updated.subject_user ?? current.subject_user
+    };
+  }
+
   function reportSubjectRef(report: Report): string | null {
     if (report.target_type === 'user') return report.target_ref;
     const key = report.target_type === 'attachment' ? 'uploader_ref' : 'author_ref';
@@ -344,52 +363,150 @@
     return subject;
   }
 
-  function attachmentContentType(report: Report): string | null {
-    const disclosed = report.evidence.disclosed_content_type;
-    const value = typeof disclosed === 'string' ? disclosed : report.evidence.content_type;
-    return typeof value === 'string' ? value : null;
+  function identityName(identity: ReportIdentity | null | undefined, fallback: string): string {
+    return identity?.display_name?.trim() || identity?.username || fallback;
   }
 
-  function reportPreviewAttachmentRef(report: Report): string | null {
-    const disclosed = report.evidence.disclosed_attachment_ref;
-    if (report.encryption_mode === 'e2ee_user_disclosed' && typeof disclosed === 'string') {
-      return disclosed;
-    }
-    const original = report.evidence.attachment_ref;
-    return typeof original === 'string' ? original : null;
+  function identityContext(identity: ReportIdentity | null | undefined, fallback: string): string {
+    return identity ? `${identity.handle} · ${identity.ref}` : fallback;
   }
 
   function reportAttachments(report: Report): ReportAttachmentMetadata[] {
     const value = report.evidence.attachments;
-    if (!Array.isArray(value)) return [];
-    return value.filter(
-      (item): item is ReportAttachmentMetadata =>
-        typeof item === 'object' &&
-        item !== null &&
-        typeof (item as Record<string, unknown>).attachment_ref === 'string'
+    const attachments = Array.isArray(value)
+      ? value.filter(
+          (item): item is ReportAttachmentMetadata =>
+            typeof item === 'object' &&
+            item !== null &&
+            typeof (item as Record<string, unknown>).attachment_ref === 'string'
+        )
+      : [];
+    const focusedRef = report.evidence.attachment_ref;
+    const targetRef = report.target_type === 'attachment' ? report.target_ref : null;
+    const attachmentRef =
+      typeof focusedRef === 'string'
+        ? focusedRef
+        : typeof targetRef === 'string'
+          ? targetRef
+          : null;
+    if (attachmentRef && !attachments.some((item) => item.attachment_ref === attachmentRef)) {
+      attachments.push({
+        attachment_ref: attachmentRef,
+        uploader_ref:
+          typeof report.evidence.uploader_ref === 'string'
+            ? report.evidence.uploader_ref
+            : undefined,
+        filename:
+          typeof report.evidence.filename === 'string' ? report.evidence.filename : undefined,
+        content_type:
+          typeof report.evidence.content_type === 'string'
+            ? report.evidence.content_type
+            : undefined,
+        size: typeof report.evidence.size === 'number' ? report.evidence.size : undefined,
+        encryption_mode:
+          typeof report.evidence.attachment_encryption_mode === 'string'
+            ? report.evidence.attachment_encryption_mode
+            : undefined
+      });
+    }
+    return attachments;
+  }
+
+  function isDisclosedReportAttachment(
+    report: Report,
+    attachment: ReportAttachmentMetadata
+  ): boolean {
+    return (
+      report.encryption_mode === 'e2ee_user_disclosed' &&
+      report.evidence.attachment_ref === attachment.attachment_ref &&
+      typeof report.evidence.disclosed_attachment_ref === 'string'
     );
   }
 
-  function canPreviewReportAttachment(report: Report): boolean {
-    const attachmentRef = reportPreviewAttachmentRef(report);
-    const contentType = attachmentContentType(report);
+  function reportAttachmentContentType(
+    report: Report,
+    attachment: ReportAttachmentMetadata
+  ): string | null {
+    const value = isDisclosedReportAttachment(report, attachment)
+      ? report.evidence.disclosed_content_type
+      : attachment.content_type;
+    return typeof value === 'string' ? value : null;
+  }
+
+  function reportAttachmentPreviewRef(
+    report: Report,
+    attachment: ReportAttachmentMetadata
+  ): string {
+    const disclosed = report.evidence.disclosed_attachment_ref;
+    return isDisclosedReportAttachment(report, attachment) && typeof disclosed === 'string'
+      ? disclosed
+      : attachment.attachment_ref;
+  }
+
+  function canAccessReportAttachment(
+    report: Report,
+    attachment: ReportAttachmentMetadata
+  ): boolean {
+    const previewRef = reportAttachmentPreviewRef(report, attachment);
+    const contentType = reportAttachmentContentType(report, attachment);
     return Boolean(
       me &&
-      attachmentRef &&
-      attachmentRef.endsWith(`@${me.user.origin_domain}`) &&
+      previewRef.endsWith(`@${me.user.origin_domain}`) &&
       report.encryption_mode !== 'e2ee_metadata' &&
       contentType &&
       (report.encryption_mode !== 'e2ee_user_disclosed' ||
+        !isDisclosedReportAttachment(report, attachment) ||
         report.evidence.disclosed_attachment_scan_status === 'clean') &&
-      (contentType.startsWith('image/') || contentType.startsWith('video/'))
+      (isDisclosedReportAttachment(report, attachment) || attachment.encryption_mode !== 'e2ee')
+    );
+  }
+
+  function canPreviewReportAttachment(
+    report: Report,
+    attachment: ReportAttachmentMetadata
+  ): boolean {
+    const contentType = reportAttachmentContentType(report, attachment);
+    return Boolean(
+      canAccessReportAttachment(report, attachment) &&
+      contentType &&
+      (contentType.startsWith('image/') ||
+        contentType.startsWith('video/') ||
+        contentType.startsWith('audio/'))
     );
   }
 
   function reportAttachmentPath(
     report: Report,
+    attachment: ReportAttachmentMetadata,
     variant: 'original' | 'thumbnail_512' | 'poster'
   ): string {
-    return `/api/v1/administration/reports/${encodeURIComponent(report.id)}/attachment/${variant}`;
+    return `/api/v1/administration/reports/${encodeURIComponent(report.id)}/attachment/${variant}?attachment_ref=${encodeURIComponent(attachment.attachment_ref)}`;
+  }
+
+  async function downloadReportedAttachment(
+    report: Report,
+    attachment: ReportAttachmentMetadata
+  ): Promise<void> {
+    const key = `${report.id}:${attachment.attachment_ref}`;
+    const contentType =
+      reportAttachmentContentType(report, attachment) ?? 'application/octet-stream';
+    const disclosedFilename = report.evidence.disclosed_filename;
+    const filename =
+      isDisclosedReportAttachment(report, attachment) && typeof disclosedFilename === 'string'
+        ? disclosedFilename
+        : attachment.filename || `reported-attachment-${attachment.attachment_ref}`;
+    reportedAttachmentErrors = { ...reportedAttachmentErrors, [key]: '' };
+    try {
+      await downloadAuthenticatedMedia(
+        { path: reportAttachmentPath(report, attachment, 'original'), contentType },
+        filename
+      );
+    } catch (caught) {
+      reportedAttachmentErrors = {
+        ...reportedAttachmentErrors,
+        [key]: userErrorMessage(caught, `Could not download ${filename}.`)
+      };
+    }
   }
 
   function hasEnforcementAction(report: Report): boolean {
@@ -570,10 +687,11 @@
           resolution: draft.resolution.trim() || null
         })
       });
-      reports = reports.map((entry) => (entry.id === report.id ? updated : entry));
+      const merged = retainReportIdentities(report, updated);
+      reports = reports.map((entry) => (entry.id === report.id ? merged : entry));
       reportDrafts[report.id] = {
-        status: updated.status,
-        resolution: updated.resolution ?? ''
+        status: merged.status,
+        resolution: merged.resolution ?? ''
       };
       notice = `Report #${report.id} was updated.`;
       await loadSection('overview');
@@ -595,7 +713,7 @@
     ].filter((label) => label && !label.startsWith('No ') && label !== 'Keep messages');
     if (
       !confirm(
-        `Apply to ${subject}?\n\n${selected.join('\n')}${
+        `Apply to ${identityName(report.subject_user, subject)} (${identityContext(report.subject_user, subject)})?\n\n${selected.join('\n')}${
           draft.message_action === 'none' ? '' : '\n\nMessage deletion cannot be undone.'
         }`
       )
@@ -615,10 +733,11 @@
           })
         }
       );
-      reports = reports.map((entry) => (entry.id === report.id ? result.report : entry));
+      const merged = retainReportIdentities(report, result.report);
+      reports = reports.map((entry) => (entry.id === report.id ? merged : entry));
       reportDrafts[report.id] = {
-        status: result.report.status,
-        resolution: result.report.resolution ?? ''
+        status: merged.status,
+        resolution: merged.resolution ?? ''
       };
       enforcementDrafts[report.id] = {
         account_action: 'none',
@@ -1043,11 +1162,38 @@
                     </div>
                     <div>
                       <dt>Reporter</dt>
-                      <dd>
-                        {report.reporter_ref ??
-                          (report.source === 'photodna' ? 'PhotoDNA scanner' : 'Unknown')}
+                      <dd class="report-identity">
+                        <strong>
+                          {identityName(
+                            report.reporter_user,
+                            report.source === 'photodna' ? 'PhotoDNA scanner' : 'Unknown reporter'
+                          )}
+                        </strong>
+                        {#if report.source !== 'photodna'}<small>
+                            {identityContext(
+                              report.reporter_user,
+                              report.reporter_ref ?? 'Identity unavailable'
+                            )}
+                          </small>{/if}
                       </dd>
                     </div>
+                    {#if report.subject_user || reportSubjectRef(report)}<div>
+                        <dt>Reported user</dt>
+                        <dd class="report-identity">
+                          <strong>
+                            {identityName(
+                              report.subject_user,
+                              reportSubjectRef(report) ?? 'Unknown user'
+                            )}
+                          </strong>
+                          <small>
+                            {identityContext(
+                              report.subject_user,
+                              reportSubjectRef(report) ?? 'Identity unavailable'
+                            )}
+                          </small>
+                        </dd>
+                      </div>{/if}
                     <div>
                       <dt>Evidence mode</dt>
                       <dd>{report.encryption_mode?.replaceAll('_', ' ') ?? 'metadata only'}</dd>
@@ -1070,109 +1216,148 @@
                       </div>
                       {#if reportAttachments(report).length}
                         {#each reportAttachments(report) as attachment (attachment.attachment_ref)}
-                          <dl class="match-metadata">
-                            {#each [['Attachment', attachment.attachment_ref], ['Uploader', attachment.uploader_ref], ['Filename', attachment.filename], ['Content type', attachment.content_type], ['Size', attachment.size], ['Encryption', attachment.encryption_mode]] as [label, value] (label)}
-                              {#if typeof value === 'string' || typeof value === 'number'}
-                                <div>
-                                  <dt>{label}</dt>
-                                  <dd>
-                                    {typeof value === 'number' ? value.toLocaleString() : value}
-                                  </dd>
-                                </div>
-                              {/if}
-                            {/each}
-                          </dl>
-                        {/each}
-                      {/if}
-                      {#if reportPreviewAttachmentRef(report)}
-                        {#if canPreviewReportAttachment(report)}
-                          {@const contentType = attachmentContentType(report) as string}
-                          <div class="report-attachment-preview">
-                            {#if contentType.startsWith('image/')}
-                              <img
-                                use:authenticatedMedia={{
-                                  path: reportAttachmentPath(report, 'thumbnail_512'),
-                                  contentType
-                                }}
-                                alt="Reported attachment preview"
-                              />
-                            {:else}
-                              <video
-                                use:authenticatedMedia={{
-                                  path: reportAttachmentPath(report, 'original'),
-                                  contentType
-                                }}
-                                controls
-                                preload="metadata"
-                              >
-                                <track kind="captions" />
-                              </video>
+                          {@const contentType = reportAttachmentContentType(report, attachment)}
+                          {@const accessible = canAccessReportAttachment(report, attachment)}
+                          {@const attachmentError =
+                            reportedAttachmentErrors[`${report.id}:${attachment.attachment_ref}`]}
+                          <section class="reported-attachment">
+                            <dl class="match-metadata">
+                              {#each [['Attachment', attachment.attachment_ref], ['Uploader', attachment.uploader_ref], ['Filename', attachment.filename], ['Content type', attachment.content_type], ['Size', attachment.size], ['Encryption', attachment.encryption_mode]] as [label, value] (label)}
+                                {#if typeof value === 'string' || typeof value === 'number'}
+                                  <div>
+                                    <dt>{label}</dt>
+                                    <dd>
+                                      {typeof value === 'number' ? value.toLocaleString() : value}
+                                    </dd>
+                                  </div>
+                                {/if}
+                              {/each}
+                            </dl>
+                            {#if canPreviewReportAttachment(report, attachment) && contentType}
+                              <div class="report-attachment-preview">
+                                {#if contentType.startsWith('image/')}
+                                  <img
+                                    use:authenticatedMedia={{
+                                      path: reportAttachmentPath(
+                                        report,
+                                        attachment,
+                                        'thumbnail_512'
+                                      ),
+                                      contentType
+                                    }}
+                                    alt={attachment.filename
+                                      ? `Reported attachment: ${attachment.filename}`
+                                      : 'Reported attachment preview'}
+                                  />
+                                {:else if contentType.startsWith('video/')}
+                                  <video
+                                    use:authenticatedMedia={{
+                                      path: reportAttachmentPath(report, attachment, 'original'),
+                                      contentType
+                                    }}
+                                    controls
+                                    preload="metadata"
+                                  >
+                                    <track kind="captions" />
+                                  </video>
+                                {:else}
+                                  <audio
+                                    use:authenticatedMedia={{
+                                      path: reportAttachmentPath(report, attachment, 'original'),
+                                      contentType
+                                    }}
+                                    controls
+                                    preload="metadata"
+                                  ></audio>
+                                {/if}
+                                <small>
+                                  Restricted {isDisclosedReportAttachment(report, attachment)
+                                    ? 'reporter-disclosed plaintext evidence'
+                                    : 'preview'} · successful access is recorded in the audit log.
+                                </small>
+                              </div>
+                            {:else if isDisclosedReportAttachment(report, attachment)}
+                              <small class="disclosure-note">
+                                {report.evidence.disclosed_attachment_scan_status === 'quarantined'
+                                  ? 'The disclosed copy was quarantined after a safety match and cannot be rendered.'
+                                  : report.evidence.disclosed_attachment_scan_status ===
+                                        'infected' ||
+                                      report.evidence.disclosed_attachment_scan_status ===
+                                        'rejected'
+                                    ? 'The disclosed copy failed safety validation and cannot be rendered.'
+                                    : report.evidence.disclosed_attachment_scan_status === 'failed'
+                                      ? 'The disclosed copy could not be processed. Follow the media-processing incident procedure.'
+                                      : report.evidence.disclosed_attachment_scan_status === 'clean'
+                                        ? 'This evidence type cannot be shown inline; download the original below.'
+                                        : 'The disclosed evidence is being scanned. Reload this queue shortly.'}
+                              </small>
+                            {:else if report.encryption_mode === 'e2ee_metadata' || attachment.encryption_mode === 'e2ee'}
+                              <small class="disclosure-note">
+                                Encrypted attachment metadata only; no decrypted file or key was
+                                disclosed.
+                              </small>
+                            {:else if !accessible}
+                              <small class="disclosure-note">
+                                Preview unavailable here. Remote attachments must be reviewed by
+                                their home instance.
+                              </small>
                             {/if}
-                            <small
-                              >Restricted {report.encryption_mode === 'e2ee_user_disclosed'
-                                ? 'reporter-disclosed plaintext evidence'
-                                : 'preview'} · successful access is recorded in the audit log.</small
-                            >
-                          </div>
-                        {:else if report.encryption_mode === 'e2ee_user_disclosed'}
-                          <small class="disclosure-note">
-                            {report.evidence.disclosed_attachment_scan_status === 'quarantined'
-                              ? 'The disclosed copy was quarantined after a safety match and cannot be rendered.'
-                              : report.evidence.disclosed_attachment_scan_status === 'infected' ||
-                                  report.evidence.disclosed_attachment_scan_status === 'rejected'
-                                ? 'The disclosed copy failed safety validation and cannot be rendered.'
-                                : report.evidence.disclosed_attachment_scan_status === 'failed'
-                                  ? 'The disclosed copy could not be processed. Follow the media-processing incident procedure.'
-                                  : report.evidence.disclosed_attachment_scan_status === 'clean'
-                                    ? 'The disclosed evidence type is not previewable inline.'
-                                    : 'The disclosed evidence is being scanned. Reload this queue shortly.'}
-                          </small>
-                        {:else if report.encryption_mode !== 'e2ee_metadata'}
-                          <small class="disclosure-note">
-                            Preview unavailable here. Remote attachments must be reviewed by their
-                            home instance.
-                          </small>
-                        {/if}
-                        <dl class="match-metadata">
-                          {#each [['Attachment', report.evidence.attachment_ref], ['Uploader', report.evidence.uploader_ref], ['Stored filename', report.evidence.filename], ['Stored content type', report.evidence.content_type], ['Stored size', report.evidence.size], ['Encryption', report.evidence.attachment_encryption_mode], ['Disclosed evidence', report.evidence.disclosed_attachment_ref], ['Disclosed filename', report.evidence.disclosed_filename], ['Disclosed content type', report.evidence.disclosed_content_type], ['Disclosed size', report.evidence.disclosed_size], ['Disclosed scan', report.evidence.disclosed_attachment_scan_status]] as [label, value] (label)}
-                            {#if typeof value === 'string' || typeof value === 'number'}
-                              <div>
-                                <dt>{label}</dt>
-                                <dd>
-                                  {typeof value === 'number' ? value.toLocaleString() : value}
-                                </dd>
+                            {#if accessible}
+                              <div class="reported-attachment-actions">
+                                <button
+                                  type="button"
+                                  class="secondary-button"
+                                  onclick={() =>
+                                    void downloadReportedAttachment(report, attachment)}
+                                  >Download original</button
+                                >
                               </div>
                             {/if}
-                          {/each}
-                        </dl>
-                        {#if report.encryption_mode === 'e2ee_metadata'}
-                          <small class="disclosure-note">
-                            Encrypted attachment metadata only; no decrypted file, filename, or key
-                            was disclosed.
-                          </small>
-                        {:else if report.encryption_mode === 'e2ee_user_disclosed'}
-                          <small class="disclosure-note">
-                            The reporter explicitly decrypted and uploaded this attachment. The
-                            plaintext evidence is reporter-supplied; the server can scan the
-                            uploaded copy but cannot prove it matches the original ciphertext.
-                          </small>
-                        {/if}
-                        {#if typeof report.evidence.photodna === 'object' && report.evidence.photodna !== null}
-                          <div class="safety-note">
-                            <Icon name="shield" size={19} />
-                            <span>
-                              The disclosed evidence produced a critical PhotoDNA safety match. Its
-                              bytes were quarantined and are not renderable from this queue.
-                            </span>
-                          </div>
-                        {/if}
+                            {#if attachmentError}<p class="form-error" role="alert">
+                                {attachmentError}
+                              </p>{/if}
+                            {#if isDisclosedReportAttachment(report, attachment)}
+                              <dl class="match-metadata disclosed-attachment-metadata">
+                                {#each [['Disclosed evidence', report.evidence.disclosed_attachment_ref], ['Disclosed filename', report.evidence.disclosed_filename], ['Disclosed content type', report.evidence.disclosed_content_type], ['Disclosed size', report.evidence.disclosed_size], ['Disclosed scan', report.evidence.disclosed_attachment_scan_status]] as [label, value] (label)}
+                                  {#if typeof value === 'string' || typeof value === 'number'}
+                                    <div>
+                                      <dt>{label}</dt>
+                                      <dd>
+                                        {typeof value === 'number' ? value.toLocaleString() : value}
+                                      </dd>
+                                    </div>
+                                  {/if}
+                                {/each}
+                              </dl>
+                              <small class="disclosure-note">
+                                The reporter explicitly decrypted and uploaded this attachment. The
+                                plaintext evidence is reporter-supplied; the server can scan the
+                                uploaded copy but cannot prove it matches the original ciphertext.
+                              </small>
+                            {/if}
+                          </section>
+                        {/each}
+                      {/if}
+                      {#if typeof report.evidence.photodna === 'object' && report.evidence.photodna !== null}
+                        <div class="safety-note">
+                          <Icon name="shield" size={19} />
+                          <span>
+                            The disclosed evidence produced a critical PhotoDNA safety match. Its
+                            bytes were quarantined and are not renderable from this queue.
+                          </span>
+                        </div>
                       {/if}
                     {/if}
                     {#if typeof report.evidence.content === 'string'}
                       <blockquote>
                         <small
-                          >Message by {report.evidence.author_ref ?? 'unknown'} in {report.evidence
-                            .channel_ref ?? 'unknown'}</small
+                          >Message by {identityName(
+                            report.subject_user,
+                            report.evidence.author_ref ?? 'unknown'
+                          )} · {identityContext(
+                            report.subject_user,
+                            report.evidence.author_ref ?? 'unknown'
+                          )} in {report.evidence.channel_ref ?? 'unknown'}</small
                         >
                         <p>
                           {report.evidence.content ||
@@ -1231,7 +1416,10 @@
                       <div class="enforcement-heading">
                         <div class="panel-icon danger-icon"><Icon name="shield" size={20} /></div>
                         <div>
-                          <h4>Enforce against {subjectRef}</h4>
+                          <h4>
+                            Enforce against {identityName(report.subject_user, subjectRef)}
+                          </h4>
+                          <small>{identityContext(report.subject_user, subjectRef)}</small>
                           <p>
                             {localSubjectRef
                               ? 'Suspend creation access or ban login, and remove messages in rooms this instance controls.'
@@ -1566,7 +1754,8 @@
   }
 
   .report-attachment-preview img,
-  .report-attachment-preview video {
+  .report-attachment-preview video,
+  .report-attachment-preview audio {
     width: 100%;
     max-height: 420px;
     display: block;
@@ -1574,6 +1763,11 @@
     border-radius: 10px;
     background: #08090d;
     object-fit: contain;
+  }
+
+  .report-attachment-preview audio {
+    min-height: 54px;
+    background: var(--surface-raised);
   }
 
   .report-attachment-preview small {
@@ -2161,6 +2355,37 @@
   .report-card dd {
     margin: 0;
     overflow-wrap: anywhere;
+  }
+
+  .report-identity {
+    display: grid;
+    gap: 0.12rem;
+  }
+
+  .report-identity strong {
+    color: var(--text);
+    font-size: 0.94rem;
+  }
+
+  .reported-attachment {
+    display: grid;
+    gap: 0.65rem;
+    margin-top: 0.8rem;
+  }
+
+  .reported-attachment .match-metadata,
+  .reported-attachment .report-attachment-preview,
+  .reported-attachment .disclosure-note {
+    margin-top: 0 !important;
+  }
+
+  .reported-attachment-actions {
+    display: flex;
+    gap: 0.55rem;
+  }
+
+  .disclosed-attachment-metadata {
+    border-color: color-mix(in srgb, var(--warning) 35%, var(--line-soft)) !important;
   }
 
   .report-body > p {

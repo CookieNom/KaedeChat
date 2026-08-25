@@ -6,7 +6,7 @@ export interface AuthenticatedMediaSource {
   contentType: string;
 }
 
-type MediaElement = HTMLImageElement | HTMLVideoElement;
+type MediaElement = HTMLAudioElement | HTMLImageElement | HTMLVideoElement;
 const MAX_THUMBNAIL_BYTES = 16 * 1024 * 1024;
 const MAX_ERROR_BYTES = 64 * 1024;
 const RETRYABLE_MEDIA_CAPACITY_CODES = new Set(['REMOTE_MEDIA_BUSY', 'REMOTE_MEDIA_CACHE_FULL']);
@@ -151,7 +151,7 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
 
     if (!isNativeDesktop() && !isBoundedThumbnail(next)) {
       node.src = next.path;
-      if (node instanceof HTMLVideoElement) node.load();
+      if (node instanceof HTMLMediaElement) node.load();
       return;
     }
 
@@ -202,7 +202,7 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
       if (current !== generation) return;
       objectUrl = URL.createObjectURL(new Blob([asBlobPart(response)], { type: next.contentType }));
       node.src = objectUrl;
-      if (node instanceof HTMLVideoElement) node.load();
+      if (node instanceof HTMLMediaElement) node.load();
     } catch (error) {
       if (current === generation && !requestController.signal.aborted) {
         node.setAttribute('data-media-error', 'true');

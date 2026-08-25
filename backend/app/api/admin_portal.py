@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
@@ -9,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from redis.asyncio import Redis
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.auth import AdminPrincipal, require_admin
@@ -298,7 +299,24 @@ def reporter_report_payload(report: AbuseReport) -> dict[str, object]:
     }
 
 
-def report_payload(report: AbuseReport) -> dict[str, object]:
+def report_identity_payload(user: User | None) -> dict[str, object] | None:
+    if user is None:
+        return None
+    return {
+        "ref": f"{user.id}@{user.origin_domain}",
+        "username": user.username,
+        "display_name": user.display_name,
+        "handle": f"{user.username}@{user.origin_domain}",
+        "profile_resolved": user.profile_resolved,
+    }
+
+
+def report_payload(
+    report: AbuseReport,
+    *,
+    reporter_user: User | None = None,
+    subject_user: User | None = None,
+) -> dict[str, object]:
     return {
         "id": str(report.id),
         "source": report.source,
@@ -308,6 +326,8 @@ def report_payload(report: AbuseReport) -> dict[str, object]:
             if report.reporter_id is not None and report.reporter_domain is not None
             else None
         ),
+        "reporter_user": report_identity_payload(reporter_user),
+        "subject_user": report_identity_payload(subject_user),
         "target_type": report.target_type,
         "target_ref": report.target_ref,
         "category": report.category,
@@ -326,6 +346,51 @@ def report_payload(report: AbuseReport) -> dict[str, object]:
         "updated_at": report.updated_at.isoformat(),
         "resolved_at": report.resolved_at.isoformat() if report.resolved_at else None,
     }
+
+
+def report_identity_refs(report: AbuseReport, local_domain: str) -> set[tuple[int, str]]:
+    refs: set[tuple[int, str]] = set()
+    if report.reporter_id is not None and report.reporter_domain is not None:
+        refs.add((report.reporter_id, report.reporter_domain))
+    subject_ref = report_subject_ref(report)
+    if subject_ref is not None:
+        with suppress(ValueError):
+            refs.add(EntityRef(subject_ref).resolve(local_domain))
+    return refs
+
+
+async def report_identity_lookup(
+    session: AsyncSession,
+    reports: list[AbuseReport],
+    local_domain: str,
+) -> dict[tuple[int, str], User]:
+    refs: set[tuple[int, str]] = set()
+    for report in reports:
+        refs.update(report_identity_refs(report, local_domain))
+    if not refs:
+        return {}
+    users = list(
+        await session.scalars(select(User).where(tuple_(User.id, User.origin_domain).in_(refs)))
+    )
+    return {(user.id, user.origin_domain): user for user in users}
+
+
+def report_payload_with_lookup(
+    report: AbuseReport,
+    users: dict[tuple[int, str], User],
+    local_domain: str,
+) -> dict[str, object]:
+    reporter_user = (
+        users.get((report.reporter_id, report.reporter_domain))
+        if report.reporter_id is not None and report.reporter_domain is not None
+        else None
+    )
+    subject_ref = report_subject_ref(report)
+    subject_user: User | None = None
+    if subject_ref is not None:
+        with suppress(ValueError):
+            subject_user = users.get(EntityRef(subject_ref).resolve(local_domain))
+    return report_payload(report, reporter_user=reporter_user, subject_user=subject_user)
 
 
 def report_subject_ref(report: AbuseReport) -> str | None:
@@ -1405,6 +1470,7 @@ async def my_reports(
 async def list_reports(
     principal: Annotated[AdminPrincipal, Depends(require_admin)],
     session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     status: str | None = Query(default=None, max_length=24),
 ) -> list[dict[str, object]]:
     principal.require("reports.read")
@@ -1412,7 +1478,8 @@ async def list_reports(
     if status:
         statement = statement.where(AbuseReport.status == status)
     reports = list(await session.scalars(statement.order_by(AbuseReport.id.desc()).limit(500)))
-    return [report_payload(report) for report in reports]
+    users = await report_identity_lookup(session, reports, settings.domain)
+    return [report_payload_with_lookup(report, users, settings.domain) for report in reports]
 
 
 @router.get("/administration/reports/{report_id}/attachment/{variant}")
@@ -1423,6 +1490,7 @@ async def view_report_attachment(
     snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
     settings: Annotated[Settings, Depends(get_settings)],
     variant: str = Path(pattern=r"^(original|thumbnail_128|thumbnail_512|thumbnail_1024|poster)$"),
+    attachment_ref: Annotated[EntityRef | None, Query()] = None,
 ) -> RedirectResponse:
     principal.require("reports.read")
     report = await session.get(AbuseReport, report_id)
@@ -1431,17 +1499,50 @@ async def view_report_attachment(
     if report.source != "user" or report.target_type not in {"message", "attachment"}:
         raise HTTPException(status_code=404, detail={"code": "REPORT_ATTACHMENT_NOT_FOUND"})
     disclosed_ref = report.evidence.get("disclosed_attachment_ref")
-    if report.encryption_mode == "e2ee_user_disclosed" and isinstance(disclosed_ref, str):
+    focused_ref = report.evidence.get("attachment_ref")
+    reported_attachment_refs: set[str] = set()
+    attachment_rows = report.evidence.get("attachments")
+    if isinstance(attachment_rows, list):
+        for item in attachment_rows:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("attachment_ref")
+            if isinstance(value, str) and value:
+                reported_attachment_refs.add(value)
+    if isinstance(focused_ref, str) and focused_ref:
+        reported_attachment_refs.add(focused_ref)
+    if report.target_type == "attachment":
+        reported_attachment_refs.add(report.target_ref)
+    requested_ref: str | None = None
+    if attachment_ref is not None:
+        try:
+            requested_id, requested_domain = attachment_ref.resolve(settings.domain)
+            requested_ref = f"{requested_id}@{requested_domain}"
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "REPORT_ATTACHMENT_NOT_FOUND"},
+            ) from exc
+        if requested_ref not in reported_attachment_refs:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "REPORT_ATTACHMENT_NOT_FOUND"},
+            )
+    preview_ref: str
+    if (
+        report.encryption_mode == "e2ee_user_disclosed"
+        and isinstance(disclosed_ref, str)
+        and (requested_ref is None or requested_ref == focused_ref)
+    ):
         uses_disclosed_evidence = True
         preview_ref = disclosed_ref
     else:
         uses_disclosed_evidence = False
-        original_ref = report.evidence.get("attachment_ref")
-        preview_ref = (
+        preview_ref = requested_ref or (
             report.target_ref
             if report.target_type == "attachment"
-            else original_ref
-            if isinstance(original_ref, str)
+            else focused_ref
+            if isinstance(focused_ref, str)
             else ""
         )
     try:
@@ -1491,6 +1592,7 @@ async def view_report_attachment(
         str(report.id),
         metadata={
             "attachment_ref": preview_ref,
+            "reported_attachment_ref": requested_ref or focused_ref or report.target_ref,
             "variant": variant,
             "reporter_disclosed": uses_disclosed_evidence,
         },

@@ -21,6 +21,7 @@ from app.api.admin_portal import (
     report_message_evidence,
     report_payload,
 )
+from app.core.types import EntityRef
 from app.db.bot_models import AbuseReport
 from app.db.models import Attachment, MediaTombstoneSource, Message, User
 from app.federation.security import FederationPrincipal
@@ -767,6 +768,61 @@ async def test_admin_can_view_only_the_bound_plaintext_report_attachment(
     )
 
 
+@pytest.mark.asyncio
+async def test_admin_can_select_any_plaintext_attachment_from_a_message_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = cast(
+        AbuseReport,
+        SimpleNamespace(
+            id=44,
+            source="user",
+            target_type="message",
+            target_ref="1@alpha.localhost",
+            message_ref="1@alpha.localhost",
+            evidence={
+                "attachments": [
+                    {"attachment_ref": "9@alpha.localhost"},
+                    {"attachment_ref": "10@alpha.localhost"},
+                ]
+            },
+            encryption_mode="plaintext",
+        ),
+    )
+    attachment = cast(
+        Attachment,
+        SimpleNamespace(
+            id=10,
+            origin_domain="alpha.localhost",
+            message_id=1,
+            message_domain="alpha.localhost",
+            report_id=None,
+            purpose="attachment",
+            encryption_mode="plaintext",
+            deleted_at=None,
+        ),
+    )
+    actor = cast(User, SimpleNamespace(id=2, origin_domain="alpha.localhost"))
+    principal = AdminPrincipal(actor, frozenset({"auditor"}), frozenset({"reports.read"}))
+    session = ReportAttachmentPreviewSession(report, attachment)
+    response = object()
+    monkeypatch.setattr(admin_portal, "redirect_to_object", lambda *_args, **_kwargs: response)
+    monkeypatch.setattr(admin_portal, "audit", AsyncMock())
+
+    result = await admin_portal.view_report_attachment(
+        44,
+        principal,
+        cast(Any, session),
+        cast(Any, ReportSnowflake()),
+        cast(Any, SimpleNamespace(domain="alpha.localhost")),
+        "thumbnail_512",
+        EntityRef("10@alpha.localhost"),
+    )
+
+    assert result is response
+    assert session.committed is True
+
+
 @pytest.mark.parametrize(
     ("target_ref", "message_ref", "encryption_mode", "expected_code"),
     [
@@ -1165,7 +1221,47 @@ def test_admin_report_payload_identifies_user_and_automated_sources(
         ),
     )
 
-    payload = report_payload(report)
+    reporter_user = (
+        cast(
+            User,
+            SimpleNamespace(
+                id=42,
+                origin_domain="alpha.localhost",
+                username="reporter",
+                display_name="Helpful Reporter",
+                profile_resolved=True,
+            ),
+        )
+        if source == "user"
+        else None
+    )
+    subject_user = cast(
+        User,
+        SimpleNamespace(
+            id=7,
+            origin_domain="alpha.localhost",
+            username="reported-user",
+            display_name="Reported User",
+            profile_resolved=True,
+        ),
+    )
+    payload = report_payload(
+        report,
+        reporter_user=reporter_user,
+        subject_user=subject_user,
+    )
 
     assert payload["source"] == source
     assert payload["reporter_ref"] == expected_reporter
+    assert payload["reporter_user"] == (
+        {
+            "ref": "42@alpha.localhost",
+            "username": "reporter",
+            "display_name": "Helpful Reporter",
+            "handle": "reporter@alpha.localhost",
+            "profile_resolved": True,
+        }
+        if source == "user"
+        else None
+    )
+    assert cast(dict[str, object], payload["subject_user"])["display_name"] == "Reported User"
