@@ -275,6 +275,35 @@ class User(Base, FederatedIdMixin, TimestampMixin):
     )
 
 
+class InstanceUserRestriction(Base, TimestampMixin):
+    """Moderation state this instance owns for one remote human identity."""
+
+    __tablename__ = "instance_user_restrictions"
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    restriction_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str | None] = mapped_column(String(500))
+    actor_id: Mapped[int] = mapped_column(BigInteger)
+    actor_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "user_domain"),
+        # Deliberately no FK for the target: a remote profile row may be
+        # garbage-collected after its final local membership is removed, but
+        # the instance ban must survive a later reintroduction of that ref.
+        ForeignKeyConstraint(
+            ["actor_id", "actor_domain"],
+            ["users.id", "users.origin_domain"],
+        ),
+        CheckConstraint(
+            "(restriction_type = 'banned' AND expires_at IS NULL) OR "
+            "(restriction_type = 'suspended' AND expires_at IS NOT NULL)",
+            name="type_expiry_consistent",
+        ),
+        Index("ix_instance_user_restrictions_expiry", "expires_at"),
+    )
+
+
 class LocalUserMixin:
     user_id: Mapped[int] = mapped_column(BigInteger)
     user_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))

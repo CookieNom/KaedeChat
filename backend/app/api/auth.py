@@ -26,7 +26,7 @@ from app.api.dependencies import (
     get_snowflake,
     require_user,
 )
-from app.auth.account_status import account_is_suspended
+from app.auth.account_status import account_is_banned
 from app.auth.schemas import (
     EmailChangeRequest,
     LoginRequest,
@@ -730,7 +730,7 @@ async def login(
             turnstile_enabled=settings.turnstile_enabled,
             failed_account_key=account_key,
         )
-    if account_is_suspended(user):
+    if account_is_banned(user):
         await reject_invalid_login(
             limiter,
             admission_key,
@@ -789,7 +789,7 @@ async def complete_mfa(
             ticket_fingerprint,
             credential_fingerprint(user),
         )
-        or account_is_suspended(user)
+        or account_is_banned(user)
         or email_verification_required(user, settings)
         or not await verify_mfa_code(session, settings, user, payload.code)
     ):
@@ -1060,7 +1060,7 @@ async def request_email_change(
     )
     if (
         locked_user is None
-        or account_is_suspended(locked_user)
+        or account_is_banned(locked_user)
         or not submitted_password_protocol_matches(locked_user, payload.password_kdf_version)
         or not await verify_submitted_password(payload.password, locked_user.password_hash)
     ):
@@ -1148,7 +1148,7 @@ async def setup_mfa(
     )
     if (
         locked_user is None
-        or account_is_suspended(locked_user)
+        or account_is_banned(locked_user)
         or not await lock_current_session(session, auth, locked_user)
     ):
         raise auth_error("AUTHENTICATION_REQUIRED", "Authentication required", 401)
@@ -1195,7 +1195,7 @@ async def enable_mfa(
     )
     if (
         locked_user is None
-        or account_is_suspended(locked_user)
+        or account_is_banned(locked_user)
         or not await lock_current_session(session, auth, locked_user)
     ):
         raise auth_error("AUTHENTICATION_REQUIRED", "Authentication required", 401)
@@ -1239,7 +1239,7 @@ async def disable_mfa(
     )
     if (
         locked_user is None
-        or account_is_suspended(locked_user)
+        or account_is_banned(locked_user)
         or not await lock_current_session(session, auth, locked_user)
     ):
         raise auth_error("AUTHENTICATION_REQUIRED", "Authentication required", 401)

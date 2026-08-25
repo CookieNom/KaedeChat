@@ -51,6 +51,10 @@ from app.api.e2ee import (
     propose_room_rekey,
     room_encryption_operation_status_for_actor,
 )
+from app.auth.instance_restrictions import (
+    require_remote_user_creation_allowed,
+    require_remote_user_join_allowed,
+)
 from app.auth.tokens import AccessGrant
 from app.bootstrap import MAX_ADVERTISED_OLD_KEYS
 from app.bots.installations import (
@@ -2646,6 +2650,7 @@ async def process_event(
             actor = await upsert_remote_user(
                 session, settings, RemoteUserProfile.model_validate(actor_raw)
             )
+            await require_remote_user_creation_allowed(session, actor)
             if str(envelope.context.get("guild_domain")) != settings.domain:
                 raise ValueError("proxy write was not addressed to this guild authority")
             guild = await home_guild(
@@ -5624,6 +5629,7 @@ async def federation_guild_join(
     if payload.user.origin_domain != principal.origin:
         raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
     user = await upsert_remote_user(session, settings, payload.user)
+    await require_remote_user_join_allowed(session, user)
     invite = await session.scalar(
         select(Invite).where(Invite.code == payload.code).with_for_update()
     )
@@ -6737,6 +6743,7 @@ async def federation_guild_proxy(
     ):
         raise HTTPException(status_code=410, detail={"code": "ATTACHMENT_DELETED"})
     actor = await upsert_remote_user(session, settings, payload.actor)
+    await require_remote_user_creation_allowed(session, actor)
     guild = await home_guild(session, settings, guild_id, for_update=True)
     channel = await session.get(Channel, (int(payload.channel_id), guild.origin_domain))
     if (

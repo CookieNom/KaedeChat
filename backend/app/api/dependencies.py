@@ -10,7 +10,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.account_status import account_is_suspended
+from app.auth.account_status import account_is_banned, account_is_temporarily_suspended
 from app.auth.tokens import AccessGrant, AccessTokenStore
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
@@ -43,6 +43,20 @@ def unauthorized() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail={"code": "AUTHENTICATION_REQUIRED", "message": "Authentication required"},
+    )
+
+
+def suspension_blocks_request(request: Request) -> bool:
+    """Keep suspended accounts readable and able to secure/report their account."""
+
+    if request.method not in {"POST", "PUT", "PATCH"}:
+        return False
+    path = request.url.path
+    if path.startswith("/api/v1/auth/"):
+        return False
+    return not (
+        path == "/api/v1/reports"
+        or (path.startswith("/api/v1/reports/") and path.endswith("/attachment-evidence"))
     )
 
 
@@ -82,7 +96,7 @@ async def require_user(
             AuthSession.absolute_expires_at > now,
         )
     )
-    if user is None or account_is_suspended(user, now=now):
+    if user is None or account_is_banned(user):
         raise unauthorized()
     cookie_authenticated = bearer_token is None and cookie_token is not None
     if (
@@ -93,5 +107,21 @@ async def require_user(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "CSRF_GUARD", "message": "Missing web client header"},
+        )
+    suspended_until = user.suspended_until
+    if (
+        suspension_blocks_request(request)
+        and suspended_until is not None
+        and account_is_temporarily_suspended(user, now=now)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ACCOUNT_SUSPENDED",
+                "message": (
+                    "This account is temporarily suspended from creating or changing content"
+                ),
+                "suspended_until": suspended_until.isoformat(),
+            },
         )
     return AuthenticatedUser(user, grant, token, cookie_authenticated)

@@ -12,15 +12,23 @@ from app.api.channels import (
     refresh_thread_last_message_after_delete,
 )
 from app.chat.channel_access import ChannelAccess, publish_channel_dispatch
+from app.chat.e2ee_membership import publish_e2ee_policy_updates
+from app.chat.events import guild_topic, publish_dispatch
 from app.chat.guild_revision import (
     federation_channel_state,
+    queue_guild_access_revocation,
     queue_guild_mutation,
     wake_queued_guild_federation,
 )
 from app.chat.payloads import channel_payload
+from app.chat.thread_membership import (
+    RemovedThreadMembers,
+    cleanup_guild_member_threads,
+    publish_guild_thread_member_cleanup,
+)
 from app.core.settings import Settings
 from app.core.task_wake import enqueue_best_effort
-from app.db.models import Attachment, Channel, DMParticipant, Guild, Message, User
+from app.db.models import Attachment, Channel, DMParticipant, Guild, GuildMember, Message, User
 from app.federation.terminal_rooms import lock_terminal_room
 from app.media.service import attachments_for_messages
 from app.media.tombstones import lock_media_tombstone_ref
@@ -39,6 +47,120 @@ class MessagePurgeResult:
     @property
     def deleted_count(self) -> int:
         return len(self.messages)
+
+
+@dataclass(slots=True)
+class RemovedInstanceMembership:
+    guild: Guild
+    thread_members: list[RemovedThreadMembers]
+    e2ee_policy_channels: list[Channel]
+
+
+async def remove_remote_user_from_local_guilds(
+    session: AsyncSession,
+    settings: Settings,
+    actor: User,
+    target: User,
+) -> list[RemovedInstanceMembership]:
+    """Remove a banned remote human from every guild hosted by this instance."""
+
+    guild_refs = list(
+        (
+            await session.execute(
+                select(GuildMember.guild_id, GuildMember.guild_domain)
+                .join(
+                    Guild,
+                    (Guild.id == GuildMember.guild_id)
+                    & (Guild.origin_domain == GuildMember.guild_domain),
+                )
+                .where(
+                    Guild.origin_domain == settings.domain,
+                    GuildMember.user_id == target.id,
+                    GuildMember.user_domain == target.origin_domain,
+                )
+                .order_by(GuildMember.guild_domain, GuildMember.guild_id)
+            )
+        ).tuples()
+    )
+    removed: list[RemovedInstanceMembership] = []
+    for guild_id, guild_domain in guild_refs:
+        await lock_terminal_room(session, "guild", guild_id, guild_domain)
+        guild = await session.scalar(
+            select(Guild)
+            .where(Guild.id == guild_id, Guild.origin_domain == guild_domain)
+            .with_for_update()
+        )
+        if guild is None:
+            continue
+        member = await session.get(
+            GuildMember,
+            (guild.id, guild.origin_domain, target.id, target.origin_domain),
+        )
+        if member is None:
+            continue
+        thread_members = await cleanup_guild_member_threads(
+            session,
+            settings,
+            guild,
+            actor,
+            [(target.id, target.origin_domain)],
+        )
+        await session.delete(member)
+        await queue_guild_access_revocation(
+            session,
+            settings,
+            guild,
+            user_id=target.id,
+            user_domain=target.origin_domain,
+            reason="instance_user_banned",
+        )
+        e2ee_policy_channels: list[Channel] = []
+        await queue_guild_mutation(
+            session,
+            settings,
+            guild,
+            actor,
+            "guild.member.remove",
+            {"user": {"id": str(target.id), "origin_domain": target.origin_domain}},
+            snapshot_required=True,
+            e2ee_policy_channels=e2ee_policy_channels,
+            pause_e2ee=True,
+        )
+        removed.append(RemovedInstanceMembership(guild, thread_members, e2ee_policy_channels))
+    return removed
+
+
+async def publish_remote_user_guild_removals(
+    session: AsyncSession,
+    redis: Redis,
+    settings: Settings,
+    removals: list[RemovedInstanceMembership],
+    target: User,
+) -> None:
+    for removal in removals:
+        await wake_queued_guild_federation(removal.guild)
+        await publish_e2ee_policy_updates(
+            session,
+            redis,
+            settings,
+            removal.e2ee_policy_channels,
+        )
+        await publish_guild_thread_member_cleanup(
+            redis,
+            removal.guild,
+            removal.thread_members,
+        )
+        await publish_dispatch(
+            redis,
+            guild_topic(removal.guild.origin_domain, removal.guild.id),
+            "GUILD_MEMBER_REMOVE",
+            {
+                "guild_id": str(removal.guild.id),
+                "guild_domain": removal.guild.origin_domain,
+                "user_id": str(target.id),
+                "user_domain": target.origin_domain,
+            },
+        )
 
 
 async def purge_author_messages(

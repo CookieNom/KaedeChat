@@ -3,16 +3,23 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
+from starlette.requests import Request
 
 from app.admin.auth import AdminPrincipal
 from app.api import admin_portal
 from app.api.admin_portal import ReportActionCreate, report_subject_ref
-from app.auth.account_status import account_is_suspended
+from app.api.dependencies import suspension_blocks_request
+from app.auth.account_status import (
+    account_is_banned,
+    account_is_suspended,
+    account_is_temporarily_suspended,
+)
 from app.db.bot_models import AbuseReport
-from app.db.models import User
+from app.db.models import InstanceUserRestriction, User
 
 
 def test_report_enforcement_requires_an_action_and_meaningful_reason() -> None:
@@ -67,6 +74,26 @@ def test_expired_temporary_suspension_restores_account_access() -> None:
     assert account_is_suspended(active, now=now) is False
     assert account_is_suspended(temporary, now=now) is True
     assert account_is_suspended(permanent, now=now) is True
+    assert account_is_temporarily_suspended(temporary, now=now) is True
+    assert account_is_banned(temporary) is False
+    assert account_is_banned(permanent) is True
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "blocked"),
+    [
+        ("GET", "/api/v1/channels/1/messages", False),
+        ("POST", "/api/v1/channels/1/messages", True),
+        ("POST", "/api/v1/channels/1/messages/2/reactions", True),
+        ("POST", "/api/v1/auth/logout", False),
+        ("POST", "/api/v1/reports", False),
+        ("PUT", "/api/v1/reports/1/attachment-evidence", False),
+    ],
+)
+def test_suspended_account_request_policy(method: str, path: str, blocked: bool) -> None:
+    request = Request({"type": "http", "method": method, "path": path, "headers": []})
+
+    assert suspension_blocks_request(request) is blocked
 
 
 class FakeSnowflake:
@@ -170,3 +197,70 @@ async def test_permanent_report_suspension_closes_case_and_revokes_sessions(
     assert session.committed is True
     assert FakeTokenStore.revoked == ["session-one", "session-two"]
     assert cast(dict[str, object], result["enforcement"])["permanently_suspended"] is True
+
+
+@pytest.mark.asyncio
+async def test_remote_report_ban_is_owned_locally_and_removes_local_memberships(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    report = cast(
+        AbuseReport,
+        SimpleNamespace(
+            id=45,
+            target_type="user",
+            target_ref="8@remote.test",
+            evidence={},
+            message_ref=None,
+            source="user",
+            reporter_id=9,
+            reporter_domain="local.test",
+            category="harassment",
+            description="abuse",
+            encryption_mode="plaintext",
+            status="submitted",
+            assigned_admin_id=None,
+            assigned_admin_domain=None,
+            resolution=None,
+            created_at=now,
+            updated_at=now,
+            resolved_at=None,
+        ),
+    )
+    target = cast(
+        User,
+        SimpleNamespace(
+            id=8,
+            origin_domain="remote.test",
+            is_local=False,
+            account_type="human",
+            disabled_at=None,
+            suspended_until=None,
+        ),
+    )
+    actor = cast(User, SimpleNamespace(id=1, origin_domain="local.test"))
+    principal = AdminPrincipal(actor, frozenset({"trust_safety"}), frozenset({"*"}))
+    session = FakeSession(report, target)
+    remove_memberships = AsyncMock(return_value=[SimpleNamespace()])
+    publish_removals = AsyncMock()
+    monkeypatch.setattr(admin_portal, "remove_remote_user_from_local_guilds", remove_memberships)
+    monkeypatch.setattr(admin_portal, "publish_remote_user_guild_removals", publish_removals)
+
+    result = await admin_portal.enforce_report(
+        45,
+        ReportActionCreate(account_action="ban_permanent", reason="confirmed abuse"),
+        principal,
+        cast(Any, session),
+        cast(Any, object()),
+        cast(Any, FakeSnowflake()),
+        cast(Any, SimpleNamespace(domain="local.test", access_token_ttl_seconds=900)),
+    )
+
+    restriction = next(item for item in session.added if isinstance(item, InstanceUserRestriction))
+    assert restriction.restriction_type == "banned"
+    assert restriction.expires_at is None
+    remove_memberships.assert_awaited_once()
+    publish_removals.assert_awaited_once()
+    enforcement = cast(dict[str, object], result["enforcement"])
+    assert enforcement["banned"] is True
+    assert enforcement["guild_memberships_removed"] == 1

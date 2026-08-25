@@ -73,6 +73,7 @@ def test_complete_v1_schema_is_registered() -> None:
         "remote_media_tombstones",
         "user_storage_usage",
         "instance_blocks",
+        "instance_user_restrictions",
         "instance_admin_grants",
         "instance_audit_events",
         "developer_teams",

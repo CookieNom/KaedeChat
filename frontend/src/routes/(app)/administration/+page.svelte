@@ -69,7 +69,7 @@
     resolution: string;
   }
 
-  type AccountAction = 'none' | 'suspend_24h' | 'suspend_7d' | 'suspend_30d' | 'suspend_permanent';
+  type AccountAction = 'none' | 'suspend_24h' | 'suspend_7d' | 'suspend_30d' | 'ban_permanent';
   type MessageAction =
     | 'none'
     | 'delete_reported'
@@ -91,7 +91,9 @@
       subject_ref: string;
       account_action: AccountAction;
       suspended_until: string | null;
+      banned: boolean;
       permanently_suspended: boolean;
+      guild_memberships_removed: number;
       message_action: MessageAction;
       messages_deleted: number;
       messages_requiring_remote_action: number;
@@ -213,11 +215,11 @@
   const closedReportStatuses = new Set(['action_taken', 'closed_no_action', 'duplicate']);
   const roleOptions = ['administrator', 'trust_safety', 'bot_reviewer', 'operations', 'auditor'];
   const accountActionOptions: { value: AccountAction; label: string }[] = [
-    { value: 'none', label: 'No account suspension' },
+    { value: 'none', label: 'No account restriction' },
     { value: 'suspend_24h', label: 'Suspend for 24 hours' },
     { value: 'suspend_7d', label: 'Suspend for 7 days' },
     { value: 'suspend_30d', label: 'Suspend for 30 days' },
-    { value: 'suspend_permanent', label: 'Suspend permanently' }
+    { value: 'ban_permanent', label: 'Ban permanently' }
   ];
   const messageActionOptions: { value: MessageAction; label: string }[] = [
     { value: 'none', label: 'Keep messages' },
@@ -492,7 +494,7 @@
 
   async function patchUser(user: User): Promise<void> {
     const disabled = !userIsSuspended(user);
-    if (!confirm(`${disabled ? 'Disable' : 'Enable'} ${user.username}?`)) return;
+    if (!confirm(`${disabled ? 'Ban' : 'Restore access for'} ${user.username}?`)) return;
     clearFeedback();
     busyAction = `user:${user.id}@${user.origin_domain}`;
     try {
@@ -503,7 +505,7 @@
       users = users.map((entry) =>
         entry.id === user.id && entry.origin_domain === user.origin_domain ? updated : entry
       );
-      notice = `${user.username} was ${disabled ? 'disabled' : 'enabled'}.`;
+      notice = `${user.username} was ${disabled ? 'banned' : 'restored'}.`;
       await loadSection('overview');
     } catch (caught) {
       showError(caught, 'Could not update the account.');
@@ -565,7 +567,7 @@
 
   async function enforceReport(report: Report): Promise<void> {
     const draft = enforcementDrafts[report.id];
-    const subject = localReportSubject(report);
+    const subject = reportSubjectRef(report);
     if (!draft || !subject || !hasEnforcementAction(report)) return;
     const selected = [
       accountActionOptions.find((option) => option.value === draft.account_action)?.label,
@@ -604,8 +606,8 @@
         reason: ''
       };
       const deleted = result.enforcement.messages_deleted;
-      const accountResult = result.enforcement.permanently_suspended
-        ? 'Account permanently suspended.'
+      const accountResult = result.enforcement.banned
+        ? `Account banned.${result.enforcement.guild_memberships_removed ? ` Removed from ${result.enforcement.guild_memberships_removed} local guild(s).` : ''}`
         : result.enforcement.suspended_until
           ? `Account suspended until ${new Date(result.enforcement.suspended_until).toLocaleString()}.`
           : '';
@@ -884,7 +886,7 @@
                   </div>
                   <span class:danger-badge={userIsSuspended(user)} class="badge"
                     >{user.disabled_at
-                      ? 'Permanently suspended'
+                      ? 'Banned'
                       : userIsSuspended(user)
                         ? `Suspended until ${new Date(user.suspended_until!).toLocaleString()}`
                         : 'Active'}</span
@@ -896,7 +898,7 @@
                       class:secondary-button={userIsSuspended(user)}
                       disabled={busyAction === `user:${user.id}@${user.origin_domain}`}
                       onclick={() => void patchUser(user)}
-                      >{userIsSuspended(user) ? 'Restore access' : 'Suspend permanently'}</button
+                      >{userIsSuspended(user) ? 'Restore access' : 'Ban permanently'}</button
                     >
                   {/if}
                 </article>
@@ -1175,15 +1177,17 @@
                 {#if can('reports.manage')}
                   {@const subjectRef = reportSubjectRef(report)}
                   {@const localSubjectRef = localReportSubject(report)}
-                  {#if localSubjectRef}
+                  {#if subjectRef}
                     <section class="enforcement-panel" aria-label="Report enforcement">
                       <div class="enforcement-heading">
                         <div class="panel-icon danger-icon"><Icon name="shield" size={20} /></div>
                         <div>
-                          <h4>Enforce against {localSubjectRef}</h4>
+                          <h4>Enforce against {subjectRef}</h4>
                           <p>
-                            Suspend account access and remove messages in rooms this instance
-                            controls. Every action is written to the audit log.
+                            {localSubjectRef
+                              ? 'Suspend creation access or ban login, and remove messages in rooms this instance controls.'
+                              : 'Suspend this remote user across locally hosted guilds, or ban and remove them from those guilds.'}
+                            Every action is written to the audit log.
                           </p>
                         </div>
                       </div>
@@ -1233,16 +1237,16 @@
                       </div>
                       <small>
                         “All messages” means all active messages stored in locally authoritative
-                        rooms. Remote rooms must be handled by their home instance.
+                        rooms. A remote ban also prevents the user from joining any guild hosted
+                        here.
                       </small>
                     </section>
                   {:else}
                     <div class="enforcement-unavailable">
                       <Icon name="globe" size={18} />
                       <span>
-                        {subjectRef
-                          ? `The reported account (${subjectRef}) is hosted remotely. Record the review and request action from its home instance.`
-                          : 'This report does not identify a user account that can receive an account or message-history punishment.'}
+                        This report does not identify a user account that can receive an account or
+                        message-history punishment.
                       </span>
                     </div>
                   {/if}

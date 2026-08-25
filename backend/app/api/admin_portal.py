@@ -13,7 +13,12 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.auth import AdminPrincipal, require_admin
-from app.admin.report_enforcement import publish_message_purge, purge_author_messages
+from app.admin.report_enforcement import (
+    publish_message_purge,
+    publish_remote_user_guild_removals,
+    purge_author_messages,
+    remove_remote_user_from_local_guilds,
+)
 from app.api.admin import (
     affected_peer_domains,
     effective_blocked_destinations,
@@ -51,6 +56,7 @@ from app.db.models import (
     Attachment,
     Instance,
     InstanceBlock,
+    InstanceUserRestriction,
     MediaTombstoneSource,
     Message,
     Session,
@@ -89,6 +95,9 @@ ACCOUNT_ACTION_SECONDS: dict[str, int | None] = {
     "suspend_24h": 86_400,
     "suspend_7d": 604_800,
     "suspend_30d": 2_592_000,
+    "ban_permanent": None,
+    # Accepted for clients deployed before permanent suspension was correctly
+    # presented as an instance ban.
     "suspend_permanent": None,
 }
 MESSAGE_ACTION_SECONDS: dict[str, int | None] = {
@@ -175,6 +184,7 @@ class ReportActionCreate(BaseModel):
         "suspend_24h",
         "suspend_7d",
         "suspend_30d",
+        "ban_permanent",
         "suspend_permanent",
     ] = "none"
     message_action: Literal[
@@ -1050,41 +1060,83 @@ async def enforce_report(
             detail={"code": "REPORT_ACTION_TARGET_INVALID"},
         ) from exc
     target = await session.get(User, (user_id, user_domain), with_for_update=True)
-    if target is None or not target.is_local or target.account_type != "human":
+    if target is None or target.account_type != "human":
         raise HTTPException(
             status_code=409,
-            detail={"code": "LOCAL_HUMAN_ENFORCEMENT_REQUIRED"},
+            detail={"code": "HUMAN_ENFORCEMENT_REQUIRED"},
         )
 
     now = datetime.now(UTC)
     revoked_session_ids: list[str] = []
+    remote_restriction: InstanceUserRestriction | None = None
+    removed_remote_memberships = []
     if payload.account_action != "none":
         principal.require("users.manage")
         if target.id == principal.user.id and target.origin_domain == principal.user.origin_domain:
             raise HTTPException(status_code=409, detail={"code": "CANNOT_SUSPEND_SELF"})
         duration = ACCOUNT_ACTION_SECONDS[payload.account_action]
-        if duration is None:
-            target.disabled_at = now
-            target.suspended_until = None
-        elif target.disabled_at is None:
-            requested_until = now + timedelta(seconds=duration)
-            target.suspended_until = max(
-                requested_until,
-                target.suspended_until or requested_until,
-            )
-        revoked_session_ids = list(
-            await session.scalars(
-                update(Session)
-                .where(
-                    Session.user_id == target.id,
-                    Session.user_domain == target.origin_domain,
-                    Session.revoked_at.is_(None),
+        if target.is_local:
+            if duration is None:
+                target.disabled_at = now
+                target.suspended_until = None
+                revoked_session_ids = list(
+                    await session.scalars(
+                        update(Session)
+                        .where(
+                            Session.user_id == target.id,
+                            Session.user_domain == target.origin_domain,
+                            Session.revoked_at.is_(None),
+                        )
+                        .values(revoked_at=now)
+                        .returning(Session.id)
+                    )
                 )
-                .values(revoked_at=now)
-                .returning(Session.id)
+            elif target.disabled_at is None:
+                requested_until = now + timedelta(seconds=duration)
+                target.suspended_until = max(
+                    requested_until,
+                    target.suspended_until or requested_until,
+                )
+        else:
+            remote_restriction = await session.get(
+                InstanceUserRestriction,
+                (target.id, target.origin_domain),
+                with_for_update=True,
             )
-        )
-
+            if remote_restriction is None:
+                remote_restriction = InstanceUserRestriction(
+                    user_id=target.id,
+                    user_domain=target.origin_domain,
+                    restriction_type="banned" if duration is None else "suspended",
+                    expires_at=(now + timedelta(seconds=duration) if duration else None),
+                    reason=payload.reason,
+                    actor_id=principal.user.id,
+                    actor_domain=principal.user.origin_domain,
+                )
+                session.add(remote_restriction)
+            elif duration is None:
+                remote_restriction.restriction_type = "banned"
+                remote_restriction.expires_at = None
+                remote_restriction.reason = payload.reason
+                remote_restriction.actor_id = principal.user.id
+                remote_restriction.actor_domain = principal.user.origin_domain
+            elif remote_restriction.restriction_type != "banned":
+                requested_until = now + timedelta(seconds=duration)
+                remote_restriction.restriction_type = "suspended"
+                remote_restriction.expires_at = max(
+                    requested_until,
+                    remote_restriction.expires_at or requested_until,
+                )
+                remote_restriction.reason = payload.reason
+                remote_restriction.actor_id = principal.user.id
+                remote_restriction.actor_domain = principal.user.origin_domain
+            if duration is None:
+                removed_remote_memberships = await remove_remote_user_from_local_guilds(
+                    session,
+                    settings,
+                    principal.user,
+                    target,
+                )
     purge_result = None
     if payload.message_action != "none":
         created_after: datetime | None = None
@@ -1126,8 +1178,24 @@ async def enforce_report(
     enforcement = {
         "subject_ref": f"{target.id}@{target.origin_domain}",
         "account_action": payload.account_action,
-        "suspended_until": (target.suspended_until.isoformat() if target.suspended_until else None),
-        "permanently_suspended": target.disabled_at is not None,
+        "suspended_until": (
+            target.suspended_until.isoformat()
+            if target.is_local and target.suspended_until
+            else remote_restriction.expires_at.isoformat()
+            if remote_restriction is not None and remote_restriction.expires_at
+            else None
+        ),
+        "banned": (
+            target.disabled_at is not None
+            if target.is_local
+            else remote_restriction is not None and remote_restriction.restriction_type == "banned"
+        ),
+        "permanently_suspended": (
+            target.disabled_at is not None
+            if target.is_local
+            else remote_restriction is not None and remote_restriction.restriction_type == "banned"
+        ),
+        "guild_memberships_removed": len(removed_remote_memberships),
         "message_action": payload.message_action,
         "messages_deleted": purge_result.deleted_count if purge_result else 0,
         "messages_requiring_remote_action": purge_result.skipped_messages if purge_result else 0,
@@ -1151,6 +1219,14 @@ async def enforce_report(
     token_store = AccessTokenStore(redis, settings.access_token_ttl_seconds)
     for session_id in revoked_session_ids:
         await token_store.revoke_session(session_id)
+    if removed_remote_memberships:
+        await publish_remote_user_guild_removals(
+            session,
+            redis,
+            settings,
+            removed_remote_memberships,
+            target,
+        )
     if purge_result is not None:
         await publish_message_purge(redis, purge_result)
     return {"report": report_payload(report), "enforcement": enforcement}
