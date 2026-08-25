@@ -1,16 +1,24 @@
 <script lang="ts">
   import { api, userErrorMessage } from '$lib/api/client';
-  import type { Message } from '$lib/chat/types';
+  import type { Attachment, Message } from '$lib/chat/types';
   import { entityRef } from '$lib/chat/refs';
+  import { decryptEncryptedAttachment, type EncryptedFileManifest } from '$lib/e2ee/media';
+  import { uploadObject, type UploadTicket } from '$lib/media/uploads';
   import { encryptedReportDisclosure } from '$lib/reports/message-evidence';
   import { portal } from '$lib/ui/portal';
 
   let {
     message,
+    attachment = null,
+    attachmentLabel,
+    attachmentManifest,
     onClose,
     onSubmitted
   }: {
     message: Message;
+    attachment?: Attachment | null;
+    attachmentLabel?: string;
+    attachmentManifest?: EncryptedFileManifest;
     onClose: () => void;
     onSubmitted?: () => void;
   } = $props();
@@ -34,39 +42,113 @@
   let disclosureAcknowledged = $state(false);
   let busy = $state(false);
   let error = $state('');
+  let progress = $state(0);
+  let activity = $state('');
+  let createdReportId = $state<string | null>(null);
+  let evidenceTicket = $state<UploadTicket | null>(null);
+  let decryptedEvidence = $state<Blob | null>(null);
+  let evidenceUploaded = $state(false);
   const encrypted = $derived(Boolean(message.e2ee));
+  const reportingAttachment = $derived(attachment !== null);
+  const requiresMessageDisclosure = $derived(encrypted && !reportingAttachment);
+  const requiresAttachmentDisclosure = $derived(
+    reportingAttachment && attachment?.encryption_mode === 'e2ee'
+  );
+  const requiresDisclosure = $derived(requiresMessageDisclosure || requiresAttachmentDisclosure);
+  const attachmentDisclosureAvailable = $derived(
+    Boolean(
+      attachmentManifest &&
+      attachment &&
+      attachmentManifest.attachment_id === attachment.id &&
+      attachmentManifest.attachment_domain === attachment.origin_domain
+    )
+  );
   const disclosure = $derived(encryptedReportDisclosure(message));
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (busy) return;
-    if (encrypted && (!disclosure.available || !disclosureAcknowledged)) return;
+    if (
+      (requiresMessageDisclosure && (!disclosure.available || !disclosureAcknowledged)) ||
+      (requiresAttachmentDisclosure && (!attachmentDisclosureAvailable || !disclosureAcknowledged))
+    )
+      return;
     busy = true;
     error = '';
     try {
       const ref = entityRef(message);
-      await api('/reports', {
-        method: 'POST',
-        body: JSON.stringify({
-          target_type: 'message',
-          target_ref: ref,
-          message_ref: ref,
-          category,
-          description: description.trim() || null,
-          ...(encrypted
-            ? {
-                disclosed_content: disclosure.content,
+      if (requiresAttachmentDisclosure && !decryptedEvidence) {
+        activity = 'Decrypting selected attachment…';
+        decryptedEvidence = await decryptEncryptedAttachment(
+          attachmentManifest!,
+          attachment?.history_media_url
+        );
+      }
+      if (!createdReportId) {
+        activity = 'Creating report…';
+        const created = await api<{ id: string }>('/reports', {
+          method: 'POST',
+          body: JSON.stringify({
+            target_type: reportingAttachment ? 'attachment' : 'message',
+            target_ref: reportingAttachment ? entityRef(attachment!) : ref,
+            message_ref: ref,
+            category,
+            description: description.trim() || null,
+            ...(requiresMessageDisclosure
+              ? {
+                  disclosed_content: disclosure.content,
+                  disclosure_acknowledged: true
+                }
+              : {})
+          })
+        });
+        createdReportId = created.id;
+      }
+      if (requiresAttachmentDisclosure) {
+        if (!evidenceTicket) {
+          activity = 'Preparing secure evidence upload…';
+          evidenceTicket = await api<UploadTicket>(
+            `/reports/${encodeURIComponent(createdReportId)}/attachment-evidence`,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                filename: attachmentManifest!.filename,
+                content_type: attachmentManifest!.content_type,
+                size: decryptedEvidence!.size,
                 disclosure_acknowledged: true
-              }
-            : {})
-        })
-      });
+              })
+            }
+          );
+        }
+        if (!evidenceUploaded) {
+          activity = 'Uploading decrypted evidence…';
+          const file = new File([decryptedEvidence!], attachmentManifest!.filename, {
+            type: attachmentManifest!.content_type
+          });
+          await uploadObject(evidenceTicket, file, (next) => (progress = next));
+          evidenceUploaded = true;
+        }
+        activity = 'Finalizing evidence…';
+        await api(`/reports/${encodeURIComponent(createdReportId)}/attachment-evidence`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            attachment_id: evidenceTicket.id,
+            disclosure_acknowledged: true
+          })
+        });
+      }
       onSubmitted?.();
       onClose();
     } catch (caught) {
-      error = userErrorMessage(caught, 'Could not submit this report. Try again.');
+      error = userErrorMessage(
+        caught,
+        createdReportId
+          ? 'The report was submitted, but its decrypted evidence could not be attached. Keep this dialog open and try again.'
+          : 'Could not submit this report. Try again.'
+      );
     } finally {
       busy = false;
+      activity = '';
     }
   }
 
@@ -80,11 +162,41 @@
     <header>
       <div>
         <span>Trust &amp; Safety</span>
-        <h2 id="report-title">Report message</h2>
+        <h2 id="report-title">Report {reportingAttachment ? 'attachment' : 'message'}</h2>
       </div>
       <button type="button" class="close" aria-label="Close report" onclick={onClose}>×</button>
     </header>
-    {#if encrypted}
+    {#if reportingAttachment}
+      <div
+        class:encrypted-disclosure={attachment?.encryption_mode === 'e2ee'}
+        class="attachment-report-summary"
+      >
+        <strong>{attachmentLabel ?? attachment?.filename ?? 'Attachment'}</strong>
+        <small>{attachment?.content_type ?? 'Unknown file type'}</small>
+        {#if attachment?.encryption_mode === 'e2ee'}
+          {#if attachmentDisclosureAvailable}
+            <strong>Share this decrypted attachment?</strong>
+            <p>
+              This attachment is end-to-end encrypted. Reporting it decrypts the selected file on
+              this device, then uploads an unencrypted evidence copy and its filename to this
+              instance's Trust &amp; Safety team. The copy is scanned and stored with the report. It
+              does not share the encryption key, other attachments, or other messages.
+            </p>
+          {:else}
+            <strong>Attachment not decrypted on this device</strong>
+            <p>
+              Kaede cannot disclose this attachment until its authenticated file manifest is
+              available here. Close this dialog, wait for the attachment to decrypt, and try again.
+            </p>
+          {/if}
+        {:else}
+          <p>
+            This specific attachment, its stored metadata, and basic message context will be sent to
+            this instance's Trust &amp; Safety team. Guild moderators do not receive this report.
+          </p>
+        {/if}
+      </div>
+    {:else if encrypted}
       <div class="encrypted-disclosure">
         {#if disclosure.available}
           <strong>Share decrypted message evidence?</strong>
@@ -112,7 +224,7 @@
     <form onsubmit={submit}>
       <label>
         Reason
-        <select bind:value={category}>
+        <select bind:value={category} disabled={busy || Boolean(createdReportId)}>
           {#each categories as [value, label] (value)}
             <option {value}>{label}</option>
           {/each}
@@ -120,19 +232,35 @@
       </label>
       <label>
         Additional details <span>(optional)</span>
-        <textarea bind:value={description} maxlength="2000" rows="4"></textarea>
+        <textarea
+          bind:value={description}
+          maxlength="2000"
+          rows="4"
+          disabled={busy || Boolean(createdReportId)}
+        ></textarea>
       </label>
-      {#if encrypted}
+      {#if requiresDisclosure}
         <label class="disclosure-consent">
           <input
             type="checkbox"
             bind:checked={disclosureAcknowledged}
-            disabled={busy || !disclosure.available}
+            disabled={busy ||
+              (requiresMessageDisclosure && !disclosure.available) ||
+              (requiresAttachmentDisclosure && !attachmentDisclosureAvailable)}
           />
-          <span
-            >I understand the decrypted message evidence will be shared with Trust &amp; Safety.</span
-          >
+          <span>
+            {requiresAttachmentDisclosure
+              ? 'I understand this attachment will be decrypted and an unencrypted copy will be shared with Trust & Safety.'
+              : 'I understand the decrypted message evidence will be shared with Trust & Safety.'}
+          </span>
         </label>
+      {/if}
+      {#if busy && activity}
+        <div class="report-progress" role="status">
+          <span>{activity}</span>
+          {#if activity.startsWith('Uploading') && progress > 0}<progress max="100" value={progress}
+            ></progress>{/if}
+        </div>
       {/if}
       {#if error}<div class="report-error" role="alert">{error}</div>{/if}
       <footer>
@@ -140,7 +268,10 @@
         <button
           type="submit"
           class="danger"
-          disabled={busy || (encrypted && (!disclosure.available || !disclosureAcknowledged))}
+          disabled={busy ||
+            (requiresMessageDisclosure && (!disclosure.available || !disclosureAcknowledged)) ||
+            (requiresAttachmentDisclosure &&
+              (!attachmentDisclosureAvailable || !disclosureAcknowledged))}
           >{busy ? 'Submitting…' : 'Submit report'}</button
         >
       </footer>
@@ -176,6 +307,20 @@
   }
   .encrypted-disclosure p {
     margin: 0.4rem 0 0;
+  }
+  .attachment-report-summary {
+    display: grid;
+    gap: 0.25rem;
+    margin: 1rem 0;
+    border-radius: 10px;
+    padding: 0.85rem;
+    background: var(--surface-hover);
+  }
+  .attachment-report-summary small {
+    color: var(--text-muted);
+  }
+  .attachment-report-summary p {
+    margin: 0.45rem 0 0;
   }
   header,
   footer {
@@ -227,6 +372,15 @@
     width: 1rem;
     height: 1rem;
     margin-top: 0.15rem;
+  }
+  .report-progress {
+    display: grid;
+    gap: 0.4rem;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+  }
+  .report-progress progress {
+    width: 100%;
   }
   select,
   textarea {

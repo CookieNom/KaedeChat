@@ -9,7 +9,11 @@
   import { portal } from '$lib/ui/portal';
   import { onDestroy, onMount } from 'svelte';
 
-  let { attachment, onClose }: { attachment: Attachment; onClose: () => void } = $props();
+  let {
+    attachment,
+    onClose,
+    onReport
+  }: { attachment: Attachment; onClose: () => void; onReport?: () => void } = $props();
   const originalUrl = $derived(
     attachmentMediaPath(
       attachment.origin_domain,
@@ -82,6 +86,8 @@
         <strong>{attachment.filename}</strong>
         <small>{attachment.content_type}</small>
       </div>
+      {#if onReport}<button type="button" class="report-media" onclick={onReport}>Report</button
+        >{/if}
       <button type="button" onclick={() => void download()}>Download</button>
       <button type="button" aria-label="Close media viewer" onclick={onClose}>×</button>
     </header>

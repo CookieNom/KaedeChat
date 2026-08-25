@@ -20,6 +20,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.auth.account_status import account_active_clause
 from app.auth.tokens import AccessGrant, AccessTokenStore
 from app.chat.events import (
     guild_topic,
@@ -753,7 +754,7 @@ async def identify(
             .where(
                 User.id == grant.user_id,
                 User.origin_domain == grant.user_domain,
-                User.disabled_at.is_(None),
+                account_active_clause(User, now=now),
                 AuthSession.id == grant.session_id,
                 AuthSession.user_id == grant.user_id,
                 AuthSession.user_domain == grant.user_domain,
@@ -912,7 +913,7 @@ async def gateway_grant_is_current(
                 AuthSession.revoked_at.is_(None),
                 AuthSession.expires_at > now,
                 AuthSession.absolute_expires_at > now,
-                User.disabled_at.is_(None),
+                account_active_clause(User, now=now),
             )
         )
     return active is not None

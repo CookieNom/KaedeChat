@@ -5634,6 +5634,63 @@ progress {
   cursor: zoom-in;
 }
 
+.attachment-reportable {
+  position: relative;
+  display: inline-flex;
+  max-width: min(640px, 100%);
+  align-items: stretch;
+  gap: 0.3rem;
+}
+
+.attachment-reportable.media-reportable {
+  display: block;
+}
+
+.attachment-report-action {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 0.45rem 0.6rem;
+  color: var(--text-muted);
+  background: var(--surface-subtle);
+  font-size: 0.7rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.attachment-report-action:hover,
+.attachment-report-action:focus-visible {
+  border-color: color-mix(in srgb, var(--danger) 48%, var(--line));
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.attachment-report-action svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  fill: none;
+  stroke: currentcolor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.media-reportable > .attachment-report-action {
+  position: absolute;
+  z-index: 2;
+  right: 0.55rem;
+  bottom: 0.55rem;
+  min-height: 0;
+  border-color: rgb(255 255 255 / 25%);
+  border-radius: 999px;
+  padding: 0.35rem 0.55rem;
+  color: white;
+  background: rgb(0 0 0 / 72%);
+}
+
 .attachment-video {
   position: relative;
   max-width: min(640px, 100%);
@@ -6176,6 +6233,10 @@ body.media-viewer-open {
   background: var(--surface-subtle);
   text-decoration: none;
   cursor: pointer;
+}
+
+.media-viewer > header .report-media {
+  color: var(--danger);
 }
 
 .media-viewer-stage {

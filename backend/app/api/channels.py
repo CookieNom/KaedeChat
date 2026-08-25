@@ -1456,7 +1456,11 @@ async def create_message(
                 int(attachment_id),
                 required_purpose="attachment",
             )
-            if attachment.message_id is not None or attachment.message_domain is not None:
+            if (
+                attachment.message_id is not None
+                or attachment.message_domain is not None
+                or getattr(attachment, "report_id", None) is not None
+            ):
                 raise HTTPException(status_code=409, detail={"code": "ATTACHMENT_ALREADY_USED"})
             message_attachments.append(attachment)
     require_message_encryption_policy(

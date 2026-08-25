@@ -234,10 +234,10 @@ export async function uploadEncryptedChannelFile(
   };
 }
 
-export async function downloadEncryptedFile(
+export async function decryptEncryptedAttachment(
   manifest: EncryptedFileManifest,
   historyMediaUrl?: string | null
-): Promise<void> {
+): Promise<Blob> {
   if (!manifest.attachment_id || !manifest.attachment_domain)
     throw new Error('Encrypted attachment reference is missing.');
   const path = attachmentMediaPath(
@@ -264,7 +264,14 @@ export async function downloadEncryptedFile(
       throw new Error('Encrypted file response is larger than its authenticated manifest.');
     ciphertext = await response.blob();
   }
-  const plaintext = await decryptFile(ciphertext, manifest);
+  return decryptFile(ciphertext, manifest);
+}
+
+export async function downloadEncryptedFile(
+  manifest: EncryptedFileManifest,
+  historyMediaUrl?: string | null
+): Promise<void> {
+  const plaintext = await decryptEncryptedAttachment(manifest, historyMediaUrl);
   const objectUrl = URL.createObjectURL(plaintext);
   try {
     const anchor = document.createElement('a');

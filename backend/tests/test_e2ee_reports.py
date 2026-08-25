@@ -5,14 +5,26 @@ import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from pydantic import ValidationError
 
-from app.api.admin_portal import ReportCreate, report_message_evidence, report_payload
+from app.admin.auth import AdminPrincipal
+from app.api import admin_portal
+from app.api.admin_portal import (
+    ReportAttachmentEvidenceCommit,
+    ReportAttachmentEvidenceTicketCreate,
+    ReportCreate,
+    report_attachment_evidence,
+    report_message_evidence,
+    report_payload,
+)
 from app.db.bot_models import AbuseReport
-from app.db.models import Message
+from app.db.models import Attachment, MediaTombstoneSource, Message, User
+from app.media.jobs import update_report_evidence_status
+from app.media.photodna import PhotoDNAFinding, PhotoDNAMatchFlag
 
 
 def report_message(*, e2ee: dict[str, object] | None, content: str | None) -> Message:
@@ -161,6 +173,566 @@ def test_report_schema_rejects_whitespace_only_disclosure() -> None:
             disclosed_content="   ",
             disclosure_acknowledged=True,
         )
+
+
+def test_attachment_report_schema_carries_its_containing_message() -> None:
+    payload = ReportCreate(
+        target_type="attachment",
+        target_ref="9@alpha.localhost",
+        message_ref="1@alpha.localhost",
+        category="illegal_content",
+    )
+
+    assert payload.target_type == "attachment"
+    assert str(payload.message_ref) == "1@alpha.localhost"
+
+
+@pytest.mark.parametrize(
+    ("message_e2ee", "attachment_encryption", "expected_mode", "includes_content"),
+    [
+        (None, "plaintext", "plaintext", True),
+        ({"ciphertext": "opaque"}, "e2ee", "e2ee_metadata", False),
+    ],
+)
+def test_attachment_report_retains_only_server_verified_metadata(
+    message_e2ee: dict[str, object] | None,
+    attachment_encryption: str,
+    expected_mode: str,
+    includes_content: bool,
+) -> None:
+    timestamp = datetime(2026, 8, 25, 15, tzinfo=UTC)
+    message = cast(
+        Message,
+        SimpleNamespace(
+            id=1,
+            origin_domain="alpha.localhost",
+            author_id=7,
+            author_domain="alpha.localhost",
+            channel_id=2,
+            channel_domain="alpha.localhost",
+            content="message context" if message_e2ee is None else None,
+            e2ee=message_e2ee,
+            created_at=timestamp,
+        ),
+    )
+    attachment = cast(
+        Attachment,
+        SimpleNamespace(
+            id=9,
+            origin_domain="alpha.localhost",
+            uploader_id=7,
+            uploader_domain="alpha.localhost",
+            created_at=timestamp,
+            filename="encrypted-file" if attachment_encryption == "e2ee" else "video.mp4",
+            content_type=(
+                "application/octet-stream" if attachment_encryption == "e2ee" else "video/mp4"
+            ),
+            detected_content_type=None,
+            size=1234,
+            encryption_mode=attachment_encryption,
+        ),
+    )
+
+    evidence, mode = report_attachment_evidence(message, attachment)
+
+    assert mode == expected_mode
+    assert evidence["attachment_ref"] == "9@alpha.localhost"
+    assert evidence["uploader_ref"] == "7@alpha.localhost"
+    assert ("content" in evidence) is includes_content
+    assert "content_sha256" not in evidence
+    assert "object_key" not in evidence
+
+
+class AttachmentReportSession:
+    def __init__(self, message: Message, attachment: Attachment) -> None:
+        self.message = message
+        self.attachment = attachment
+        self.added: AbuseReport | None = None
+
+    async def get(self, model: type[object], key: object) -> object | None:
+        if model is Message:
+            return self.message
+        if model is Attachment:
+            return self.attachment
+        return None
+
+    def add(self, report: AbuseReport) -> None:
+        self.added = report
+
+    async def commit(self) -> None:
+        assert self.added is not None
+        timestamp = datetime(2026, 8, 25, 16, tzinfo=UTC)
+        self.added.created_at = timestamp
+        self.added.updated_at = timestamp
+
+
+class ReportSnowflake:
+    async def mint(self) -> int:
+        return 123
+
+
+class ReportAttachmentPreviewSession:
+    def __init__(self, report: AbuseReport, attachment: Attachment | None) -> None:
+        self.report = report
+        self.attachment = attachment
+        self.committed = False
+
+    async def get(
+        self,
+        model: type[object],
+        key: object,
+        **_kwargs: object,
+    ) -> object | None:
+        if model is AbuseReport:
+            return self.report
+        if model is Attachment:
+            return self.attachment
+        if model is MediaTombstoneSource:
+            return None
+        return None
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+@pytest.mark.asyncio
+async def test_create_attachment_report_validates_message_binding_and_stores_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timestamp = datetime(2026, 8, 25, 15, tzinfo=UTC)
+    reporter = SimpleNamespace(
+        id=4,
+        origin_domain="alpha.localhost",
+        is_local=True,
+        account_type="human",
+    )
+    message = cast(
+        Message,
+        SimpleNamespace(
+            id=1,
+            origin_domain="alpha.localhost",
+            channel_id=2,
+            channel_domain="alpha.localhost",
+            author_id=7,
+            author_domain="alpha.localhost",
+            content="look at this",
+            e2ee=None,
+            deleted_at=None,
+            created_at=timestamp,
+        ),
+    )
+    attachment = cast(
+        Attachment,
+        SimpleNamespace(
+            id=9,
+            origin_domain="alpha.localhost",
+            message_id=1,
+            message_domain="alpha.localhost",
+            uploader_id=7,
+            uploader_domain="alpha.localhost",
+            filename="photo.jpg",
+            content_type="image/jpeg",
+            detected_content_type="image/jpeg",
+            size=2048,
+            encryption_mode="plaintext",
+            purpose="attachment",
+            deleted_at=None,
+            created_at=timestamp,
+        ),
+    )
+    session = AttachmentReportSession(message, attachment)
+    monkeypatch.setattr(admin_portal, "enforce_keyed_rate_limit", AsyncMock())
+    monkeypatch.setattr(admin_portal, "load_channel_access", AsyncMock(return_value=object()))
+    monkeypatch.setattr(admin_portal, "require_channel_permissions", AsyncMock(return_value=0))
+
+    result = await admin_portal.create_report(
+        ReportCreate(
+            target_type="attachment",
+            target_ref="9@alpha.localhost",
+            message_ref="1@alpha.localhost",
+            category="illegal_content",
+            description="This image should be reviewed",
+        ),
+        Response(),
+        cast(Any, SimpleNamespace(user=reporter)),
+        cast(Any, session),
+        cast(Any, object()),
+        cast(Any, ReportSnowflake()),
+        cast(Any, SimpleNamespace(domain="alpha.localhost")),
+    )
+
+    assert result["target_type"] == "attachment"
+    assert session.added is not None
+    assert session.added.message_ref == "1@alpha.localhost"
+    assert session.added.evidence["attachment_ref"] == "9@alpha.localhost"
+    assert session.added.evidence["content_type"] == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_admin_can_view_only_the_bound_plaintext_report_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = cast(
+        AbuseReport,
+        SimpleNamespace(
+            id=44,
+            source="user",
+            target_type="attachment",
+            target_ref="9@alpha.localhost",
+            message_ref="1@alpha.localhost",
+            evidence={},
+            encryption_mode="plaintext",
+        ),
+    )
+    attachment = cast(
+        Attachment,
+        SimpleNamespace(
+            id=9,
+            origin_domain="alpha.localhost",
+            message_id=1,
+            message_domain="alpha.localhost",
+            report_id=None,
+            purpose="attachment",
+            encryption_mode="plaintext",
+            deleted_at=None,
+        ),
+    )
+    actor = cast(User, SimpleNamespace(id=2, origin_domain="alpha.localhost"))
+    principal = AdminPrincipal(actor, frozenset({"auditor"}), frozenset({"reports.read"}))
+    session = ReportAttachmentPreviewSession(report, attachment)
+    response = object()
+    monkeypatch.setattr(
+        admin_portal,
+        "redirect_to_object",
+        lambda *_args, **_kwargs: response,
+    )
+    audit = AsyncMock()
+    monkeypatch.setattr(admin_portal, "audit", audit)
+
+    result = await admin_portal.view_report_attachment(
+        44,
+        principal,
+        cast(Any, session),
+        cast(Any, ReportSnowflake()),
+        cast(Any, SimpleNamespace(domain="alpha.localhost")),
+        "thumbnail_512",
+    )
+
+    assert result is response
+    assert session.committed is True
+    audit.assert_awaited_once()
+    audit_call = audit.await_args
+    assert audit_call is not None
+    assert audit_call.args[3:6] == (
+        "admin.report.attachment_view",
+        "report",
+        "44",
+    )
+
+
+@pytest.mark.parametrize(
+    ("target_ref", "message_ref", "encryption_mode", "expected_code"),
+    [
+        ("9@remote.example", "1@alpha.localhost", "plaintext", "REMOTE_REPORT_ATTACHMENT"),
+        ("9@alpha.localhost", "2@alpha.localhost", "plaintext", "REPORT_ATTACHMENT_NOT_FOUND"),
+        ("9@alpha.localhost", "1@alpha.localhost", "e2ee", "REPORT_ATTACHMENT_NOT_FOUND"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_admin_report_attachment_preview_rejects_unsafe_media(
+    target_ref: str,
+    message_ref: str,
+    encryption_mode: str,
+    expected_code: str,
+) -> None:
+    report = cast(
+        AbuseReport,
+        SimpleNamespace(
+            id=44,
+            source="user",
+            target_type="attachment",
+            target_ref=target_ref,
+            message_ref=message_ref,
+            evidence={},
+            encryption_mode="plaintext",
+        ),
+    )
+    attachment = cast(
+        Attachment,
+        SimpleNamespace(
+            id=9,
+            origin_domain="alpha.localhost",
+            message_id=1,
+            message_domain="alpha.localhost",
+            report_id=None,
+            purpose="attachment",
+            encryption_mode=encryption_mode,
+            deleted_at=None,
+        ),
+    )
+    actor = cast(User, SimpleNamespace(id=2, origin_domain="alpha.localhost"))
+    principal = AdminPrincipal(actor, frozenset({"auditor"}), frozenset({"reports.read"}))
+
+    with pytest.raises(HTTPException) as raised:
+        await admin_portal.view_report_attachment(
+            44,
+            principal,
+            cast(Any, ReportAttachmentPreviewSession(report, attachment)),
+            cast(Any, ReportSnowflake()),
+            cast(Any, SimpleNamespace(domain="alpha.localhost")),
+            "original",
+        )
+
+    assert cast(dict[str, Any], raised.value.detail)["code"] == expected_code
+
+
+@pytest.mark.asyncio
+async def test_admin_previews_reporter_disclosed_copy_for_remote_e2ee_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = cast(
+        AbuseReport,
+        SimpleNamespace(
+            id=44,
+            source="user",
+            target_type="attachment",
+            target_ref="9@remote.example",
+            message_ref="1@remote.example",
+            evidence={"disclosed_attachment_ref": "81@alpha.localhost"},
+            encryption_mode="e2ee_user_disclosed",
+        ),
+    )
+    evidence_attachment = cast(
+        Attachment,
+        SimpleNamespace(
+            id=81,
+            origin_domain="alpha.localhost",
+            message_id=None,
+            message_domain=None,
+            report_id=44,
+            purpose="attachment",
+            encryption_mode="plaintext",
+            deleted_at=None,
+        ),
+    )
+    actor = cast(User, SimpleNamespace(id=2, origin_domain="alpha.localhost"))
+    principal = AdminPrincipal(actor, frozenset({"auditor"}), frozenset({"reports.read"}))
+    session = ReportAttachmentPreviewSession(report, evidence_attachment)
+    response = object()
+    monkeypatch.setattr(
+        admin_portal,
+        "redirect_to_object",
+        lambda *_args, **_kwargs: response,
+    )
+    monkeypatch.setattr(admin_portal, "audit", AsyncMock())
+
+    result = await admin_portal.view_report_attachment(
+        44,
+        principal,
+        cast(Any, session),
+        cast(Any, ReportSnowflake()),
+        cast(Any, SimpleNamespace(domain="alpha.localhost")),
+        "original",
+    )
+
+    assert result is response
+    assert session.committed is True
+
+
+class EvidenceUploadSession:
+    def __init__(self, report: AbuseReport, existing: Attachment | None = None) -> None:
+        self.report = report
+        self.existing = existing
+        self.committed = False
+
+    async def get(
+        self,
+        model: type[object],
+        _key: object,
+        **_kwargs: object,
+    ) -> object | None:
+        if model is AbuseReport:
+            return self.report
+        return None
+
+    async def scalar(self, _statement: object) -> object | None:
+        return self.existing
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+def encrypted_attachment_report() -> AbuseReport:
+    timestamp = datetime(2026, 8, 25, 18, tzinfo=UTC)
+    return cast(
+        AbuseReport,
+        SimpleNamespace(
+            id=44,
+            source="user",
+            reporter_id=4,
+            reporter_domain="alpha.localhost",
+            target_type="attachment",
+            target_ref="9@remote.example",
+            category="harassment",
+            description="review this file",
+            message_ref="1@remote.example",
+            evidence={"attachment_encryption_mode": "e2ee"},
+            encryption_mode="e2ee_metadata",
+            status="submitted",
+            created_at=timestamp,
+            updated_at=timestamp,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_reporter_can_create_plaintext_evidence_ticket_only_with_consent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = encrypted_attachment_report()
+    session = EvidenceUploadSession(report)
+    reporter = cast(
+        User,
+        SimpleNamespace(id=4, origin_domain="alpha.localhost", is_local=True),
+    )
+    evidence_attachment = cast(Attachment, SimpleNamespace(id=81))
+    create_ticket = AsyncMock(return_value=(evidence_attachment, "https://upload.invalid"))
+    monkeypatch.setattr(admin_portal, "create_upload_ticket", create_ticket)
+    monkeypatch.setattr(admin_portal, "ticket_payload", lambda *_args: {"id": "81"})
+    monkeypatch.setattr(admin_portal, "enforce_keyed_rate_limit", AsyncMock())
+
+    result = await admin_portal.create_report_attachment_evidence_ticket(
+        44,
+        ReportAttachmentEvidenceTicketCreate(
+            filename="evidence.jpg",
+            content_type="image/jpeg",
+            size=2048,
+            disclosure_acknowledged=True,
+        ),
+        Response(),
+        cast(Any, SimpleNamespace(user=reporter)),
+        cast(Any, session),
+        cast(Any, object()),
+        cast(Any, ReportSnowflake()),
+        cast(Any, SimpleNamespace(domain="alpha.localhost")),
+    )
+
+    assert result == {"id": "81"}
+    assert session.committed is True
+    ticket_call = create_ticket.await_args
+    assert ticket_call is not None
+    assert ticket_call.kwargs["report_id"] == 44
+    assert ticket_call.kwargs["encryption_mode"] == "plaintext"
+
+    with pytest.raises(HTTPException) as raised:
+        await admin_portal.create_report_attachment_evidence_ticket(
+            44,
+            ReportAttachmentEvidenceTicketCreate(
+                filename="evidence.jpg",
+                content_type="image/jpeg",
+                size=2048,
+                disclosure_acknowledged=False,
+            ),
+            Response(),
+            cast(Any, SimpleNamespace(user=reporter)),
+            cast(Any, EvidenceUploadSession(report)),
+            cast(Any, object()),
+            cast(Any, ReportSnowflake()),
+            cast(Any, SimpleNamespace(domain="alpha.localhost")),
+        )
+    assert cast(dict[str, Any], raised.value.detail)["code"] == (
+        "E2EE_ATTACHMENT_DISCLOSURE_REQUIRED"
+    )
+
+
+@pytest.mark.asyncio
+async def test_committing_decrypted_evidence_marks_report_as_reporter_disclosed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = encrypted_attachment_report()
+    session = EvidenceUploadSession(report)
+    reporter = cast(User, SimpleNamespace(id=4, origin_domain="alpha.localhost"))
+    evidence_attachment = cast(
+        Attachment,
+        SimpleNamespace(
+            id=81,
+            origin_domain="alpha.localhost",
+            report_id=44,
+            filename="evidence.jpg",
+            content_type="image/jpeg",
+            size=2048,
+            scan_status="pending",
+        ),
+    )
+    monkeypatch.setattr(
+        admin_portal,
+        "finalize_attachment",
+        AsyncMock(return_value=evidence_attachment),
+    )
+    wake = AsyncMock()
+    monkeypatch.setattr(admin_portal, "enqueue_best_effort", wake)
+
+    result = await admin_portal.commit_report_attachment_evidence(
+        44,
+        ReportAttachmentEvidenceCommit(
+            attachment_id="81",
+            disclosure_acknowledged=True,
+        ),
+        cast(Any, SimpleNamespace(user=reporter)),
+        cast(Any, session),
+        cast(Any, SimpleNamespace(domain="alpha.localhost")),
+    )
+
+    assert report.encryption_mode == "e2ee_user_disclosed"
+    assert report.evidence["disclosed_attachment_ref"] == "81@alpha.localhost"
+    assert (
+        cast(dict[str, Any], report.evidence["attachment_disclosure"])["reporter_acknowledged"]
+        is True
+    )
+    assert cast(dict[str, Any], result["evidence"])["scan_status"] == "pending"
+    assert session.committed is True
+    wake.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_disclosed_evidence_safety_match_updates_original_report() -> None:
+    report = encrypted_attachment_report()
+    report.encryption_mode = "e2ee_user_disclosed"
+    session = EvidenceUploadSession(report)
+    evidence_attachment = cast(
+        Attachment,
+        SimpleNamespace(
+            id=81,
+            origin_domain="alpha.localhost",
+            report_id=44,
+            uploader_id=4,
+            uploader_domain="alpha.localhost",
+            detected_content_type="image/jpeg",
+            content_sha256="a" * 64,
+        ),
+    )
+    finding = PhotoDNAFinding(
+        tracking_id="tracking",
+        flags=(
+            PhotoDNAMatchFlag(
+                source="test",
+                violations=("sexual_abuse",),
+                match_distance=0,
+                match_id="match",
+            ),
+        ),
+    )
+
+    await update_report_evidence_status(
+        cast(Any, session),
+        evidence_attachment,
+        "quarantined",
+        finding=finding,
+    )
+
+    assert report.category == "illegal_content"
+    assert report.evidence["disclosed_attachment_scan_status"] == "quarantined"
+    assert isinstance(report.evidence["photodna"], dict)
 
 
 @pytest.mark.parametrize(

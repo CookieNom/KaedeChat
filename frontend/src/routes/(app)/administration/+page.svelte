@@ -3,6 +3,7 @@
   import { hasAdminCapability } from '$lib/admin/capabilities';
   import { api, userErrorMessage } from '$lib/api/client';
   import Icon, { type IconName } from '$lib/components/Icon.svelte';
+  import { authenticatedMedia } from '$lib/media/authenticated';
   import { onMount } from 'svelte';
 
   type View =
@@ -26,6 +27,7 @@
     display_name: string | null;
     account_type?: string;
     disabled_at: string | null;
+    suspended_until: string | null;
   }
 
   interface App {
@@ -45,6 +47,7 @@
     target_ref: string;
     category: string;
     description: string | null;
+    message_ref?: string | null;
     evidence: {
       content?: string | null;
       author_ref?: string;
@@ -64,6 +67,35 @@
   interface ReportDraft {
     status: string;
     resolution: string;
+  }
+
+  type AccountAction = 'none' | 'suspend_24h' | 'suspend_7d' | 'suspend_30d' | 'suspend_permanent';
+  type MessageAction =
+    | 'none'
+    | 'delete_reported'
+    | 'delete_1h'
+    | 'delete_24h'
+    | 'delete_7d'
+    | 'delete_30d'
+    | 'delete_all';
+
+  interface EnforcementDraft {
+    account_action: AccountAction;
+    message_action: MessageAction;
+    reason: string;
+  }
+
+  interface EnforcementResponse {
+    report: Report;
+    enforcement: {
+      subject_ref: string;
+      account_action: AccountAction;
+      suspended_until: string | null;
+      permanently_suspended: boolean;
+      message_action: MessageAction;
+      messages_deleted: number;
+      messages_requiring_remote_action: number;
+    };
   }
 
   interface PhotoDnaFlag {
@@ -180,6 +212,22 @@
   ];
   const closedReportStatuses = new Set(['action_taken', 'closed_no_action', 'duplicate']);
   const roleOptions = ['administrator', 'trust_safety', 'bot_reviewer', 'operations', 'auditor'];
+  const accountActionOptions: { value: AccountAction; label: string }[] = [
+    { value: 'none', label: 'No account suspension' },
+    { value: 'suspend_24h', label: 'Suspend for 24 hours' },
+    { value: 'suspend_7d', label: 'Suspend for 7 days' },
+    { value: 'suspend_30d', label: 'Suspend for 30 days' },
+    { value: 'suspend_permanent', label: 'Suspend permanently' }
+  ];
+  const messageActionOptions: { value: MessageAction; label: string }[] = [
+    { value: 'none', label: 'Keep messages' },
+    { value: 'delete_reported', label: 'Delete reported message' },
+    { value: 'delete_1h', label: 'Delete messages from last hour' },
+    { value: 'delete_24h', label: 'Delete messages from last 24 hours' },
+    { value: 'delete_7d', label: 'Delete messages from last 7 days' },
+    { value: 'delete_30d', label: 'Delete messages from last 30 days' },
+    { value: 'delete_all', label: 'Delete all message history' }
+  ];
 
   let me = $state<AdminIdentity | null>(null);
   let overview = $state<Record<string, number>>({});
@@ -187,6 +235,7 @@
   let apps = $state<App[]>([]);
   let reports = $state<Report[]>([]);
   let reportDrafts = $state<Record<string, ReportDraft>>({});
+  let enforcementDrafts = $state<Record<string, EnforcementDraft>>({});
   let blocks = $state<Block[]>([]);
   let operators = $state<Operator[]>([]);
   let audits = $state<Audit[]>([]);
@@ -258,6 +307,82 @@
         report.id,
         { status: report.status, resolution: report.resolution ?? '' }
       ])
+    );
+    enforcementDrafts = Object.fromEntries(
+      nextReports.map((report) => [
+        report.id,
+        enforcementDrafts[report.id] ?? {
+          account_action: 'none',
+          message_action: 'none',
+          reason: ''
+        }
+      ])
+    );
+  }
+
+  function reportSubjectRef(report: Report): string | null {
+    if (report.target_type === 'user') return report.target_ref;
+    const key = report.target_type === 'attachment' ? 'uploader_ref' : 'author_ref';
+    const value = report.evidence[key];
+    return typeof value === 'string' && value ? value : null;
+  }
+
+  function localReportSubject(report: Report): string | null {
+    const subject = reportSubjectRef(report);
+    if (!subject || !me || !subject.endsWith(`@${me.user.origin_domain}`)) return null;
+    return subject;
+  }
+
+  function attachmentContentType(report: Report): string | null {
+    const disclosed = report.evidence.disclosed_content_type;
+    const value = typeof disclosed === 'string' ? disclosed : report.evidence.content_type;
+    return typeof value === 'string' ? value : null;
+  }
+
+  function reportPreviewAttachmentRef(report: Report): string | null {
+    const disclosed = report.evidence.disclosed_attachment_ref;
+    if (report.encryption_mode === 'e2ee_user_disclosed' && typeof disclosed === 'string') {
+      return disclosed;
+    }
+    const original = report.evidence.attachment_ref;
+    return typeof original === 'string' ? original : null;
+  }
+
+  function canPreviewReportAttachment(report: Report): boolean {
+    const attachmentRef = reportPreviewAttachmentRef(report);
+    const contentType = attachmentContentType(report);
+    return Boolean(
+      me &&
+      attachmentRef &&
+      attachmentRef.endsWith(`@${me.user.origin_domain}`) &&
+      report.encryption_mode !== 'e2ee_metadata' &&
+      contentType &&
+      (report.encryption_mode !== 'e2ee_user_disclosed' ||
+        report.evidence.disclosed_attachment_scan_status === 'clean') &&
+      (contentType.startsWith('image/') || contentType.startsWith('video/'))
+    );
+  }
+
+  function reportAttachmentPath(
+    report: Report,
+    variant: 'original' | 'thumbnail_512' | 'poster'
+  ): string {
+    return `/api/v1/administration/reports/${encodeURIComponent(report.id)}/attachment/${variant}`;
+  }
+
+  function hasEnforcementAction(report: Report): boolean {
+    const draft = enforcementDrafts[report.id];
+    return Boolean(
+      draft &&
+      draft.reason.trim().length >= 3 &&
+      (draft.account_action !== 'none' || draft.message_action !== 'none')
+    );
+  }
+
+  function userIsSuspended(user: User): boolean {
+    return Boolean(
+      user.disabled_at ||
+      (user.suspended_until && new Date(user.suspended_until).getTime() > Date.now())
     );
   }
 
@@ -366,7 +491,7 @@
   }
 
   async function patchUser(user: User): Promise<void> {
-    const disabled = !user.disabled_at;
+    const disabled = !userIsSuspended(user);
     if (!confirm(`${disabled ? 'Disable' : 'Enable'} ${user.username}?`)) return;
     clearFeedback();
     busyAction = `user:${user.id}@${user.origin_domain}`;
@@ -433,6 +558,67 @@
     } catch (caught) {
       showError(caught, 'Could not update the report.');
       await loadSection('reports');
+    } finally {
+      busyAction = '';
+    }
+  }
+
+  async function enforceReport(report: Report): Promise<void> {
+    const draft = enforcementDrafts[report.id];
+    const subject = localReportSubject(report);
+    if (!draft || !subject || !hasEnforcementAction(report)) return;
+    const selected = [
+      accountActionOptions.find((option) => option.value === draft.account_action)?.label,
+      messageActionOptions.find((option) => option.value === draft.message_action)?.label
+    ].filter((label) => label && !label.startsWith('No ') && label !== 'Keep messages');
+    if (
+      !confirm(
+        `Apply to ${subject}?\n\n${selected.join('\n')}${
+          draft.message_action === 'none' ? '' : '\n\nMessage deletion cannot be undone.'
+        }`
+      )
+    )
+      return;
+    clearFeedback();
+    busyAction = `enforce:${report.id}`;
+    try {
+      const result = await api<EnforcementResponse>(
+        `/administration/reports/${report.id}/actions`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            account_action: draft.account_action,
+            message_action: draft.message_action,
+            reason: draft.reason.trim()
+          })
+        }
+      );
+      reports = reports.map((entry) => (entry.id === report.id ? result.report : entry));
+      reportDrafts[report.id] = {
+        status: result.report.status,
+        resolution: result.report.resolution ?? ''
+      };
+      enforcementDrafts[report.id] = {
+        account_action: 'none',
+        message_action: 'none',
+        reason: ''
+      };
+      const deleted = result.enforcement.messages_deleted;
+      const accountResult = result.enforcement.permanently_suspended
+        ? 'Account permanently suspended.'
+        : result.enforcement.suspended_until
+          ? `Account suspended until ${new Date(result.enforcement.suspended_until).toLocaleString()}.`
+          : '';
+      const remoteResult = result.enforcement.messages_requiring_remote_action
+        ? ` ${result.enforcement.messages_requiring_remote_action} message(s) require remote moderation.`
+        : '';
+      notice =
+        `${accountResult}${deleted ? ` ${deleted} message(s) deleted.` : ''}${remoteResult}`.trim();
+      const refreshes = [loadSection('overview'), loadSection('users')];
+      if (can('audit.read')) refreshes.push(loadSection('audit'));
+      await Promise.all(refreshes);
+    } catch (caught) {
+      showError(caught, 'Could not apply the report enforcement action.');
     } finally {
       busyAction = '';
     }
@@ -696,17 +882,21 @@
                         'human'}</small
                     >
                   </div>
-                  <span class:danger-badge={user.disabled_at} class="badge"
-                    >{user.disabled_at ? 'Disabled' : 'Active'}</span
+                  <span class:danger-badge={userIsSuspended(user)} class="badge"
+                    >{user.disabled_at
+                      ? 'Permanently suspended'
+                      : userIsSuspended(user)
+                        ? `Suspended until ${new Date(user.suspended_until!).toLocaleString()}`
+                        : 'Active'}</span
                   >
                   {#if can('users.manage') && user.account_type !== 'bot'}
                     <button
                       type="button"
-                      class:danger-button={user.disabled_at === null}
-                      class:secondary-button={user.disabled_at !== null}
+                      class:danger-button={!userIsSuspended(user)}
+                      class:secondary-button={userIsSuspended(user)}
                       disabled={busyAction === `user:${user.id}@${user.origin_domain}`}
                       onclick={() => void patchUser(user)}
-                      >{user.disabled_at ? 'Enable' : 'Disable'}</button
+                      >{userIsSuspended(user) ? 'Restore access' : 'Suspend permanently'}</button
                     >
                   {/if}
                 </article>
@@ -839,6 +1029,94 @@
                   </dl>
                   <div class="report-body">
                     <p>{report.description ?? 'No reporter note was provided.'}</p>
+                    {#if report.target_type === 'attachment' && report.source !== 'photodna'}
+                      <div class="safety-note attachment-evidence-note">
+                        <Icon name="image" size={19} />
+                        <span>
+                          This report targets one attachment. Its verified metadata and, when
+                          available, a restricted preview appear below.
+                        </span>
+                      </div>
+                      {#if canPreviewReportAttachment(report)}
+                        {@const contentType = attachmentContentType(report) as string}
+                        <div class="report-attachment-preview">
+                          {#if contentType.startsWith('image/')}
+                            <img
+                              use:authenticatedMedia={{
+                                path: reportAttachmentPath(report, 'thumbnail_512'),
+                                contentType
+                              }}
+                              alt="Reported attachment preview"
+                            />
+                          {:else}
+                            <video
+                              use:authenticatedMedia={{
+                                path: reportAttachmentPath(report, 'original'),
+                                contentType
+                              }}
+                              controls
+                              preload="metadata"
+                            >
+                              <track kind="captions" />
+                            </video>
+                          {/if}
+                          <small
+                            >Restricted {report.encryption_mode === 'e2ee_user_disclosed'
+                              ? 'reporter-disclosed plaintext evidence'
+                              : 'preview'} · successful access is recorded in the audit log.</small
+                          >
+                        </div>
+                      {:else if report.encryption_mode === 'e2ee_user_disclosed'}
+                        <small class="disclosure-note">
+                          {report.evidence.disclosed_attachment_scan_status === 'quarantined'
+                            ? 'The disclosed copy was quarantined after a safety match and cannot be rendered.'
+                            : report.evidence.disclosed_attachment_scan_status === 'infected' ||
+                                report.evidence.disclosed_attachment_scan_status === 'rejected'
+                              ? 'The disclosed copy failed safety validation and cannot be rendered.'
+                              : report.evidence.disclosed_attachment_scan_status === 'failed'
+                                ? 'The disclosed copy could not be processed. Follow the media-processing incident procedure.'
+                                : report.evidence.disclosed_attachment_scan_status === 'clean'
+                                  ? 'The disclosed evidence type is not previewable inline.'
+                                  : 'The disclosed evidence is being scanned. Reload this queue shortly.'}
+                        </small>
+                      {:else if report.encryption_mode !== 'e2ee_metadata'}
+                        <small class="disclosure-note">
+                          Preview unavailable here. Remote attachments must be reviewed by their
+                          home instance.
+                        </small>
+                      {/if}
+                      <dl class="match-metadata">
+                        {#each [['Attachment', report.evidence.attachment_ref], ['Uploader', report.evidence.uploader_ref], ['Stored filename', report.evidence.filename], ['Stored content type', report.evidence.content_type], ['Stored size', report.evidence.size], ['Encryption', report.evidence.attachment_encryption_mode], ['Disclosed evidence', report.evidence.disclosed_attachment_ref], ['Disclosed filename', report.evidence.disclosed_filename], ['Disclosed content type', report.evidence.disclosed_content_type], ['Disclosed size', report.evidence.disclosed_size], ['Disclosed scan', report.evidence.disclosed_attachment_scan_status]] as [label, value] (label)}
+                          {#if typeof value === 'string' || typeof value === 'number'}
+                            <div>
+                              <dt>{label}</dt>
+                              <dd>{typeof value === 'number' ? value.toLocaleString() : value}</dd>
+                            </div>
+                          {/if}
+                        {/each}
+                      </dl>
+                      {#if report.encryption_mode === 'e2ee_metadata'}
+                        <small class="disclosure-note">
+                          Encrypted attachment metadata only; no decrypted file, filename, or key
+                          was disclosed.
+                        </small>
+                      {:else if report.encryption_mode === 'e2ee_user_disclosed'}
+                        <small class="disclosure-note">
+                          The reporter explicitly decrypted and uploaded this attachment. The
+                          plaintext evidence is reporter-supplied; the server can scan the uploaded
+                          copy but cannot prove it matches the original ciphertext.
+                        </small>
+                      {/if}
+                      {#if typeof report.evidence.photodna === 'object' && report.evidence.photodna !== null}
+                        <div class="safety-note">
+                          <Icon name="shield" size={19} />
+                          <span>
+                            The disclosed evidence produced a critical PhotoDNA safety match. Its
+                            bytes were quarantined and are not renderable from this queue.
+                          </span>
+                        </div>
+                      {/if}
+                    {/if}
                     {#if typeof report.evidence.content === 'string'}
                       <blockquote>
                         <small
@@ -894,6 +1172,81 @@
                     {/if}
                   </div>
                 </div>
+                {#if can('reports.manage')}
+                  {@const subjectRef = reportSubjectRef(report)}
+                  {@const localSubjectRef = localReportSubject(report)}
+                  {#if localSubjectRef}
+                    <section class="enforcement-panel" aria-label="Report enforcement">
+                      <div class="enforcement-heading">
+                        <div class="panel-icon danger-icon"><Icon name="shield" size={20} /></div>
+                        <div>
+                          <h4>Enforce against {localSubjectRef}</h4>
+                          <p>
+                            Suspend account access and remove messages in rooms this instance
+                            controls. Every action is written to the audit log.
+                          </p>
+                        </div>
+                      </div>
+                      <div class="enforcement-fields">
+                        <label>
+                          <span>Account action</span>
+                          <select
+                            bind:value={enforcementDrafts[report.id].account_action}
+                            disabled={!can('users.manage')}
+                          >
+                            {#each accountActionOptions as option (option.value)}
+                              <option value={option.value}>{option.label}</option>
+                            {/each}
+                          </select>
+                        </label>
+                        <label>
+                          <span>Message action</span>
+                          <select bind:value={enforcementDrafts[report.id].message_action}>
+                            {#each messageActionOptions as option (option.value)}
+                              <option
+                                value={option.value}
+                                disabled={option.value === 'delete_reported' && !report.message_ref}
+                                >{option.label}</option
+                              >
+                            {/each}
+                          </select>
+                        </label>
+                        <label class="enforcement-reason">
+                          <span>Enforcement reason</span>
+                          <textarea
+                            bind:value={enforcementDrafts[report.id].reason}
+                            rows="2"
+                            maxlength="500"
+                            placeholder="Required; visible in the administrative audit trail"
+                          ></textarea>
+                        </label>
+                        <button
+                          type="button"
+                          class="danger-button"
+                          disabled={busyAction === `enforce:${report.id}` ||
+                            !hasEnforcementAction(report)}
+                          onclick={() => void enforceReport(report)}
+                          >{busyAction === `enforce:${report.id}`
+                            ? 'Applying…'
+                            : 'Apply punishment'}</button
+                        >
+                      </div>
+                      <small>
+                        “All messages” means all active messages stored in locally authoritative
+                        rooms. Remote rooms must be handled by their home instance.
+                      </small>
+                    </section>
+                  {:else}
+                    <div class="enforcement-unavailable">
+                      <Icon name="globe" size={18} />
+                      <span>
+                        {subjectRef
+                          ? `The reported account (${subjectRef}) is hosted remotely. Record the review and request action from its home instance.`
+                          : 'This report does not identify a user account that can receive an account or message-history punishment.'}
+                      </span>
+                    </div>
+                  {/if}
+                {/if}
                 <footer class="case-actions">
                   {#if can('reports.manage')}
                     <label
@@ -1145,6 +1498,33 @@
   .safety-note {
     display: flex;
     align-items: center;
+  }
+
+  .attachment-evidence-note {
+    color: var(--text-soft);
+    background: var(--surface-subtle);
+  }
+
+  .report-attachment-preview {
+    display: grid;
+    gap: 0.45rem;
+    width: min(100%, 680px);
+    margin-top: 0.75rem;
+  }
+
+  .report-attachment-preview img,
+  .report-attachment-preview video {
+    width: 100%;
+    max-height: 420px;
+    display: block;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    background: #08090d;
+    object-fit: contain;
+  }
+
+  .report-attachment-preview small {
+    color: var(--text-muted);
   }
 
   .back-link {
@@ -1754,6 +2134,74 @@
     color: var(--warning) !important;
   }
 
+  .enforcement-panel {
+    display: grid;
+    gap: 0.9rem;
+    margin: 0 1.15rem 1.15rem;
+    border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--line));
+    border-radius: 12px;
+    padding: 1rem;
+    background: color-mix(in srgb, var(--danger-soft) 55%, var(--surface-raised));
+  }
+
+  .enforcement-heading {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .enforcement-heading h4,
+  .enforcement-heading p {
+    margin: 0;
+  }
+
+  .enforcement-heading p,
+  .enforcement-panel > small {
+    margin-top: 0.2rem;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+  }
+
+  .danger-icon {
+    flex: 0 0 auto;
+    color: var(--danger);
+    background: var(--danger-soft);
+  }
+
+  .enforcement-fields {
+    display: grid;
+    grid-template-columns: minmax(170px, 0.55fr) minmax(190px, 0.7fr) minmax(250px, 1fr) auto;
+    align-items: end;
+    gap: 0.75rem;
+  }
+
+  .enforcement-fields label {
+    min-width: 0;
+    display: grid;
+    gap: 0.35rem;
+    color: var(--text-soft);
+    font-size: 0.78rem;
+    font-weight: 750;
+  }
+
+  .enforcement-fields textarea {
+    min-height: 2.75rem;
+    resize: vertical;
+  }
+
+  .enforcement-unavailable {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0 1.15rem 1.15rem;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    padding: 0.75rem 0.85rem;
+    color: var(--text-muted);
+    background: var(--surface-subtle);
+    font-size: 0.82rem;
+  }
+
   .safety-note {
     align-items: flex-start;
     gap: 0.65rem;
@@ -1896,6 +2344,19 @@
       grid-template-columns: 1fr;
     }
 
+    .enforcement-fields {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .enforcement-reason {
+      grid-column: 1 / -1;
+    }
+
+    .enforcement-fields button {
+      grid-column: 1 / -1;
+      justify-self: end;
+    }
+
     .case-actions {
       grid-template-columns: 1fr 2fr;
     }
@@ -1983,22 +2444,30 @@
     }
 
     .case-actions,
+    .enforcement-fields,
     .operator-form,
     .policy-form {
       grid-template-columns: 1fr;
     }
 
     .reason-field,
+    .enforcement-reason,
     .policy-form .checkbox-field,
     .case-actions button {
       grid-column: auto;
     }
 
     .case-actions button,
+    .enforcement-fields button,
     .operator-form button,
     .policy-form button {
       width: 100%;
       justify-self: stretch;
+    }
+
+    .enforcement-panel,
+    .enforcement-unavailable {
+      margin-inline: 0.75rem;
     }
   }
 

@@ -43,7 +43,7 @@
   {#if !loaded}<p>Loading reports…</p>
   {:else if reports.length === 0}<section class="empty">
       <h2>No reports</h2>
-      <p>Reports you submit from a message's menu will appear here.</p>
+      <p>Reports you submit from a message or attachment will appear here.</p>
     </section>
   {:else}<div class="reports">
       {#each reports as report (report.id)}<article>

@@ -25,6 +25,7 @@ from app.media.photodna import (
     PhotoDNAFinding,
     PhotoDNAInputRejected,
     photodna_report,
+    photodna_report_values,
     scan_image,
 )
 from app.media.processing import (
@@ -117,6 +118,43 @@ def attachment_photodna_report(attachment: Attachment, finding: PhotoDNAFinding)
         detected_content_type=attachment.detected_content_type,
         content_sha256=attachment.content_sha256,
     )
+
+
+async def update_report_evidence_status(
+    session: AsyncSession,
+    attachment: Attachment,
+    scan_status: str,
+    *,
+    finding: PhotoDNAFinding | None = None,
+) -> None:
+    """Project a disclosed plaintext copy's scan result onto its existing report."""
+
+    report_id = getattr(attachment, "report_id", None)
+    if report_id is None:
+        return
+    report = await session.get(AbuseReport, report_id)
+    if report is None:
+        return
+    evidence = dict(report.evidence)
+    evidence["disclosed_attachment_scan_status"] = scan_status
+    if attachment.detected_content_type is not None:
+        evidence["disclosed_detected_content_type"] = attachment.detected_content_type
+    if finding is not None:
+        if attachment.content_sha256 is None or attachment.detected_content_type is None:
+            raise RuntimeError("PhotoDNA report evidence requires finalized media metadata")
+        values = photodna_report_values(
+            report_id=report.id,
+            attachment_ref=f"{attachment.id}@{attachment.origin_domain}",
+            finding=finding,
+            uploader_ref=f"{attachment.uploader_id}@{attachment.uploader_domain}",
+            message_ref=report.message_ref,
+            purpose="report_evidence",
+            detected_content_type=attachment.detected_content_type,
+            content_sha256=attachment.content_sha256,
+        )
+        evidence["photodna"] = values["evidence"]
+        report.category = "illegal_content"
+    report.evidence = evidence
 
 
 def image_derivatives_are_current(attachment: Attachment) -> bool:
@@ -302,6 +340,7 @@ async def process_attachment_record(
         scan = "clean" if reprocessing else await clamav_scan(data, settings)
         if scan == "infected":
             attachment.scan_status = "infected"
+            await update_report_evidence_status(session, attachment, "infected")
             if attachment.staging_object_key is None:
                 attachment.staging_object_key = attachment.object_key
             await discard_attachment(session, settings, attachment)
@@ -319,6 +358,7 @@ async def process_attachment_record(
                 # retry. The durable marker also prevents legacy reprocessing
                 # from selecting the same deterministic failure forever.
                 attachment.scan_status = "rejected"
+                await update_report_evidence_status(session, attachment, "rejected")
                 if attachment.staging_object_key is None:
                     attachment.staging_object_key = attachment.object_key
                 await discard_attachment(session, settings, attachment)
@@ -328,13 +368,22 @@ async def process_attachment_record(
                 return "rejected"
             if finding is not None:
                 attachment.scan_status = "quarantined"
+                await update_report_evidence_status(
+                    session,
+                    attachment,
+                    "quarantined",
+                    finding=finding,
+                )
                 # This nullable key doubles as the existing durable physical
                 # deletion queue. Reprocessing may discover a match after the
                 # original staging key has already been swept.
                 if attachment.staging_object_key is None:
                     attachment.staging_object_key = attachment.object_key
                 await discard_attachment(session, settings, attachment)
-                if await session.get(AbuseReport, attachment.id) is None:
+                if (
+                    getattr(attachment, "report_id", None) is None
+                    and await session.get(AbuseReport, attachment.id) is None
+                ):
                     session.add(attachment_photodna_report(attachment, finding))
                 await prepare_terminal_commit(attachment)
                 # Commit the durable quarantine and metadata-only report before
@@ -404,6 +453,7 @@ async def process_attachment_record(
         attachment.variants = rendered_variants
         attachment.object_key = final_key
         attachment.scan_status = "clean"
+        await update_report_evidence_status(session, attachment, "clean")
         await session.commit()
         try:
             await storage.delete(settings.media_attachments_bucket, staging_key)
@@ -422,6 +472,7 @@ async def process_attachment_record(
         # for unscannable PhotoDNA input; reserve ``infected`` exclusively for
         # an affirmative ClamAV result.
         attachment.scan_status = "rejected"
+        await update_report_evidence_status(session, attachment, "rejected")
         if attachment.staging_object_key is None:
             attachment.staging_object_key = attachment.object_key
         await discard_attachment(session, settings, attachment)
@@ -435,6 +486,7 @@ async def process_attachment_record(
             log.exception("media_reprocessing_failed", attachment_id=str(attachment_id))
             raise
         attachment.scan_status = "failed"
+        await update_report_evidence_status(session, attachment, "failed")
         await session.commit()
         log.exception("media_processing_failed", attachment_id=str(attachment_id))
         raise
@@ -750,6 +802,7 @@ async def retention_sweep(session: AsyncSession, settings: Settings) -> int:
             .where(
                 Attachment.finalized_at < cutoff,
                 Attachment.message_id.is_(None),
+                Attachment.report_id.is_(None),
                 Attachment.purpose == "attachment",
                 Attachment.deleted_at.is_(None),
             )

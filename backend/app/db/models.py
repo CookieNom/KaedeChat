@@ -162,6 +162,7 @@ class User(Base, FederatedIdMixin, TimestampMixin):
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    suspended_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     profile_version: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
     e2ee_device_generation: Mapped[int] = mapped_column(
         BigInteger, server_default="0", nullable=False
@@ -2229,6 +2230,7 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
     __tablename__ = "attachments"
     message_id: Mapped[int | None] = mapped_column(BigInteger)
     message_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    report_id: Mapped[int | None] = mapped_column(BigInteger)
     uploader_id: Mapped[int] = mapped_column(BigInteger)
     uploader_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     bot_installation_id: Mapped[int | None] = mapped_column(BigInteger)
@@ -2265,6 +2267,7 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
             ["messages.id", "messages.origin_domain"],
             ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(["report_id"], ["abuse_reports.id"], ondelete="RESTRICT"),
         ForeignKeyConstraint(
             ["uploader_id", "uploader_domain"],
             ["users.id", "users.origin_domain"],
@@ -2277,6 +2280,11 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
         CheckConstraint(
             "(message_id IS NULL) = (message_domain IS NULL)",
             name="message_ref_complete",
+        ),
+        CheckConstraint(
+            "report_id IS NULL OR "
+            "(message_id IS NULL AND message_domain IS NULL AND encryption_mode = 'plaintext')",
+            name="report_evidence_is_unbound_plaintext",
         ),
         CheckConstraint("size >= 0", name="nonnegative_size"),
         CheckConstraint(
@@ -2314,6 +2322,7 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
         ),
         CheckConstraint("jsonb_typeof(variants) = 'object'", name="variants_object"),
         UniqueConstraint("asset_binding", name="uq_attachments_asset_binding"),
+        Index("ix_attachments_report_id", "report_id"),
         Index(
             "ix_attachments_pending_gc",
             "upload_expires_at",

@@ -132,6 +132,12 @@
   let reactionPickerOpen = $state(false);
   let reactionViewerOpen = $state(false);
   let reportDialogOpen = $state(false);
+  let attachmentReport = $state<{
+    message: Message;
+    attachment: Attachment;
+    label: string;
+    manifest?: EncryptedFileManifest;
+  } | null>(null);
   let reactionViewerInitialEmoji = $state<string | undefined>(undefined);
   let reactionViewerReturnFocus: HTMLElement | null = null;
   let recentReactionValues = $state<string[]>([]);
@@ -429,6 +435,27 @@
     event.stopPropagation();
     closeMenu(false);
     reportDialogOpen = true;
+  }
+
+  function openAttachmentReport(
+    attachment: Attachment,
+    label: string,
+    event?: MouseEvent,
+    manifest?: EncryptedFileManifest
+  ) {
+    event?.stopPropagation();
+    attachmentReport = { message: presentedMessage, attachment, label, manifest };
+  }
+
+  function attachmentForManifest(manifest: EncryptedFileManifest): Attachment | null {
+    if (!manifest.attachment_id || !manifest.attachment_domain) return null;
+    return (
+      presentedMessage.attachments?.find(
+        (attachment) =>
+          attachment.id === manifest.attachment_id &&
+          attachment.origin_domain === manifest.attachment_domain
+      ) ?? null
+    );
   }
 
   function requestDelete(event: MouseEvent) {
@@ -797,87 +824,106 @@
     {#if !presentedMessage.deleted_at && presentedMessage.attachments?.length}
       <div class="message-attachments">
         {#each presentedMessage.attachments as attachment (`${attachment.id}@${attachment.origin_domain}`)}
-          {#if attachment.encryption_mode === 'e2ee'}
-            <!-- The authenticated decrypted manifest below supplies the real name, type, and key. -->
-          {:else if attachment.scan_status === 'pending'}
-            <span class="attachment-file">Scanning {attachment.filename}…</span>
-          {:else if attachment.scan_status === 'rejected' || attachment.scan_status === 'infected'}
-            <span class="attachment-file">Attachment rejected during server processing</span>
-          {:else if attachment.scan_status === 'failed'}
-            <span class="attachment-file">Attachment processing unavailable</span>
-          {:else if attachment.content_type.startsWith('image/')}
-            {#if mediaFailures[attachmentKey(attachment)]}
-              <div class="attachment-load-error" role="alert">
-                <span>{mediaFailures[attachmentKey(attachment)]}</span>
-                <button type="button" onclick={() => retryMedia(attachment)}>Try again</button>
-              </div>
-            {:else}
-              {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
-                <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- authenticated media is served by the API, not a Svelte route -->
-                <button
-                  class="attachment-preview-button"
-                  type="button"
-                  aria-label={`Open ${attachment.filename}`}
-                  onclick={() => (mediaViewer = attachment)}
-                >
-                  <img
-                    use:authenticatedMedia={{
-                      path: attachmentMediaPath(
-                        attachment.origin_domain,
-                        attachment.id,
-                        'thumbnail_512',
-                        attachment.history_media_url
-                      ),
-                      contentType: attachment.content_type
-                    }}
-                    onerror={(event) => markMediaFailed(attachment, event)}
-                    alt={attachment.filename}
-                    width={attachment.width ?? 512}
-                    height={attachment.height ?? 320}
-                  />
-                </button>
-              {/key}
-            {/if}
-          {:else if attachment.content_type.startsWith('video/')}
-            {#if mediaFailures[attachmentKey(attachment)]}
-              <div class="attachment-load-error" role="alert">
-                <span>{mediaFailures[attachmentKey(attachment)]}</span>
-                <button type="button" onclick={() => retryMedia(attachment)}>Try again</button>
-              </div>
-            {:else}
-              {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
-                <div class="attachment-video">
-                  <video
-                    use:authenticatedMedia={{
-                      path: attachmentMediaPath(
-                        attachment.origin_domain,
-                        attachment.id,
-                        'original',
-                        attachment.history_media_url
-                      ),
-                      contentType: attachment.content_type
-                    }}
-                    onerror={(event) => markMediaFailed(attachment, event)}
-                    controls
-                    playsinline
-                    preload="metadata"
-                  >
-                    <track kind="captions" />
-                  </video>
-                  <button type="button" onclick={() => (mediaViewer = attachment)}
-                    >Open viewer</button
-                  >
-                </div>
-              {/key}
-            {/if}
-          {:else}
-            <button
-              type="button"
-              class="attachment-file"
-              onclick={() => void downloadAttachment(attachment)}
+          {#if attachment.encryption_mode !== 'e2ee'}
+            <div
+              class="attachment-reportable"
+              class:media-reportable={attachment.content_type.startsWith('image/') ||
+                attachment.content_type.startsWith('video/')}
             >
-              📎 {attachment.filename}
-            </button>
+              {#if attachment.scan_status === 'pending'}
+                <span class="attachment-file">Scanning {attachment.filename}…</span>
+              {:else if attachment.scan_status === 'rejected' || attachment.scan_status === 'infected'}
+                <span class="attachment-file">Attachment rejected during server processing</span>
+              {:else if attachment.scan_status === 'failed'}
+                <span class="attachment-file">Attachment processing unavailable</span>
+              {:else if attachment.content_type.startsWith('image/')}
+                {#if mediaFailures[attachmentKey(attachment)]}
+                  <div class="attachment-load-error" role="alert">
+                    <span>{mediaFailures[attachmentKey(attachment)]}</span>
+                    <button type="button" onclick={() => retryMedia(attachment)}>Try again</button>
+                  </div>
+                {:else}
+                  {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
+                    <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- authenticated media is served by the API, not a Svelte route -->
+                    <button
+                      class="attachment-preview-button"
+                      type="button"
+                      aria-label={`Open ${attachment.filename}`}
+                      onclick={() => (mediaViewer = attachment)}
+                    >
+                      <img
+                        use:authenticatedMedia={{
+                          path: attachmentMediaPath(
+                            attachment.origin_domain,
+                            attachment.id,
+                            'thumbnail_512',
+                            attachment.history_media_url
+                          ),
+                          contentType: attachment.content_type
+                        }}
+                        onerror={(event) => markMediaFailed(attachment, event)}
+                        alt={attachment.filename}
+                        width={attachment.width ?? 512}
+                        height={attachment.height ?? 320}
+                      />
+                    </button>
+                  {/key}
+                {/if}
+              {:else if attachment.content_type.startsWith('video/')}
+                {#if mediaFailures[attachmentKey(attachment)]}
+                  <div class="attachment-load-error" role="alert">
+                    <span>{mediaFailures[attachmentKey(attachment)]}</span>
+                    <button type="button" onclick={() => retryMedia(attachment)}>Try again</button>
+                  </div>
+                {:else}
+                  {#key `${attachmentKey(attachment)}:${mediaAttempts[attachmentKey(attachment)] ?? 0}`}
+                    <div class="attachment-video">
+                      <video
+                        use:authenticatedMedia={{
+                          path: attachmentMediaPath(
+                            attachment.origin_domain,
+                            attachment.id,
+                            'original',
+                            attachment.history_media_url
+                          ),
+                          contentType: attachment.content_type
+                        }}
+                        onerror={(event) => markMediaFailed(attachment, event)}
+                        controls
+                        playsinline
+                        preload="metadata"
+                      >
+                        <track kind="captions" />
+                      </video>
+                      <button type="button" onclick={() => (mediaViewer = attachment)}
+                        >Open viewer</button
+                      >
+                    </div>
+                  {/key}
+                {/if}
+              {:else}
+                <button
+                  type="button"
+                  class="attachment-file"
+                  onclick={() => void downloadAttachment(attachment)}
+                >
+                  📎 {attachment.filename}
+                </button>
+              {/if}
+              {#if actionsEnabled && !message.pending && !message.queued}
+                <button
+                  type="button"
+                  class="attachment-report-action"
+                  aria-label={`Report ${attachment.filename}`}
+                  onclick={(event) => openAttachmentReport(attachment, attachment.filename, event)}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 21V4m0 0h11l-2 4 2 4H5" />
+                  </svg>
+                  Report
+                </button>
+              {/if}
+            </div>
           {/if}
         {/each}
       </div>
@@ -888,13 +934,30 @@
     {#if !presentedMessage.deleted_at && presentedMessage.decrypted_attachments?.length}
       <div class="message-attachments encrypted-attachments">
         {#each presentedMessage.decrypted_attachments as manifest (manifest.file_id)}
-          <button
-            type="button"
-            class="attachment-file"
-            onclick={() => void downloadDecryptedAttachment(manifest)}
-          >
-            🔒 {manifest.filename} · {Math.max(1, Math.ceil(manifest.plaintext_size / 1024))} KB
-          </button>
+          {@const encryptedAttachment = attachmentForManifest(manifest)}
+          <div class="attachment-reportable">
+            <button
+              type="button"
+              class="attachment-file"
+              onclick={() => void downloadDecryptedAttachment(manifest)}
+            >
+              🔒 {manifest.filename} · {Math.max(1, Math.ceil(manifest.plaintext_size / 1024))} KB
+            </button>
+            {#if encryptedAttachment && actionsEnabled && !message.pending && !message.queued}
+              <button
+                type="button"
+                class="attachment-report-action"
+                aria-label={`Report ${manifest.filename}`}
+                onclick={(event) =>
+                  openAttachmentReport(encryptedAttachment, manifest.filename, event, manifest)}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 21V4m0 0h11l-2 4 2 4H5" />
+                </svg>
+                Report
+              </button>
+            {/if}
+          </div>
         {/each}
       </div>
       {#if attachmentActionError}
@@ -1209,7 +1272,26 @@
     onSubmitted={() => (feedback = 'Report submitted to Trust & Safety.')}
   />
 {/if}
+{#if attachmentReport}
+  <ReportMessageDialog
+    message={attachmentReport.message}
+    attachment={attachmentReport.attachment}
+    attachmentLabel={attachmentReport.label}
+    attachmentManifest={attachmentReport.manifest}
+    onClose={() => (attachmentReport = null)}
+    onSubmitted={() => (feedback = 'Attachment report submitted to Trust & Safety.')}
+  />
+{/if}
 
 {#if mediaViewer}
-  <MediaViewer attachment={mediaViewer} onClose={() => (mediaViewer = null)} />
+  <MediaViewer
+    attachment={mediaViewer}
+    onClose={() => (mediaViewer = null)}
+    onReport={() => {
+      const attachment = mediaViewer;
+      if (!attachment) return;
+      mediaViewer = null;
+      openAttachmentReport(attachment, attachment.filename);
+    }}
+  />
 {/if}

@@ -10,6 +10,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.account_status import account_is_suspended
 from app.auth.tokens import AccessGrant, AccessTokenStore
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
@@ -81,7 +82,7 @@ async def require_user(
             AuthSession.absolute_expires_at > now,
         )
     )
-    if user is None or user.disabled_at is not None:
+    if user is None or account_is_suspended(user, now=now):
         raise unauthorized()
     cookie_authenticated = bearer_token is None and cookie_token is not None
     if (
