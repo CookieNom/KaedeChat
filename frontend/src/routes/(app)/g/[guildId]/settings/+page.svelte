@@ -25,6 +25,7 @@
   import { PERMISSION_METADATA, Permission } from '$lib/generated/permissions';
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
   import { assetUrl } from '$lib/media/assets';
+  import { moveCrop, resizeCrop, type CropCorner, type NormalizedCrop } from '$lib/media/crop';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
   import {
     browserNotifications,
@@ -219,8 +220,16 @@
   let stickerPreviewUrl = $state('');
   let stickerCropX = $state(0);
   let stickerCropY = $state(0);
-  let stickerCropSize = $state(1);
+  let stickerCropWidth = $state(1);
+  let stickerCropHeight = $state(1);
+  let stickerImageAspect = $state(1);
   let stickerRemoveBackground = $state(false);
+  let stickerCropGesture: {
+    pointerId: number;
+    mode: 'move' | CropCorner;
+    clientX: number;
+    clientY: number;
+  } | null = null;
 
   onDestroy(() => {
     if (stickerPreviewUrl) URL.revokeObjectURL(stickerPreviewUrl);
@@ -1327,8 +1336,92 @@
     stickerPreviewUrl = file ? URL.createObjectURL(file) : '';
     stickerCropX = 0;
     stickerCropY = 0;
-    stickerCropSize = 1;
+    stickerCropWidth = 1;
+    stickerCropHeight = 1;
+    stickerImageAspect = 1;
     stickerRemoveBackground = false;
+  }
+
+  function currentStickerCrop(): NormalizedCrop {
+    return {
+      x: stickerCropX,
+      y: stickerCropY,
+      width: stickerCropWidth,
+      height: stickerCropHeight
+    };
+  }
+
+  function applyStickerCrop(crop: NormalizedCrop) {
+    stickerCropX = crop.x;
+    stickerCropY = crop.y;
+    stickerCropWidth = crop.width;
+    stickerCropHeight = crop.height;
+  }
+
+  function beginStickerCropGesture(
+    event: PointerEvent,
+    mode: 'move' | CropCorner,
+    stopPropagation = false
+  ) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    if (stopPropagation) event.stopPropagation();
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    stickerCropGesture = {
+      pointerId: event.pointerId,
+      mode,
+      clientX: event.clientX,
+      clientY: event.clientY
+    };
+  }
+
+  function moveStickerCropGesture(event: PointerEvent) {
+    const gesture = stickerCropGesture;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return;
+    event.preventDefault();
+    const dx = (event.clientX - gesture.clientX) / bounds.width;
+    const dy = (event.clientY - gesture.clientY) / bounds.height;
+    applyStickerCrop(
+      gesture.mode === 'move'
+        ? moveCrop(currentStickerCrop(), dx, dy)
+        : resizeCrop(currentStickerCrop(), gesture.mode, dx, dy)
+    );
+    gesture.clientX = event.clientX;
+    gesture.clientY = event.clientY;
+  }
+
+  function endStickerCropGesture(event: PointerEvent) {
+    if (stickerCropGesture?.pointerId === event.pointerId) stickerCropGesture = null;
+  }
+
+  function moveStickerCropWithKeyboard(event: KeyboardEvent) {
+    if (event.target !== event.currentTarget) return;
+    const step = event.shiftKey ? 0.05 : 0.01;
+    const delta = {
+      ArrowLeft: [-step, 0],
+      ArrowRight: [step, 0],
+      ArrowUp: [0, -step],
+      ArrowDown: [0, step]
+    }[event.key];
+    if (!delta) return;
+    event.preventDefault();
+    applyStickerCrop(moveCrop(currentStickerCrop(), delta[0], delta[1]));
+  }
+
+  function resizeStickerCropWithKeyboard(event: KeyboardEvent, corner: CropCorner) {
+    const step = event.shiftKey ? 0.05 : 0.01;
+    const delta = {
+      ArrowLeft: [-step, 0],
+      ArrowRight: [step, 0],
+      ArrowUp: [0, -step],
+      ArrowDown: [0, step]
+    }[event.key];
+    if (!delta) return;
+    event.preventDefault();
+    event.stopPropagation();
+    applyStickerCrop(resizeCrop(currentStickerCrop(), corner, delta[0], delta[1]));
   }
 
   async function createSticker(event: SubmitEvent) {
@@ -1359,8 +1452,8 @@
             crop: {
               x: stickerCropX,
               y: stickerCropY,
-              width: stickerCropSize,
-              height: stickerCropSize
+              width: stickerCropWidth,
+              height: stickerCropHeight
             },
             remove_background: stickerRemoveBackground
           })
@@ -3759,48 +3852,68 @@
               </div>
               {#if stickerPreviewUrl}
                 <div class="sticker-editor">
-                  <div class="sticker-crop-preview" aria-label="Sticker crop preview">
-                    <img
-                      src={stickerPreviewUrl}
-                      alt=""
-                      style:width={`${100 / stickerCropSize}%`}
-                      style:left={`${(-stickerCropX / stickerCropSize) * 100}%`}
-                      style:top={`${(-stickerCropY / stickerCropSize) * 100}%`}
-                    />
+                  <div class="sticker-crop-stage">
+                    <div
+                      class="sticker-crop-preview"
+                      role="application"
+                      aria-label="Sticker crop editor"
+                      style:--sticker-image-aspect={String(stickerImageAspect)}
+                      onpointermove={moveStickerCropGesture}
+                      onpointerup={endStickerCropGesture}
+                      onpointercancel={endStickerCropGesture}
+                    >
+                      <img
+                        src={stickerPreviewUrl}
+                        alt="Sticker source"
+                        draggable="false"
+                        onload={(event) => {
+                          const image = event.currentTarget as HTMLImageElement;
+                          stickerImageAspect = image.naturalWidth / image.naturalHeight || 1;
+                        }}
+                      />
+                      <div
+                        class="sticker-crop-selection"
+                        role="button"
+                        aria-label="Crop selection. Drag to move, or use the arrow keys."
+                        tabindex="0"
+                        style:left={`${stickerCropX * 100}%`}
+                        style:top={`${stickerCropY * 100}%`}
+                        style:width={`${stickerCropWidth * 100}%`}
+                        style:height={`${stickerCropHeight * 100}%`}
+                        onpointerdown={(event) => beginStickerCropGesture(event, 'move')}
+                        onkeydown={moveStickerCropWithKeyboard}
+                      >
+                        <span class="crop-grid-line crop-grid-line-v first"></span>
+                        <span class="crop-grid-line crop-grid-line-v second"></span>
+                        <span class="crop-grid-line crop-grid-line-h first"></span>
+                        <span class="crop-grid-line crop-grid-line-h second"></span>
+                        {#each ['nw', 'ne', 'sw', 'se'] as corner (corner)}
+                          <button
+                            class={`crop-handle ${corner}`}
+                            type="button"
+                            aria-label={`Resize crop from ${corner.toUpperCase()} corner`}
+                            onpointerdown={(event) =>
+                              beginStickerCropGesture(event, corner as CropCorner, true)}
+                            onkeydown={(event) =>
+                              resizeStickerCropWithKeyboard(event, corner as CropCorner)}
+                          ></button>
+                        {/each}
+                      </div>
+                    </div>
                   </div>
                   <div class="sticker-crop-controls">
-                    <label
-                      ><span>Crop size</span><input
-                        type="range"
-                        min="0.2"
-                        max="1"
-                        step="0.01"
-                        bind:value={stickerCropSize}
-                        oninput={() => {
-                          stickerCropX = Math.min(stickerCropX, 1 - stickerCropSize);
-                          stickerCropY = Math.min(stickerCropY, 1 - stickerCropSize);
-                        }}
-                      /></label
-                    >
-                    <label
-                      ><span>Horizontal position</span><input
-                        type="range"
-                        min="0"
-                        max={1 - stickerCropSize}
-                        step="0.01"
-                        bind:value={stickerCropX}
-                        disabled={stickerCropSize === 1}
-                      /></label
-                    >
-                    <label
-                      ><span>Vertical position</span><input
-                        type="range"
-                        min="0"
-                        max={1 - stickerCropSize}
-                        step="0.01"
-                        bind:value={stickerCropY}
-                        disabled={stickerCropSize === 1}
-                      /></label
+                    <strong>Crop your sticker</strong>
+                    <p>Drag the box to move it. Drag any corner to resize it.</p>
+                    <small>
+                      Selection: {Math.round(stickerCropWidth * 100)}% × {Math.round(
+                        stickerCropHeight * 100
+                      )}%
+                    </small>
+                    <button
+                      class="secondary-button crop-reset-button"
+                      type="button"
+                      onclick={() => applyStickerCrop({ x: 0, y: 0, width: 1, height: 1 })}
+                      >Reset crop</button
                     >
                     <label class="toggle-row">
                       <input

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
@@ -3061,8 +3062,8 @@ final class _StickersTabState extends State<_StickersTab> {
         file: file,
         cropX: edit.cropX,
         cropY: edit.cropY,
-        cropWidth: edit.cropSize,
-        cropHeight: edit.cropSize,
+        cropWidth: edit.cropWidth,
+        cropHeight: edit.cropHeight,
         removeBackground: edit.removeBackground,
       );
       await _load();
@@ -3084,7 +3085,8 @@ typedef StickerEdit = ({
   String? description,
   double cropX,
   double cropY,
-  double cropSize,
+  double cropWidth,
+  double cropHeight,
   bool removeBackground,
 });
 
@@ -3096,7 +3098,8 @@ Future<StickerEdit?> showStickerEditor(
 }) {
   var name = '';
   var description = '';
-  var cropSize = 1.0;
+  var cropWidth = 1.0;
+  var cropHeight = 1.0;
   var cropX = 0.0;
   var cropY = 0.0;
   var removeBackground = false;
@@ -3132,61 +3135,54 @@ Future<StickerEdit?> showStickerEditor(
                     onChanged: (value) => description = value,
                   ),
                   const SizedBox(height: 12),
-                  Center(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(14),
-                      child: Container(
-                        key: const ValueKey('sticker-crop-preview'),
-                        width: 240,
-                        height: 240,
-                        color: KaedeColors.rail,
-                        child: ClipRect(
-                          child: Stack(
-                            children: [
-                              Positioned(
-                                left: -(cropX / cropSize) * 240,
-                                top: -(cropY / cropSize) * 240,
-                                width: 240 / cropSize,
-                                height: 240 / cropSize,
-                                child: Image.file(file, fit: BoxFit.fill),
-                              ),
-                            ],
+                  _StickerCropper(
+                    file: file,
+                    crop: (
+                      x: cropX,
+                      y: cropY,
+                      width: cropWidth,
+                      height: cropHeight,
+                    ),
+                    onChanged: (crop) => setDialogState(() {
+                      cropX = crop.x;
+                      cropY = crop.y;
+                      cropWidth = crop.width;
+                      cropHeight = crop.height;
+                    }),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    key: const ValueKey('sticker-crop-summary'),
+                    'Selection: ${(cropWidth * 100).round()}% × '
+                    '${(cropHeight * 100).round()}%',
+                    style: const TextStyle(
+                      color: KaedeColors.muted,
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Drag the box to move it. Drag a corner to resize.',
+                          style: const TextStyle(
+                            color: KaedeColors.muted,
+                            fontSize: 12,
                           ),
                         ),
                       ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Text('Crop size: ${(cropSize * 100).round()}%'),
-                  Slider(
-                    key: const ValueKey('sticker-crop-size'),
-                    value: cropSize,
-                    min: .25,
-                    max: 1,
-                    divisions: 75,
-                    onChanged: (value) => setDialogState(() {
-                      cropSize = value;
-                      cropX = cropX.clamp(0, 1 - cropSize).toDouble();
-                      cropY = cropY.clamp(0, 1 - cropSize).toDouble();
-                    }),
-                  ),
-                  const Text('Horizontal position'),
-                  Slider(
-                    key: const ValueKey('sticker-crop-x'),
-                    value: cropX,
-                    max: 1 - cropSize,
-                    onChanged: cropSize == 1
-                        ? null
-                        : (value) => setDialogState(() => cropX = value),
-                  ),
-                  const Text('Vertical position'),
-                  Slider(
-                    key: const ValueKey('sticker-crop-y'),
-                    value: cropY,
-                    max: 1 - cropSize,
-                    onChanged: cropSize == 1
-                        ? null
-                        : (value) => setDialogState(() => cropY = value),
+                      TextButton(
+                        key: const ValueKey('sticker-crop-reset'),
+                        onPressed: () => setDialogState(() {
+                          cropX = 0;
+                          cropY = 0;
+                          cropWidth = 1;
+                          cropHeight = 1;
+                        }),
+                        child: const Text('Reset'),
+                      ),
+                    ],
                   ),
                   SwitchListTile(
                     key: const ValueKey('sticker-remove-background'),
@@ -3221,7 +3217,8 @@ Future<StickerEdit?> showStickerEditor(
                             : description.trim(),
                         cropX: cropX,
                         cropY: cropY,
-                        cropSize: cropSize,
+                        cropWidth: cropWidth,
+                        cropHeight: cropHeight,
                         removeBackground: removeBackground,
                       ))
                   : null,
@@ -3233,6 +3230,362 @@ Future<StickerEdit?> showStickerEditor(
       },
     ),
   );
+}
+
+typedef _NormalizedStickerCrop = ({
+  double x,
+  double y,
+  double width,
+  double height,
+});
+
+enum _StickerCropGesture { move, northwest, northeast, southwest, southeast }
+
+final class _StickerCropper extends StatefulWidget {
+  const _StickerCropper({
+    required this.file,
+    required this.crop,
+    required this.onChanged,
+  });
+
+  final File file;
+  final _NormalizedStickerCrop crop;
+  final ValueChanged<_NormalizedStickerCrop> onChanged;
+
+  @override
+  State<_StickerCropper> createState() => _StickerCropperState();
+}
+
+final class _StickerCropperState extends State<_StickerCropper> {
+  static const _minimumSize = .1;
+  late FileImage _provider;
+  ImageStream? _stream;
+  ImageStreamListener? _listener;
+  var _aspectRatio = 1.0;
+  int? _activePointer;
+  _StickerCropGesture? _gesture;
+
+  @override
+  void initState() {
+    super.initState();
+    _provider = FileImage(widget.file);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _resolveImage();
+  }
+
+  @override
+  void didUpdateWidget(covariant _StickerCropper oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.file.path != widget.file.path) {
+      _stream?.removeListener(_listener!);
+      _stream = null;
+      _provider = FileImage(widget.file);
+      _resolveImage();
+    }
+  }
+
+  void _resolveImage() {
+    if (_stream != null) return;
+    final listener = ImageStreamListener((info, _) {
+      final width = info.image.width;
+      final height = info.image.height;
+      if (!mounted || width <= 0 || height <= 0) return;
+      setState(() => _aspectRatio = width / height);
+    });
+    _listener = listener;
+    _stream = _provider.resolve(createLocalImageConfiguration(context))
+      ..addListener(listener);
+  }
+
+  @override
+  void dispose() {
+    if (_listener case final listener?) _stream?.removeListener(listener);
+    super.dispose();
+  }
+
+  double _clamp(double value, double minimum, double maximum) =>
+      value.clamp(minimum, maximum).toDouble();
+
+  void _beginGesture(PointerDownEvent event, _StickerCropGesture gesture) {
+    _activePointer = event.pointer;
+    _gesture = gesture;
+  }
+
+  void _updateGesture(PointerMoveEvent event, Size size) {
+    if (_activePointer != event.pointer) return;
+    if (_gesture == _StickerCropGesture.move) {
+      _move(event.delta, size);
+    } else if (_gesture case final gesture?) {
+      _resize(gesture, event.delta, size);
+    }
+  }
+
+  void _endGesture(PointerEvent event) {
+    if (_activePointer != event.pointer) return;
+    _activePointer = null;
+    _gesture = null;
+  }
+
+  void _move(Offset delta, Size size) {
+    final crop = widget.crop;
+    widget.onChanged((
+      x: _clamp(crop.x + delta.dx / size.width, 0, 1 - crop.width),
+      y: _clamp(crop.y + delta.dy / size.height, 0, 1 - crop.height),
+      width: crop.width,
+      height: crop.height,
+    ));
+  }
+
+  void _resize(
+    _StickerCropGesture corner,
+    Offset delta,
+    Size size,
+  ) {
+    final crop = widget.crop;
+    final dx = delta.dx / size.width;
+    final dy = delta.dy / size.height;
+    var x = crop.x;
+    var y = crop.y;
+    var width = crop.width;
+    var height = crop.height;
+    if (corner == _StickerCropGesture.northwest ||
+        corner == _StickerCropGesture.southwest) {
+      final right = x + width;
+      x = _clamp(x + dx, 0, right - _minimumSize);
+      width = right - x;
+    } else {
+      width = _clamp(width + dx, _minimumSize, 1 - x);
+    }
+    if (corner == _StickerCropGesture.northwest ||
+        corner == _StickerCropGesture.northeast) {
+      final bottom = y + height;
+      y = _clamp(y + dy, 0, bottom - _minimumSize);
+      height = bottom - y;
+    } else {
+      height = _clamp(height + dy, _minimumSize, 1 - y);
+    }
+    widget.onChanged((x: x, y: y, width: width, height: height));
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+        builder: (context, constraints) {
+          final availableWidth =
+              constraints.maxWidth.isFinite ? constraints.maxWidth : 320.0;
+          final maxWidth = math.min(320.0, availableWidth);
+          final height = math.min(320.0, maxWidth / _aspectRatio);
+          final size = Size(height * _aspectRatio, height);
+          final crop = widget.crop;
+          return Center(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: SizedBox(
+                key: const ValueKey('sticker-crop-preview'),
+                width: size.width,
+                height: size.height,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onHorizontalDragUpdate: (_) {},
+                  onVerticalDragUpdate: (_) {},
+                  child: Listener(
+                    onPointerMove: (event) => _updateGesture(event, size),
+                    onPointerUp: _endGesture,
+                    onPointerCancel: _endGesture,
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: ColoredBox(
+                            color: KaedeColors.rail,
+                            child: Image(image: _provider, fit: BoxFit.fill),
+                          ),
+                        ),
+                        _cropShade(
+                          imageSize: size,
+                          left: 0,
+                          top: 0,
+                          right: 0,
+                          height: crop.y,
+                        ),
+                        _cropShade(
+                          imageSize: size,
+                          left: 0,
+                          top: crop.y + crop.height,
+                          right: 0,
+                          bottom: 0,
+                        ),
+                        _cropShade(
+                          imageSize: size,
+                          left: 0,
+                          top: crop.y,
+                          width: crop.x,
+                          height: crop.height,
+                        ),
+                        _cropShade(
+                          imageSize: size,
+                          left: crop.x + crop.width,
+                          top: crop.y,
+                          right: 0,
+                          height: crop.height,
+                        ),
+                        Positioned(
+                          left: crop.x * size.width,
+                          top: crop.y * size.height,
+                          width: crop.width * size.width,
+                          height: crop.height * size.height,
+                          child: Semantics(
+                            label: 'Crop selection. Drag to move.',
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                Positioned.fill(
+                                  child: Listener(
+                                    key: const ValueKey(
+                                        'sticker-crop-selection'),
+                                    behavior: HitTestBehavior.translucent,
+                                    onPointerDown: (event) => _beginGesture(
+                                      event,
+                                      _StickerCropGesture.move,
+                                    ),
+                                    child: DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        border: Border.all(
+                                          color: Colors.white,
+                                          width: 2,
+                                        ),
+                                        boxShadow: const [
+                                          BoxShadow(
+                                            color: Colors.black54,
+                                            blurRadius: 2,
+                                          ),
+                                        ],
+                                      ),
+                                      child: const _CropGrid(),
+                                    ),
+                                  ),
+                                ),
+                                _cropHandle(
+                                  _StickerCropGesture.northwest,
+                                  size,
+                                ),
+                                _cropHandle(
+                                  _StickerCropGesture.northeast,
+                                  size,
+                                ),
+                                _cropHandle(
+                                  _StickerCropGesture.southwest,
+                                  size,
+                                ),
+                                _cropHandle(
+                                  _StickerCropGesture.southeast,
+                                  size,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      );
+
+  Widget _cropShade({
+    required Size imageSize,
+    required double left,
+    required double top,
+    double? right,
+    double? bottom,
+    double? width,
+    double? height,
+  }) =>
+      Positioned(
+        left: left == 0 ? 0 : left * imageSize.width,
+        top: top == 0 ? 0 : top * imageSize.height,
+        right: right,
+        bottom: bottom,
+        width: width == null ? null : width * imageSize.width,
+        height: height == null ? null : height * imageSize.height,
+        child: const IgnorePointer(
+          child: ColoredBox(color: Color(0x99000000)),
+        ),
+      );
+
+  Widget _cropHandle(
+    _StickerCropGesture corner,
+    Size imageSize,
+  ) {
+    final north = corner == _StickerCropGesture.northwest ||
+        corner == _StickerCropGesture.northeast;
+    final west = corner == _StickerCropGesture.northwest ||
+        corner == _StickerCropGesture.southwest;
+    return Positioned(
+      top: north ? 0 : null,
+      bottom: north ? null : 0,
+      left: west ? 0 : null,
+      right: west ? null : 0,
+      width: 40,
+      height: 40,
+      child: Semantics(
+        button: true,
+        label: 'Resize crop from ${corner.name} corner',
+        child: Listener(
+          key: ValueKey('sticker-crop-handle-${corner.name}'),
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (event) => _beginGesture(event, corner),
+          child: Center(
+            child: Container(
+              width: 15,
+              height: 15,
+              decoration: BoxDecoration(
+                color: KaedeColors.coral,
+                border: Border.all(color: Colors.white, width: 2),
+                borderRadius: BorderRadius.circular(3),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black54, blurRadius: 3),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _CropGrid extends StatelessWidget {
+  const _CropGrid();
+
+  @override
+  Widget build(BuildContext context) => Stack(
+        children: [
+          for (final alignment in const [-1 / 3, 1 / 3]) ...[
+            Align(
+              alignment: Alignment(alignment, 0),
+              child: const VerticalDivider(
+                width: 1,
+                thickness: 1,
+                color: Color(0x66FFFFFF),
+              ),
+            ),
+            Align(
+              alignment: Alignment(0, alignment),
+              child: const Divider(
+                height: 1,
+                thickness: 1,
+                color: Color(0x66FFFFFF),
+              ),
+            ),
+          ],
+        ],
+      );
 }
 
 final class _BotIntegrationsTab extends StatefulWidget {

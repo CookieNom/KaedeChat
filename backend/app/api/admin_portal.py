@@ -62,12 +62,23 @@ from app.db.models import (
     Session,
     User,
 )
-from app.federation.network import normalize_domain
+from app.federation.client import signed_request
+from app.federation.network import (
+    FederationNetworkError,
+    decode_federation_response_json,
+    normalize_domain,
+)
+from app.federation.security import (
+    FederationPrincipal,
+    authenticate_federation,
+    enforce_federation_route_rate_limit,
+)
 from app.media.schemas import AssetCommitRequest, UploadTicketRequest
 from app.media.service import create_upload_ticket, finalize_attachment
 from app.tasks import media_process
 
 router = APIRouter(prefix="/api/v1", tags=["instance administration"])
+federation_router = APIRouter(tags=["report federation"])
 ADMIN_ROLES = {
     "owner",
     "administrator",
@@ -169,6 +180,11 @@ class ReportCreate(BaseModel):
         if self.focused_attachment_ref is not None and self.target_type != "message":
             raise ValueError("focused attachment context requires a message report")
         return self
+
+
+class FederatedReportCreate(ReportCreate):
+    reporter_ref: EntityRef
+    source_report_ref: EntityRef
 
 
 class ReportPatch(BaseModel):
@@ -456,7 +472,8 @@ async def administration_overview(
             statement = statement.where(BotInstallation.status == "active")
         elif name == "open_reports":
             statement = statement.where(
-                AbuseReport.status.not_in(("action_taken", "closed_no_action", "duplicate"))
+                AbuseReport.status.not_in(("action_taken", "closed_no_action", "duplicate")),
+                AbuseReport.evidence["report_authority"].astext.is_(None),
             )
         counts[name] = int(await session.scalar(statement) or 0)
     return counts
@@ -715,6 +732,7 @@ async def create_report(
     evidence: dict[str, object] = {}
     message_ref: str | None = None
     report_encryption_mode = "plaintext"
+    report_authority = settings.domain
     if payload.message_ref is not None:
         message_id, message_domain = payload.message_ref.resolve(settings.domain)
         message = await session.get(Message, (message_id, message_domain))
@@ -734,6 +752,7 @@ async def create_report(
             required_permissions("message.list"),
         )
         message_ref = f"{message.id}@{message.origin_domain}"
+        report_authority = message.channel_domain
         if payload.target_type == "message":
             if payload.target_ref != message_ref:
                 raise HTTPException(status_code=422, detail={"code": "REPORT_TARGET_MISMATCH"})
@@ -795,8 +814,56 @@ async def create_report(
             ):
                 raise HTTPException(status_code=404, detail={"code": "ATTACHMENT_NOT_FOUND"})
             evidence, report_encryption_mode = report_attachment_evidence(message, attachment)
+    report_id = await snowflake.mint()
+    report_status = "submitted"
+    if message_ref is not None and report_authority != settings.domain:
+        outbound = FederatedReportCreate(
+            **payload.model_dump(),
+            reporter_ref=EntityRef(f"{auth.user.id}@{auth.user.origin_domain}"),
+            source_report_ref=EntityRef(f"{report_id}@{settings.domain}"),
+        )
+        try:
+            upstream = await signed_request(
+                session,
+                settings,
+                "POST",
+                report_authority,
+                "/_kaede/v1/reports",
+                payload=outbound.model_dump(mode="json"),
+                max_response_bytes=64 * 1024,
+            )
+        except (FederationNetworkError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "REPORT_AUTHORITY_UNAVAILABLE"},
+            ) from exc
+        if upstream.status_code != 201:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "REPORT_AUTHORITY_REJECTED"},
+            )
+        try:
+            forwarded = decode_federation_response_json(
+                upstream,
+                max_response_bytes=64 * 1024,
+            )
+            if not isinstance(forwarded, dict):
+                raise TypeError
+            forwarded_report_id = int(forwarded["id"])
+        except (FederationNetworkError, KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "REPORT_AUTHORITY_INVALID_RESPONSE"},
+            ) from exc
+        evidence.update(
+            {
+                "report_authority": report_authority,
+                "forwarded_report_id": str(forwarded_report_id),
+            }
+        )
+        report_status = "awaiting_remote"
     report = AbuseReport(
-        id=await snowflake.mint(),
+        id=report_id,
         reporter_id=auth.user.id,
         reporter_domain=auth.user.origin_domain,
         reporter_is_local=True,
@@ -807,6 +874,126 @@ async def create_report(
         message_ref=message_ref,
         evidence=evidence,
         encryption_mode=report_encryption_mode,
+        status=report_status,
+    )
+    session.add(report)
+    await session.commit()
+    return reporter_report_payload(report)
+
+
+@federation_router.post("/_kaede/v1/reports", status_code=201)
+async def create_federated_report(
+    payload: FederatedReportCreate,
+    principal: Annotated[FederationPrincipal, Depends(authenticate_federation)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    redis: Annotated[Redis, Depends(get_redis)],
+    snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, object]:
+    """Receive a user report at the instance authoritative for its channel."""
+
+    if principal.silenced:
+        raise HTTPException(status_code=403, detail={"code": "KAED_FED_INSTANCE_SILENCED"})
+    if payload.target_type != "message" or payload.message_ref is None:
+        raise HTTPException(status_code=422, detail={"code": "KAED_FED_REPORT_TARGET_INVALID"})
+    reporter_id, reporter_domain = payload.reporter_ref.resolve(settings.domain)
+    source_report_id, source_report_domain = payload.source_report_ref.resolve(settings.domain)
+    if reporter_domain != principal.origin or source_report_domain != principal.origin:
+        raise HTTPException(status_code=403, detail={"code": "KAED_FED_REPORTER_ORIGIN_MISMATCH"})
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "abuse-reports",
+        capacity=30,
+        refill_per_minute=5,
+    )
+    source_report_ref = f"{source_report_id}@{source_report_domain}"
+    existing = await session.scalar(
+        select(AbuseReport).where(
+            AbuseReport.source == "user",
+            AbuseReport.reporter_is_local.is_(False),
+            AbuseReport.evidence["source_report_ref"].astext == source_report_ref,
+        )
+    )
+    if existing is not None:
+        return reporter_report_payload(existing)
+    reporter = await session.get(User, (reporter_id, reporter_domain))
+    if (
+        reporter is None
+        or reporter.is_local
+        or reporter.account_type != "human"
+        or reporter.origin_domain != principal.origin
+    ):
+        raise HTTPException(status_code=404, detail={"code": "KAED_FED_REPORTER_NOT_FOUND"})
+    message_id, message_domain = payload.message_ref.resolve(settings.domain)
+    message = await session.get(Message, (message_id, message_domain))
+    if (
+        message is None
+        or message.deleted_at is not None
+        or message.channel_domain != settings.domain
+    ):
+        raise HTTPException(status_code=404, detail={"code": "KAED_FED_REPORT_MESSAGE_NOT_FOUND"})
+    message_ref = f"{message.id}@{message.origin_domain}"
+    if payload.target_ref != message_ref:
+        raise HTTPException(status_code=422, detail={"code": "KAED_FED_REPORT_TARGET_MISMATCH"})
+    access = await load_channel_access(
+        session,
+        settings,
+        reporter,
+        EntityRef(f"{message.channel_id}@{message.channel_domain}"),
+    )
+    await require_channel_permissions(
+        session,
+        redis,
+        access,
+        reporter,
+        required_permissions("message.list"),
+    )
+    attachments = list(
+        await session.scalars(
+            select(Attachment)
+            .where(
+                Attachment.message_id == message.id,
+                Attachment.message_domain == message.origin_domain,
+                Attachment.purpose == "attachment",
+                Attachment.deleted_at.is_(None),
+            )
+            .order_by(Attachment.created_at, Attachment.origin_domain, Attachment.id)
+        )
+    )
+    focused_attachment: Attachment | None = None
+    if payload.focused_attachment_ref is not None:
+        focused_id, focused_domain = payload.focused_attachment_ref.resolve(settings.domain)
+        focused_attachment = next(
+            (
+                item
+                for item in attachments
+                if (item.id, item.origin_domain) == (focused_id, focused_domain)
+            ),
+            None,
+        )
+        if focused_attachment is None:
+            raise HTTPException(status_code=404, detail={"code": "KAED_FED_REPORT_MEDIA_NOT_FOUND"})
+    evidence, encryption_mode = report_message_evidence(
+        message,
+        disclosed_content=payload.disclosed_content,
+        disclosure_acknowledged=payload.disclosure_acknowledged,
+        attachments=attachments,
+        focused_attachment=focused_attachment,
+    )
+    evidence["source_report_ref"] = source_report_ref
+    report = AbuseReport(
+        id=await snowflake.mint(),
+        reporter_id=reporter.id,
+        reporter_domain=reporter.origin_domain,
+        reporter_is_local=False,
+        target_type="message",
+        target_ref=message_ref,
+        category=payload.category,
+        description=payload.description,
+        message_ref=message_ref,
+        evidence=evidence,
+        encryption_mode=encryption_mode,
     )
     session.add(report)
     await session.commit()
@@ -831,6 +1018,60 @@ async def owned_encrypted_media_evidence_report(
     ):
         raise HTTPException(status_code=404, detail={"code": "REPORT_NOT_FOUND"})
     return report
+
+
+def forwarded_report_target(report: AbuseReport) -> tuple[str, int] | None:
+    authority = report.evidence.get("report_authority")
+    report_id = report.evidence.get("forwarded_report_id")
+    if not isinstance(authority, str) or not isinstance(report_id, str):
+        return None
+    try:
+        return normalize_domain(authority), int(report_id)
+    except (FederationNetworkError, ValueError):
+        return None
+
+
+async def federated_encrypted_media_evidence_report(
+    session: AsyncSession,
+    report_id: int,
+    principal: FederationPrincipal,
+    *,
+    for_update: bool,
+) -> tuple[AbuseReport, User]:
+    report = await session.get(AbuseReport, report_id, with_for_update=for_update)
+    if (
+        report is None
+        or report.source != "user"
+        or report.reporter_is_local is not False
+        or report.reporter_domain != principal.origin
+        or report.target_type != "message"
+        or report.evidence.get("attachment_encryption_mode") != "e2ee"
+        or report.encryption_mode not in {"e2ee_metadata", "e2ee_user_disclosed"}
+    ):
+        raise HTTPException(status_code=404, detail={"code": "KAED_FED_REPORT_NOT_FOUND"})
+    reporter = await session.get(User, (report.reporter_id, report.reporter_domain))
+    if reporter is None or reporter.is_local or reporter.account_type != "human":
+        raise HTTPException(status_code=404, detail={"code": "KAED_FED_REPORTER_NOT_FOUND"})
+    return report, reporter
+
+
+def attach_disclosed_evidence(report: AbuseReport, attachment: Attachment) -> None:
+    evidence = dict(report.evidence)
+    evidence.update(
+        {
+            "disclosed_attachment_ref": f"{attachment.id}@{attachment.origin_domain}",
+            "disclosed_filename": attachment.filename,
+            "disclosed_content_type": attachment.content_type,
+            "disclosed_size": attachment.size,
+            "attachment_disclosure": {
+                "source": "reporter_client_decrypted",
+                "reporter_acknowledged": True,
+                "server_verified": False,
+            },
+        }
+    )
+    report.evidence = evidence
+    report.encryption_mode = "e2ee_user_disclosed"
 
 
 @router.post(
@@ -869,6 +1110,42 @@ async def create_report_attachment_evidence_ticket(
         auth,
         for_update=True,
     )
+    forwarded_target = forwarded_report_target(report)
+    if forwarded_target is not None:
+        authority, forwarded_report_id = forwarded_target
+        try:
+            upstream = await signed_request(
+                session,
+                settings,
+                "POST",
+                authority,
+                f"/_kaede/v1/reports/{forwarded_report_id}/attachment-evidence",
+                payload=payload.model_dump(mode="json"),
+                max_response_bytes=64 * 1024,
+            )
+        except (FederationNetworkError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "REPORT_AUTHORITY_UNAVAILABLE"},
+            ) from exc
+        if upstream.status_code != 201:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "REPORT_EVIDENCE_AUTHORITY_REJECTED"},
+            )
+        try:
+            result = decode_federation_response_json(upstream, max_response_bytes=64 * 1024)
+        except FederationNetworkError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "REPORT_AUTHORITY_INVALID_RESPONSE"},
+            ) from exc
+        if not isinstance(result, dict):
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "REPORT_AUTHORITY_INVALID_RESPONSE"},
+            )
+        return result
     existing = await session.scalar(
         select(Attachment)
         .where(
@@ -916,6 +1193,59 @@ async def commit_report_attachment_evidence(
         auth,
         for_update=True,
     )
+    forwarded_target = forwarded_report_target(report)
+    if forwarded_target is not None:
+        authority, forwarded_report_id = forwarded_target
+        try:
+            upstream = await signed_request(
+                session,
+                settings,
+                "PUT",
+                authority,
+                f"/_kaede/v1/reports/{forwarded_report_id}/attachment-evidence",
+                payload=payload.model_dump(mode="json"),
+                max_response_bytes=64 * 1024,
+            )
+        except (FederationNetworkError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "REPORT_AUTHORITY_UNAVAILABLE"},
+            ) from exc
+        if upstream.status_code != 202:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "REPORT_EVIDENCE_AUTHORITY_REJECTED"},
+            )
+        try:
+            result = decode_federation_response_json(upstream, max_response_bytes=64 * 1024)
+            if not isinstance(result, dict):
+                raise TypeError
+            disclosed = result["evidence"]
+            if not isinstance(disclosed, dict):
+                raise TypeError
+            disclosed_ref = disclosed["attachment_ref"]
+        except (FederationNetworkError, KeyError, TypeError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "REPORT_AUTHORITY_INVALID_RESPONSE"},
+            ) from exc
+        if not isinstance(disclosed_ref, str):
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "REPORT_AUTHORITY_INVALID_RESPONSE"},
+            )
+        evidence = dict(report.evidence)
+        evidence["disclosed_attachment_ref"] = disclosed_ref
+        evidence["attachment_disclosure"] = {
+            "source": "reporter_client_decrypted",
+            "reporter_acknowledged": True,
+            "server_verified": False,
+            "stored_by_authority": authority,
+        }
+        report.evidence = evidence
+        report.encryption_mode = "e2ee_user_disclosed"
+        await session.commit()
+        return result
     evidence_attachment = await finalize_attachment(
         session,
         settings,
@@ -928,24 +1258,7 @@ async def commit_report_attachment_evidence(
             status_code=404,
             detail={"code": "REPORT_EVIDENCE_NOT_FOUND"},
         )
-    evidence = dict(report.evidence)
-    evidence.update(
-        {
-            "disclosed_attachment_ref": (
-                f"{evidence_attachment.id}@{evidence_attachment.origin_domain}"
-            ),
-            "disclosed_filename": evidence_attachment.filename,
-            "disclosed_content_type": evidence_attachment.content_type,
-            "disclosed_size": evidence_attachment.size,
-            "attachment_disclosure": {
-                "source": "reporter_client_decrypted",
-                "reporter_acknowledged": True,
-                "server_verified": False,
-            },
-        }
-    )
-    report.evidence = evidence
-    report.encryption_mode = "e2ee_user_disclosed"
+    attach_disclosed_evidence(report, evidence_attachment)
     await session.commit()
     await enqueue_best_effort(
         media_process,
@@ -955,7 +1268,115 @@ async def commit_report_attachment_evidence(
     return {
         "report": reporter_report_payload(report),
         "evidence": {
-            "attachment_ref": evidence["disclosed_attachment_ref"],
+            "attachment_ref": report.evidence["disclosed_attachment_ref"],
+            "scan_status": evidence_attachment.scan_status,
+        },
+    }
+
+
+@federation_router.post(
+    "/_kaede/v1/reports/{report_id}/attachment-evidence",
+    status_code=201,
+)
+async def create_federated_report_attachment_evidence_ticket(
+    report_id: int,
+    payload: ReportAttachmentEvidenceTicketCreate,
+    principal: Annotated[FederationPrincipal, Depends(authenticate_federation)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    redis: Annotated[Redis, Depends(get_redis)],
+    snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, object]:
+    if not payload.disclosure_acknowledged:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "E2EE_ATTACHMENT_DISCLOSURE_REQUIRED"},
+        )
+    if payload.encryption_mode != "plaintext" or payload.encryption_protocol is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "REPORT_EVIDENCE_MUST_BE_PLAINTEXT"},
+        )
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "abuse-report-evidence",
+        capacity=20,
+        refill_per_minute=2,
+    )
+    report, reporter = await federated_encrypted_media_evidence_report(
+        session,
+        report_id,
+        principal,
+        for_update=True,
+    )
+    existing = await session.scalar(
+        select(Attachment)
+        .where(Attachment.report_id == report.id, Attachment.deleted_at.is_(None))
+        .with_for_update()
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "REPORT_EVIDENCE_ALREADY_CREATED"},
+        )
+    evidence_attachment, upload_url = await create_upload_ticket(
+        session,
+        settings,
+        snowflake,
+        reporter,
+        filename=payload.filename,
+        content_type=payload.content_type,
+        size=payload.size,
+        encryption_mode="plaintext",
+        report_id=report.id,
+    )
+    await session.commit()
+    return ticket_payload(evidence_attachment, upload_url)
+
+
+@federation_router.put(
+    "/_kaede/v1/reports/{report_id}/attachment-evidence",
+    status_code=202,
+)
+async def commit_federated_report_attachment_evidence(
+    report_id: int,
+    payload: ReportAttachmentEvidenceCommit,
+    principal: Annotated[FederationPrincipal, Depends(authenticate_federation)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, object]:
+    if not payload.disclosure_acknowledged:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "E2EE_ATTACHMENT_DISCLOSURE_REQUIRED"},
+        )
+    report, reporter = await federated_encrypted_media_evidence_report(
+        session,
+        report_id,
+        principal,
+        for_update=True,
+    )
+    evidence_attachment = await finalize_attachment(
+        session,
+        settings,
+        reporter,
+        int(payload.attachment_id),
+        required_purpose="attachment",
+    )
+    if evidence_attachment.report_id != report.id:
+        raise HTTPException(status_code=404, detail={"code": "REPORT_EVIDENCE_NOT_FOUND"})
+    attach_disclosed_evidence(report, evidence_attachment)
+    await session.commit()
+    await enqueue_best_effort(
+        media_process,
+        evidence_attachment.id,
+        evidence_attachment.origin_domain,
+    )
+    return {
+        "report": reporter_report_payload(report),
+        "evidence": {
+            "attachment_ref": report.evidence["disclosed_attachment_ref"],
             "scan_status": evidence_attachment.scan_status,
         },
     }
@@ -987,7 +1408,7 @@ async def list_reports(
     status: str | None = Query(default=None, max_length=24),
 ) -> list[dict[str, object]]:
     principal.require("reports.read")
-    statement = select(AbuseReport)
+    statement = select(AbuseReport).where(AbuseReport.evidence["report_authority"].astext.is_(None))
     if status:
         statement = statement.where(AbuseReport.status == status)
     reports = list(await session.scalars(statement.order_by(AbuseReport.id.desc()).limit(500)))

@@ -44,6 +44,20 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.byKey(const ValueKey('sticker-crop-preview')), findsOneWidget);
+    final southeast =
+        find.byKey(const ValueKey('sticker-crop-handle-southeast'));
+    await tester.ensureVisible(southeast);
+    await tester.drag(southeast, const Offset(-60, -50));
+    await tester.pump();
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('sticker-crop-summary')))
+          .data,
+      isNot('Selection: 100% × 100%'),
+    );
+    final selection = find.byKey(const ValueKey('sticker-crop-selection'));
+    await tester.drag(selection, const Offset(20, 15));
+    await tester.pump();
     await tester.enterText(
         find.byKey(const ValueKey('sticker-name')), 'party_blob');
     final removeBackground =
@@ -59,7 +73,10 @@ void main() {
 
     expect(result?.name, 'party_blob');
     expect(result?.removeBackground, isTrue);
-    expect(result?.cropSize, 1);
+    expect(result?.cropWidth, lessThan(1));
+    expect(result?.cropHeight, lessThan(1));
+    expect(result?.cropX, greaterThan(0));
+    expect(result?.cropY, greaterThan(0));
     expect(tester.takeException(), isNull);
   });
 

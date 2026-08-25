@@ -162,8 +162,11 @@ context, run `nginx -t`, and reload nginx yourself. The internal edge stays on
 the selected `127.0.0.1` port, so it does not conflict with an existing nginx
 listener on 80/443.
 
-For external S3, keep all three buckets private and configure provider CORS for
-browser `PUT`, `GET`, and `HEAD` requests from the exact Kaede HTTPS origin.
+For external S3, keep all three buckets private. Configure `GET` and `HEAD` CORS
+for the exact Kaede HTTPS origin. The attachment bucket's browser `PUT` rule
+must accept any HTTPS origin because a remote guild member can explicitly
+disclose E2EE report evidence directly to the guild's moderation authority;
+the short-lived presigned URL remains the upload authorization.
 
 For voice, choose whether to keep an existing port set, let setup pick an
 available set, or enter all five host ports manually. Each LiveKit deployment

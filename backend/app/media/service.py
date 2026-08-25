@@ -118,9 +118,49 @@ async def create_upload_ticket(
     if size <= 0 or size > settings.media_max_attachment_bytes:
         raise HTTPException(status_code=413, detail={"code": "ATTACHMENT_TOO_LARGE"})
     declared_type = normalize_declared_type(content_type)
-    if bot_installation is None:
+    remote_report_evidence = report_id is not None and (
+        user.origin_domain != settings.domain or not user.is_local
+    )
+    usage: UserStorageUsage | BotInstallation | None
+    if remote_report_evidence:
+        usage = None
+        pending_query = (
+            select(func.count())
+            .select_from(Attachment)
+            .where(
+                Attachment.uploader_id == user.id,
+                Attachment.uploader_domain == user.origin_domain,
+                Attachment.report_id.is_not(None),
+            )
+        )
+        pending_bytes = int(
+            await session.scalar(
+                select(func.coalesce(func.sum(Attachment.size), 0)).where(
+                    Attachment.uploader_id == user.id,
+                    Attachment.uploader_domain == user.origin_domain,
+                    Attachment.report_id.is_not(None),
+                    Attachment.finalized_at.is_(None),
+                    Attachment.deleted_at.is_(None),
+                    Attachment.upload_expires_at > func.now(),
+                )
+            )
+            or 0
+        )
+        bytes_used = int(
+            await session.scalar(
+                select(func.coalesce(func.sum(Attachment.size), 0)).where(
+                    Attachment.uploader_id == user.id,
+                    Attachment.uploader_domain == user.origin_domain,
+                    Attachment.report_id.is_not(None),
+                    Attachment.finalized_at.is_not(None),
+                    Attachment.deleted_at.is_(None),
+                )
+            )
+            or 0
+        )
+    elif bot_installation is None:
         human_usage = await locked_usage(session, settings, user)
-        usage: UserStorageUsage | BotInstallation = human_usage
+        usage = human_usage
         pending_query = (
             select(func.count())
             .select_from(Attachment)
@@ -180,7 +220,7 @@ async def create_upload_ticket(
     session.add(attachment)
     if isinstance(usage, UserStorageUsage):
         usage.pending_bytes += size
-    else:
+    elif isinstance(usage, BotInstallation):
         usage.media_pending_bytes += size
     await session.flush()
     try:
@@ -238,9 +278,40 @@ async def finalize_attachment(
         stored_type = ""
     if stored_type != attachment.content_type:
         raise HTTPException(status_code=400, detail={"code": "UPLOAD_TYPE_MISMATCH"})
-    if attachment.bot_installation_id is None:
+    remote_report_evidence = attachment.report_id is not None and (
+        user.origin_domain != settings.domain or not user.is_local
+    )
+    usage: UserStorageUsage | BotInstallation | None
+    if remote_report_evidence:
+        usage = None
+        pending_bytes = int(
+            await session.scalar(
+                select(func.coalesce(func.sum(Attachment.size), 0)).where(
+                    Attachment.uploader_id == user.id,
+                    Attachment.uploader_domain == user.origin_domain,
+                    Attachment.report_id.is_not(None),
+                    Attachment.finalized_at.is_(None),
+                    Attachment.deleted_at.is_(None),
+                    Attachment.upload_expires_at > func.now(),
+                )
+            )
+            or 0
+        )
+        bytes_used = int(
+            await session.scalar(
+                select(func.coalesce(func.sum(Attachment.size), 0)).where(
+                    Attachment.uploader_id == user.id,
+                    Attachment.uploader_domain == user.origin_domain,
+                    Attachment.report_id.is_not(None),
+                    Attachment.finalized_at.is_not(None),
+                    Attachment.deleted_at.is_(None),
+                )
+            )
+            or 0
+        )
+    elif attachment.bot_installation_id is None:
         human_usage = await locked_usage(session, settings, user)
-        usage: UserStorageUsage | BotInstallation = human_usage
+        usage = human_usage
         pending_bytes = human_usage.pending_bytes
         bytes_used = human_usage.bytes_used
     else:
@@ -257,7 +328,7 @@ async def finalize_attachment(
     if isinstance(usage, UserStorageUsage):
         usage.pending_bytes -= attachment.size
         usage.bytes_used += attachment.size
-    else:
+    elif isinstance(usage, BotInstallation):
         usage.media_pending_bytes -= attachment.size
         usage.media_bytes_used += attachment.size
     attachment.finalized_at = now

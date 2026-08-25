@@ -19,6 +19,7 @@ List<String> messageAttachmentIds(Iterable<EntityRef> attachments) =>
 Map<String, Object?> messageReportRequestData(
   EntityRef message, {
   required String category,
+  EntityRef? focusedAttachment,
   String? description,
   String? disclosedContent,
   bool disclosureAcknowledged = false,
@@ -27,6 +28,8 @@ Map<String, Object?> messageReportRequestData(
       'target_type': 'message',
       'target_ref': message.wire,
       'message_ref': message.wire,
+      if (focusedAttachment != null)
+        'focused_attachment_ref': focusedAttachment.wire,
       'category': category,
       if (description?.trim().isNotEmpty == true)
         'description': description!.trim(),
@@ -757,9 +760,10 @@ final class KaedeRepository {
   Future<void> deleteMessage(EntityRef channel, EntityRef message) =>
       api.sendJson('DELETE',
           '/api/v1/channels/${channel.wire}/messages/${message.wire}');
-  Future<void> reportMessage(
+  Future<Map<String, Object?>> reportMessage(
     EntityRef message, {
     required String category,
+    EntityRef? focusedAttachment,
     String? description,
     String? disclosedContent,
     bool disclosureAcknowledged = false,
@@ -770,10 +774,54 @@ final class KaedeRepository {
         data: messageReportRequestData(
           message,
           category: category,
+          focusedAttachment: focusedAttachment,
           description: description,
           disclosedContent: disclosedContent,
           disclosureAcknowledged: disclosureAcknowledged,
         ),
+      );
+
+  Future<Map<String, Object?>> createReportAttachmentEvidenceTicket(
+    String reportId, {
+    required String filename,
+    required String contentType,
+    required int size,
+  }) =>
+      api.sendJson(
+        'POST',
+        '/api/v1/reports/${Uri.encodeComponent(reportId)}/attachment-evidence',
+        data: <String, Object?>{
+          'filename': filename,
+          'content_type': contentType,
+          'size': size,
+          'disclosure_acknowledged': true,
+        },
+      );
+
+  Future<void> uploadReportAttachmentEvidence(
+    Map<String, Object?> ticket,
+    File file, {
+    required String contentType,
+    void Function(int sent, int total)? onProgress,
+  }) =>
+      api.putPresignedFile(
+        ticket['upload_url']! as String,
+        file,
+        contentType: contentType,
+        onProgress: onProgress,
+      );
+
+  Future<Map<String, Object?>> commitReportAttachmentEvidence(
+    String reportId, {
+    required String attachmentId,
+  }) =>
+      api.sendJson(
+        'PUT',
+        '/api/v1/reports/${Uri.encodeComponent(reportId)}/attachment-evidence',
+        data: <String, Object?>{
+          'attachment_id': attachmentId,
+          'disclosure_acknowledged': true,
+        },
       );
 
   Future<List<Map<String, Object?>>> myReports() =>

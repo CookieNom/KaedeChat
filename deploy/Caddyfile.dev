@@ -35,10 +35,13 @@ beta.localhost {
 
 media.alpha.localhost {
 	header {
-		Access-Control-Allow-Origin "https://alpha.localhost:{$KAEDE_DEV_HTTPS_PORT}"
 		Access-Control-Allow-Methods "GET, HEAD, PUT, OPTIONS"
 		Access-Control-Allow-Headers "Content-Type"
 	}
+	@media_upload method PUT OPTIONS
+	header @media_upload Access-Control-Allow-Origin "*"
+	@media_read method GET HEAD
+	header @media_read Access-Control-Allow-Origin "https://alpha.localhost:{$KAEDE_DEV_HTTPS_PORT}"
 	@cors_preflight method OPTIONS
 	respond @cors_preflight 204
 	reverse_proxy alpha-garage:3900
@@ -46,10 +49,13 @@ media.alpha.localhost {
 
 media.beta.localhost {
 	header {
-		Access-Control-Allow-Origin "https://beta.localhost:{$KAEDE_DEV_HTTPS_PORT}"
 		Access-Control-Allow-Methods "GET, HEAD, PUT, OPTIONS"
 		Access-Control-Allow-Headers "Content-Type"
 	}
+	@media_upload method PUT OPTIONS
+	header @media_upload Access-Control-Allow-Origin "*"
+	@media_read method GET HEAD
+	header @media_read Access-Control-Allow-Origin "https://beta.localhost:{$KAEDE_DEV_HTTPS_PORT}"
 	@cors_preflight method OPTIONS
 	respond @cors_preflight 204
 	reverse_proxy beta-garage:3900

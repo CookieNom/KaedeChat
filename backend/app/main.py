@@ -16,6 +16,7 @@ from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.admin import router as admin_router
+from app.api.admin_portal import federation_router as report_federation_router
 from app.api.admin_portal import router as admin_portal_router
 from app.api.applications import federation_router as bot_install_federation_router
 from app.api.applications import router as applications_router
@@ -121,6 +122,7 @@ app = FastAPI(
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(admin_portal_router)
+app.include_router(report_federation_router)
 app.include_router(applications_router)
 app.include_router(bot_install_federation_router)
 app.include_router(bots_router)

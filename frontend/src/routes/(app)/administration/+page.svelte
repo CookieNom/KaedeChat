@@ -728,7 +728,15 @@
     }
   }
 
-  onMount(() => void loadAdministration());
+  onMount(() => {
+    void loadAdministration();
+    const reportRefresh = window.setInterval(() => {
+      if (view === 'reports' && me && !loading.reports && !document.hidden) {
+        void loadSection('reports');
+      }
+    }, 15_000);
+    return () => window.clearInterval(reportRefresh);
+  });
 </script>
 
 <svelte:head><title>Instance Administration · Kaede Chat</title></svelte:head>

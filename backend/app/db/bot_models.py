@@ -516,7 +516,7 @@ class AbuseReport(Base, TimestampMixin):
         CheckConstraint("source IN ('user','photodna')", name="abuse_report_source_value"),
         CheckConstraint(
             "(source = 'user' AND reporter_id IS NOT NULL AND reporter_domain IS NOT NULL "
-            "AND reporter_is_local) OR (source = 'photodna' AND reporter_id IS NULL "
+            "AND reporter_is_local IS NOT NULL) OR (source = 'photodna' AND reporter_id IS NULL "
             "AND reporter_domain IS NULL AND reporter_is_local IS NULL "
             "AND target_type = 'attachment' AND category = 'illegal_content' "
             "AND encryption_mode = 'plaintext')",
@@ -540,6 +540,12 @@ class AbuseReport(Base, TimestampMixin):
             name="abuse_report_status_value",
         ),
         Index("ix_abuse_reports_queue", "status", "created_at"),
+        Index(
+            "uq_abuse_reports_federated_source_ref",
+            text("(evidence ->> 'source_report_ref')"),
+            unique=True,
+            postgresql_where=text("source = 'user' AND reporter_is_local = false"),
+        ),
         Index(
             "uq_abuse_reports_photodna_target",
             "source",

@@ -23,6 +23,7 @@ from app.api.admin_portal import (
 )
 from app.db.bot_models import AbuseReport
 from app.db.models import Attachment, MediaTombstoneSource, Message, User
+from app.federation.security import FederationPrincipal
 from app.media.jobs import update_report_evidence_status
 from app.media.photodna import PhotoDNAFinding, PhotoDNAMatchFlag
 
@@ -499,6 +500,7 @@ async def test_create_message_report_bundles_attachment_metadata(
 
         async def commit(self) -> None:
             assert self.added is not None
+            self.added.status = "submitted"
             self.added.created_at = timestamp
             self.added.updated_at = timestamp
 
@@ -529,6 +531,178 @@ async def test_create_message_report_bundles_attachment_metadata(
     assert session.added.evidence["attachment_ref"] == "9@alpha.localhost"
     bundled = cast(list[dict[str, Any]], session.added.evidence["attachments"])
     assert bundled[0]["content_type"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_remote_guild_message_report_is_forwarded_to_channel_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timestamp = datetime(2026, 8, 25, 15, tzinfo=UTC)
+    reporter = cast(
+        User,
+        SimpleNamespace(
+            id=4,
+            origin_domain="alpha.localhost",
+            is_local=True,
+            account_type="human",
+        ),
+    )
+    message = cast(
+        Message,
+        SimpleNamespace(
+            id=1,
+            origin_domain="gamma.localhost",
+            author_id=7,
+            author_domain="gamma.localhost",
+            channel_id=2,
+            channel_domain="beta.localhost",
+            content="report this remote-guild message",
+            e2ee=None,
+            deleted_at=None,
+            created_at=timestamp,
+        ),
+    )
+
+    class ForwardingSession:
+        def __init__(self) -> None:
+            self.added: AbuseReport | None = None
+
+        async def get(self, model: type[object], _key: object) -> object | None:
+            return message if model is Message else None
+
+        async def scalars(self, _statement: object) -> list[Attachment]:
+            return []
+
+        def add(self, report: AbuseReport) -> None:
+            self.added = report
+
+        async def commit(self) -> None:
+            assert self.added is not None
+            self.added.created_at = timestamp
+            self.added.updated_at = timestamp
+
+    session = ForwardingSession()
+    send = AsyncMock(return_value=SimpleNamespace(status_code=201))
+    monkeypatch.setattr(admin_portal, "signed_request", send)
+    monkeypatch.setattr(
+        admin_portal,
+        "decode_federation_response_json",
+        lambda *_args, **_kwargs: {"id": "987"},
+    )
+    monkeypatch.setattr(admin_portal, "enforce_keyed_rate_limit", AsyncMock())
+    monkeypatch.setattr(admin_portal, "load_channel_access", AsyncMock(return_value=object()))
+    monkeypatch.setattr(admin_portal, "require_channel_permissions", AsyncMock(return_value=0))
+
+    result = await admin_portal.create_report(
+        ReportCreate(
+            target_type="message",
+            target_ref="1@gamma.localhost",
+            message_ref="1@gamma.localhost",
+            category="harassment",
+        ),
+        Response(),
+        cast(Any, SimpleNamespace(user=reporter)),
+        cast(Any, session),
+        cast(Any, object()),
+        cast(Any, ReportSnowflake()),
+        cast(Any, SimpleNamespace(domain="alpha.localhost")),
+    )
+
+    assert result["status"] == "awaiting_remote"
+    assert session.added is not None
+    assert session.added.evidence["report_authority"] == "beta.localhost"
+    assert session.added.evidence["forwarded_report_id"] == "987"
+    assert send.await_args.args[3:5] == ("beta.localhost", "/_kaede/v1/reports")
+    assert send.await_args.kwargs["payload"]["reporter_ref"] == "4@alpha.localhost"
+
+
+@pytest.mark.asyncio
+async def test_channel_authority_stores_forwarded_report_from_remote_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timestamp = datetime(2026, 8, 25, 15, tzinfo=UTC)
+    reporter = cast(
+        User,
+        SimpleNamespace(
+            id=4,
+            origin_domain="alpha.localhost",
+            is_local=False,
+            account_type="human",
+        ),
+    )
+    message = cast(
+        Message,
+        SimpleNamespace(
+            id=1,
+            origin_domain="gamma.localhost",
+            author_id=7,
+            author_domain="gamma.localhost",
+            channel_id=2,
+            channel_domain="beta.localhost",
+            content="authority-visible evidence",
+            e2ee=None,
+            deleted_at=None,
+            created_at=timestamp,
+        ),
+    )
+
+    class AuthoritySession:
+        def __init__(self) -> None:
+            self.added: AbuseReport | None = None
+
+        async def scalar(self, _statement: object) -> object | None:
+            return None
+
+        async def get(self, model: type[object], key: object, **_kwargs: object) -> object | None:
+            if model is User and key == (4, "alpha.localhost"):
+                return reporter
+            if model is Message and key == (1, "gamma.localhost"):
+                return message
+            return None
+
+        async def scalars(self, _statement: object) -> list[Attachment]:
+            return []
+
+        def add(self, report: AbuseReport) -> None:
+            self.added = report
+
+        async def commit(self) -> None:
+            assert self.added is not None
+            self.added.status = "submitted"
+            self.added.created_at = timestamp
+            self.added.updated_at = timestamp
+
+    session = AuthoritySession()
+    monkeypatch.setattr(
+        admin_portal,
+        "enforce_federation_route_rate_limit",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(admin_portal, "load_channel_access", AsyncMock(return_value=object()))
+    monkeypatch.setattr(admin_portal, "require_channel_permissions", AsyncMock(return_value=0))
+
+    result = await admin_portal.create_federated_report(
+        admin_portal.FederatedReportCreate(
+            target_type="message",
+            target_ref="1@gamma.localhost",
+            message_ref="1@gamma.localhost",
+            reporter_ref="4@alpha.localhost",
+            source_report_ref="123@alpha.localhost",
+            category="harassment",
+        ),
+        FederationPrincipal(origin="alpha.localhost", key_id="key"),
+        cast(Any, session),
+        cast(Any, object()),
+        cast(Any, ReportSnowflake()),
+        cast(Any, SimpleNamespace(domain="beta.localhost")),
+    )
+
+    assert result["status"] == "submitted"
+    assert session.added is not None
+    assert session.added.reporter_is_local is False
+    assert session.added.reporter_domain == "alpha.localhost"
+    assert session.added.evidence["source_report_ref"] == "123@alpha.localhost"
+    assert session.added.evidence["content"] == "authority-visible evidence"
 
 
 @pytest.mark.asyncio
@@ -806,6 +980,61 @@ async def test_reporter_can_create_plaintext_evidence_ticket_only_with_consent(
     assert cast(dict[str, Any], raised.value.detail)["code"] == (
         "E2EE_ATTACHMENT_DISCLOSURE_REQUIRED"
     )
+
+
+@pytest.mark.asyncio
+async def test_remote_report_evidence_upload_is_prepared_by_channel_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = encrypted_attachment_report()
+    report.target_type = "message"
+    report.reporter_is_local = True
+    report.evidence.update(
+        {
+            "report_authority": "beta.localhost",
+            "forwarded_report_id": "908",
+        }
+    )
+    reporter = cast(
+        User,
+        SimpleNamespace(id=4, origin_domain="alpha.localhost", is_local=True),
+    )
+    send = AsyncMock(return_value=SimpleNamespace(status_code=201))
+    create_ticket = AsyncMock()
+    monkeypatch.setattr(admin_portal, "signed_request", send)
+    monkeypatch.setattr(admin_portal, "create_upload_ticket", create_ticket)
+    monkeypatch.setattr(admin_portal, "enforce_keyed_rate_limit", AsyncMock())
+    monkeypatch.setattr(
+        admin_portal,
+        "decode_federation_response_json",
+        lambda *_args, **_kwargs: {
+            "id": "81",
+            "upload_url": "https://authority-upload.invalid",
+        },
+    )
+
+    result = await admin_portal.create_report_attachment_evidence_ticket(
+        44,
+        ReportAttachmentEvidenceTicketCreate(
+            filename="evidence.jpg",
+            content_type="image/jpeg",
+            size=2048,
+            disclosure_acknowledged=True,
+        ),
+        Response(),
+        cast(Any, SimpleNamespace(user=reporter)),
+        cast(Any, EvidenceUploadSession(report)),
+        cast(Any, object()),
+        cast(Any, ReportSnowflake()),
+        cast(Any, SimpleNamespace(domain="alpha.localhost")),
+    )
+
+    assert result["id"] == "81"
+    assert send.await_args.args[3:5] == (
+        "beta.localhost",
+        "/_kaede/v1/reports/908/attachment-evidence",
+    )
+    create_ticket.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -233,9 +233,21 @@ bool encryptedReportEvidenceAvailable(KaedeMessage message) =>
 bool canSubmitMessageReport(
   KaedeMessage message, {
   required bool disclosureAcknowledged,
+  bool requiresAttachmentDisclosure = false,
+  bool attachmentDisclosureAvailable = true,
 }) =>
-    message.e2ee == null ||
-    (encryptedReportEvidenceAvailable(message) && disclosureAcknowledged);
+    (message.e2ee == null ||
+        (encryptedReportEvidenceAvailable(message) &&
+            disclosureAcknowledged)) &&
+    (!requiresAttachmentDisclosure ||
+        (attachmentDisclosureAvailable && disclosureAcknowledged));
+
+typedef _ReportAttachment = Future<void> Function(
+  KaedeMessage message,
+  KaedeAttachment attachment,
+  Map<String, Object?>? manifest,
+  File? decryptedFile,
+);
 
 const _automaticHistoryLoadThreshold = 320.0;
 const _defaultRecentReactions = <String>['❤️', '😂', '👍', '🔥'];
@@ -1028,6 +1040,17 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                               onMenu: detached
                                   ? null
                                   : () => _showMessageActions(message),
+                              onReportAttachment: detached ||
+                                      message.authorRef == state.user?.ref
+                                  ? null
+                                  : (reportedMessage, attachment, manifest,
+                                          decryptedFile) =>
+                                      _reportMessageDialog(
+                                        reportedMessage,
+                                        attachment: attachment,
+                                        attachmentManifest: manifest,
+                                        decryptedAttachment: decryptedFile,
+                                      ),
                               onOpenThread: message.thread == null
                                   ? null
                                   : () => ref
@@ -2507,7 +2530,12 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     );
   }
 
-  Future<void> _reportMessageDialog(KaedeMessage message) async {
+  Future<void> _reportMessageDialog(
+    KaedeMessage message, {
+    KaedeAttachment? attachment,
+    Map<String, Object?>? attachmentManifest,
+    File? decryptedAttachment,
+  }) async {
     const categories = <String, String>{
       'spam': 'Spam',
       'harassment': 'Harassment',
@@ -2524,13 +2552,30 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     var category = 'spam';
     var disclose = false;
     var submitting = false;
+    var activity = '';
+    var uploadProgress = 0.0;
+    String? createdReportId;
+    Map<String, Object?>? evidenceTicket;
+    var evidenceUploaded = false;
+    File? ownedEvidenceFile;
     final encryptedEvidenceAvailable =
         encryptedReportEvidenceAvailable(message);
+    final focusedAttachment = attachment != null;
+    final requiresAttachmentDisclosure = attachmentManifest != null;
+    final attachmentDisclosureAvailable = !requiresAttachmentDisclosure ||
+        decryptedAttachment != null ||
+        ('${attachmentManifest['attachment_id']}' == attachment!.ref.id.value &&
+            '${attachmentManifest['attachment_domain']}' ==
+                attachment.ref.domain.value);
+    final requiresDisclosure =
+        message.e2ee != null || requiresAttachmentDisclosure;
+    final attachmentLabel =
+        '${attachmentManifest?['filename'] ?? attachment?.filename ?? 'Attachment'}';
     final description = TextEditingController();
     try {
       await showDialog<void>(
         context: context,
-        barrierDismissible: !submitting,
+        barrierDismissible: false,
         builder: (dialogContext) => StatefulBuilder(
           builder: (context, setDialogState) => AlertDialog(
             title: const Text('Report message'),
@@ -2539,28 +2584,65 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (message.e2ee != null) ...[
+                  if (focusedAttachment) ...[
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        attachment.contentType.startsWith('video/')
+                            ? Icons.movie_outlined
+                            : attachment.contentType.startsWith('image/')
+                                ? Icons.image_outlined
+                                : Icons.attach_file_rounded,
+                      ),
+                      title: Text(attachmentLabel),
+                      subtitle: Text(
+                        '${attachmentManifest?['content_type'] ?? attachment.contentType} · '
+                        '${formatAttachmentSize((attachmentManifest?['plaintext_size'] as num?)?.toInt() ?? attachment.size)}',
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                  ],
+                  if (requiresAttachmentDisclosure) ...[
+                    Text(
+                      !attachmentDisclosureAvailable
+                          ? 'This encrypted attachment is not available on this device yet. Wait for it to decrypt, then try again.'
+                          : message.e2ee != null && !encryptedEvidenceAvailable
+                              ? 'The selected attachment is available, but the encrypted message text has not decrypted on this device. Wait for it to decrypt, then try again.'
+                              : 'Reporting shares the complete message and uploads an unencrypted copy of $attachmentLabel to the channel’s moderation authority. Encryption keys and other messages are never sent.',
+                    ),
+                  ] else if (message.e2ee != null) ...[
                     Text(
                       encryptedEvidenceAvailable
-                          ? 'This message is end-to-end encrypted. Reporting shares the decrypted message evidence shown on this device with this instance’s Trust & Safety team. Attachment-only messages have empty disclosed text and can still be reported. Encryption keys, decrypted file contents, and other messages are not sent.'
+                          ? 'This message is end-to-end encrypted. Reporting shares the decrypted message text shown on this device and metadata for all of its attachments with the channel’s moderation authority. Attachment-only messages have empty disclosed text and can still be reported. Encryption keys and decrypted file contents are not sent unless an attachment is selected directly.'
                           : 'This encrypted message has not decrypted on this device. Wait for its authenticated message evidence to decrypt, then try again.',
                     ),
+                  ] else if (focusedAttachment)
+                    const Text(
+                      'This reports the complete message and all of its attachments. The selected attachment will be highlighted for moderators.',
+                    )
+                  else
+                    const Text(
+                      'The message text and metadata for all of its attachments will be sent to the channel’s moderation authority.',
+                    ),
+                  if (requiresDisclosure) ...[
                     const SizedBox(height: 12),
                     CheckboxListTile(
                       contentPadding: EdgeInsets.zero,
                       value: disclose,
-                      onChanged: submitting || !encryptedEvidenceAvailable
+                      onChanged: submitting ||
+                              (message.e2ee != null &&
+                                  !encryptedEvidenceAvailable) ||
+                              !attachmentDisclosureAvailable
                           ? null
                           : (value) =>
                               setDialogState(() => disclose = value == true),
-                      title: const Text(
-                        'I understand the decrypted message evidence will be disclosed.',
+                      title: Text(
+                        requiresAttachmentDisclosure
+                            ? 'I understand the decrypted message and selected file will be disclosed unencrypted.'
+                            : 'I understand the decrypted message text will be disclosed.',
                       ),
                     ),
-                  ] else
-                    const Text(
-                      'The message text and basic context will be sent to this instance’s Trust & Safety team.',
-                    ),
+                  ],
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     initialValue: category,
@@ -2587,6 +2669,22 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                       labelText: 'Additional details (optional)',
                     ),
                   ),
+                  if (submitting) ...[
+                    const SizedBox(height: 8),
+                    LinearProgressIndicator(
+                      value: activity == 'Uploading decrypted evidence…'
+                          ? uploadProgress
+                          : null,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      activity,
+                      style: const TextStyle(
+                        color: KaedeColors.muted,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -2601,23 +2699,85 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                         !canSubmitMessageReport(
                           message,
                           disclosureAcknowledged: disclose,
+                          requiresAttachmentDisclosure:
+                              requiresAttachmentDisclosure,
+                          attachmentDisclosureAvailable:
+                              attachmentDisclosureAvailable,
                         )
                     ? null
                     : () async {
                         setDialogState(() => submitting = true);
                         try {
-                          await ref
+                          final repository = ref
                               .read(mobileControllerProvider.notifier)
-                              .repository
-                              .reportMessage(
-                                message.ref,
-                                category: category,
-                                description: description.text,
-                                disclosedContent: message.e2ee == null
-                                    ? null
-                                    : message.content,
-                                disclosureAcknowledged: disclose,
+                              .repository;
+                          var evidenceFile = decryptedAttachment;
+                          if (requiresAttachmentDisclosure &&
+                              evidenceFile == null) {
+                            setDialogState(() =>
+                                activity = 'Decrypting selected attachment…');
+                            final directory = await getTemporaryDirectory();
+                            ownedEvidenceFile = File(
+                              '${directory.path}/kaede-report-${attachment!.ref.id.value}-${DateTime.now().microsecondsSinceEpoch}.evidence',
+                            );
+                            evidenceFile = await downloadEncryptedFile(
+                              repository: repository,
+                              manifest: attachmentManifest,
+                              destination: ownedEvidenceFile!,
+                              historyMediaUrl: attachment.historyMediaUrl,
+                            );
+                          }
+                          if (createdReportId == null) {
+                            setDialogState(() => activity = 'Creating report…');
+                            final created = await repository.reportMessage(
+                              message.ref,
+                              category: category,
+                              focusedAttachment: attachment?.ref,
+                              description: description.text,
+                              disclosedContent:
+                                  message.e2ee == null ? null : message.content,
+                              disclosureAcknowledged: disclose,
+                            );
+                            createdReportId = '${created['id']}';
+                          }
+                          if (requiresAttachmentDisclosure) {
+                            final filename =
+                                '${attachmentManifest['filename'] ?? attachmentLabel}';
+                            final contentType =
+                                '${attachmentManifest['content_type'] ?? 'application/octet-stream'}';
+                            evidenceTicket ??= await repository
+                                .createReportAttachmentEvidenceTicket(
+                              createdReportId!,
+                              filename: filename,
+                              contentType: contentType,
+                              size: await evidenceFile!.length(),
+                            );
+                            if (!evidenceUploaded) {
+                              setDialogState(() {
+                                activity = 'Uploading decrypted evidence…';
+                                uploadProgress = 0;
+                              });
+                              await repository.uploadReportAttachmentEvidence(
+                                evidenceTicket!,
+                                evidenceFile!,
+                                contentType: contentType,
+                                onProgress: (sent, total) {
+                                  if (!dialogContext.mounted || total <= 0) {
+                                    return;
+                                  }
+                                  setDialogState(
+                                      () => uploadProgress = sent / total);
+                                },
                               );
+                              evidenceUploaded = true;
+                            }
+                            setDialogState(
+                                () => activity = 'Finalizing evidence…');
+                            await repository.commitReportAttachmentEvidence(
+                              createdReportId!,
+                              attachmentId: '${evidenceTicket!['id']}',
+                            );
+                          }
                           if (dialogContext.mounted) {
                             Navigator.pop(dialogContext);
                           }
@@ -2629,12 +2789,17 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                           }
                         } on Object catch (error) {
                           if (dialogContext.mounted) {
-                            setDialogState(() => submitting = false);
+                            setDialogState(() {
+                              submitting = false;
+                              activity = '';
+                            });
                             ScaffoldMessenger.of(dialogContext).showSnackBar(
                               SnackBar(
                                 content: Text(userFacingError(
                                   error,
-                                  summary: 'Could not submit the report',
+                                  summary: createdReportId == null
+                                      ? 'Could not submit the report'
+                                      : 'The report was submitted, but its decrypted attachment evidence could not be added',
                                 )),
                               ),
                             );
@@ -2649,6 +2814,14 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
       );
     } finally {
       description.dispose();
+      final evidence = ownedEvidenceFile;
+      if (evidence != null && await evidence.exists()) {
+        try {
+          await evidence.delete();
+        } on FileSystemException {
+          // The operating system will remove the temporary file later.
+        }
+      }
     }
   }
 }
@@ -3729,6 +3902,7 @@ final class _MessageTile extends StatelessWidget {
       this.onAddReaction,
       this.onAuthorTap,
       this.onOpenThread,
+      this.onReportAttachment,
       this.referenced,
       this.onJump});
   final KaedeMessage message;
@@ -3741,6 +3915,7 @@ final class _MessageTile extends StatelessWidget {
   final VoidCallback? onAddReaction;
   final VoidCallback? onAuthorTap;
   final VoidCallback? onOpenThread;
+  final _ReportAttachment? onReportAttachment;
   final VoidCallback? onJump;
 
   void _openMenu() {
@@ -3907,6 +4082,15 @@ final class _MessageTile extends StatelessWidget {
                       attachment: attachment,
                       encryptedManifest:
                           _encryptedManifestFor(displayedMessage, attachment),
+                      onReport: onReportAttachment == null
+                          ? null
+                          : (selected, manifest, decryptedFile) =>
+                              onReportAttachment!(
+                                displayedMessage,
+                                selected,
+                                manifest,
+                                decryptedFile,
+                              ),
                     ),
                   if (!deleted)
                     if (message.thread case final thread?)
@@ -4319,9 +4503,15 @@ final class _AttachmentCard extends ConsumerStatefulWidget {
   const _AttachmentCard({
     required this.attachment,
     this.encryptedManifest,
+    this.onReport,
   });
   final KaedeAttachment attachment;
   final Map<String, Object?>? encryptedManifest;
+  final Future<void> Function(
+    KaedeAttachment attachment,
+    Map<String, Object?>? manifest,
+    File? decryptedFile,
+  )? onReport;
 
   @override
   ConsumerState<_AttachmentCard> createState() => _AttachmentCardState();
@@ -4975,6 +5165,13 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (widget.onReport != null)
+              ListTile(
+                leading: const Icon(Icons.flag_outlined),
+                title: const Text('Report message'),
+                subtitle: const Text('Include this attachment as context'),
+                onTap: () => Navigator.pop(context, 'report'),
+              ),
             ListTile(
               leading: const Icon(Icons.link_rounded),
               title: const Text('Copy media link'),
@@ -4992,7 +5189,16 @@ final class _AttachmentCardState extends ConsumerState<_AttachmentCard> {
         ),
       ),
     );
-    if (action != 'copy' || !mounted) return;
+    if (!mounted) return;
+    if (action == 'report') {
+      await widget.onReport?.call(
+        widget.attachment,
+        widget.encryptedManifest,
+        _file,
+      );
+      return;
+    }
+    if (action != 'copy') return;
     final controller = ref.read(mobileControllerProvider.notifier);
     final instance = controller.api.tokens?.instance.value;
     if (instance == null) return;

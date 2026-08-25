@@ -367,9 +367,12 @@ void main() {
       final payload = messageReportRequestData(
         attachmentOnly.ref,
         category: 'illegal_content',
+        focusedAttachment: EntityRef.parse('99@alpha.example'),
         disclosedContent: attachmentOnly.content,
         disclosureAcknowledged: true,
       );
+      expect(
+          payload, containsPair('focused_attachment_ref', '99@alpha.example'));
       expect(payload, containsPair('disclosed_content', ''));
       expect(payload, containsPair('disclosure_acknowledged', true));
 
@@ -381,6 +384,29 @@ void main() {
       );
       expect(unavailablePayload, isNot(contains('disclosed_content')));
       expect(unavailablePayload, isNot(contains('disclosure_acknowledged')));
+    });
+
+    test('requires consent and availability for selected E2EE attachment', () {
+      final attachmentOnly = encryptedMessage('');
+
+      expect(
+        canSubmitMessageReport(
+          attachmentOnly,
+          disclosureAcknowledged: true,
+          requiresAttachmentDisclosure: true,
+          attachmentDisclosureAvailable: false,
+        ),
+        isFalse,
+      );
+      expect(
+        canSubmitMessageReport(
+          attachmentOnly,
+          disclosureAcknowledged: true,
+          requiresAttachmentDisclosure: true,
+          attachmentDisclosureAvailable: true,
+        ),
+        isTrue,
+      );
     });
   });
 

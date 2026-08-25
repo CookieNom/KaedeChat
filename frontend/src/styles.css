@@ -5413,7 +5413,7 @@ progress {
 
 .sticker-editor {
   display: grid;
-  grid-template-columns: minmax(160px, 240px) minmax(220px, 1fr);
+  grid-template-columns: minmax(280px, 440px) minmax(220px, 1fr);
   align-items: center;
   gap: 1.25rem;
   padding: 1rem;
@@ -5422,11 +5422,25 @@ progress {
   background: var(--surface-subtle);
 }
 
-.sticker-crop-preview {
-  position: relative;
-  aspect-ratio: 1;
+.sticker-crop-stage {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
   overflow: hidden;
+  padding: 0.75rem;
   border-radius: 12px;
+  background: var(--surface-raised);
+}
+
+.sticker-crop-preview {
+  --sticker-image-aspect: 1;
+
+  position: relative;
+  width: min(100%, calc(360px * var(--sticker-image-aspect)));
+  max-height: 360px;
+  aspect-ratio: var(--sticker-image-aspect);
+  overflow: hidden;
+  border-radius: 8px;
   background-color: #eee;
   background-image:
     linear-gradient(45deg, #ccc 25%, transparent 25%),
@@ -5439,13 +5453,114 @@ progress {
     8px -8px,
     -8px 0;
   background-size: 16px 16px;
+  touch-action: none;
+  user-select: none;
 }
 
 .sticker-crop-preview img {
   position: absolute;
-  height: auto;
-  max-width: none;
-  object-fit: cover;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  user-select: none;
+}
+
+.sticker-crop-selection {
+  position: absolute;
+  z-index: 1;
+  border: 2px solid white;
+  cursor: move;
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 75%),
+    0 0 0 9999px rgb(0 0 0 / 58%);
+  outline: none;
+  touch-action: none;
+}
+
+.sticker-crop-selection:focus-visible {
+  border-color: var(--accent-text);
+  box-shadow:
+    0 0 0 3px var(--accent-soft),
+    0 0 0 9999px rgb(0 0 0 / 58%);
+}
+
+.crop-grid-line {
+  position: absolute;
+  background: rgb(255 255 255 / 42%);
+  pointer-events: none;
+}
+
+.crop-grid-line-v {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.crop-grid-line-h {
+  right: 0;
+  left: 0;
+  height: 1px;
+}
+
+.crop-grid-line-v.first {
+  left: 33.333%;
+}
+
+.crop-grid-line-v.second {
+  left: 66.666%;
+}
+
+.crop-grid-line-h.first {
+  top: 33.333%;
+}
+
+.crop-grid-line-h.second {
+  top: 66.666%;
+}
+
+.crop-handle {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  touch-action: none;
+}
+
+.crop-handle::after {
+  position: absolute;
+  inset: 7px;
+  border: 2px solid white;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 70%);
+  content: '';
+}
+
+.crop-handle.nw {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+.crop-handle.ne {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
+}
+
+.crop-handle.sw {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
+}
+
+.crop-handle.se {
+  right: 0;
+  bottom: 0;
+  cursor: nwse-resize;
 }
 
 .sticker-crop-controls {
@@ -5453,11 +5568,24 @@ progress {
   gap: 0.75rem;
 }
 
-.sticker-crop-controls > label:not(.toggle-row) {
-  display: grid;
-  grid-template-columns: 150px minmax(0, 1fr);
-  align-items: center;
-  gap: 0.75rem;
+.sticker-crop-controls > p,
+.sticker-crop-controls > small {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.crop-reset-button {
+  justify-self: start;
+}
+
+@media (max-width: 720px) {
+  .sticker-editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sticker-crop-stage {
+    min-height: 220px;
+  }
 }
 
 .sticker-management-grid {

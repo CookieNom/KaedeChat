@@ -52,6 +52,7 @@
   import ReactionPicker from './ReactionPicker.svelte';
   import ReactionViewer from './ReactionViewer.svelte';
   import ReportMessageDialog from './ReportMessageDialog.svelte';
+  import Toast from './Toast.svelte';
 
   let {
     message,
@@ -128,6 +129,7 @@
   let confirmingDelete = $state(false);
   let deleteConfirmationButton = $state<HTMLButtonElement | null>(null);
   let feedback = $state('');
+  let reportNotice = $state('');
   let mediaViewer = $state<Attachment | null>(null);
   let reactionPickerOpen = $state(false);
   let reactionViewerOpen = $state(false);
@@ -472,6 +474,11 @@
       reportDialogOpen = true;
     }
     contextAttachment = null;
+  }
+
+  function reportSubmitted() {
+    feedback = 'Report submitted to Trust & Safety.';
+    reportNotice = feedback;
   }
 
   function attachmentForManifest(manifest: EncryptedFileManifest): Attachment | null {
@@ -1282,7 +1289,7 @@
   <ReportMessageDialog
     {message}
     onClose={() => (reportDialogOpen = false)}
-    onSubmitted={() => (feedback = 'Report submitted to Trust & Safety.')}
+    onSubmitted={reportSubmitted}
   />
 {/if}
 {#if attachmentReport}
@@ -1292,8 +1299,13 @@
     attachmentLabel={attachmentReport.label}
     attachmentManifest={attachmentReport.manifest}
     onClose={() => (attachmentReport = null)}
-    onSubmitted={() => (feedback = 'Message report submitted to Trust & Safety.')}
+    onSubmitted={reportSubmitted}
   />
+{/if}
+{#if reportNotice}
+  <div use:portal>
+    <Toast message={reportNotice} onDismiss={() => (reportNotice = '')} />
+  </div>
 {/if}
 
 {#if mediaViewer}
