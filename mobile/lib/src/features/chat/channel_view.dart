@@ -1149,7 +1149,6 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 compact: MediaQuery.sizeOf(context).width <= 360,
                 canAttach: channel.type == ChannelType.dm ||
                     channel.allows(Permission.attachFiles),
-                gifsAllowed: composerAllowsGifs(channel),
                 onNotifyChanged: (value) =>
                     setState(() => _notifyReply = value),
                 onCancelReply: () => setState(() => _reply = null),
@@ -1160,11 +1159,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 onMore: () => _showComposerActions(channel),
                 onAttach: () =>
                     _runComposerAction(channel, ComposerAction.attach),
-                onEmoji: () =>
-                    _runComposerAction(channel, ComposerAction.emoji),
-                onSticker: () =>
-                    _runComposerAction(channel, ComposerAction.sticker),
-                onGif: () => _runComposerAction(channel, ComposerAction.gif),
+                onMedia: () =>
+                    _runComposerAction(channel, ComposerAction.media),
                 onSend: _send,
               ),
             ),
@@ -1566,7 +1562,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
         }
         await _pickFiles();
         break;
-      case ComposerAction.emoji:
+      case ComposerAction.media:
         final state = ref.read(mobileControllerProvider);
         final recent = await _recentReactions(state.user?.ref);
         if (!mounted ||
@@ -1574,40 +1570,27 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
                 channel.ref) {
           return;
         }
-        final emoji = await showComposerEmojiPicker(
+        final selection = await showComposerMediaPicker(
           context,
           repository: ref.read(mobileControllerProvider.notifier).repository,
           channel: channel,
           categories: _reactionEmojiCategories,
           recent: recent,
+          gifsAllowed: composerAllowsGifs(channel),
         );
-        if (!mounted || emoji == null) return;
+        if (!mounted || selection == null) return;
         if (ref.read(mobileControllerProvider).activeChannel?.ref !=
             channel.ref) {
           return;
         }
-        _insertComposerText(emoji);
-        break;
-      case ComposerAction.sticker:
-        final sticker = await showComposerStickerPicker(
-          context,
-          repository: ref.read(mobileControllerProvider.notifier).repository,
-          channel: channel,
-        );
-        if (!mounted || sticker == null) return;
-        await _sendSticker(channel, sticker);
-        break;
-      case ComposerAction.gif:
-        if (!composerAllowsGifs(channel)) {
-          _showGifUnavailable();
-          return;
+        switch (selection) {
+          case ComposerEmojiSelection(:final value):
+            _insertComposerText(value);
+          case ComposerStickerSelection(:final sticker):
+            await _sendSticker(channel, sticker);
+          case ComposerGifSelection(:final gif):
+            await _sendGif(channel, gif);
         }
-        final gif = await showComposerGifPicker(
-          context,
-          repository: ref.read(mobileControllerProvider.notifier).repository,
-        );
-        if (!mounted || gif == null) return;
-        await _sendGif(channel, gif);
         break;
     }
   }
@@ -5475,15 +5458,12 @@ final class _Composer extends StatelessWidget {
       required this.slowModeRemaining,
       required this.compact,
       required this.canAttach,
-      required this.gifsAllowed,
       required this.onNotifyChanged,
       required this.onCancelReply,
       required this.onRemoveUpload,
       required this.onMore,
       required this.onAttach,
-      required this.onEmoji,
-      required this.onSticker,
-      required this.onGif,
+      required this.onMedia,
       required this.onSend});
   final TextEditingController controller;
   final FocusNode focusNode;
@@ -5494,19 +5474,16 @@ final class _Composer extends StatelessWidget {
   final bool sending;
   final Duration slowModeRemaining;
 
-  /// Narrow phones collapse the attachment, emoji and GIF entry points into a
-  /// single sheet so the text field keeps a usable width.
+  /// Narrow phones collapse attachment and media entry points into a single
+  /// sheet so the text field keeps a usable width.
   final bool compact;
   final bool canAttach;
-  final bool gifsAllowed;
   final ValueChanged<bool> onNotifyChanged;
   final VoidCallback onCancelReply;
   final ValueChanged<_PendingUpload> onRemoveUpload;
   final VoidCallback onMore;
   final VoidCallback onAttach;
-  final VoidCallback onEmoji;
-  final VoidCallback onSticker;
-  final VoidCallback onGif;
+  final VoidCallback onMedia;
   final VoidCallback onSend;
 
   @override
@@ -5577,7 +5554,7 @@ final class _Composer extends StatelessWidget {
                   _ComposerButton(
                     icon: Icons.add_rounded,
                     tooltip: compact
-                        ? 'Add files, emoji, or GIF'
+                        ? 'Add files, emoji, stickers, or GIF'
                         : canAttach
                             ? 'Attach files'
                             : 'Attachments are not allowed here',
@@ -5617,24 +5594,8 @@ final class _Composer extends StatelessWidget {
                   if (!compact)
                     _ComposerButton(
                       icon: Icons.emoji_emotions_outlined,
-                      tooltip: 'Emoji',
-                      onPressed: sending ? null : onEmoji,
-                    ),
-                  if (!compact)
-                    _ComposerButton(
-                      icon: Icons.sticky_note_2_outlined,
-                      tooltip: 'Stickers',
-                      onPressed: sending ? null : onSticker,
-                    ),
-                  if (!compact)
-                    _ComposerButton(
-                      icon: Icons.gif_box_outlined,
-                      tooltip: gifsAllowed
-                          ? 'GIFs'
-                          : 'GIF search is unavailable in encrypted '
-                              'conversations',
-                      onPressed: sending ? null : onGif,
-                      muted: !gifsAllowed,
+                      tooltip: 'GIFs, stickers, and emoji',
+                      onPressed: sending ? null : onMedia,
                     ),
                   _ComposerSend(
                     controller: controller,
@@ -5660,14 +5621,12 @@ final class _ComposerButton extends StatelessWidget {
     required this.tooltip,
     required this.onPressed,
     this.size = 21,
-    this.muted = false,
   });
 
   final IconData icon;
   final String tooltip;
   final VoidCallback? onPressed;
   final double size;
-  final bool muted;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -5679,7 +5638,7 @@ final class _ComposerButton extends StatelessWidget {
           constraints: const BoxConstraints.tightFor(width: 40, height: 40),
           padding: EdgeInsets.zero,
           style: IconButton.styleFrom(
-            foregroundColor: muted ? KaedeColors.muted : KaedeColors.textSoft,
+            foregroundColor: KaedeColors.textSoft,
             shape: const CircleBorder(),
           ),
           icon: Icon(icon, size: size),

@@ -125,7 +125,6 @@
   import { memberRoleColor } from '$lib/chat/members';
   import EmojiPicker from '$lib/components/EmojiPicker.svelte';
   import GifPicker from '$lib/components/GifPicker.svelte';
-  import StickerPicker from '$lib/components/StickerPicker.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import MessageRow from '$lib/components/MessageRow.svelte';
   import MessageSearch from '$lib/components/MessageSearch.svelte';
@@ -257,7 +256,6 @@
   let featureController: AbortController | null = null;
   let emojiPickerOpen = $state(false);
   let availableEmojis = $state<CustomEmoji[]>([]);
-  let stickerPickerOpen = $state(false);
   let availableStickers = $state<GuildSticker[]>([]);
   let unicodeEmojis = $state<EmojiOption[]>([]);
   let emojiCatalogLoading = false;
@@ -2817,7 +2815,6 @@
 
   function chooseSticker(value: string) {
     if (busy || !channelReady || !channel || !canSendMessages || editingMessage) return;
-    stickerPickerOpen = false;
     emojiPickerOpen = false;
     gifPickerOpen = false;
     void send(pendingMessageSend(value, [], []));
@@ -5703,7 +5700,6 @@
                     onclick={() => {
                       gifPickerOpen = !gifPickerOpen;
                       emojiPickerOpen = false;
-                      stickerPickerOpen = false;
                     }}>GIF</button
                   >
                 {/if}
@@ -5713,26 +5709,13 @@
                     class:active={emojiPickerOpen}
                     type="button"
                     disabled={busy || !channelReady || !channel || !canSendMessages}
-                    aria-label="Choose an emoji"
+                    aria-label="Choose an emoji or sticker"
+                    title="Emoji and stickers"
                     aria-expanded={emojiPickerOpen}
                     onclick={() => {
                       emojiPickerOpen = !emojiPickerOpen;
                       gifPickerOpen = false;
-                      stickerPickerOpen = false;
                     }}>☺</button
-                  >
-                  <button
-                    class="sticker-button"
-                    class:active={stickerPickerOpen}
-                    type="button"
-                    disabled={busy || !channelReady || !channel || !canSendMessages}
-                    aria-label="Choose a sticker"
-                    aria-expanded={stickerPickerOpen}
-                    onclick={() => {
-                      stickerPickerOpen = !stickerPickerOpen;
-                      emojiPickerOpen = false;
-                      gifPickerOpen = false;
-                    }}>▱</button
                   >
                 {/if}
                 {#if nativeThreadComposer || selectedApplicationCommand}
@@ -5794,15 +5777,10 @@
               {#if emojiPickerOpen}
                 <EmojiPicker
                   customEmojis={pickerEmojis}
-                  onSelect={chooseEmoji}
-                  onClose={() => (emojiPickerOpen = false)}
-                />
-              {/if}
-              {#if stickerPickerOpen}
-                <StickerPicker
                   stickers={pickerStickers}
-                  onSelect={chooseSticker}
-                  onClose={() => (stickerPickerOpen = false)}
+                  onSelect={chooseEmoji}
+                  onStickerSelect={chooseSticker}
+                  onClose={() => (emojiPickerOpen = false)}
                 />
               {/if}
               {#if uploads.length && !editingMessage}

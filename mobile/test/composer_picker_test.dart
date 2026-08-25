@@ -238,7 +238,7 @@ void main() {
     });
   });
 
-  testWidgets('add sheet explains unavailable E2EE GIF search', (tester) async {
+  testWidgets('add sheet keeps all mobile media in one action', (tester) async {
     await tester.pumpWidget(MaterialApp(
       theme: kaedeTheme(),
       home: Scaffold(
@@ -261,16 +261,136 @@ void main() {
     final attach = tester.widget<ListTile>(
       find.byKey(const ValueKey('composer-action-attach')),
     );
-    final gif = tester.widget<ListTile>(
-      find.byKey(const ValueKey('composer-action-gif')),
-    );
     expect(attach.enabled, isFalse);
-    expect(gif.enabled, isFalse);
     expect(
-      find.text('Unavailable in end-to-end encrypted conversations'),
+      find.text('GIFs are unavailable here; stickers and emoji work'),
       findsOneWidget,
     );
-    expect(find.text('Choose Unicode or guild emoji'), findsOneWidget);
+    expect(find.text('GIFs, stickers, and emoji'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('composer-action-media')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('composer-action-gif')), findsNothing);
+    expect(find.byKey(const ValueKey('composer-action-sticker')), findsNothing);
+  });
+
+  testWidgets('mobile media pane switches between GIFs, stickers, and emoji',
+      (tester) async {
+    final channel = KaedeChannel(
+      ref: EntityRef.parse('30@home.example'),
+      guildRef: EntityRef.parse('20@home.example'),
+      type: ChannelType.text,
+      position: 0,
+      permissions: BigInt.zero,
+    );
+    await tester.pumpWidget(MaterialApp(
+      theme: kaedeTheme(),
+      home: Scaffold(
+        body: ComposerMediaPicker(
+          gifLoader: ({String? query, int page = 1}) async => <String, Object?>{
+            'page': page,
+            'next_page': null,
+            'items': const <Object?>[],
+          },
+          emojiLoader: () async => const <Map<String, Object?>>[],
+          stickerLoader: () async => const <Map<String, Object?>>[],
+          channel: channel,
+          gifsAllowed: true,
+          categories: const <String, List<String>>{
+            'Smileys': <String>['😀'],
+          },
+        ),
+      ),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('composer-media-tabs')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('composer-gif-search')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('composer-sticker-search')),
+      findsNothing,
+    );
+
+    await tester.tap(find.text('Stickers'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('composer-emoji-search')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('composer-sticker-search')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Emoji'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('composer-sticker-search')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('composer-emoji-search')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('mobile media pane keeps a disabled GIF category in E2EE',
+      (tester) async {
+    var gifRequests = 0;
+    await tester.pumpWidget(MaterialApp(
+      theme: kaedeTheme(),
+      home: Scaffold(
+        body: ComposerMediaPicker(
+          gifLoader: ({String? query, int page = 1}) async {
+            gifRequests += 1;
+            return <String, Object?>{
+              'page': page,
+              'next_page': null,
+              'items': const <Object?>[],
+            };
+          },
+          emojiLoader: () async => const <Map<String, Object?>>[],
+          stickerLoader: () async => const <Map<String, Object?>>[],
+          channel: KaedeChannel(
+            ref: EntityRef.parse('30@home.example'),
+            type: ChannelType.dm,
+            position: 0,
+            permissions: BigInt.zero,
+            encryptionMode: 'e2ee',
+          ),
+          gifsAllowed: false,
+          categories: const <String, List<String>>{
+            'Smileys': <String>['😀'],
+          },
+        ),
+      ),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('composer-emoji-search')), findsOneWidget);
+    await tester.tap(find.text('GIFs'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(
+        'GIF search is unavailable in end-to-end encrypted conversations.',
+      ),
+      findsOneWidget,
+    );
+    expect(gifRequests, 0);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets(

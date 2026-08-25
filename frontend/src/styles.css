@@ -5856,7 +5856,6 @@ progress {
 .attach-button,
 .gif-button,
 .emoji-button,
-.sticker-button,
 .send-button {
   display: grid;
   width: 42px;
@@ -5886,9 +5885,7 @@ progress {
 .gif-button:hover:not(:disabled),
 .gif-button.active,
 .emoji-button:hover:not(:disabled),
-.emoji-button.active,
-.sticker-button:hover:not(:disabled),
-.sticker-button.active {
+.emoji-button.active {
   color: var(--accent-text);
   background: var(--accent-soft);
 }
@@ -5905,7 +5902,6 @@ progress {
 .attach-button:disabled,
 .gif-button:disabled,
 .emoji-button:disabled,
-.sticker-button:disabled,
 .send-button:disabled {
   cursor: not-allowed;
   opacity: 0.42;

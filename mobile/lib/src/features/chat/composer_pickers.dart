@@ -12,7 +12,29 @@ import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-enum ComposerAction { attach, emoji, sticker, gif }
+enum ComposerAction { attach, media }
+
+sealed class ComposerMediaSelection {
+  const ComposerMediaSelection();
+}
+
+final class ComposerEmojiSelection extends ComposerMediaSelection {
+  const ComposerEmojiSelection(this.value);
+
+  final String value;
+}
+
+final class ComposerStickerSelection extends ComposerMediaSelection {
+  const ComposerStickerSelection(this.sticker);
+
+  final ComposerSticker sticker;
+}
+
+final class ComposerGifSelection extends ComposerMediaSelection {
+  const ComposerGifSelection(this.gif);
+
+  final ComposerGif gif;
+}
 
 typedef ComposerEmojiLoader = Future<List<Map<String, Object?>>> Function();
 typedef ComposerStickerLoader = Future<List<Map<String, Object?>>> Function();
@@ -537,30 +559,13 @@ Future<ComposerAction?> showComposerActionPicker(
                     : null,
               ),
               ListTile(
-                key: const ValueKey('composer-action-emoji'),
+                key: const ValueKey('composer-action-media'),
                 leading: const Icon(Icons.emoji_emotions_outlined),
-                title: const Text('Emoji'),
-                subtitle: const Text('Choose Unicode or guild emoji'),
-                onTap: () => Navigator.pop(context, ComposerAction.emoji),
-              ),
-              ListTile(
-                key: const ValueKey('composer-action-sticker'),
-                leading: const Icon(Icons.sticky_note_2_outlined),
-                title: const Text('Stickers'),
-                subtitle: const Text('Choose a sticker from your guilds'),
-                onTap: () => Navigator.pop(context, ComposerAction.sticker),
-              ),
-              ListTile(
-                key: const ValueKey('composer-action-gif'),
-                leading: const Icon(Icons.gif_box_outlined),
-                title: const Text('GIF'),
+                title: const Text('GIFs, stickers, and emoji'),
                 subtitle: Text(gifsAllowed
-                    ? 'Search the GIF library'
-                    : 'Unavailable in end-to-end encrypted conversations'),
-                enabled: gifsAllowed,
-                onTap: gifsAllowed
-                    ? () => Navigator.pop(context, ComposerAction.gif)
-                    : null,
+                    ? 'Open the media picker'
+                    : 'GIFs are unavailable here; stickers and emoji work'),
+                onTap: () => Navigator.pop(context, ComposerAction.media),
               ),
               const SizedBox(height: 4),
             ],
@@ -617,15 +622,160 @@ Future<ComposerSticker?> showComposerStickerPicker(
       ),
     );
 
+Future<ComposerMediaSelection?> showComposerMediaPicker(
+  BuildContext context, {
+  required KaedeRepository repository,
+  required KaedeChannel channel,
+  required Map<String, List<String>> categories,
+  required bool gifsAllowed,
+  List<String> recent = const <String>[],
+}) =>
+    showModalBottomSheet<ComposerMediaSelection>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (context) => ComposerMediaPicker(
+        gifLoader: repository.gifs,
+        emojiLoader: repository.emojis,
+        stickerLoader: repository.stickers,
+        channel: channel,
+        categories: categories,
+        recent: recent,
+        gifsAllowed: gifsAllowed,
+      ),
+    );
+
+enum _ComposerMediaMode { gifs, stickers, emoji }
+
+final class ComposerMediaPicker extends StatefulWidget {
+  const ComposerMediaPicker({
+    super.key,
+    required this.gifLoader,
+    required this.emojiLoader,
+    required this.stickerLoader,
+    required this.channel,
+    required this.categories,
+    required this.gifsAllowed,
+    this.recent = const <String>[],
+  });
+
+  final ComposerGifLoader gifLoader;
+  final ComposerEmojiLoader emojiLoader;
+  final ComposerStickerLoader stickerLoader;
+  final KaedeChannel channel;
+  final Map<String, List<String>> categories;
+  final bool gifsAllowed;
+  final List<String> recent;
+
+  @override
+  State<ComposerMediaPicker> createState() => _ComposerMediaPickerState();
+}
+
+final class _ComposerMediaPickerState extends State<ComposerMediaPicker> {
+  late _ComposerMediaMode _mode;
+
+  @override
+  void initState() {
+    super.initState();
+    _mode =
+        widget.gifsAllowed ? _ComposerMediaMode.gifs : _ComposerMediaMode.emoji;
+  }
+
+  @override
+  Widget build(BuildContext context) => _KeyboardSafePickerSheet(
+        maxHeight: 620,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              child: SegmentedButton<_ComposerMediaMode>(
+                key: const ValueKey('composer-media-tabs'),
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(
+                    value: _ComposerMediaMode.gifs,
+                    icon: Icon(Icons.gif_box_outlined),
+                    label: Text('GIFs'),
+                  ),
+                  ButtonSegment(
+                    value: _ComposerMediaMode.stickers,
+                    icon: Icon(Icons.sticky_note_2_outlined),
+                    label: Text('Stickers'),
+                  ),
+                  ButtonSegment(
+                    value: _ComposerMediaMode.emoji,
+                    icon: Icon(Icons.emoji_emotions_outlined),
+                    label: Text('Emoji'),
+                  ),
+                ],
+                selected: {_mode},
+                onSelectionChanged: (selection) =>
+                    setState(() => _mode = selection.single),
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: IndexedStack(
+                index: _mode.index,
+                children: [
+                  if (widget.gifsAllowed)
+                    ComposerGifPicker(
+                      loader: widget.gifLoader,
+                      embedded: true,
+                      onSelected: (gif) => Navigator.pop(
+                        context,
+                        ComposerGifSelection(gif),
+                      ),
+                    )
+                  else
+                    const _PickerStatus(
+                      icon: Icon(Icons.gif_box_outlined),
+                      message: 'GIF search is unavailable in end-to-end '
+                          'encrypted conversations.',
+                    ),
+                  ComposerStickerPicker(
+                    loader: widget.stickerLoader,
+                    channel: widget.channel,
+                    embedded: true,
+                    onSelected: (sticker) => Navigator.pop(
+                      context,
+                      ComposerStickerSelection(sticker),
+                    ),
+                  ),
+                  ComposerEmojiPicker(
+                    loader: widget.emojiLoader,
+                    channel: widget.channel,
+                    categories: widget.categories,
+                    recent: widget.recent,
+                    embedded: true,
+                    onSelected: (value) => Navigator.pop(
+                      context,
+                      ComposerEmojiSelection(value),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+}
+
 final class ComposerStickerPicker extends StatefulWidget {
   const ComposerStickerPicker({
     super.key,
     required this.loader,
     required this.channel,
+    this.embedded = false,
+    this.onSelected,
   });
 
   final ComposerStickerLoader loader;
   final KaedeChannel channel;
+  final bool embedded;
+  final ValueChanged<ComposerSticker>? onSelected;
 
   @override
   State<ComposerStickerPicker> createState() => _ComposerStickerPickerState();
@@ -684,120 +834,122 @@ final class _ComposerStickerPickerState extends State<ComposerStickerPicker> {
     for (final item in filtered) {
       groups.putIfAbsent(item.guildRef, () => <ComposerSticker>[]).add(item);
     }
-    return _KeyboardSafePickerSheet(
-      maxHeight: 620,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-        child: Column(
-          children: [
-            TextField(
-              key: const ValueKey('composer-sticker-search'),
-              controller: _search,
-              textInputAction: TextInputAction.search,
-              decoration: const InputDecoration(
-                hintText: 'Search stickers',
-                prefixIcon: Icon(Icons.search_rounded),
-                isDense: true,
-              ),
-              onChanged: (_) => setState(() {}),
+    final content = Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+      child: Column(
+        children: [
+          TextField(
+            key: const ValueKey('composer-sticker-search'),
+            controller: _search,
+            textInputAction: TextInputAction.search,
+            decoration: const InputDecoration(
+              hintText: 'Search stickers',
+              prefixIcon: Icon(Icons.search_rounded),
+              isDense: true,
             ),
-            const SizedBox(height: 8),
-            Expanded(
-              child: _loading
-                  ? const _PickerStatus(
-                      icon: CircularProgressIndicator(strokeWidth: 2),
-                      message: 'Loading stickers…',
-                    )
-                  : _error != null
-                      ? _PickerError(
-                          message: userFacingError(_error!,
-                              summary: 'Could not load stickers'),
-                          onRetry: _load,
-                        )
-                      : groups.isEmpty
-                          ? const _PickerStatus(
-                              icon: Icon(Icons.sticky_note_2_outlined),
-                              message: 'No stickers found.',
-                            )
-                          : ListView.builder(
-                              key: const ValueKey('composer-sticker-groups'),
-                              keyboardDismissBehavior:
-                                  ScrollViewKeyboardDismissBehavior.onDrag,
-                              itemCount: groups.length,
-                              itemBuilder: (context, index) {
-                                final stickers = groups.values.elementAt(index);
-                                final guildName = stickers.first.guildName;
-                                return Padding(
-                                  padding: const EdgeInsets.only(bottom: 14),
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 4, vertical: 6),
-                                        child: Text(
-                                          guildName,
-                                          style: const TextStyle(
-                                            color: KaedeColors.muted,
-                                            fontWeight: FontWeight.w700,
-                                          ),
+            onChanged: (_) => setState(() {}),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: _loading
+                ? const _PickerStatus(
+                    icon: CircularProgressIndicator(strokeWidth: 2),
+                    message: 'Loading stickers…',
+                  )
+                : _error != null
+                    ? _PickerError(
+                        message: userFacingError(_error!,
+                            summary: 'Could not load stickers'),
+                        onRetry: _load,
+                      )
+                    : groups.isEmpty
+                        ? const _PickerStatus(
+                            icon: Icon(Icons.sticky_note_2_outlined),
+                            message: 'No stickers found.',
+                          )
+                        : ListView.builder(
+                            key: const ValueKey('composer-sticker-groups'),
+                            keyboardDismissBehavior:
+                                ScrollViewKeyboardDismissBehavior.onDrag,
+                            itemCount: groups.length,
+                            itemBuilder: (context, index) {
+                              final stickers = groups.values.elementAt(index);
+                              final guildName = stickers.first.guildName;
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 14),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 4, vertical: 6),
+                                      child: Text(
+                                        guildName,
+                                        style: const TextStyle(
+                                          color: KaedeColors.muted,
+                                          fontWeight: FontWeight.w700,
                                         ),
                                       ),
-                                      GridView.builder(
-                                        shrinkWrap: true,
-                                        physics:
-                                            const NeverScrollableScrollPhysics(),
-                                        gridDelegate:
-                                            const SliverGridDelegateWithMaxCrossAxisExtent(
-                                          maxCrossAxisExtent: 112,
-                                          mainAxisExtent: 116,
-                                          mainAxisSpacing: 6,
-                                          crossAxisSpacing: 6,
-                                        ),
-                                        itemCount: stickers.length,
-                                        itemBuilder: (context, stickerIndex) {
-                                          final sticker =
-                                              stickers[stickerIndex];
-                                          return Tooltip(
-                                            message: sticker.description ??
-                                                sticker.name,
-                                            child: InkWell(
-                                              onTap: () => Navigator.pop(
-                                                  context, sticker),
-                                              borderRadius:
-                                                  BorderRadius.circular(10),
-                                              child: Column(
-                                                mainAxisAlignment:
-                                                    MainAxisAlignment.center,
-                                                children: [
-                                                  StickerImage(
-                                                      sticker: sticker,
-                                                      size: 82),
-                                                  Text(
-                                                    sticker.name,
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                    style: const TextStyle(
-                                                        fontSize: 11),
-                                                  ),
-                                                ],
-                                              ),
+                                    ),
+                                    GridView.builder(
+                                      shrinkWrap: true,
+                                      physics:
+                                          const NeverScrollableScrollPhysics(),
+                                      gridDelegate:
+                                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                                        maxCrossAxisExtent: 112,
+                                        mainAxisExtent: 116,
+                                        mainAxisSpacing: 6,
+                                        crossAxisSpacing: 6,
+                                      ),
+                                      itemCount: stickers.length,
+                                      itemBuilder: (context, stickerIndex) {
+                                        final sticker = stickers[stickerIndex];
+                                        return Tooltip(
+                                          message: sticker.description ??
+                                              sticker.name,
+                                          child: InkWell(
+                                            onTap: () {
+                                              if (widget.onSelected
+                                                  case final onSelected?) {
+                                                onSelected(sticker);
+                                              } else {
+                                                Navigator.pop(context, sticker);
+                                              }
+                                            },
+                                            borderRadius:
+                                                BorderRadius.circular(10),
+                                            child: Column(
+                                              mainAxisAlignment:
+                                                  MainAxisAlignment.center,
+                                              children: [
+                                                StickerImage(
+                                                    sticker: sticker, size: 82),
+                                                Text(
+                                                  sticker.name,
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: const TextStyle(
+                                                      fontSize: 11),
+                                                ),
+                                              ],
                                             ),
-                                          );
-                                        },
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              },
-                            ),
-            ),
-          ],
-        ),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+          ),
+        ],
       ),
     );
+    if (widget.embedded) return content;
+    return _KeyboardSafePickerSheet(maxHeight: 620, child: content);
   }
 }
 
@@ -808,12 +960,16 @@ final class ComposerEmojiPicker extends StatefulWidget {
     required this.channel,
     required this.categories,
     this.recent = const <String>[],
+    this.embedded = false,
+    this.onSelected,
   });
 
   final ComposerEmojiLoader loader;
   final KaedeChannel channel;
   final Map<String, List<String>> categories;
   final List<String> recent;
+  final bool embedded;
+  final ValueChanged<String>? onSelected;
 
   @override
   State<ComposerEmojiPicker> createState() => _ComposerEmojiPickerState();
@@ -865,53 +1021,54 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
   }
 
   @override
-  Widget build(BuildContext context) => _KeyboardSafePickerSheet(
-        maxHeight: 560,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-          child: _KeyboardResponsivePickerBody(
-            expandedBreakpoint: 170,
-            compactBodyHeight: 140,
-            header: [
-              TextField(
-                key: const ValueKey('composer-emoji-search'),
-                controller: _search,
-                textInputAction: TextInputAction.search,
-                decoration: const InputDecoration(
-                  hintText: 'Search emoji',
-                  prefixIcon: Icon(Icons.search_rounded),
-                  isDense: true,
-                ),
-                onChanged: (_) => setState(() {}),
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                height: 38,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: widget.categories.length + 1,
-                  separatorBuilder: (_, __) => const SizedBox(width: 6),
-                  itemBuilder: (context, index) {
-                    final name = index == widget.categories.length
-                        ? 'Custom'
-                        : widget.categories.keys.elementAt(index);
-                    return ChoiceChip(
-                      label: Text(name),
-                      selected: _category == name && _search.text.isEmpty,
-                      onSelected: (_) => setState(() {
-                        _category = name;
-                        _search.clear();
-                      }),
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
-            body: _buildChoices(context),
+  Widget build(BuildContext context) {
+    final content = Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+      child: _KeyboardResponsivePickerBody(
+        expandedBreakpoint: 170,
+        compactBodyHeight: 140,
+        header: [
+          TextField(
+            key: const ValueKey('composer-emoji-search'),
+            controller: _search,
+            textInputAction: TextInputAction.search,
+            decoration: const InputDecoration(
+              hintText: 'Search emoji',
+              prefixIcon: Icon(Icons.search_rounded),
+              isDense: true,
+            ),
+            onChanged: (_) => setState(() {}),
           ),
-        ),
-      );
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 38,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: widget.categories.length + 1,
+              separatorBuilder: (_, __) => const SizedBox(width: 6),
+              itemBuilder: (context, index) {
+                final name = index == widget.categories.length
+                    ? 'Custom'
+                    : widget.categories.keys.elementAt(index);
+                return ChoiceChip(
+                  label: Text(name),
+                  selected: _category == name && _search.text.isEmpty,
+                  onSelected: (_) => setState(() {
+                    _category = name;
+                    _search.clear();
+                  }),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+        body: _buildChoices(context),
+      ),
+    );
+    if (widget.embedded) return content;
+    return _KeyboardSafePickerSheet(maxHeight: 560, child: content);
+  }
 
   Widget _buildChoices(BuildContext context) {
     final query = _search.text.trim().toLowerCase();
@@ -979,7 +1136,13 @@ final class _ComposerEmojiPickerState extends State<ComposerEmojiPicker> {
               child: Tooltip(
                 message: choice.label,
                 child: InkWell(
-                  onTap: () => Navigator.pop(context, choice.value),
+                  onTap: () {
+                    if (widget.onSelected case final onSelected?) {
+                      onSelected(choice.value);
+                    } else {
+                      Navigator.pop(context, choice.value);
+                    }
+                  },
                   borderRadius: BorderRadius.circular(10),
                   child: Center(child: choice.build()),
                 ),
@@ -1028,9 +1191,16 @@ final class _ComposerEmojiChoice {
 }
 
 final class ComposerGifPicker extends StatefulWidget {
-  const ComposerGifPicker({super.key, required this.loader});
+  const ComposerGifPicker({
+    super.key,
+    required this.loader,
+    this.embedded = false,
+    this.onSelected,
+  });
 
   final ComposerGifLoader loader;
+  final bool embedded;
+  final ValueChanged<ComposerGif>? onSelected;
 
   @override
   State<ComposerGifPicker> createState() => _ComposerGifPickerState();
@@ -1141,45 +1311,46 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
   }
 
   @override
-  Widget build(BuildContext context) => _KeyboardSafePickerSheet(
-        maxHeight: 620,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-          child: _KeyboardResponsivePickerBody(
-            expandedBreakpoint: 160,
-            compactBodyHeight: 180,
-            header: [
-              TextField(
-                key: const ValueKey('composer-gif-search'),
-                controller: _search,
-                textInputAction: TextInputAction.search,
-                decoration: const InputDecoration(
-                  hintText: 'Search GIFs',
-                  prefixIcon: Icon(Icons.search_rounded),
-                  isDense: true,
-                ),
-                onChanged: _queryChanged,
-                onSubmitted: (_) {
-                  _debounce?.cancel();
-                  unawaited(_load(page: 1, append: false));
-                },
-              ),
-              if (_searchPending || (_loading && _items.isNotEmpty))
-                const LinearProgressIndicator(minHeight: 2),
-              const SizedBox(height: 8),
-            ],
-            body: _buildResults(),
-            footer: const [
-              SizedBox(height: 5),
-              Text(
-                'Powered by KLIPY',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: KaedeColors.muted, fontSize: 11),
-              ),
-            ],
+  Widget build(BuildContext context) {
+    final content = Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      child: _KeyboardResponsivePickerBody(
+        expandedBreakpoint: 160,
+        compactBodyHeight: 180,
+        header: [
+          TextField(
+            key: const ValueKey('composer-gif-search'),
+            controller: _search,
+            textInputAction: TextInputAction.search,
+            decoration: const InputDecoration(
+              hintText: 'Search GIFs',
+              prefixIcon: Icon(Icons.search_rounded),
+              isDense: true,
+            ),
+            onChanged: _queryChanged,
+            onSubmitted: (_) {
+              _debounce?.cancel();
+              unawaited(_load(page: 1, append: false));
+            },
           ),
-        ),
-      );
+          if (_searchPending || (_loading && _items.isNotEmpty))
+            const LinearProgressIndicator(minHeight: 2),
+          const SizedBox(height: 8),
+        ],
+        body: _buildResults(),
+        footer: const [
+          SizedBox(height: 5),
+          Text(
+            'Powered by KLIPY',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: KaedeColors.muted, fontSize: 11),
+          ),
+        ],
+      ),
+    );
+    if (widget.embedded) return content;
+    return _KeyboardSafePickerSheet(maxHeight: 620, child: content);
+  }
 
   Widget _buildResults() {
     if (_loading && _items.isEmpty && _favorites.isEmpty) {
@@ -1225,7 +1396,13 @@ final class _ComposerGifPickerState extends State<ComposerGifPicker> {
                     child: Tooltip(
                       message: gif.title,
                       child: InkWell(
-                        onTap: () => Navigator.pop(context, gif),
+                        onTap: () {
+                          if (widget.onSelected case final onSelected?) {
+                            onSelected(gif);
+                          } else {
+                            Navigator.pop(context, gif);
+                          }
+                        },
                         borderRadius: BorderRadius.circular(12),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(12),
