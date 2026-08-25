@@ -138,6 +138,11 @@
     label: string;
     manifest?: EncryptedFileManifest;
   } | null>(null);
+  let contextAttachment = $state<{
+    attachment: Attachment;
+    label: string;
+    manifest?: EncryptedFileManifest;
+  } | null>(null);
   let reactionViewerInitialEmoji = $state<string | undefined>(undefined);
   let reactionViewerReturnFocus: HTMLElement | null = null;
   let recentReactionValues = $state<string[]>([]);
@@ -325,7 +330,7 @@
     });
   }
 
-  function openContextMenu(event: MouseEvent) {
+  function showContextMenu(event: MouseEvent) {
     if (!menuAvailable) return;
     event.preventDefault();
     event.stopPropagation();
@@ -341,9 +346,25 @@
     );
   }
 
+  function openContextMenu(event: MouseEvent) {
+    contextAttachment = null;
+    showContextMenu(event);
+  }
+
+  function openAttachmentContextMenu(
+    attachment: Attachment,
+    label: string,
+    event: MouseEvent,
+    manifest?: EncryptedFileManifest
+  ) {
+    contextAttachment = { attachment, label, manifest };
+    showContextMenu(event);
+  }
+
   function openKeyboardMenu(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
+    contextAttachment = null;
     const trigger = event.currentTarget as HTMLButtonElement;
     const bounds = rowElement?.getBoundingClientRect() ?? trigger.getBoundingClientRect();
     showMenu(bounds.left + Math.min(bounds.width / 2, 32), bounds.top + 24, trigger);
@@ -431,12 +452,6 @@
     }
   }
 
-  function openReportDialog(event: MouseEvent) {
-    event.stopPropagation();
-    closeMenu(false);
-    reportDialogOpen = true;
-  }
-
   function openAttachmentReport(
     attachment: Attachment,
     label: string,
@@ -445,6 +460,18 @@
   ) {
     event?.stopPropagation();
     attachmentReport = { message: presentedMessage, attachment, label, manifest };
+  }
+
+  function reportMessageFromMenu(event: MouseEvent) {
+    event.stopPropagation();
+    const selected = contextAttachment;
+    closeMenu(false);
+    if (selected) {
+      openAttachmentReport(selected.attachment, selected.label, undefined, selected.manifest);
+    } else {
+      reportDialogOpen = true;
+    }
+    contextAttachment = null;
   }
 
   function attachmentForManifest(manifest: EncryptedFileManifest): Attachment | null {
@@ -829,6 +856,10 @@
               class="attachment-reportable"
               class:media-reportable={attachment.content_type.startsWith('image/') ||
                 attachment.content_type.startsWith('video/')}
+              role="group"
+              aria-label={`Attachment ${attachment.filename}`}
+              oncontextmenu={(event) =>
+                openAttachmentContextMenu(attachment, attachment.filename, event)}
             >
               {#if attachment.scan_status === 'pending'}
                 <span class="attachment-file">Scanning {attachment.filename}…</span>
@@ -910,19 +941,6 @@
                   📎 {attachment.filename}
                 </button>
               {/if}
-              {#if actionsEnabled && !message.pending && !message.queued}
-                <button
-                  type="button"
-                  class="attachment-report-action"
-                  aria-label={`Report ${attachment.filename}`}
-                  onclick={(event) => openAttachmentReport(attachment, attachment.filename, event)}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M5 21V4m0 0h11l-2 4 2 4H5" />
-                  </svg>
-                  Report
-                </button>
-              {/if}
             </div>
           {/if}
         {/each}
@@ -935,7 +953,14 @@
       <div class="message-attachments encrypted-attachments">
         {#each presentedMessage.decrypted_attachments as manifest (manifest.file_id)}
           {@const encryptedAttachment = attachmentForManifest(manifest)}
-          <div class="attachment-reportable">
+          <div
+            class="attachment-reportable"
+            role="group"
+            aria-label={`Encrypted attachment ${manifest.filename}`}
+            oncontextmenu={(event) =>
+              encryptedAttachment &&
+              openAttachmentContextMenu(encryptedAttachment, manifest.filename, event, manifest)}
+          >
             <button
               type="button"
               class="attachment-file"
@@ -943,20 +968,6 @@
             >
               🔒 {manifest.filename} · {Math.max(1, Math.ceil(manifest.plaintext_size / 1024))} KB
             </button>
-            {#if encryptedAttachment && actionsEnabled && !message.pending && !message.queued}
-              <button
-                type="button"
-                class="attachment-report-action"
-                aria-label={`Report ${manifest.filename}`}
-                onclick={(event) =>
-                  openAttachmentReport(encryptedAttachment, manifest.filename, event, manifest)}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M5 21V4m0 0h11l-2 4 2 4H5" />
-                </svg>
-                Report
-              </button>
-            {/if}
           </div>
         {/each}
       </div>
@@ -1011,7 +1022,9 @@
       class="message-context-menu"
       role="menu"
       tabindex="-1"
-      aria-label="Message actions"
+      aria-label={contextAttachment
+        ? `Attachment actions for ${contextAttachment.label}`
+        : 'Message actions'}
       onkeydown={menuKeydown}
     >
       {#if reactionPickerOpen}
@@ -1155,8 +1168,8 @@
             </button>
           {/each}
         {/if}
-        {#if renderedContent && !message.deleted_at}
-          <button type="button" role="menuitem" tabindex="-1" onclick={openReportDialog}>
+        {#if !message.deleted_at && (renderedContent || presentedMessage.attachments?.length || presentedMessage.decrypted_attachments?.length)}
+          <button type="button" role="menuitem" tabindex="-1" onclick={reportMessageFromMenu}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M5 21V4m0 1h11l-2 4 2 4H5" />
             </svg>
@@ -1279,7 +1292,7 @@
     attachmentLabel={attachmentReport.label}
     attachmentManifest={attachmentReport.manifest}
     onClose={() => (attachmentReport = null)}
-    onSubmitted={() => (feedback = 'Attachment report submitted to Trust & Safety.')}
+    onSubmitted={() => (feedback = 'Message report submitted to Trust & Safety.')}
   />
 {/if}
 

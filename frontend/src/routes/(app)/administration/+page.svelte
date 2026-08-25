@@ -107,6 +107,15 @@
     match_id: string | null;
   }
 
+  interface ReportAttachmentMetadata {
+    attachment_ref: string;
+    uploader_ref?: string;
+    filename?: string;
+    content_type?: string;
+    size?: number;
+    encryption_mode?: string;
+  }
+
   interface Block {
     domain: string;
     level: 'silence' | 'suspend';
@@ -348,6 +357,17 @@
     }
     const original = report.evidence.attachment_ref;
     return typeof original === 'string' ? original : null;
+  }
+
+  function reportAttachments(report: Report): ReportAttachmentMetadata[] {
+    const value = report.evidence.attachments;
+    if (!Array.isArray(value)) return [];
+    return value.filter(
+      (item): item is ReportAttachmentMetadata =>
+        typeof item === 'object' &&
+        item !== null &&
+        typeof (item as Record<string, unknown>).attachment_ref === 'string'
+    );
   }
 
   function canPreviewReportAttachment(report: Report): boolean {
@@ -1031,92 +1051,113 @@
                   </dl>
                   <div class="report-body">
                     <p>{report.description ?? 'No reporter note was provided.'}</p>
-                    {#if report.target_type === 'attachment' && report.source !== 'photodna'}
+                    {#if (report.target_type === 'attachment' || reportAttachments(report).length) && report.source !== 'photodna'}
                       <div class="safety-note attachment-evidence-note">
                         <Icon name="image" size={19} />
                         <span>
-                          This report targets one attachment. Its verified metadata and, when
-                          available, a restricted preview appear below.
+                          This report covers the complete message and its attachments. Verified
+                          attachment metadata and, when an attachment was highlighted, a restricted
+                          preview appear below.
                         </span>
                       </div>
-                      {#if canPreviewReportAttachment(report)}
-                        {@const contentType = attachmentContentType(report) as string}
-                        <div class="report-attachment-preview">
-                          {#if contentType.startsWith('image/')}
-                            <img
-                              use:authenticatedMedia={{
-                                path: reportAttachmentPath(report, 'thumbnail_512'),
-                                contentType
-                              }}
-                              alt="Reported attachment preview"
-                            />
-                          {:else}
-                            <video
-                              use:authenticatedMedia={{
-                                path: reportAttachmentPath(report, 'original'),
-                                contentType
-                              }}
-                              controls
-                              preload="metadata"
-                            >
-                              <track kind="captions" />
-                            </video>
-                          {/if}
-                          <small
-                            >Restricted {report.encryption_mode === 'e2ee_user_disclosed'
-                              ? 'reporter-disclosed plaintext evidence'
-                              : 'preview'} · successful access is recorded in the audit log.</small
-                          >
-                        </div>
-                      {:else if report.encryption_mode === 'e2ee_user_disclosed'}
-                        <small class="disclosure-note">
-                          {report.evidence.disclosed_attachment_scan_status === 'quarantined'
-                            ? 'The disclosed copy was quarantined after a safety match and cannot be rendered.'
-                            : report.evidence.disclosed_attachment_scan_status === 'infected' ||
-                                report.evidence.disclosed_attachment_scan_status === 'rejected'
-                              ? 'The disclosed copy failed safety validation and cannot be rendered.'
-                              : report.evidence.disclosed_attachment_scan_status === 'failed'
-                                ? 'The disclosed copy could not be processed. Follow the media-processing incident procedure.'
-                                : report.evidence.disclosed_attachment_scan_status === 'clean'
-                                  ? 'The disclosed evidence type is not previewable inline.'
-                                  : 'The disclosed evidence is being scanned. Reload this queue shortly.'}
-                        </small>
-                      {:else if report.encryption_mode !== 'e2ee_metadata'}
-                        <small class="disclosure-note">
-                          Preview unavailable here. Remote attachments must be reviewed by their
-                          home instance.
-                        </small>
-                      {/if}
-                      <dl class="match-metadata">
-                        {#each [['Attachment', report.evidence.attachment_ref], ['Uploader', report.evidence.uploader_ref], ['Stored filename', report.evidence.filename], ['Stored content type', report.evidence.content_type], ['Stored size', report.evidence.size], ['Encryption', report.evidence.attachment_encryption_mode], ['Disclosed evidence', report.evidence.disclosed_attachment_ref], ['Disclosed filename', report.evidence.disclosed_filename], ['Disclosed content type', report.evidence.disclosed_content_type], ['Disclosed size', report.evidence.disclosed_size], ['Disclosed scan', report.evidence.disclosed_attachment_scan_status]] as [label, value] (label)}
-                          {#if typeof value === 'string' || typeof value === 'number'}
-                            <div>
-                              <dt>{label}</dt>
-                              <dd>{typeof value === 'number' ? value.toLocaleString() : value}</dd>
-                            </div>
-                          {/if}
+                      {#if reportAttachments(report).length}
+                        {#each reportAttachments(report) as attachment (attachment.attachment_ref)}
+                          <dl class="match-metadata">
+                            {#each [['Attachment', attachment.attachment_ref], ['Uploader', attachment.uploader_ref], ['Filename', attachment.filename], ['Content type', attachment.content_type], ['Size', attachment.size], ['Encryption', attachment.encryption_mode]] as [label, value] (label)}
+                              {#if typeof value === 'string' || typeof value === 'number'}
+                                <div>
+                                  <dt>{label}</dt>
+                                  <dd>
+                                    {typeof value === 'number' ? value.toLocaleString() : value}
+                                  </dd>
+                                </div>
+                              {/if}
+                            {/each}
+                          </dl>
                         {/each}
-                      </dl>
-                      {#if report.encryption_mode === 'e2ee_metadata'}
-                        <small class="disclosure-note">
-                          Encrypted attachment metadata only; no decrypted file, filename, or key
-                          was disclosed.
-                        </small>
-                      {:else if report.encryption_mode === 'e2ee_user_disclosed'}
-                        <small class="disclosure-note">
-                          The reporter explicitly decrypted and uploaded this attachment. The
-                          plaintext evidence is reporter-supplied; the server can scan the uploaded
-                          copy but cannot prove it matches the original ciphertext.
-                        </small>
                       {/if}
-                      {#if typeof report.evidence.photodna === 'object' && report.evidence.photodna !== null}
-                        <div class="safety-note">
-                          <Icon name="shield" size={19} />
-                          <span>
-                            The disclosed evidence produced a critical PhotoDNA safety match. Its
-                            bytes were quarantined and are not renderable from this queue.
-                          </span>
-                        </div>
+                      {#if reportPreviewAttachmentRef(report)}
+                        {#if canPreviewReportAttachment(report)}
+                          {@const contentType = attachmentContentType(report) as string}
+                          <div class="report-attachment-preview">
+                            {#if contentType.startsWith('image/')}
+                              <img
+                                use:authenticatedMedia={{
+                                  path: reportAttachmentPath(report, 'thumbnail_512'),
+                                  contentType
+                                }}
+                                alt="Reported attachment preview"
+                              />
+                            {:else}
+                              <video
+                                use:authenticatedMedia={{
+                                  path: reportAttachmentPath(report, 'original'),
+                                  contentType
+                                }}
+                                controls
+                                preload="metadata"
+                              >
+                                <track kind="captions" />
+                              </video>
+                            {/if}
+                            <small
+                              >Restricted {report.encryption_mode === 'e2ee_user_disclosed'
+                                ? 'reporter-disclosed plaintext evidence'
+                                : 'preview'} · successful access is recorded in the audit log.</small
+                            >
+                          </div>
+                        {:else if report.encryption_mode === 'e2ee_user_disclosed'}
+                          <small class="disclosure-note">
+                            {report.evidence.disclosed_attachment_scan_status === 'quarantined'
+                              ? 'The disclosed copy was quarantined after a safety match and cannot be rendered.'
+                              : report.evidence.disclosed_attachment_scan_status === 'infected' ||
+                                  report.evidence.disclosed_attachment_scan_status === 'rejected'
+                                ? 'The disclosed copy failed safety validation and cannot be rendered.'
+                                : report.evidence.disclosed_attachment_scan_status === 'failed'
+                                  ? 'The disclosed copy could not be processed. Follow the media-processing incident procedure.'
+                                  : report.evidence.disclosed_attachment_scan_status === 'clean'
+                                    ? 'The disclosed evidence type is not previewable inline.'
+                                    : 'The disclosed evidence is being scanned. Reload this queue shortly.'}
+                          </small>
+                        {:else if report.encryption_mode !== 'e2ee_metadata'}
+                          <small class="disclosure-note">
+                            Preview unavailable here. Remote attachments must be reviewed by their
+                            home instance.
+                          </small>
+                        {/if}
+                        <dl class="match-metadata">
+                          {#each [['Attachment', report.evidence.attachment_ref], ['Uploader', report.evidence.uploader_ref], ['Stored filename', report.evidence.filename], ['Stored content type', report.evidence.content_type], ['Stored size', report.evidence.size], ['Encryption', report.evidence.attachment_encryption_mode], ['Disclosed evidence', report.evidence.disclosed_attachment_ref], ['Disclosed filename', report.evidence.disclosed_filename], ['Disclosed content type', report.evidence.disclosed_content_type], ['Disclosed size', report.evidence.disclosed_size], ['Disclosed scan', report.evidence.disclosed_attachment_scan_status]] as [label, value] (label)}
+                            {#if typeof value === 'string' || typeof value === 'number'}
+                              <div>
+                                <dt>{label}</dt>
+                                <dd>
+                                  {typeof value === 'number' ? value.toLocaleString() : value}
+                                </dd>
+                              </div>
+                            {/if}
+                          {/each}
+                        </dl>
+                        {#if report.encryption_mode === 'e2ee_metadata'}
+                          <small class="disclosure-note">
+                            Encrypted attachment metadata only; no decrypted file, filename, or key
+                            was disclosed.
+                          </small>
+                        {:else if report.encryption_mode === 'e2ee_user_disclosed'}
+                          <small class="disclosure-note">
+                            The reporter explicitly decrypted and uploaded this attachment. The
+                            plaintext evidence is reporter-supplied; the server can scan the
+                            uploaded copy but cannot prove it matches the original ciphertext.
+                          </small>
+                        {/if}
+                        {#if typeof report.evidence.photodna === 'object' && report.evidence.photodna !== null}
+                          <div class="safety-note">
+                            <Icon name="shield" size={19} />
+                            <span>
+                              The disclosed evidence produced a critical PhotoDNA safety match. Its
+                              bytes were quarantined and are not renderable from this queue.
+                            </span>
+                          </div>
+                        {/if}
                       {/if}
                     {/if}
                     {#if typeof report.evidence.content === 'string'}

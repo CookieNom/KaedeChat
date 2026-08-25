@@ -163,6 +163,73 @@ def test_plaintext_report_rejects_empty_client_disclosure_too() -> None:
     assert cast(dict[str, Any], raised.value.detail)["code"] == "REPORT_DISCLOSURE_UNEXPECTED"
 
 
+def test_message_report_bundles_all_attachments_and_highlights_context_attachment() -> None:
+    timestamp = datetime(2026, 8, 25, 15, tzinfo=UTC)
+    message = report_message(e2ee=None, content="message with media")
+    attachments = [
+        cast(
+            Attachment,
+            SimpleNamespace(
+                id=9,
+                origin_domain="alpha.localhost",
+                uploader_id=7,
+                uploader_domain="alpha.localhost",
+                created_at=timestamp,
+                filename="photo.png",
+                content_type="image/png",
+                detected_content_type="image/png",
+                size=1234,
+                encryption_mode="plaintext",
+            ),
+        ),
+        cast(
+            Attachment,
+            SimpleNamespace(
+                id=10,
+                origin_domain="alpha.localhost",
+                uploader_id=7,
+                uploader_domain="alpha.localhost",
+                created_at=timestamp,
+                filename="clip.mp4",
+                content_type="video/mp4",
+                detected_content_type="video/mp4",
+                size=5678,
+                encryption_mode="plaintext",
+            ),
+        ),
+    ]
+
+    evidence, mode = report_message_evidence(
+        message,
+        disclosed_content=None,
+        disclosure_acknowledged=False,
+        attachments=attachments,
+        focused_attachment=attachments[1],
+    )
+
+    assert mode == "plaintext"
+    assert evidence["content"] == "message with media"
+    assert [
+        item["attachment_ref"] for item in cast(list[dict[str, Any]], evidence["attachments"])
+    ] == [
+        "9@alpha.localhost",
+        "10@alpha.localhost",
+    ]
+    assert evidence["attachment_ref"] == "10@alpha.localhost"
+    assert evidence["content_type"] == "video/mp4"
+
+
+def test_focused_attachment_is_only_valid_for_message_reports() -> None:
+    with pytest.raises(ValidationError):
+        ReportCreate(
+            target_type="attachment",
+            target_ref="9@alpha.localhost",
+            message_ref="1@alpha.localhost",
+            focused_attachment_ref="9@alpha.localhost",
+            category="spam",
+        )
+
+
 def test_report_schema_rejects_whitespace_only_disclosure() -> None:
     with pytest.raises(ValidationError):
         ReportCreate(
@@ -366,6 +433,102 @@ async def test_create_attachment_report_validates_message_binding_and_stores_met
     assert session.added.message_ref == "1@alpha.localhost"
     assert session.added.evidence["attachment_ref"] == "9@alpha.localhost"
     assert session.added.evidence["content_type"] == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_create_message_report_bundles_attachment_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timestamp = datetime(2026, 8, 25, 15, tzinfo=UTC)
+    reporter = cast(
+        User,
+        SimpleNamespace(
+            id=4,
+            origin_domain="alpha.localhost",
+            is_local=True,
+            account_type="human",
+        ),
+    )
+    message = cast(
+        Message,
+        SimpleNamespace(
+            id=1,
+            origin_domain="alpha.localhost",
+            author_id=7,
+            author_domain="alpha.localhost",
+            channel_id=2,
+            channel_domain="alpha.localhost",
+            content="message with media",
+            e2ee=None,
+            deleted_at=None,
+            created_at=timestamp,
+        ),
+    )
+    attachment = cast(
+        Attachment,
+        SimpleNamespace(
+            id=9,
+            origin_domain="alpha.localhost",
+            message_id=1,
+            message_domain="alpha.localhost",
+            uploader_id=7,
+            uploader_domain="alpha.localhost",
+            filename="photo.png",
+            content_type="image/png",
+            detected_content_type="image/png",
+            size=2048,
+            encryption_mode="plaintext",
+            purpose="attachment",
+            deleted_at=None,
+            created_at=timestamp,
+        ),
+    )
+
+    class MessageReportSession:
+        def __init__(self) -> None:
+            self.added: AbuseReport | None = None
+
+        async def get(self, model: type[object], _key: object) -> object | None:
+            return message if model is Message else None
+
+        async def scalars(self, _statement: object) -> list[Attachment]:
+            return [attachment]
+
+        def add(self, report: AbuseReport) -> None:
+            self.added = report
+
+        async def commit(self) -> None:
+            assert self.added is not None
+            self.added.created_at = timestamp
+            self.added.updated_at = timestamp
+
+    session = MessageReportSession()
+    monkeypatch.setattr(admin_portal, "enforce_keyed_rate_limit", AsyncMock())
+    monkeypatch.setattr(admin_portal, "load_channel_access", AsyncMock(return_value=object()))
+    monkeypatch.setattr(admin_portal, "require_channel_permissions", AsyncMock(return_value=0))
+
+    result = await admin_portal.create_report(
+        ReportCreate(
+            target_type="message",
+            target_ref="1@alpha.localhost",
+            message_ref="1@alpha.localhost",
+            focused_attachment_ref="9@alpha.localhost",
+            category="illegal_content",
+        ),
+        Response(),
+        cast(Any, SimpleNamespace(user=reporter)),
+        cast(Any, session),
+        cast(Any, object()),
+        cast(Any, ReportSnowflake()),
+        cast(Any, SimpleNamespace(domain="alpha.localhost")),
+    )
+
+    assert result["target_type"] == "message"
+    assert session.added is not None
+    assert session.added.target_ref == "1@alpha.localhost"
+    assert session.added.evidence["attachment_ref"] == "9@alpha.localhost"
+    bundled = cast(list[dict[str, Any]], session.added.evidence["attachments"])
+    assert bundled[0]["content_type"] == "image/png"
 
 
 @pytest.mark.asyncio

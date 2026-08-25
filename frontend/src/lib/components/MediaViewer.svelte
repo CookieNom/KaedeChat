@@ -86,7 +86,8 @@
         <strong>{attachment.filename}</strong>
         <small>{attachment.content_type}</small>
       </div>
-      {#if onReport}<button type="button" class="report-media" onclick={onReport}>Report</button
+      {#if onReport}<button type="button" class="report-media" onclick={onReport}
+          >Report message</button
         >{/if}
       <button type="button" onclick={() => void download()}>Download</button>
       <button type="button" aria-label="Close media viewer" onclick={onClose}>×</button>

@@ -150,6 +150,7 @@ class ReportCreate(BaseModel):
     ]
     description: str | None = Field(default=None, max_length=2000)
     message_ref: EntityRef | None = None
+    focused_attachment_ref: EntityRef | None = None
     disclosed_content: str | None = Field(default=None, max_length=4000)
     disclosure_acknowledged: bool = False
 
@@ -162,6 +163,12 @@ class ReportCreate(BaseModel):
         if value is not None and value != "" and not value.strip():
             raise ValueError("disclosed content must contain a non-whitespace character")
         return value
+
+    @model_validator(mode="after")
+    def _focused_attachment_requires_message_target(self) -> ReportCreate:
+        if self.focused_attachment_ref is not None and self.target_type != "message":
+            raise ValueError("focused attachment context requires a message report")
+        return self
 
 
 class ReportPatch(BaseModel):
@@ -318,6 +325,8 @@ def report_message_evidence(
     *,
     disclosed_content: str | None,
     disclosure_acknowledged: bool,
+    attachments: list[Attachment] | None = None,
+    focused_attachment: Attachment | None = None,
 ) -> tuple[dict[str, object], str]:
     """Build report evidence without ever accepting or persisting room keys."""
 
@@ -326,6 +335,35 @@ def report_message_evidence(
         "channel_ref": f"{message.channel_id}@{message.channel_domain}",
         "created_at": message.created_at.isoformat(),
     }
+    attachment_rows = attachments or []
+    if attachment_rows:
+        evidence["attachments"] = [
+            {
+                "attachment_ref": f"{item.id}@{item.origin_domain}",
+                "uploader_ref": f"{item.uploader_id}@{item.uploader_domain}",
+                "filename": item.filename,
+                "content_type": item.detected_content_type or item.content_type,
+                "size": item.size,
+                "encryption_mode": item.encryption_mode,
+            }
+            for item in attachment_rows
+        ]
+    if focused_attachment is not None:
+        evidence.update(
+            {
+                "attachment_ref": (f"{focused_attachment.id}@{focused_attachment.origin_domain}"),
+                "uploader_ref": (
+                    f"{focused_attachment.uploader_id}@{focused_attachment.uploader_domain}"
+                ),
+                "attachment_created_at": focused_attachment.created_at.isoformat(),
+                "filename": focused_attachment.filename,
+                "content_type": (
+                    focused_attachment.detected_content_type or focused_attachment.content_type
+                ),
+                "size": focused_attachment.size,
+                "attachment_encryption_mode": focused_attachment.encryption_mode,
+            }
+        )
     if message.e2ee is None:
         if disclosed_content is not None or disclosure_acknowledged:
             raise HTTPException(
@@ -665,6 +703,11 @@ async def create_report(
         raise HTTPException(status_code=422, detail={"code": "REPORT_MESSAGE_REF_REQUIRED"})
     if not message_context_target and payload.message_ref is not None:
         raise HTTPException(status_code=422, detail={"code": "REPORT_MESSAGE_REF_UNEXPECTED"})
+    if payload.target_type != "message" and payload.focused_attachment_ref is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "REPORT_FOCUSED_ATTACHMENT_UNEXPECTED"},
+        )
     if payload.target_type != "message" and (
         payload.disclosed_content is not None or payload.disclosure_acknowledged
     ):
@@ -694,10 +737,40 @@ async def create_report(
         if payload.target_type == "message":
             if payload.target_ref != message_ref:
                 raise HTTPException(status_code=422, detail={"code": "REPORT_TARGET_MISMATCH"})
+            attachments = list(
+                await session.scalars(
+                    select(Attachment)
+                    .where(
+                        Attachment.message_id == message.id,
+                        Attachment.message_domain == message.origin_domain,
+                        Attachment.purpose == "attachment",
+                        Attachment.deleted_at.is_(None),
+                    )
+                    .order_by(Attachment.created_at, Attachment.origin_domain, Attachment.id)
+                )
+            )
+            focused_attachment: Attachment | None = None
+            if payload.focused_attachment_ref is not None:
+                focused_id, focused_domain = payload.focused_attachment_ref.resolve(settings.domain)
+                focused_attachment = next(
+                    (
+                        item
+                        for item in attachments
+                        if (item.id, item.origin_domain) == (focused_id, focused_domain)
+                    ),
+                    None,
+                )
+                if focused_attachment is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail={"code": "ATTACHMENT_NOT_FOUND"},
+                    )
             evidence, report_encryption_mode = report_message_evidence(
                 message,
                 disclosed_content=payload.disclosed_content,
                 disclosure_acknowledged=payload.disclosure_acknowledged,
+                attachments=attachments,
+                focused_attachment=focused_attachment,
             )
         else:
             try:
@@ -740,7 +813,7 @@ async def create_report(
     return reporter_report_payload(report)
 
 
-async def owned_encrypted_attachment_report(
+async def owned_encrypted_media_evidence_report(
     session: AsyncSession,
     report_id: int,
     auth: AuthenticatedUser,
@@ -751,7 +824,7 @@ async def owned_encrypted_attachment_report(
     if (
         report is None
         or report.source != "user"
-        or report.target_type != "attachment"
+        or report.target_type not in {"message", "attachment"}
         or (report.reporter_id, report.reporter_domain) != (auth.user.id, auth.user.origin_domain)
         or report.evidence.get("attachment_encryption_mode") != "e2ee"
         or report.encryption_mode not in {"e2ee_metadata", "e2ee_user_disclosed"}
@@ -790,7 +863,7 @@ async def create_report_attachment_evidence_ticket(
         REPORT_EVIDENCE_UPLOAD_LIMIT,
         identity=f"{auth.user.origin_domain}:{auth.user.id}",
     )
-    report = await owned_encrypted_attachment_report(
+    report = await owned_encrypted_media_evidence_report(
         session,
         report_id,
         auth,
@@ -837,7 +910,7 @@ async def commit_report_attachment_evidence(
             status_code=422,
             detail={"code": "E2EE_ATTACHMENT_DISCLOSURE_REQUIRED"},
         )
-    report = await owned_encrypted_attachment_report(
+    report = await owned_encrypted_media_evidence_report(
         session,
         report_id,
         auth,
@@ -934,7 +1007,7 @@ async def view_report_attachment(
     report = await session.get(AbuseReport, report_id)
     if report is None:
         raise HTTPException(status_code=404, detail={"code": "REPORT_NOT_FOUND"})
-    if report.source != "user" or report.target_type != "attachment":
+    if report.source != "user" or report.target_type not in {"message", "attachment"}:
         raise HTTPException(status_code=404, detail={"code": "REPORT_ATTACHMENT_NOT_FOUND"})
     disclosed_ref = report.evidence.get("disclosed_attachment_ref")
     if report.encryption_mode == "e2ee_user_disclosed" and isinstance(disclosed_ref, str):
@@ -942,7 +1015,14 @@ async def view_report_attachment(
         preview_ref = disclosed_ref
     else:
         uses_disclosed_evidence = False
-        preview_ref = report.target_ref
+        original_ref = report.evidence.get("attachment_ref")
+        preview_ref = (
+            report.target_ref
+            if report.target_type == "attachment"
+            else original_ref
+            if isinstance(original_ref, str)
+            else ""
+        )
     try:
         attachment_id, attachment_domain = EntityRef(preview_ref).resolve(settings.domain)
     except ValueError as exc:

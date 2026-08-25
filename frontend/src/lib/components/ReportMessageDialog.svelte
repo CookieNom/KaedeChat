@@ -49,10 +49,10 @@
   let decryptedEvidence = $state<Blob | null>(null);
   let evidenceUploaded = $state(false);
   const encrypted = $derived(Boolean(message.e2ee));
-  const reportingAttachment = $derived(attachment !== null);
-  const requiresMessageDisclosure = $derived(encrypted && !reportingAttachment);
+  const focusedAttachment = $derived(attachment !== null);
+  const requiresMessageDisclosure = $derived(encrypted);
   const requiresAttachmentDisclosure = $derived(
-    reportingAttachment && attachment?.encryption_mode === 'e2ee'
+    focusedAttachment && attachment?.encryption_mode === 'e2ee'
   );
   const requiresDisclosure = $derived(requiresMessageDisclosure || requiresAttachmentDisclosure);
   const attachmentDisclosureAvailable = $derived(
@@ -89,12 +89,13 @@
         const created = await api<{ id: string }>('/reports', {
           method: 'POST',
           body: JSON.stringify({
-            target_type: reportingAttachment ? 'attachment' : 'message',
-            target_ref: reportingAttachment ? entityRef(attachment!) : ref,
+            target_type: 'message',
+            target_ref: ref,
             message_ref: ref,
+            ...(focusedAttachment ? { focused_attachment_ref: entityRef(attachment!) } : {}),
             category,
             description: description.trim() || null,
-            ...(requiresMessageDisclosure
+            ...(encrypted
               ? {
                   disclosed_content: disclosure.content,
                   disclosure_acknowledged: true
@@ -162,11 +163,11 @@
     <header>
       <div>
         <span>Trust &amp; Safety</span>
-        <h2 id="report-title">Report {reportingAttachment ? 'attachment' : 'message'}</h2>
+        <h2 id="report-title">Report message</h2>
       </div>
       <button type="button" class="close" aria-label="Close report" onclick={onClose}>×</button>
     </header>
-    {#if reportingAttachment}
+    {#if focusedAttachment}
       <div
         class:encrypted-disclosure={attachment?.encryption_mode === 'e2ee'}
         class="attachment-report-summary"
@@ -175,12 +176,13 @@
         <small>{attachment?.content_type ?? 'Unknown file type'}</small>
         {#if attachment?.encryption_mode === 'e2ee'}
           {#if attachmentDisclosureAvailable}
-            <strong>Share this decrypted attachment?</strong>
+            <strong>Include this decrypted attachment with the message report?</strong>
             <p>
-              This attachment is end-to-end encrypted. Reporting it decrypts the selected file on
-              this device, then uploads an unencrypted evidence copy and its filename to this
-              instance's Trust &amp; Safety team. The copy is scanned and stored with the report. It
-              does not share the encryption key, other attachments, or other messages.
+              This report covers the entire message. It sends the decrypted message text and
+              decrypts this selected attachment on this device, then uploads an unencrypted evidence
+              copy and its filename to this instance's Trust &amp; Safety team. The copy is scanned
+              and stored with the report. It does not share encryption keys, other attachments, or
+              other messages.
             </p>
           {:else}
             <strong>Attachment not decrypted on this device</strong>
@@ -191,8 +193,9 @@
           {/if}
         {:else}
           <p>
-            This specific attachment, its stored metadata, and basic message context will be sent to
-            this instance's Trust &amp; Safety team. Guild moderators do not receive this report.
+            The entire message, its text, and metadata for all of its attachments will be sent to
+            this instance's Trust &amp; Safety team. This attachment will be highlighted for review.
+            Guild moderators do not receive this report.
           </p>
         {/if}
       </div>
@@ -202,10 +205,11 @@
           <strong>Share decrypted message evidence?</strong>
           <p>
             This message is end-to-end encrypted. Reporting it sends the decrypted text shown on
-            this device and basic message context to this instance's Trust &amp; Safety team. For an
-            attachment-only message, the disclosed text is empty but the message can still be
-            reported. It does not send your encryption keys, decrypted file contents, or other
-            messages. The server labels this as reporter-supplied evidence.
+            this device, encrypted attachment metadata, and basic message context to this instance's
+            Trust &amp; Safety team. For an attachment-only message, the disclosed text is empty but
+            the message can still be reported. It does not send encryption keys, decrypted file
+            contents, or other messages unless a specific attachment was selected before opening
+            this report. The server labels plaintext as reporter-supplied evidence.
           </p>
         {:else}
           <strong>Message not decrypted on this device</strong>
@@ -217,8 +221,8 @@
       </div>
     {:else}
       <p>
-        The message text and basic context will be sent to this instance's Trust &amp; Safety team.
-        Guild moderators do not receive this report.
+        The message text, basic context, and metadata for all attachments will be sent to this
+        instance's Trust &amp; Safety team. Guild moderators do not receive this report.
       </p>
     {/if}
     <form onsubmit={submit}>
@@ -250,7 +254,7 @@
           />
           <span>
             {requiresAttachmentDisclosure
-              ? 'I understand this attachment will be decrypted and an unencrypted copy will be shared with Trust & Safety.'
+              ? 'I understand the message text and this attachment will be decrypted, and an unencrypted copy will be shared with Trust & Safety.'
               : 'I understand the decrypted message evidence will be shared with Trust & Safety.'}
           </span>
         </label>
