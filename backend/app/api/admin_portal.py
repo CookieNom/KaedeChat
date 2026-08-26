@@ -190,6 +190,7 @@ class FederatedReportCreate(ReportCreate):
 
 class ReportPatch(BaseModel):
     status: Literal[
+        "submitted",
         "triaged",
         "in_review",
         "awaiting_remote",

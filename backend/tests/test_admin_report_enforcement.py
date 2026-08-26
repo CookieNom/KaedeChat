@@ -38,6 +38,26 @@ def test_report_enforcement_requires_an_action_and_meaningful_reason() -> None:
 
 
 @pytest.mark.parametrize(
+    "status",
+    [
+        "submitted",
+        "triaged",
+        "in_review",
+        "awaiting_remote",
+        "needs_information",
+        "action_taken",
+        "closed_no_action",
+        "duplicate",
+        "reopened",
+    ],
+)
+def test_report_patch_accepts_every_persisted_queue_status(status: str) -> None:
+    patch = ReportPatch.model_validate({"status": status})
+
+    assert patch.status == status
+
+
+@pytest.mark.parametrize(
     ("target_type", "target_ref", "evidence", "expected"),
     [
         ("user", "7@local.test", {}, "7@local.test"),
