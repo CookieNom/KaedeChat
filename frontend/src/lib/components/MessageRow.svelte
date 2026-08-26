@@ -61,6 +61,7 @@
     canDelete = false,
     presence = 'offline',
     authorColor,
+    authorIconRole,
     mentionUsers = [],
     mentionRoles = [],
     referencedMessage = null,
@@ -93,6 +94,7 @@
     canDelete?: boolean;
     presence?: PresenceStatus;
     authorColor?: string;
+    authorIconRole?: Role;
     mentionUsers?: UserSummary[];
     mentionRoles?: Role[];
     referencedMessage?: Message | null;
@@ -750,6 +752,14 @@
           >
         {:else}
           <strong style:color={authorColor}>{authorName()}</strong>
+        {/if}
+        {#if authorIconRole?.icon_hash}
+          <img
+            class="message-role-icon"
+            src={assetUrl(authorIconRole.icon_hash, 'thumbnail_128', authorIconRole.origin_domain)}
+            alt={`${authorIconRole.name} role icon`}
+            title={authorIconRole.name}
+          />
         {/if}
         {#if message.webhook}<small class="webhook-badge">WEBHOOK</small>{/if}
         {#if message.author?.bot}<small class="bot-badge">BOT</small>{/if}

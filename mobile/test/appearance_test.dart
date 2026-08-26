@@ -243,17 +243,41 @@ void main() {
           profileResolved: true,
         );
 
-    KaedeRole role(String id, String name, int position, {bool hoist = true}) =>
+    KaedeRole role(String id, String name, int position,
+            {bool hoist = true, String? iconHash}) =>
         KaedeRole(
           ref: EntityRef.parse('$id@home.example'),
           guildRef: EntityRef.parse('900@home.example'),
           name: name,
+          iconHash: iconHash,
           color: 0,
           permissions: BigInt.zero,
           position: position,
           hoist: hoist,
           mentionable: false,
         );
+
+    test('the highest assigned role icon wins independently of role color', () {
+      final lower =
+          role('10', 'Lower', 2, iconHash: List<String>.filled(64, 'a').join());
+      final higherWithoutIcon = role('11', 'Higher', 5);
+      final highestIcon =
+          role('12', 'Guard', 4, iconHash: List<String>.filled(64, 'b').join());
+      final guild = KaedeGuild(
+        ref: EntityRef.parse('900@home.example'),
+        name: 'Home',
+        ownerRef: EntityRef.parse('1@home.example'),
+        permissions: BigInt.zero,
+        unavailable: false,
+        roles: [lower, higherWithoutIcon, highestIcon],
+      );
+      final member = GuildMember(
+        user: person('1', 'Ada'),
+        roleIds: const ['10', '11', '12'],
+      );
+
+      expect(highestIconRole(guild, member), same(highestIcon));
+    });
 
     test('hoisted roles come first, then online, then offline', () {
       final admin = role('10', 'Admins', 3);

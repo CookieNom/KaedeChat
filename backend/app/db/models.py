@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -1111,11 +1112,13 @@ class FederationReplicaUsage(Base, TimestampMixin):
     projection_bytes: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
     structural_rows: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
     structural_bytes: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    tracker_rows: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    tracker_bytes: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
     total_rows: Mapped[int] = mapped_column(
         BigInteger,
         Computed(
             "message_rows + reaction_rows + member_rows + attachment_rows + "
-            "projection_rows + structural_rows",
+            "projection_rows + structural_rows + tracker_rows",
             persisted=True,
         ),
     )
@@ -1123,7 +1126,7 @@ class FederationReplicaUsage(Base, TimestampMixin):
         BigInteger,
         Computed(
             "message_bytes + reaction_bytes + member_bytes + attachment_bytes + "
-            "projection_bytes + structural_bytes",
+            "projection_bytes + structural_bytes + tracker_bytes",
             persisted=True,
         ),
     )
@@ -1136,13 +1139,14 @@ class FederationReplicaUsage(Base, TimestampMixin):
         ),
         CheckConstraint(
             "message_rows >= 0 AND reaction_rows >= 0 AND member_rows >= 0 "
-            "AND attachment_rows >= 0 AND projection_rows >= 0 AND structural_rows >= 0",
+            "AND attachment_rows >= 0 AND projection_rows >= 0 AND structural_rows >= 0 "
+            "AND tracker_rows >= 0",
             name="nonnegative_rows",
         ),
         CheckConstraint(
             "message_bytes >= 0 AND reaction_bytes >= 0 AND member_bytes >= 0 "
             "AND attachment_bytes >= 0 AND projection_bytes >= 0 "
-            "AND structural_bytes >= 0",
+            "AND structural_bytes >= 0 AND tracker_bytes >= 0",
             name="nonnegative_bytes",
         ),
         Index("ix_federation_replica_usage_origin", "guild_domain"),
@@ -1326,6 +1330,7 @@ class Role(Base, FederatedIdMixin, TimestampMixin):
     guild_id: Mapped[int] = mapped_column(BigInteger)
     guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    icon_hash: Mapped[str | None] = mapped_column(String(64))
     color: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     permissions: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -1342,8 +1347,11 @@ class Role(Base, FederatedIdMixin, TimestampMixin):
         CheckConstraint("origin_domain = guild_domain", name="origin_matches_guild"),
         CheckConstraint("position >= 0", name="nonnegative_position"),
         CheckConstraint("permissions >= 0", name="nonnegative_permissions"),
-        CheckConstraint("(permissions & ~6759101702335743) = 0", name="known_permission_mask"),
+        CheckConstraint("(permissions & ~285982278599306495) = 0", name="known_permission_mask"),
         CheckConstraint("color BETWEEN 0 AND 16777215", name="color_range"),
+        CheckConstraint(
+            "icon_hash IS NULL OR char_length(icon_hash) = 64", name="icon_hash_length"
+        ),
         Index("ix_roles_guild_position", "guild_id", "guild_domain", "position"),
     )
 
@@ -1520,7 +1528,7 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
             initially="DEFERRED",
             use_alter=True,
         ),
-        CheckConstraint("type IN (0,1,2,4,5,10,11,12,15)", name="channel_type"),
+        CheckConstraint("type IN (0,1,2,4,5,10,11,12,15,17)", name="channel_type"),
         CheckConstraint(
             "encryption_mode IN ('plaintext','e2ee')",
             name="channel_encryption_mode_value",
@@ -1722,6 +1730,288 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
     )
 
 
+class TrackerBoard(Base, TimestampMixin):
+    __tablename__ = "tracker_boards"
+    channel_id: Mapped[int] = mapped_column(BigInteger)
+    channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    channel_type: Mapped[int] = mapped_column(Integer, server_default="17", nullable=False)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    key_prefix: Mapped[str] = mapped_column(String(10), nullable=False)
+    next_task_number: Mapped[int] = mapped_column(BigInteger, server_default="1", nullable=False)
+    __table_args__ = (
+        PrimaryKeyConstraint("channel_id", "channel_domain"),
+        UniqueConstraint(
+            "channel_id",
+            "channel_domain",
+            "guild_id",
+            "guild_domain",
+            name="uq_tracker_boards_ref_guild",
+        ),
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain", "guild_id", "guild_domain"],
+            [
+                "channels.id",
+                "channels.origin_domain",
+                "channels.guild_id",
+                "channels.guild_domain",
+            ],
+            name="fk_tracker_boards_channel_ref_guild",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain", "channel_type"],
+            ["channels.id", "channels.origin_domain", "channels.type"],
+            name="fk_tracker_boards_channel_ref_type",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("channel_type = 17", name="channel_type"),
+        CheckConstraint("channel_domain = guild_domain", name="origin_matches_guild"),
+        CheckConstraint("key_prefix ~ '^[A-Z][A-Z0-9]{1,9}$'", name="key_prefix_format"),
+        CheckConstraint("next_task_number >= 1", name="positive_next_task_number"),
+    )
+
+
+class TrackerDispatchOutbox(Base):
+    """Committed tracker changes awaiting projection into the gateway stream."""
+
+    __tablename__ = "tracker_dispatch_outbox"
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain", "guild_id", "guild_domain"],
+            [
+                "tracker_boards.channel_id",
+                "tracker_boards.channel_domain",
+                "tracker_boards.guild_id",
+                "tracker_boards.guild_domain",
+            ],
+            name="fk_tracker_dispatch_outbox_board_ref_guild",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("attempts >= 0", name="attempts_nonnegative"),
+        CheckConstraint(
+            "event_type IN ('TRACKER_BOARD_UPDATE','TRACKER_LANE_CREATE',"
+            "'TRACKER_LANE_UPDATE','TRACKER_LANE_DELETE','TRACKER_TASK_CREATE',"
+            "'TRACKER_TASK_UPDATE','TRACKER_TASK_DELETE')",
+            name="event_type_value",
+        ),
+        Index("ix_tracker_dispatch_outbox_due", "next_attempt_at", "id"),
+    )
+
+
+class TrackerLane(Base, FederatedIdMixin, TimestampMixin):
+    __tablename__ = "tracker_lanes"
+    channel_id: Mapped[int] = mapped_column(BigInteger)
+    channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    color: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), server_default="custom", nullable=False)
+    completed: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "origin_domain"),
+        UniqueConstraint(
+            "id",
+            "origin_domain",
+            "channel_id",
+            "channel_domain",
+            name="uq_tracker_lanes_ref_channel",
+        ),
+        UniqueConstraint(
+            "channel_id",
+            "channel_domain",
+            "position",
+            name="uq_tracker_lanes_channel_position",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain", "guild_id", "guild_domain"],
+            [
+                "tracker_boards.channel_id",
+                "tracker_boards.channel_domain",
+                "tracker_boards.guild_id",
+                "tracker_boards.guild_domain",
+            ],
+            name="fk_tracker_lanes_board_ref_guild",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("origin_domain = channel_domain", name="origin_matches_channel"),
+        CheckConstraint("channel_domain = guild_domain", name="channel_matches_guild"),
+        CheckConstraint("char_length(btrim(name)) BETWEEN 1 AND 100", name="name_length"),
+        CheckConstraint("color BETWEEN 0 AND 16777215", name="color_range"),
+        CheckConstraint(
+            "kind IN ('backlog','planned','in_progress','completed','custom')",
+            name="kind_value",
+        ),
+        CheckConstraint("position BETWEEN 0 AND 49", name="position_range"),
+        Index("ix_tracker_lanes_channel_position", "channel_id", "channel_domain", "position"),
+    )
+
+
+class TrackerTask(Base, FederatedIdMixin, TimestampMixin):
+    __tablename__ = "tracker_tasks"
+    channel_id: Mapped[int] = mapped_column(BigInteger)
+    channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    guild_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    lane_id: Mapped[int] = mapped_column(BigInteger)
+    lane_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    priority: Mapped[str] = mapped_column(String(8), server_default="none", nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    creator_id: Mapped[int] = mapped_column(BigInteger)
+    creator_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
+    assignee_id: Mapped[int | None] = mapped_column(BigInteger)
+    assignee_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
+    client_nonce: Mapped[str | None] = mapped_column(String(64))
+    client_request_hash: Mapped[str | None] = mapped_column(String(64))
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "origin_domain"),
+        UniqueConstraint(
+            "channel_id",
+            "channel_domain",
+            "number",
+            name="uq_tracker_tasks_channel_number",
+        ),
+        UniqueConstraint(
+            "channel_id",
+            "channel_domain",
+            "creator_id",
+            "creator_domain",
+            "client_nonce",
+            name="uq_tracker_tasks_creator_nonce",
+        ),
+        UniqueConstraint(
+            "channel_id",
+            "channel_domain",
+            "lane_id",
+            "lane_domain",
+            "position",
+            name="uq_tracker_tasks_lane_position",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
+            ["channel_id", "channel_domain", "guild_id", "guild_domain"],
+            [
+                "tracker_boards.channel_id",
+                "tracker_boards.channel_domain",
+                "tracker_boards.guild_id",
+                "tracker_boards.guild_domain",
+            ],
+            name="fk_tracker_tasks_board_ref_guild",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["lane_id", "lane_domain", "channel_id", "channel_domain"],
+            [
+                "tracker_lanes.id",
+                "tracker_lanes.origin_domain",
+                "tracker_lanes.channel_id",
+                "tracker_lanes.channel_domain",
+            ],
+            name="fk_tracker_tasks_lane_ref_channel",
+        ),
+        ForeignKeyConstraint(
+            ["creator_id", "creator_domain"],
+            ["users.id", "users.origin_domain"],
+            name="fk_tracker_tasks_creator",
+        ),
+        ForeignKeyConstraint(
+            ["assignee_id", "assignee_domain"],
+            ["users.id", "users.origin_domain"],
+            name="fk_tracker_tasks_assignee",
+        ),
+        ForeignKeyConstraint(
+            ["guild_id", "guild_domain", "assignee_id", "assignee_domain"],
+            [
+                "guild_members.guild_id",
+                "guild_members.guild_domain",
+                "guild_members.user_id",
+                "guild_members.user_domain",
+            ],
+            name="fk_tracker_tasks_assignee_membership",
+            # PostgreSQL 15+ can null only the optional identity columns while
+            # retaining the task's required guild identity. Service cleanup
+            # updates resource versions/events; this FK is the final invariant
+            # for bulk, cascade, and future membership-removal paths.
+            ondelete="SET NULL (assignee_id, assignee_domain)",
+        ),
+        CheckConstraint("origin_domain = channel_domain", name="origin_matches_channel"),
+        CheckConstraint("channel_domain = guild_domain", name="channel_matches_guild"),
+        CheckConstraint("lane_domain = channel_domain", name="lane_matches_channel"),
+        CheckConstraint("number >= 1", name="positive_number"),
+        CheckConstraint("char_length(btrim(title)) BETWEEN 1 AND 200", name="title_length"),
+        CheckConstraint(
+            "description IS NULL OR char_length(description) <= 10000",
+            name="description_length",
+        ),
+        CheckConstraint(
+            "priority IN ('none','low','medium','high','urgent')", name="priority_value"
+        ),
+        CheckConstraint("position BETWEEN 0 AND 4999", name="position_range"),
+        CheckConstraint(
+            "(assignee_id IS NULL) = (assignee_domain IS NULL)",
+            name="assignee_ref_complete",
+        ),
+        CheckConstraint(
+            "(client_nonce IS NULL) = (client_request_hash IS NULL)",
+            name="client_idempotency_complete",
+        ),
+        CheckConstraint(
+            "client_nonce IS NULL OR (char_length(client_nonce) BETWEEN 1 AND 64 "
+            "AND client_nonce ~ '^[A-Za-z0-9._:-]+$')",
+            name="client_nonce_format",
+        ),
+        CheckConstraint(
+            "client_request_hash IS NULL OR char_length(client_request_hash) = 64",
+            name="client_request_hash_length",
+        ),
+        Index(
+            "ix_tracker_tasks_channel_lane_position",
+            "channel_id",
+            "channel_domain",
+            "lane_id",
+            "position",
+        ),
+        Index(
+            "ix_tracker_tasks_channel_assignee",
+            "channel_id",
+            "channel_domain",
+            "assignee_id",
+            "assignee_domain",
+        ),
+        Index(
+            "ix_tracker_tasks_channel_due",
+            "channel_id",
+            "channel_domain",
+            "due_at",
+            postgresql_where=text("due_at IS NOT NULL"),
+        ),
+    )
+
+
 class ThreadMember(Base):
     __tablename__ = "thread_members"
     thread_id: Mapped[int] = mapped_column(BigInteger)
@@ -1842,7 +2132,10 @@ class ChannelOverwrite(Base):
         CheckConstraint("target_type IN ('role','member')", name="target_type"),
         CheckConstraint("allow >= 0 AND deny >= 0", name="nonnegative_masks"),
         CheckConstraint("(allow & deny) = 0", name="disjoint_masks"),
-        CheckConstraint("((allow | deny) & ~6759101702335743) = 0", name="known_permission_masks"),
+        CheckConstraint(
+            "((allow | deny) & ~285982278599306495) = 0",
+            name="known_permission_masks",
+        ),
     )
 
 
@@ -2338,7 +2631,7 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
         ),
         CheckConstraint(
             "purpose IN ('attachment','avatar','banner','guild_icon',"
-            "'guild_banner','emoji','sticker','webhook_avatar')",
+            "'guild_banner','emoji','sticker','webhook_avatar','role_icon')",
             name="purpose_value",
         ),
         CheckConstraint(

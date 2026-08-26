@@ -33,6 +33,7 @@ from app.federation.terminal_rooms import lock_terminal_room
 from app.media.service import attachments_for_messages
 from app.media.tombstones import lock_media_tombstone_ref
 from app.tasks import federation_deliver, media_local_purge
+from app.tracker.membership import clear_tracker_assignees, wake_tracker_membership_cleanup
 
 
 @dataclass(slots=True)
@@ -105,6 +106,13 @@ async def remove_remote_user_from_local_guilds(
             actor,
             [(target.id, target.origin_domain)],
         )
+        await clear_tracker_assignees(
+            session,
+            settings,
+            guild,
+            actor,
+            [(target.id, target.origin_domain)],
+        )
         await session.delete(member)
         await queue_guild_access_revocation(
             session,
@@ -138,7 +146,7 @@ async def publish_remote_user_guild_removals(
     target: User,
 ) -> None:
     for removal in removals:
-        await wake_queued_guild_federation(removal.guild)
+        await wake_tracker_membership_cleanup(removal.guild)
         await publish_e2ee_policy_updates(
             session,
             redis,

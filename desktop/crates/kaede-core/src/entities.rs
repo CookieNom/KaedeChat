@@ -104,6 +104,7 @@ pub enum ChannelKind {
     Voice,
     Category,
     Announcement,
+    Tracker,
     Unknown(u8),
 }
 
@@ -115,6 +116,7 @@ impl From<u8> for ChannelKind {
             2 => Self::Voice,
             4 => Self::Category,
             5 => Self::Announcement,
+            17 => Self::Tracker,
             unknown => Self::Unknown(unknown),
         }
     }
@@ -128,6 +130,7 @@ impl From<ChannelKind> for u8 {
             ChannelKind::Voice => 2,
             ChannelKind::Category => 4,
             ChannelKind::Announcement => 5,
+            ChannelKind::Tracker => 17,
             ChannelKind::Unknown(value) => value,
         }
     }
@@ -231,6 +234,8 @@ pub struct Role {
     pub guild_id: Snowflake,
     pub guild_domain: Domain,
     pub name: String,
+    #[serde(default)]
+    pub icon_hash: Option<String>,
     #[serde(default)]
     pub color: u32,
     pub permissions: PermissionBits,
@@ -516,6 +521,13 @@ impl CustomEmoji {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracker_channel_kind_has_a_stable_wire_value() {
+        assert_eq!(ChannelKind::from(17), ChannelKind::Tracker);
+        assert_eq!(u8::from(ChannelKind::Tracker), 17);
+        assert_eq!(ChannelKind::from(16), ChannelKind::Unknown(16));
+    }
 
     #[test]
     fn server_guild_snapshot_deserializes_without_browser_urls() {

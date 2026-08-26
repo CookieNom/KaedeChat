@@ -207,6 +207,7 @@ async def reconcile_replica_storage(
     """
 
     await session.scalar(select(func.kaede_reconcile_replica_usage(guild_id, guild_domain)))
+    await session.scalar(select(func.kaede_reconcile_tracker_replica_usage(guild_id, guild_domain)))
 
 
 def _remote_user_reference_absence() -> tuple[ColumnElement[bool], ...]:

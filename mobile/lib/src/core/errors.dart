@@ -253,6 +253,26 @@ final class KaedeException implements Exception {
           'The role list changed somewhere else. Refresh and try again.',
       'SETTINGS_VERSION_CONFLICT':
           'These settings changed somewhere else. Reload them and try again.',
+      'TRACKER_VERSION_REQUIRED': 'Refresh this tracker before changing it.',
+      'TRACKER_VERSION_CONFLICT':
+          'This tracker changed somewhere else. It has been refreshed; try again.',
+      'TRACKER_CAPACITY_INVALID':
+          'This tracker exceeds the server’s supported size. Contact an administrator.',
+      'TRACKER_LANE_LIMIT_REACHED':
+          'This tracker already has the maximum of 50 lanes.',
+      'TRACKER_TASK_LIMIT_REACHED':
+          'This tracker already has the maximum of 5,000 tasks.',
+      'TRACKER_POSITION_INVALID':
+          'That destination is no longer available. Refresh and try again.',
+      'TRACKER_LAST_LANE': 'A tracker must keep at least one lane.',
+      'TRACKER_LANE_NOT_EMPTY':
+          'Move or delete every task in this lane before deleting it.',
+      'TRACKER_ASSIGNEE_NOT_MEMBER':
+          'Tasks can only be assigned to current guild members.',
+      'TRACKER_CLIENT_NONCE_CONFLICT':
+          'That pending task does not match the original request. Create it again.',
+      'FEDERATED_WRITE_UNSUPPORTED':
+          'This remote tracker is read-only in this version of Kaede.',
       'PASSWORD_WORK_BUSY':
           'The server is busy checking passwords. Try again in a moment.',
       'TURNSTILE_REQUIRED': 'Complete the security check to continue.',

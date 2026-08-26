@@ -31,6 +31,7 @@ MANAGE_MESSAGES = 1 << 13
 THREAD_MEMBER_DEFAULTS = (1 << 35) | (1 << 36) | (1 << 38)
 PIN_MESSAGES = 1 << 51
 BYPASS_SLOWMODE = 1 << 52
+TRACKER_MEMBER_DEFAULTS = (1 << 53) | (1 << 54)
 
 
 async def cleanup_federation_fixture(session: AsyncSession) -> None:
@@ -165,8 +166,8 @@ async def prepare_thread_permission_fixture(session: AsyncSession) -> None:
     await session.execute(
         text(
             "INSERT INTO users "
-            "(id, origin_domain, is_local, username, federation_introduced_by_domain) "
-            "VALUES (:owner_id, :domain, false, 'thread_permission_guard', :domain)"
+            "(id, origin_domain, is_local, username) "
+            "VALUES (:owner_id, :domain, false, 'thread_permission_guard')"
         ),
         values,
     )
@@ -230,7 +231,12 @@ async def verify_thread_permission_fixture(session: AsyncSession) -> None:
         ).all()
     }
     expected_member = (
-        SEND_MESSAGES | MANAGE_MESSAGES | THREAD_MEMBER_DEFAULTS | PIN_MESSAGES | BYPASS_SLOWMODE
+        SEND_MESSAGES
+        | MANAGE_MESSAGES
+        | THREAD_MEMBER_DEFAULTS
+        | PIN_MESSAGES
+        | BYPASS_SLOWMODE
+        | TRACKER_MEMBER_DEFAULTS
     )
     expected_channel_manager = MANAGE_CHANNELS | BYPASS_SLOWMODE
     expected_roles = {
@@ -263,7 +269,8 @@ async def verify_thread_permission_fixture(session: AsyncSession) -> None:
             | MANAGE_CHANNELS
             | THREAD_MEMBER_DEFAULTS
             | PIN_MESSAGES
-            | BYPASS_SLOWMODE,
+            | BYPASS_SLOWMODE
+            | TRACKER_MEMBER_DEFAULTS,
         ),
     }
     if overwrite_rows != expected_overwrites:

@@ -75,6 +75,7 @@ from app.federation.security import (
     authenticate_federation,
     enforce_federation_route_rate_limit,
 )
+from app.tracker.membership import clear_tracker_assignees, wake_tracker_membership_cleanup
 
 router = APIRouter(prefix="/api/v1", tags=["applications"])
 federation_router = APIRouter(tags=["bot install federation"])
@@ -115,6 +116,9 @@ SUPPORTED_SCOPES = frozenset(
         "invites.manage",
         "webhooks.manage",
         "emojis.manage",
+        "tasks.read",
+        "tasks.write",
+        "tasks.manage",
         "dm.send",
     }
 )
@@ -129,6 +133,7 @@ SUPPORTED_INTENTS = frozenset(
         "guild_typing",
         "voice_states",
         "interactions",
+        "guild_tasks",
     }
 )
 CONTROL_SCOPES = frozenset({"workers.manage", "commands.manage"})
@@ -2157,6 +2162,13 @@ async def _uninstall_bot_from_local_guild(
             mutation_signer,
             [(installation.bot_user_id, installation.bot_user_domain)],
         )
+        await clear_tracker_assignees(
+            session,
+            settings,
+            guild,
+            mutation_signer,
+            [(installation.bot_user_id, installation.bot_user_domain)],
+        )
         await queue_guild_mutation(
             session,
             settings,
@@ -2174,7 +2186,10 @@ async def _uninstall_bot_from_local_guild(
         )
         await session.delete(member)
     await session.commit()
-    await wake_queued_guild_federation(guild)
+    if member is not None:
+        await wake_tracker_membership_cleanup(guild)
+    else:
+        await wake_queued_guild_federation(guild)
     await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
     if member is not None:

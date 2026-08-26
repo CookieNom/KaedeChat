@@ -1,6 +1,6 @@
 # Mobile parity
 
-Last audited: 2026-08-23 against the current repository working tree.
+Last audited: 2026-08-26 against the current repository working tree.
 
 This is the living parity contract between the Flutter client and the web/
 desktop client. A repository method by itself does not count as parity: the
@@ -33,6 +33,7 @@ is the better interaction for a phone.
 | Guild/DM browsing, unread and mention counts, categories, guild ordering, and guild groups | **Mobile equivalent** | `mobile_shell.dart` uses a phone-first rail/drawer and stacked conversation route while retaining composite federated identities.                                                       |
 | Friends, inbound/outbound requests, blocks, profiles, new DMs, and group DMs               | **Aligned**           | Mobile exposes add, accept, decline, cancel, remove, block/unblock, message, group creation, membership, rename, leave, and ownership state.                                            |
 | Create/join guild, invite shortcut, guild settings, and channel creation                   | **Aligned**           | Authorized users have a create-channel action directly in the guild header as well as the settings screen. Create/update responses are reconciled into navigation immediately.          |
+| Task tracker channels                                                                      | **Aligned**           | Type-17 channels open a dedicated responsive board with ordered/collapsible statuses, task and lane CRUD, priorities, due dates, assignees, touch move controls, exact high-bit permission checks, stable retry nonces, Gateway refresh, and stale-version recovery. |
 | Responsive navigation                                                                      | **Mobile equivalent** | Compact screens use stacked pages and sheets; wider Flutter layouts use panes or navigation rails. Desktop-only hover, context-menu, and multi-window behaviors are not parity targets. |
 
 ## Messaging, rendering, composer, search, and pins
@@ -156,6 +157,9 @@ execution require physical devices; emulator-only results are insufficient.
 - Create, edit, reorder, and delete a channel and role on mobile; verify both
   mobile lists update immediately and web receives the same state without
   leaving/re-entering either screen.
+- Create a tracker channel, add and edit tasks and statuses, move tasks within
+  and between statuses, and verify permission-denied and stale-version recovery
+  from a second client.
 - Exercise every role and channel permission group, including Connect, Speak,
   Stream, Use Voice Activity, Mute/Deafen/Move Members, and federation grants;
   verify effective behavior from a second account.

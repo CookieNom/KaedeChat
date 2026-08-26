@@ -217,6 +217,41 @@ Pass `ThreadPage.next_cursor` back unchanged. The older timestamp-based
 `before` argument remains available for compatibility, but cannot be combined
 with `cursor`.
 
+Task tracker channels use typed board resources rather than message history.
+Grant `tasks.read` and `tasks.write`, enable `guild_tasks`, and grant the bot's
+role the corresponding tracker permissions:
+
+```python
+bot = kaede.Client(
+    worker_state=kaede.WorkerState.load("/run/secrets/kaede-worker"),
+    intents=kaede.Intents(guild_tasks=True),
+)
+
+tracker_channel = next(channel for channel in channels if channel.is_tracker)
+board = await tracker_channel.tracker()
+planned = next(lane for lane in board.lanes if lane.kind == "planned")
+
+task = await board.create_task(
+    planned.ref,
+    "Publish release notes",
+    priority="high",
+    client_nonce="release-2026-08-notes",
+)
+await task.move(
+    next(lane.ref for lane in board.lanes if lane.kind == "in_progress"),
+    0,
+)
+
+@bot.event
+async def on_tracker_task_update(task: kaede.TrackerTask) -> None:
+    print(task.key, task.title, task.lane_ref)
+```
+
+Every existing-resource mutation sends the fetched resource's version through
+`If-Match`. On a stale-write error, refetch the board before retrying. Task
+creation's `client_nonce` is safe to reuse only for the identical request. See
+[Task tracker channels](task-tracker.md) for permissions and route details.
+
 Joining a thread can set the bot's own Kaede notification preference. Adding
 another member never changes that member's preference; they control it through
 their own `@me` membership operation. Member listing is capped at 100 per page;
@@ -271,6 +306,8 @@ Supported listener aliases follow the event families:
 - `on_thread_create`, `on_thread_update`, `on_thread_delete`,
   `on_thread_list_sync`, `on_thread_member_update`, and
   `on_thread_members_update`
+- `on_tracker_board_update`, tracker lane create/update/delete, and tracker task
+  create/update/delete listeners
 - `on_presence`, `on_typing`, `on_voice_state`, and `on_interaction`
 
 `Client.listen()` registers additional listeners, and `Client.wait_for()`

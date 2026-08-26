@@ -332,6 +332,7 @@ def role_payload(role: Role) -> dict[str, object]:
         "guild_id": str(role.guild_id),
         "guild_domain": role.guild_domain,
         "name": role.name,
+        "icon_hash": role.icon_hash,
         "color": role.color,
         "permissions": str(role.permissions),
         "position": role.position,

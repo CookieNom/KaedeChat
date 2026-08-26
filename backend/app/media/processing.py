@@ -189,7 +189,7 @@ def _flatten_alpha(image: pyvips.Image) -> pyvips.Image:
 
 
 IMAGE_DERIVATIVE_SIZES = (128, 512, 1024)
-COMPACT_IMAGE_PURPOSES = frozenset({"avatar", "guild_icon", "webhook_avatar"})
+COMPACT_IMAGE_PURPOSES = frozenset({"avatar", "guild_icon", "webhook_avatar", "role_icon"})
 
 
 def image_derivative_sizes(purpose: str) -> tuple[int, ...]:

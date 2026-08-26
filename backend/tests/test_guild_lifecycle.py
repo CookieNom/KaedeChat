@@ -227,6 +227,9 @@ async def test_local_bot_leave_cleans_installation_role_and_publishes_after_comm
     async def publish_roles(*_args) -> None:
         order.append("roles")
 
+    async def wake_tracker(_guild: Guild) -> None:
+        order.append("tracker-wake")
+
     async def publish_member(*_args, **_kwargs) -> None:
         order.append("member")
 
@@ -243,8 +246,15 @@ async def test_local_bot_leave_cleans_installation_role_and_publishes_after_comm
         "cleanup_guild_member_threads",
         AsyncMock(return_value=[]),
     )
+    clear_assignees = AsyncMock(return_value=[])
+    monkeypatch.setattr(guild_lifecycle, "clear_tracker_assignees", clear_assignees)
     monkeypatch.setattr(guild_lifecycle, "queue_guild_mutation", AsyncMock())
     monkeypatch.setattr(guild_lifecycle, "wake_queued_guild_federation", AsyncMock())
+    monkeypatch.setattr(
+        guild_lifecycle,
+        "wake_tracker_membership_cleanup",
+        AsyncMock(side_effect=wake_tracker),
+    )
     monkeypatch.setattr(guild_lifecycle, "publish_e2ee_policy_updates", AsyncMock())
     monkeypatch.setattr(guild_lifecycle, "publish_guild_thread_member_cleanup", AsyncMock())
     monkeypatch.setattr(
@@ -281,8 +291,15 @@ async def test_local_bot_leave_cleans_installation_role_and_publishes_after_comm
         bot,
         [installation],
     )
+    clear_assignees.assert_awaited_once_with(
+        session,
+        SimpleNamespace(domain="chat.example"),  # type: ignore[arg-type]
+        guild,
+        bot,
+        [(bot.id, bot.origin_domain)],
+    )
     session.delete.assert_awaited_once_with(member)
-    assert order == ["commit", "roles", "member"]
+    assert order == ["commit", "tracker-wake", "roles", "member"]
 
 
 @pytest.mark.asyncio
@@ -339,6 +356,8 @@ async def test_authority_applies_durable_leave_request_idempotently(monkeypatch)
         "cleanup_guild_member_threads",
         AsyncMock(return_value=[]),
     )
+    clear_assignees = AsyncMock(return_value=[])
+    monkeypatch.setattr(federation, "clear_tracker_assignees", clear_assignees)
 
     assert await federation._apply_authoritative_guild_leave(
         session,
@@ -359,6 +378,13 @@ async def test_authority_applies_durable_leave_request_idempotently(monkeypatch)
     )
     queue_revocation.assert_awaited_once()
     queue_mutation.assert_awaited_once()
+    clear_assignees.assert_awaited_once_with(
+        session,
+        SimpleNamespace(domain="chat.example"),  # type: ignore[arg-type]
+        guild,
+        owner,
+        [(remote.id, remote.origin_domain)],
+    )
 
     session.reset_mock()
     session.get.side_effect = lambda _model, _key: None
@@ -402,7 +428,7 @@ async def test_direct_authoritative_leave_publishes_role_cleanup_only_after_comm
     monkeypatch.setattr(federation, "_apply_authoritative_guild_leave", applied)
     monkeypatch.setattr(
         federation,
-        "wake_queued_guild_federation",
+        "wake_tracker_membership_cleanup",
         AsyncMock(side_effect=wake),
     )
     monkeypatch.setattr(

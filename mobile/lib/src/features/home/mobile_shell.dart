@@ -33,7 +33,11 @@ String conversationHeaderTitle(KaedeChannel channel) {
   if (channel.guildRef != null) {
     final name = channel.name?.trim();
     final display = name?.isNotEmpty == true ? name! : 'channel';
-    return channel.isThread || channel.isForum ? display : '#$display';
+    return channel.isThread ||
+            channel.isForum ||
+            channel.type == ChannelType.tracker
+        ? display
+        : '#$display';
   }
   if (channel.conversationType == 'group' &&
       channel.name?.trim().isNotEmpty == true) {
@@ -1000,7 +1004,8 @@ final class _ConversationScreenState
                 onPressed: _showThreads,
                 icon: const Icon(Icons.forum_outlined),
               ),
-            if (!widget.channel.isForum)
+            if (!widget.channel.isForum &&
+                widget.channel.type != ChannelType.tracker)
               IconButton(
                 tooltip: 'Search this conversation',
                 onPressed: _showMessageSearch,
@@ -2080,6 +2085,7 @@ final class _ChannelDetailsSheetState
         .select((state) => state.e2eeActivationEnabled));
     final state = ref.read(mobileControllerProvider);
     final showEncryption = !channel.isForum &&
+        channel.type != ChannelType.tracker &&
         (channel.encryptionMode == 'e2ee' || state.e2eeActivationEnabled);
     final topic = channel.topic?.trim();
     return SafeArea(
@@ -2098,7 +2104,9 @@ final class _ChannelDetailsSheetState
                           ? Icons.campaign_rounded
                           : channel.isForum
                               ? Icons.forum_outlined
-                              : Icons.tag_rounded,
+                              : channel.type == ChannelType.tracker
+                                  ? Icons.view_kanban_outlined
+                                  : Icons.tag_rounded,
                   color: KaedeColors.muted,
                 ),
                 const SizedBox(width: 8),
@@ -4674,11 +4682,13 @@ final class _ChannelRow extends StatelessWidget {
                       ? Icons.subdirectory_arrow_right_rounded
                       : channel.isForum
                           ? Icons.forum_outlined
-                          : channel.type == ChannelType.voice
-                              ? Icons.volume_up_rounded
-                              : channel.type == ChannelType.announcement
-                                  ? Icons.campaign_rounded
-                                  : Icons.tag_rounded,
+                          : channel.type == ChannelType.tracker
+                              ? Icons.view_kanban_outlined
+                              : channel.type == ChannelType.voice
+                                  ? Icons.volume_up_rounded
+                                  : channel.type == ChannelType.announcement
+                                      ? Icons.campaign_rounded
+                                      : Icons.tag_rounded,
                   size: 19,
                   color: highlighted || active
                       ? KaedeColors.text

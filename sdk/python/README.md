@@ -32,9 +32,13 @@ The SDK includes typed `Guild`, `Channel`, `Member`, `Role`, `Message`, and
 thread metadata, membership, pagination, and Gateway events. `Invite`,
 `Webhook`, `Emoji`, and `Interaction` have their own classes, and there are
 types for reactions, pins, presence, typing, deletions, bans, voice state, and
-voice occupancy. Every resource remembers its target instance, so convenience
-methods stay safe when one worker connects to several federated Kaede
-instances.
+voice occupancy. Task tracker channels expose typed `TrackerBoard`,
+`TrackerLane`, and `TrackerTask` resources, version-safe CRUD helpers,
+idempotent creation nonces, and `guild_tasks` Gateway events. Lane and task
+events also expose their parent `board_version`, so consumers can version-fence
+incremental state before applying it. Every resource remembers its target
+instance, so convenience methods stay safe when one worker connects to several
+federated Kaede instances.
 
 Forum listings use `Channel.threads(include_archived=True)` for one globally
 ordered active-and-archived feed. They expose an opaque `ThreadPage.next_cursor`;

@@ -160,7 +160,8 @@ KaedeChannel? resolveInitialConversation({
           .where((channel) =>
               channel.type == ChannelType.text ||
               channel.type == ChannelType.announcement ||
-              channel.type == ChannelType.forum),
+              channel.type == ChannelType.forum ||
+              channel.type == ChannelType.tracker),
   ];
   for (final channel in accessible) {
     if (channel.ref == savedRef) return channel;
@@ -3627,6 +3628,16 @@ final class MobileController extends StateNotifier<MobileState> {
       case 'FEDERATION_PEER_STATUS':
         // Peer health is operator-facing. User-visible remote availability is
         // delivered through guild/channel availability events instead.
+        break;
+      case 'TRACKER_BOARD_UPDATE' ||
+            'TRACKER_LANE_CREATE' ||
+            'TRACKER_LANE_UPDATE' ||
+            'TRACKER_LANE_DELETE' ||
+            'TRACKER_TASK_CREATE' ||
+            'TRACKER_TASK_UPDATE' ||
+            'TRACKER_TASK_DELETE':
+        // The active tracker view observes these raw events and refreshes its
+        // versioned board projection. They do not change guild navigation.
         break;
       default:
         // Preserve forward compatibility without refreshing for every frame:

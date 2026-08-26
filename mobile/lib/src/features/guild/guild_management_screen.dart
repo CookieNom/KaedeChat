@@ -689,6 +689,7 @@ String channelSummaryLine(KaedeChannel channel, KaedeChannel? parent) {
     ChannelType.voice => 'Voice channel',
     ChannelType.announcement => 'Announcement channel',
     ChannelType.forum => 'Forum channel',
+    ChannelType.tracker => 'Task tracker',
     ChannelType.announcementThread ||
     ChannelType.publicThread ||
     ChannelType.privateThread =>
@@ -1184,6 +1185,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
                     ChannelType.voice => Icons.volume_up_rounded,
                     ChannelType.announcement => Icons.campaign_rounded,
                     ChannelType.forum => Icons.forum_outlined,
+                    ChannelType.tracker => Icons.view_kanban_outlined,
                     ChannelType.announcementThread ||
                     ChannelType.publicThread ||
                     ChannelType.privateThread =>
@@ -1848,6 +1850,27 @@ final class _RolesTabState extends State<_RolesTab> {
         if (!mounted) return;
         saved = updated;
         _upsertRole(updated);
+      }
+      final iconFile = draft.iconFile;
+      if (saved != null && iconFile != null) {
+        final contentType = imageUploadContentType(iconFile.name,
+            reportedType: iconFile.mimeType);
+        if (contentType == null) {
+          throw const FormatException(
+              'Choose a PNG, JPEG, GIF, or WebP image.');
+        }
+        saved = await widget.repository.uploadRoleIcon(
+          guild: widget.guild.ref,
+          role: saved.ref,
+          filename: iconFile.name,
+          contentType: contentType,
+          file: File(iconFile.path),
+        );
+        _upsertRole(saved);
+      } else if (saved != null && draft.removeIcon && saved.iconHash != null) {
+        saved =
+            await widget.repository.deleteRoleIcon(widget.guild.ref, saved.ref);
+        _upsertRole(saved);
       }
       final message = draft.delete
           ? 'Role deleted'
@@ -5648,6 +5671,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
   late final _defaultReaction = TextEditingController(
     text: '${widget.channel?.defaultReactionEmoji?['emoji_name'] ?? ''}',
   );
+  late final _trackerPrefix = TextEditingController(text: 'TASK');
   late final String? _defaultReactionId =
       widget.channel?.defaultReactionEmoji?['emoji_id'] as String?;
   var _defaultReactionEdited = false;
@@ -5672,6 +5696,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
     (ChannelType.voice, 'Voice', Icons.volume_up_rounded),
     (ChannelType.announcement, 'Announcement', Icons.campaign_rounded),
     (ChannelType.forum, 'Forum', Icons.forum_outlined),
+    (ChannelType.tracker, 'Task tracker', Icons.view_kanban_outlined),
     (ChannelType.category, 'Category', Icons.folder_outlined),
   ];
 
@@ -5690,6 +5715,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
     _name.dispose();
     _topic.dispose();
     _defaultReaction.dispose();
+    _trackerPrefix.dispose();
     super.dispose();
   }
 
@@ -5826,6 +5852,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             ChannelType.voice => Icons.volume_up_rounded,
                             ChannelType.announcement => Icons.campaign_rounded,
                             ChannelType.forum => Icons.forum_outlined,
+                            ChannelType.tracker => Icons.view_kanban_outlined,
                             _ => Icons.tag_rounded,
                           }),
                         ),
@@ -5873,6 +5900,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                 ChannelType.announcement =>
                                   Icons.campaign_rounded,
                                 ChannelType.forum => Icons.forum_outlined,
+                                ChannelType.tracker =>
+                                  Icons.view_kanban_outlined,
                                 _ => Icons.tag_rounded,
                               },
                               size: 15,
@@ -5887,6 +5916,7 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                                   ChannelType.announcement =>
                                     'Announcement channel',
                                   ChannelType.forum => 'Forum channel',
+                                  ChannelType.tracker => 'Task tracker',
                                   _ => 'Text channel',
                                 }} · the type cannot change after creation',
                                 style: const TextStyle(
@@ -5939,7 +5969,8 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             alignLabelWithHint: true,
                           ),
                         ),
-                        if (_type != ChannelType.voice) ...[
+                        if (_type != ChannelType.voice &&
+                            _type != ChannelType.tracker) ...[
                           const SizedBox(height: 4),
                           DropdownButtonFormField<int>(
                             initialValue: _slow,
@@ -5960,6 +5991,27 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
                             ],
                             onChanged: (value) =>
                                 setState(() => _slow = value ?? 0),
+                          ),
+                        ],
+                        if (_type == ChannelType.tracker &&
+                            widget.channel == null) ...[
+                          const SizedBox(height: 14),
+                          TextFormField(
+                            key: const ValueKey('tracker-key-prefix-field'),
+                            controller: _trackerPrefix,
+                            maxLength: 10,
+                            textCapitalization: TextCapitalization.characters,
+                            decoration: const InputDecoration(
+                              labelText: 'Task key prefix',
+                              helperText:
+                                  'Used for task IDs, for example TASK-24.',
+                              prefixIcon: Icon(Icons.tag_rounded),
+                            ),
+                            validator: (value) => RegExp(
+                              r'^[A-Za-z][A-Za-z0-9]{1,9}$',
+                            ).hasMatch(value?.trim() ?? '')
+                                ? null
+                                : 'Use 2–10 letters or digits; start with a letter',
                           ),
                         ],
                         if (_type == ChannelType.forum) ...[
@@ -6300,10 +6352,11 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
         name: _name.text.trim(),
         topic: _topic.text.trim(),
         type: _type,
-        slowModeSeconds:
-            _type == ChannelType.category || _type == ChannelType.voice
-                ? 0
-                : _slow,
+        slowModeSeconds: _type == ChannelType.category ||
+                _type == ChannelType.voice ||
+                _type == ChannelType.tracker
+            ? 0
+            : _slow,
         parentRef: _type == ChannelType.category ? null : parent,
         federatedHistoryPolicy:
             _type == ChannelType.text || _type == ChannelType.announcement
@@ -6325,6 +6378,9 @@ final class _ChannelEditorSheetState extends State<_ChannelEditorSheet> {
         defaultSortOrder: _type == ChannelType.forum ? _forumSort : null,
         defaultForumLayout: _type == ChannelType.forum ? _forumLayout : null,
         e2eeRequired: _type == ChannelType.forum ? _e2eeRequired : null,
+        trackerKeyPrefix: _type == ChannelType.tracker && widget.channel == null
+            ? _trackerPrefix.text.trim().toUpperCase()
+            : null,
       ),
     );
   }
@@ -6401,6 +6457,7 @@ final class GuildChannelDraft {
     this.defaultSortOrder,
     this.defaultForumLayout,
     this.e2eeRequired,
+    this.trackerKeyPrefix,
   });
 
   final String name;
@@ -6417,13 +6474,16 @@ final class GuildChannelDraft {
   final int? defaultSortOrder;
   final int? defaultForumLayout;
   final bool? e2eeRequired;
+  final String? trackerKeyPrefix;
 
   Map<String, Object?> get json => {
         'name': name,
         'type': _channelNumber(type),
         'topic': type == ChannelType.category || topic.isEmpty ? null : topic,
         'rate_limit_per_user':
-            type == ChannelType.category ? 0 : slowModeSeconds,
+            type == ChannelType.category || type == ChannelType.tracker
+                ? 0
+                : slowModeSeconds,
         'parent_id': type == ChannelType.category ? null : parentRef?.id.value,
         if (federatedHistoryPolicy != null)
           'federated_history_policy': federatedHistoryPolicy,
@@ -6451,6 +6511,7 @@ final class GuildChannelDraft {
         if (defaultForumLayout != null)
           'default_forum_layout': defaultForumLayout,
         if (e2eeRequired != null) 'e2ee_required': e2eeRequired,
+        if (trackerKeyPrefix != null) 'tracker_key_prefix': trackerKeyPrefix,
       };
 }
 
@@ -6491,6 +6552,8 @@ final class _RoleEditorState extends State<_RoleEditor> {
   late int _color = widget.role?.color ?? 0;
   late bool _hoist = widget.role?.hoist ?? false,
       _mentionable = widget.role?.mentionable ?? false;
+  XFile? _iconFile;
+  var _removeIcon = false;
   static const _colors = [
     0,
     0x55B998,
@@ -6589,6 +6652,59 @@ final class _RoleEditorState extends State<_RoleEditor> {
                   ),
                 ),
               ),
+          ]),
+          const SizedBox(height: 18),
+          Text('Role icon', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          const Text(
+            'Shown beside names in chat. A member uses their highest role icon.',
+            style: TextStyle(color: KaedeColors.muted, fontSize: 12.5),
+          ),
+          const SizedBox(height: 12),
+          Row(children: [
+            if (_iconFile case final file?)
+              Image.file(File(file.path),
+                  width: 44, height: 44, fit: BoxFit.contain)
+            else if (!_removeIcon && widget.role?.iconHash != null)
+              CachedNetworkImage(
+                imageUrl: publicAssetUri(
+                        widget.role!.ref.domain, widget.role!.iconHash,
+                        variant: 'thumbnail_128')!
+                    .toString(),
+                width: 44,
+                height: 44,
+                fit: BoxFit.contain,
+              )
+            else
+              const SizedBox.square(
+                dimension: 44,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: KaedeColors.raised,
+                    borderRadius: BorderRadius.all(Radius.circular(12)),
+                  ),
+                  child: Icon(Icons.shield_outlined, color: KaedeColors.muted),
+                ),
+              ),
+            const SizedBox(width: 12),
+            OutlinedButton.icon(
+              onPressed: _pickRoleIcon,
+              icon: const Icon(Icons.image_outlined),
+              label: Text(_iconFile == null && widget.role?.iconHash == null
+                  ? 'Choose icon'
+                  : 'Change icon'),
+            ),
+            if (_iconFile != null ||
+                (!_removeIcon && widget.role?.iconHash != null)) ...[
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: () => setState(() {
+                  _iconFile = null;
+                  _removeIcon = true;
+                }),
+                child: const Text('Remove'),
+              ),
+            ],
           ]),
           const SizedBox(height: 18),
           _Panel(
@@ -6694,12 +6810,28 @@ final class _RoleEditorState extends State<_RoleEditor> {
                       'permissions': '$_permissions',
                       'hoist': _hoist,
                       'mentionable': _mentionable
-                    }),
+                    }, iconFile: _iconFile, removeIcon: _removeIcon),
                   ),
           icon: Icon(
               widget.role == null ? Icons.add_rounded : Icons.save_outlined),
           label: Text(widget.role == null ? 'Create role' : 'Save role'),
         ));
+  }
+
+  Future<void> _pickRoleIcon() async {
+    final file = await ImagePicker().pickImage(source: ImageSource.gallery);
+    if (file == null || !mounted) return;
+    final contentType =
+        imageUploadContentType(file.name, reportedType: file.mimeType);
+    if (contentType == null) {
+      _tabError(context, 'Could not choose role icon',
+          'Choose a PNG, JPEG, GIF, or WebP image.');
+      return;
+    }
+    setState(() {
+      _iconFile = file;
+      _removeIcon = false;
+    });
   }
 
   Future<void> _confirmDelete() async {
@@ -6720,9 +6852,12 @@ final class _RoleEditorState extends State<_RoleEditor> {
 }
 
 final class _RoleDraft {
-  const _RoleDraft(this.json, {this.delete = false});
+  const _RoleDraft(this.json,
+      {this.delete = false, this.iconFile, this.removeIcon = false});
   final Map<String, Object?> json;
   final bool delete;
+  final XFile? iconFile;
+  final bool removeIcon;
 }
 
 final class _RoleAssignmentDialog extends StatefulWidget {
@@ -7018,5 +7153,6 @@ int _channelNumber(ChannelType type) => switch (type) {
       ChannelType.publicThread => 11,
       ChannelType.privateThread => 12,
       ChannelType.forum => 15,
+      ChannelType.tracker => 17,
       ChannelType.unknown => 0
     };

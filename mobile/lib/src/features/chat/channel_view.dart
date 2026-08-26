@@ -23,6 +23,7 @@ import 'package:kaede_mobile/src/e2ee/media.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
+import 'package:kaede_mobile/src/features/tracker/tracker_channel_view.dart';
 import 'package:kaede_mobile/src/features/voice/voice_room.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/storage/local_database.dart';
@@ -768,6 +769,9 @@ final class _ChannelViewState extends ConsumerState<ChannelView> {
     final channel = state.activeChannel;
     if (channel == null) {
       return const Center(child: Text('Choose a conversation.'));
+    }
+    if (channel.type == ChannelType.tracker) {
+      return TrackerChannelView(channel: channel);
     }
     if (channel.type == ChannelType.voice) return VoiceRoom(channel: channel);
     final composerReady = _composerChannel == channel.ref;
@@ -3946,6 +3950,9 @@ final class _MessageTile extends StatelessWidget {
     final authorColor = guild == null || authorMember == null
         ? null
         : memberRoleColor(guild, authorMember);
+    final authorIconRole = guild == null || authorMember == null
+        ? null
+        : highestIconRole(guild, authorMember);
     final deleted = displayedMessage.deletedAt != null;
     final mediaPreview = previewMediaUrl(displayedMessage.content ?? '');
     final linkPreview = previewableMessageLink(displayedMessage.content);
@@ -4009,6 +4016,28 @@ final class _MessageTile extends StatelessWidget {
                               ),
                             ),
                           ),
+                          if (authorIconRole?.iconHash
+                              case final iconHash?) ...[
+                            const SizedBox(width: 5),
+                            Baseline(
+                              baseline: 14,
+                              baselineType: TextBaseline.alphabetic,
+                              child: Tooltip(
+                                message: authorIconRole!.name,
+                                child: CachedNetworkImage(
+                                  imageUrl: publicAssetUri(
+                                    authorIconRole.ref.domain,
+                                    iconHash,
+                                    variant: 'thumbnail_128',
+                                  )!
+                                      .toString(),
+                                  width: 18,
+                                  height: 18,
+                                  fit: BoxFit.contain,
+                                ),
+                              ),
+                            ),
+                          ],
                           if (displayedMessage.createdAtAvailable) ...[
                             const SizedBox(width: 8),
                             Text(

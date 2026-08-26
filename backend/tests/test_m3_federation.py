@@ -1175,6 +1175,7 @@ def test_complete_guild_mutation_registry_and_snapshot_fences() -> None:
         "guild.channel.update",
         "guild.channel.delete",
         "guild.forum.cursor.update",
+        "guild.tracker.board.invalidate",
         "guild.thread.member.upsert",
         "guild.thread.member.delete",
         "guild.role.create",
@@ -2980,6 +2981,12 @@ def test_guild_snapshot_rejects_cross_origin_entity_injection() -> None:
         ],
     }
     validate_guild_snapshot(snapshot, expected_origin="beta.localhost", expected_guild_id=10)
+    snapshot["roles"][0]["icon_hash"] = "b" * 64
+    validate_guild_snapshot(snapshot, expected_origin="beta.localhost", expected_guild_id=10)
+    snapshot["roles"][0]["icon_hash"] = "not-a-digest"
+    with pytest.raises(ValueError, match="role icon hash"):
+        validate_guild_snapshot(snapshot, expected_origin="beta.localhost", expected_guild_id=10)
+    snapshot["roles"][0]["icon_hash"] = None
     with pytest.raises(ValueError, match="joining local member"):
         validate_guild_snapshot(
             snapshot,

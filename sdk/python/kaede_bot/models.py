@@ -168,6 +168,7 @@ class Guild:
         default_forum_layout: int | MissingType = MISSING,
         flags: int | MissingType = MISSING,
         e2ee_required: bool | MissingType = MISSING,
+        tracker_key_prefix: str | MissingType = MISSING,
     ) -> Channel:
         return await self.client.create_channel(
             self.ref,
@@ -185,6 +186,7 @@ class Guild:
             default_forum_layout=default_forum_layout,
             flags=flags,
             e2ee_required=e2ee_required,
+            tracker_key_prefix=tracker_key_prefix,
         )
 
     async def create_role(
@@ -511,6 +513,10 @@ class Channel:
         return self.type == 15
 
     @property
+    def is_tracker(self) -> bool:
+        return self.type == 17
+
+    @property
     def archived(self) -> bool:
         return bool(self.thread_metadata and self.thread_metadata.archived)
 
@@ -564,6 +570,11 @@ class Channel:
 
     async def voice_occupancy(self) -> VoiceOccupancy:
         return await self.client.voice_occupancy(self.ref, target=self.target)
+
+    async def tracker(self) -> TrackerBoard:
+        if not self.is_tracker:
+            raise ValueError("task trackers require a tracker channel")
+        return await self.client.fetch_tracker(self.ref, target=self.target)
 
     async def edit(
         self,
@@ -829,6 +840,284 @@ class ThreadPage:
 
 
 @dataclass(slots=True)
+class TrackerLane:
+    client: Client
+    target: str
+    ref: EntityRef
+    channel_ref: EntityRef
+    name: str
+    color: int
+    kind: str
+    completed: bool
+    position: int
+    task_count: int = 0
+    version: str | None = None
+    board_version: str | None = None
+
+    @classmethod
+    def from_payload(
+        cls, client: Client, target: str, payload: dict[str, Any]
+    ) -> TrackerLane:
+        return cls(
+            client=client,
+            target=target,
+            ref=EntityRef(int(payload["id"]), str(payload["origin_domain"])),
+            channel_ref=EntityRef(
+                int(payload["channel_id"]), str(payload["channel_domain"])
+            ),
+            name=str(payload["name"]),
+            color=int(payload.get("color", 0)),
+            kind=str(payload.get("kind", "custom")),
+            completed=bool(payload.get("completed", False)),
+            position=int(payload.get("position", 0)),
+            task_count=int(payload.get("task_count", 0)),
+            version=(
+                str(payload["version"]) if payload.get("version") is not None else None
+            ),
+            board_version=(
+                str(payload["board_version"])
+                if payload.get("board_version") is not None
+                else None
+            ),
+        )
+
+    async def edit(
+        self,
+        *,
+        name: str | MissingType = MISSING,
+        color: int | MissingType = MISSING,
+        kind: str | MissingType = MISSING,
+        completed: bool | MissingType = MISSING,
+    ) -> TrackerLane:
+        return await self.client.edit_tracker_lane(
+            self.channel_ref,
+            self.ref,
+            target=self.target,
+            version=self.version,
+            name=name,
+            color=color,
+            kind=kind,
+            completed=completed,
+        )
+
+    async def move(self, position: int) -> TrackerLane:
+        return await self.client.move_tracker_lane(
+            self.channel_ref,
+            self.ref,
+            position,
+            target=self.target,
+            version=self.version,
+        )
+
+    async def delete(self) -> None:
+        await self.client.delete_tracker_lane(
+            self.channel_ref,
+            self.ref,
+            target=self.target,
+            version=self.version,
+        )
+
+
+@dataclass(slots=True)
+class TrackerTask:
+    client: Client
+    target: str
+    ref: EntityRef
+    channel_ref: EntityRef
+    lane_ref: EntityRef
+    number: int
+    key: str
+    title: str
+    description: str | None
+    priority: str
+    position: int
+    creator: User
+    assignee: User | None = None
+    due_at: datetime | None = None
+    completed_at: datetime | None = None
+    version: str | None = None
+    board_version: str | None = None
+
+    @classmethod
+    def from_payload(
+        cls, client: Client, target: str, payload: dict[str, Any]
+    ) -> TrackerTask:
+        creator = payload.get("creator")
+        if not isinstance(creator, dict):
+            raise ValueError("tracker task payload is missing its creator")
+        assignee = payload.get("assignee")
+        return cls(
+            client=client,
+            target=target,
+            ref=EntityRef(int(payload["id"]), str(payload["origin_domain"])),
+            channel_ref=EntityRef(
+                int(payload["channel_id"]), str(payload["channel_domain"])
+            ),
+            lane_ref=EntityRef(
+                int(payload["lane_id"]),
+                str(payload.get("lane_domain", payload["channel_domain"])),
+            ),
+            number=int(payload.get("number", payload.get("task_number", 0))),
+            key=str(payload.get("key", payload.get("display_id", ""))),
+            title=str(payload["title"]),
+            description=(
+                str(payload["description"])
+                if payload.get("description") is not None
+                else None
+            ),
+            priority=str(payload.get("priority", "none")),
+            position=int(payload.get("position", 0)),
+            creator=User.from_payload(creator),
+            assignee=(
+                User.from_payload(assignee) if isinstance(assignee, dict) else None
+            ),
+            due_at=_datetime(payload.get("due_at")),
+            completed_at=_datetime(payload.get("completed_at")),
+            version=(
+                str(payload["version"]) if payload.get("version") is not None else None
+            ),
+            board_version=(
+                str(payload["board_version"])
+                if payload.get("board_version") is not None
+                else None
+            ),
+        )
+
+    async def edit(
+        self,
+        *,
+        title: str | MissingType = MISSING,
+        description: str | None | MissingType = MISSING,
+        priority: str | MissingType = MISSING,
+        due_at: datetime | None | MissingType = MISSING,
+        assignee: EntityRef | None | MissingType = MISSING,
+    ) -> TrackerTask:
+        return await self.client.edit_tracker_task(
+            self.channel_ref,
+            self.ref,
+            target=self.target,
+            version=self.version,
+            title=title,
+            description=description,
+            priority=priority,
+            due_at=due_at,
+            assignee=assignee,
+        )
+
+    async def move(self, lane: EntityRef, position: int) -> TrackerTask:
+        return await self.client.move_tracker_task(
+            self.channel_ref,
+            self.ref,
+            lane,
+            position,
+            target=self.target,
+            version=self.version,
+        )
+
+    async def delete(self) -> None:
+        await self.client.delete_tracker_task(
+            self.channel_ref,
+            self.ref,
+            target=self.target,
+            version=self.version,
+        )
+
+
+@dataclass(slots=True)
+class TrackerBoard:
+    client: Client
+    target: str
+    channel_ref: EntityRef
+    key_prefix: str
+    next_task_number: int
+    permissions: int
+    lanes: list[TrackerLane]
+    tasks: list[TrackerTask]
+    version: str | None = None
+
+    @classmethod
+    def from_payload(
+        cls, client: Client, target: str, payload: dict[str, Any]
+    ) -> TrackerBoard:
+        channel_ref = EntityRef(
+            int(payload["channel_id"]), str(payload["channel_domain"])
+        )
+        return cls(
+            client=client,
+            target=target,
+            channel_ref=channel_ref,
+            key_prefix=str(payload["key_prefix"]),
+            next_task_number=int(payload.get("next_task_number", 1)),
+            permissions=int(payload.get("permissions", 0)),
+            lanes=[
+                TrackerLane.from_payload(client, target, item)
+                for item in payload.get("lanes", [])
+                if isinstance(item, dict)
+            ],
+            tasks=[
+                TrackerTask.from_payload(client, target, item)
+                for item in payload.get("tasks", [])
+                if isinstance(item, dict)
+            ],
+            version=(
+                str(payload["version"]) if payload.get("version") is not None else None
+            ),
+        )
+
+    async def edit(self, *, key_prefix: str) -> TrackerBoard:
+        return await self.client.edit_tracker(
+            self.channel_ref,
+            key_prefix=key_prefix,
+            target=self.target,
+            version=self.version,
+        )
+
+    async def create_lane(
+        self,
+        name: str,
+        *,
+        color: int = 0x5865F2,
+        kind: str = "custom",
+        completed: bool = False,
+        position: int | None = None,
+    ) -> TrackerLane:
+        return await self.client.create_tracker_lane(
+            self.channel_ref,
+            name,
+            target=self.target,
+            color=color,
+            kind=kind,
+            completed=completed,
+            position=position,
+        )
+
+    async def create_task(
+        self,
+        lane: EntityRef,
+        title: str,
+        *,
+        description: str | None = None,
+        priority: str = "none",
+        position: int | None = None,
+        due_at: datetime | None = None,
+        assignee: EntityRef | None = None,
+        client_nonce: str | None = None,
+    ) -> TrackerTask:
+        return await self.client.create_tracker_task(
+            self.channel_ref,
+            lane,
+            title,
+            target=self.target,
+            description=description,
+            priority=priority,
+            position=position,
+            due_at=due_at,
+            assignee=assignee,
+            client_nonce=client_nonce,
+        )
+
+
+@dataclass(slots=True)
 class Role:
     client: Client
     target: str
@@ -840,6 +1129,7 @@ class Role:
     position: int
     hoist: bool = False
     mentionable: bool = False
+    icon_hash: str | None = None
     version: str | None = None
 
     @classmethod
@@ -850,6 +1140,11 @@ class Role:
             ref=EntityRef(int(payload["id"]), str(payload["origin_domain"])),
             guild_ref=EntityRef(int(payload["guild_id"]), str(payload["guild_domain"])),
             name=str(payload["name"]),
+            icon_hash=(
+                str(payload["icon_hash"])
+                if payload.get("icon_hash") is not None
+                else None
+            ),
             color=int(payload.get("color", 0)),
             permissions=int(payload.get("permissions", 0)),
             position=int(payload.get("position", 0)),
@@ -1606,6 +1901,33 @@ class ChannelDeleteEvent:
     target: str
     channel_ref: EntityRef
     guild_ref: EntityRef | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TrackerBoardUpdateEvent:
+    target: str
+    channel_ref: EntityRef
+    key_prefix: str
+    next_task_number: int
+    version: str | None = None
+    full_refresh: bool = False
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TrackerLaneDeleteEvent:
+    target: str
+    channel_ref: EntityRef
+    lane_ref: EntityRef
+    board_version: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TrackerTaskDeleteEvent:
+    target: str
+    channel_ref: EntityRef
+    task_ref: EntityRef
+    board_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -58,6 +58,13 @@ const eventNames = <String>{
   "THREAD_LIST_SYNC",
   "THREAD_MEMBER_UPDATE",
   "THREAD_MEMBERS_UPDATE",
+  "TRACKER_BOARD_UPDATE",
+  "TRACKER_LANE_CREATE",
+  "TRACKER_LANE_UPDATE",
+  "TRACKER_LANE_DELETE",
+  "TRACKER_TASK_CREATE",
+  "TRACKER_TASK_UPDATE",
+  "TRACKER_TASK_DELETE",
   "GUILD_CREATE",
   "GUILD_UPDATE",
   "GUILD_DELETE",
@@ -129,6 +136,11 @@ abstract final class Permission {
   static const banInstances = 2199023255552;
   static const pinMessages = 2251799813685248;
   static const bypassSlowmode = 4503599627370496;
+  static const createTrackerTasks = 9007199254740992;
+  static const editOwnTrackerTasks = 18014398509481984;
+  static const manageTrackerTasks = 36028797018963968;
+  static const assignTrackerTasks = 72057594037927936;
+  static const manageTracker = 144115188075855872;
 }
 
 enum PermissionDanger { normal, elevated, dangerous, critical }
@@ -255,7 +267,7 @@ const permissionMetadata = <PermissionMetadata>[
     description: "See a channel and its live activity.",
     group: "General",
     resourceScopes: ["channel"],
-    channelTypes: [0, 2, 4, 5, 10, 11, 12, 15],
+    channelTypes: [0, 2, 4, 5, 10, 11, 12, 15, 17],
     dependencies: <int>[],
     danger: PermissionDanger.normal,
   ),
@@ -480,7 +492,7 @@ const permissionMetadata = <PermissionMetadata>[
         "Use slash commands and context menu commands from applications.",
     group: "Applications",
     resourceScopes: ["channel"],
-    channelTypes: [0, 2, 5, 10, 11, 12, 15],
+    channelTypes: [0, 2, 5, 10, 11, 12, 15, 17],
     dependencies: <int>[1024],
     danger: PermissionDanger.normal,
   ),
@@ -571,6 +583,64 @@ const permissionMetadata = <PermissionMetadata>[
     group: "Text",
     resourceScopes: ["channel"],
     channelTypes: [0, 5, 10, 11, 12, 15],
+    dependencies: <int>[1024],
+    danger: PermissionDanger.elevated,
+  ),
+  PermissionMetadata(
+    name: "CREATE_TRACKER_TASKS",
+    bit: 9007199254740992,
+    label: "Create tracker tasks",
+    description: "Add tasks to tracker channels.",
+    group: "Tracker",
+    resourceScopes: ["channel"],
+    channelTypes: [17],
+    dependencies: <int>[1024],
+    danger: PermissionDanger.normal,
+  ),
+  PermissionMetadata(
+    name: "EDIT_OWN_TRACKER_TASKS",
+    bit: 18014398509481984,
+    label: "Edit own tracker tasks",
+    description:
+        "Edit, move, complete, and delete tasks you created or are assigned.",
+    group: "Tracker",
+    resourceScopes: ["channel"],
+    channelTypes: [17],
+    dependencies: <int>[1024],
+    danger: PermissionDanger.normal,
+  ),
+  PermissionMetadata(
+    name: "MANAGE_TRACKER_TASKS",
+    bit: 36028797018963968,
+    label: "Manage tracker tasks",
+    description:
+        "Edit, move, complete, and delete any task in tracker channels.",
+    group: "Tracker moderation",
+    resourceScopes: ["channel"],
+    channelTypes: [17],
+    dependencies: <int>[1024],
+    danger: PermissionDanger.elevated,
+  ),
+  PermissionMetadata(
+    name: "ASSIGN_TRACKER_TASKS",
+    bit: 72057594037927936,
+    label: "Assign tracker tasks",
+    description: "Assign and unassign other members on tracker tasks.",
+    group: "Tracker moderation",
+    resourceScopes: ["channel"],
+    channelTypes: [17],
+    dependencies: <int>[1024],
+    danger: PermissionDanger.elevated,
+  ),
+  PermissionMetadata(
+    name: "MANAGE_TRACKER",
+    bit: 144115188075855872,
+    label: "Manage tracker",
+    description:
+        "Change tracker settings and create, edit, reorder, or remove lanes.",
+    group: "Tracker management",
+    resourceScopes: ["channel"],
+    channelTypes: [17],
     dependencies: <int>[1024],
     danger: PermissionDanger.elevated,
   ),

@@ -160,6 +160,7 @@ from app.search.meili import (
     reconcile_search_index_state,
     seed_search_backfill,
 )
+from app.tracker.outbox import drain_tracker_dispatch_outbox
 from app.voice.background import replicate_room
 from app.voice.cleanup import cleanup_orphaned_dm_rooms
 from app.voice.rooms import parse_room_name
@@ -1373,6 +1374,25 @@ async def search_index_sweep() -> int:
                 # must not make Taskiq create a parallel retry storm.
                 return 0
     finally:
+        await engine.dispose()
+
+
+@broker.task(
+    task_name="tracker.dispatch_outbox_drain",
+    schedule=[{"cron": "* * * * *"}],
+)
+@observed_job("tracker.dispatch_outbox_drain")
+async def tracker_dispatch_outbox_drain() -> int:
+    """Project durable tracker mutations into resumable gateway streams."""
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        async with sessionmaker() as session:
+            return await drain_tracker_dispatch_outbox(session, redis)
+    finally:
+        await redis.aclose()
         await engine.dispose()
 
 

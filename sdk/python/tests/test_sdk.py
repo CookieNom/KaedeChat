@@ -22,6 +22,11 @@ from kaede_bot.models import (
     StickerDeleteEvent,
     ThreadListSyncEvent,
     ThreadMembersUpdateEvent,
+    TrackerBoardUpdateEvent,
+    TrackerLane,
+    TrackerLaneDeleteEvent,
+    TrackerTask,
+    TrackerTaskDeleteEvent,
     VoiceStateEvent,
 )
 from kaede_bot.refs import EntityRef, User
@@ -215,6 +220,8 @@ def test_gateway_cursors_are_private_and_survive_restart(tmp_path: Path) -> None
 def test_intents_include_independent_typing_subscription() -> None:
     assert "guild_typing" not in Intents.default().names()
     assert "guild_typing" in Intents.all().names()
+    assert "guild_tasks" not in Intents.default().names()
+    assert "guild_tasks" in Intents.all().names()
 
 
 @pytest.mark.asyncio
@@ -1361,3 +1368,392 @@ async def test_forum_channel_edit_serializes_nested_wire_snowflakes() -> None:
         },
         headers={"If-Match": "channel-v1"},
     )
+
+
+def tracker_task_payload() -> dict[str, object]:
+    return {
+        "id": "301",
+        "origin_domain": "guild.example",
+        "channel_id": "20",
+        "channel_domain": "guild.example",
+        "lane_id": "201",
+        "lane_domain": "guild.example",
+        "number": "7",
+        "key": "OPS-7",
+        "title": "Ship the release",
+        "description": "Run the production checklist",
+        "priority": "high",
+        "position": 0,
+        "due_at": "2026-08-27T12:00:00+00:00",
+        "completed_at": None,
+        "creator": {
+            "id": "5",
+            "origin_domain": "users.example",
+            "username": "alice",
+            "display_name": "Alice",
+        },
+        "assignee": None,
+        "version": "task-v1",
+    }
+
+
+def tracker_lane_payload() -> dict[str, object]:
+    return {
+        "id": "201",
+        "origin_domain": "guild.example",
+        "channel_id": "20",
+        "channel_domain": "guild.example",
+        "name": "Planned",
+        "color": 0xF59E0B,
+        "kind": "planned",
+        "completed": False,
+        "position": 0,
+        "task_count": 1,
+        "version": "lane-v1",
+    }
+
+
+def tracker_board_payload() -> dict[str, object]:
+    return {
+        "channel_id": "20",
+        "channel_domain": "guild.example",
+        "key_prefix": "OPS",
+        "next_task_number": "8",
+        "permissions": str((1 << 58) - 1),
+        "version": "board-v1",
+        "lanes": [tracker_lane_payload()],
+        "tasks": [tracker_task_payload()],
+    }
+
+
+@pytest.mark.asyncio
+async def test_tracker_bot_crud_uses_composite_refs_and_versions() -> None:
+    bot = client()
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value=tracker_board_payload()
+    )
+
+    board = await bot.fetch_tracker(
+        EntityRef(20, "guild.example"), target="https://guild.example"
+    )
+
+    assert board.key_prefix == "OPS"
+    assert board.next_task_number == 8
+    assert board.lanes[0].task_count == 1
+    assert board.tasks[0].key == "OPS-7"
+    assert board.tasks[0].creator.handle == "alice@users.example"
+
+    bot.request = AsyncMock(return_value=tracker_task_payload())  # type: ignore[method-assign]
+    due_at = datetime.fromisoformat("2026-08-27T12:00:00+00:00")
+    task = await board.create_task(
+        EntityRef(201, "guild.example"),
+        "Ship the release",
+        description="Run the production checklist",
+        priority="high",
+        due_at=due_at,
+        client_nonce="deploy-7",
+    )
+
+    assert task.ref == EntityRef(301, "guild.example")
+    assert bot.request.await_args is not None
+    assert bot.request.await_args.args[:2] == (
+        "POST",
+        "/api/v1/bots/channels/20@guild.example/tracker/tasks",
+    )
+    assert bot.request.await_args.kwargs["json"] == {
+        "lane_id": "201@guild.example",
+        "title": "Ship the release",
+        "description": "Run the production checklist",
+        "priority": "high",
+        "due_at": "2026-08-27T12:00:00+00:00",
+        "assignee_id": None,
+        "client_nonce": "deploy-7",
+    }
+
+    bot.request = AsyncMock(return_value=tracker_task_payload())  # type: ignore[method-assign]
+    await task.edit(description=None, assignee=None)
+    bot.request.assert_awaited_once_with(
+        "PATCH",
+        "/api/v1/bots/channels/20@guild.example/tracker/tasks/301@guild.example",
+        target="https://guild.example",
+        json={"description": None, "assignee_id": None},
+        headers={"If-Match": "task-v1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_tracker_board_and_lane_convenience_requests_are_complete() -> None:
+    bot = client()
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value=tracker_board_payload()
+    )
+    board = await bot.fetch_tracker(
+        EntityRef(20, "guild.example"), target="https://guild.example"
+    )
+
+    updated_board_payload = {
+        **tracker_board_payload(),
+        "key_prefix": "REL",
+        "version": "board-v2",
+    }
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value=updated_board_payload
+    )
+    updated_board = await board.edit(key_prefix="REL")
+
+    assert updated_board.key_prefix == "REL"
+    bot.request.assert_awaited_once_with(
+        "PATCH",
+        "/api/v1/bots/channels/20@guild.example/tracker",
+        target="https://guild.example",
+        json={"key_prefix": "REL"},
+        headers={"If-Match": "board-v1"},
+    )
+
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value=tracker_lane_payload()
+    )
+    lane = await board.create_lane(
+        "Verification",
+        color=0x22C55E,
+        kind="custom",
+        completed=True,
+        position=2,
+    )
+
+    assert lane.ref == EntityRef(201, "guild.example")
+    bot.request.assert_awaited_once_with(
+        "POST",
+        "/api/v1/bots/channels/20@guild.example/tracker/lanes",
+        target="https://guild.example",
+        json={
+            "name": "Verification",
+            "color": 0x22C55E,
+            "kind": "custom",
+            "completed": True,
+            "position": 2,
+        },
+    )
+
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value=tracker_lane_payload()
+    )
+    await lane.edit(
+        name="Ready",
+        color=0x3B82F6,
+        kind="planned",
+        completed=False,
+    )
+    bot.request.assert_awaited_once_with(
+        "PATCH",
+        ("/api/v1/bots/channels/20@guild.example/tracker/lanes/201@guild.example"),
+        target="https://guild.example",
+        json={
+            "name": "Ready",
+            "color": 0x3B82F6,
+            "kind": "planned",
+            "completed": False,
+        },
+        headers={"If-Match": "lane-v1"},
+    )
+
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value=tracker_lane_payload()
+    )
+    await lane.move(4)
+    bot.request.assert_awaited_once_with(
+        "POST",
+        ("/api/v1/bots/channels/20@guild.example/tracker/lanes/201@guild.example/move"),
+        target="https://guild.example",
+        json={"position": 4},
+        headers={"If-Match": "lane-v1"},
+    )
+
+    bot.request = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    await lane.delete()
+    bot.request.assert_awaited_once_with(
+        "DELETE",
+        ("/api/v1/bots/channels/20@guild.example/tracker/lanes/201@guild.example"),
+        target="https://guild.example",
+        headers={"If-Match": "lane-v1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_tracker_task_move_and_delete_convenience_requests_are_complete() -> None:
+    bot = client()
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value=tracker_board_payload()
+    )
+    board = await bot.fetch_tracker(
+        EntityRef(20, "guild.example"), target="https://guild.example"
+    )
+    task = board.tasks[0]
+    destination = EntityRef(202, "workflow.example")
+
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value=tracker_task_payload()
+    )
+    await task.move(destination, 3)
+    bot.request.assert_awaited_once_with(
+        "POST",
+        ("/api/v1/bots/channels/20@guild.example/tracker/tasks/301@guild.example/move"),
+        target="https://guild.example",
+        json={"lane_id": "202@workflow.example", "position": 3},
+        headers={"If-Match": "task-v1"},
+    )
+
+    bot.request = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    await task.delete()
+    bot.request.assert_awaited_once_with(
+        "DELETE",
+        ("/api/v1/bots/channels/20@guild.example/tracker/tasks/301@guild.example"),
+        target="https://guild.example",
+        headers={"If-Match": "task-v1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_tracker_channel_creation_sends_the_optional_key_prefix() -> None:
+    bot = client()
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "id": "20",
+            "origin_domain": "guild.example",
+            "guild_id": "2",
+            "guild_domain": "guild.example",
+            "type": 17,
+            "name": "Release plan",
+        }
+    )
+
+    channel = await bot.create_channel(
+        EntityRef(2, "guild.example"),
+        "Release plan",
+        type=17,
+        tracker_key_prefix="REL",
+        target="https://guild.example",
+    )
+
+    assert channel.is_tracker
+    assert bot.request.await_args is not None
+    assert bot.request.await_args.kwargs["json"]["tracker_key_prefix"] == "REL"
+
+
+@pytest.mark.asyncio
+async def test_guild_tracker_channel_creation_forwards_the_optional_key_prefix() -> (
+    None
+):
+    bot = client()
+    bot.request = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "id": "20",
+            "origin_domain": "guild.example",
+            "guild_id": "2",
+            "guild_domain": "guild.example",
+            "type": 17,
+            "name": "Release plan",
+        }
+    )
+    guild = Guild(
+        client=bot,
+        target="https://guild.example",
+        ref=EntityRef(2, "guild.example"),
+        name="Guild",
+    )
+
+    channel = await guild.create_channel(
+        "Release plan", type=17, tracker_key_prefix="REL"
+    )
+
+    assert channel.is_tracker
+    assert bot.request.await_args is not None
+    assert bot.request.await_args.kwargs["json"]["tracker_key_prefix"] == "REL"
+
+
+@pytest.mark.asyncio
+async def test_tracker_gateway_events_are_typed() -> None:
+    bot = client()
+    seen: list[object] = []
+
+    for event_name in (
+        "TRACKER_BOARD_UPDATE",
+        "TRACKER_LANE_CREATE",
+        "TRACKER_LANE_DELETE",
+        "TRACKER_TASK_UPDATE",
+        "TRACKER_TASK_DELETE",
+    ):
+        bot.listen(event_name)(lambda event: _record_event(seen, event))
+
+    await bot.dispatch(
+        "TRACKER_BOARD_UPDATE",
+        {
+            "channel_id": "20",
+            "channel_domain": "guild.example",
+            "key_prefix": "OPS",
+            "next_task_number": "8",
+            "version": "board-v2",
+            "full_refresh": True,
+            "reason": "lane_completion_updated",
+        },
+        target="https://guild.example",
+    )
+    await bot.dispatch(
+        "TRACKER_LANE_CREATE",
+        {
+            "channel_id": "20",
+            "channel_domain": "guild.example",
+            "lane": tracker_lane_payload(),
+            "board_version": "board-v3",
+        },
+        target="https://guild.example",
+    )
+    await bot.dispatch(
+        "TRACKER_LANE_DELETE",
+        {
+            "channel_id": "20",
+            "channel_domain": "guild.example",
+            "lane_id": "201",
+            "lane_domain": "guild.example",
+            "board_version": "board-v4",
+        },
+        target="https://guild.example",
+    )
+    await bot.dispatch(
+        "TRACKER_TASK_UPDATE",
+        {
+            "channel_id": "20",
+            "channel_domain": "guild.example",
+            "task": tracker_task_payload(),
+            "board_version": "board-v5",
+        },
+        target="https://guild.example",
+    )
+    await bot.dispatch(
+        "TRACKER_TASK_DELETE",
+        {
+            "channel_id": "20",
+            "channel_domain": "guild.example",
+            "task_id": "301",
+            "task_domain": "guild.example",
+            "board_version": "board-v6",
+        },
+        target="https://guild.example",
+    )
+
+    assert isinstance(seen[0], TrackerBoardUpdateEvent)
+    assert seen[0].version == "board-v2"
+    assert seen[0].full_refresh is True
+    assert seen[0].reason == "lane_completion_updated"
+    assert isinstance(seen[1], TrackerLane)
+    assert seen[1].board_version == "board-v3"
+    assert isinstance(seen[2], TrackerLaneDeleteEvent)
+    assert seen[2].board_version == "board-v4"
+    assert isinstance(seen[3], TrackerTask)
+    assert seen[3].board_version == "board-v5"
+    assert isinstance(seen[4], TrackerTaskDeleteEvent)
+    assert seen[4].board_version == "board-v6"
+
+
+async def _record_event(seen: list[object], event: object) -> None:
+    seen.append(event)

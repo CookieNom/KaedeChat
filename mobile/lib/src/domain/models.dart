@@ -41,6 +41,7 @@ enum ChannelType {
   publicThread,
   privateThread,
   forum,
+  tracker,
 }
 
 enum RelationshipType { friend, pendingIn, pendingOut, blocked }
@@ -55,6 +56,7 @@ ChannelType channelType(int value) => switch (value) {
       11 => ChannelType.publicThread,
       12 => ChannelType.privateThread,
       15 => ChannelType.forum,
+      17 => ChannelType.tracker,
       _ => ChannelType.unknown,
     };
 
@@ -468,6 +470,7 @@ final class KaedeChannel {
           ChannelType.publicThread => 11,
           ChannelType.privateThread => 12,
           ChannelType.forum => 15,
+          ChannelType.tracker => 17,
           ChannelType.unknown => -1,
         },
         'name': name,
@@ -709,6 +712,255 @@ final class ThreadPage {
   final String? nextCursor;
 }
 
+enum TrackerLaneKind { backlog, planned, inProgress, completed, custom }
+
+TrackerLaneKind trackerLaneKind(Object? value) => switch ('$value') {
+      'backlog' => TrackerLaneKind.backlog,
+      'planned' => TrackerLaneKind.planned,
+      'in_progress' => TrackerLaneKind.inProgress,
+      'completed' => TrackerLaneKind.completed,
+      _ => TrackerLaneKind.custom,
+    };
+
+extension TrackerLaneKindWire on TrackerLaneKind {
+  String get wire => switch (this) {
+        TrackerLaneKind.inProgress => 'in_progress',
+        _ => name,
+      };
+}
+
+enum TrackerPriority { none, low, medium, high, urgent }
+
+TrackerPriority trackerPriority(Object? value) =>
+    TrackerPriority.values
+        .where((priority) => priority.name == '$value')
+        .firstOrNull ??
+    TrackerPriority.none;
+
+/// Stable high-bit tracker grants. These use [BigInt] so permission checks
+/// remain exact when the mobile web build is compiled through JavaScript.
+abstract final class TrackerPermission {
+  static final createTasks = BigInt.one << 53;
+  static final editOwnTasks = BigInt.one << 54;
+  static final manageTasks = BigInt.one << 55;
+  static final assignTasks = BigInt.one << 56;
+  static final manageTracker = BigInt.one << 57;
+}
+
+final class TrackerLane {
+  const TrackerLane({
+    required this.ref,
+    required this.channelRef,
+    required this.name,
+    required this.color,
+    required this.kind,
+    required this.completed,
+    required this.position,
+    required this.taskCount,
+    required this.version,
+  });
+
+  factory TrackerLane.fromJson(Json json) => TrackerLane(
+        ref: EntityRef(
+          Snowflake('${json['id']}'),
+          Domain('${json['origin_domain']}'),
+        ),
+        channelRef: EntityRef(
+          Snowflake('${json['channel_id']}'),
+          Domain('${json['channel_domain']}'),
+        ),
+        name: _string(json['name']) ?? '',
+        color: _integer(json['color']).clamp(0, 0xFFFFFF),
+        kind: trackerLaneKind(json['kind']),
+        completed: _boolean(json['completed']),
+        position: _integer(json['position']),
+        taskCount: _integer(json['task_count']),
+        version: _string(json['version']) ?? '',
+      );
+
+  final EntityRef ref;
+  final EntityRef channelRef;
+  final String name;
+  final int color;
+  final TrackerLaneKind kind;
+  final bool completed;
+  final int position;
+  final int taskCount;
+  final String version;
+
+  Json toJson() => <String, Object?>{
+        'id': ref.id.value,
+        'origin_domain': ref.domain.value,
+        'channel_id': channelRef.id.value,
+        'channel_domain': channelRef.domain.value,
+        'name': name,
+        'color': color,
+        'kind': kind.wire,
+        'completed': completed,
+        'position': position,
+        'task_count': taskCount,
+        'version': version,
+      };
+}
+
+final class TrackerTask {
+  const TrackerTask({
+    required this.ref,
+    required this.channelRef,
+    required this.laneRef,
+    required this.number,
+    required this.key,
+    required this.title,
+    required this.priority,
+    required this.position,
+    required this.creator,
+    required this.version,
+    this.description,
+    this.dueAt,
+    this.completedAt,
+    this.assignee,
+  });
+
+  factory TrackerTask.fromJson(Json json) => TrackerTask(
+        ref: EntityRef(
+          Snowflake('${json['id']}'),
+          Domain('${json['origin_domain']}'),
+        ),
+        channelRef: EntityRef(
+          Snowflake('${json['channel_id']}'),
+          Domain('${json['channel_domain']}'),
+        ),
+        laneRef: EntityRef(
+          Snowflake('${json['lane_id']}'),
+          Domain('${json['lane_domain']}'),
+        ),
+        number: _integer(json['number']),
+        key: _string(json['key']) ?? '',
+        title: _string(json['title']) ?? '',
+        description: _string(json['description']),
+        priority: trackerPriority(json['priority']),
+        position: _integer(json['position']),
+        dueAt: DateTime.tryParse(_string(json['due_at']) ?? '')?.toUtc(),
+        completedAt:
+            DateTime.tryParse(_string(json['completed_at']) ?? '')?.toUtc(),
+        creator: KaedeUser.fromJson(
+          Map<String, Object?>.from(json['creator']! as Map),
+        ),
+        assignee: json['assignee'] is Map
+            ? KaedeUser.fromJson(
+                Map<String, Object?>.from(json['assignee']! as Map),
+              )
+            : null,
+        version: _string(json['version']) ?? '',
+      );
+
+  final EntityRef ref;
+  final EntityRef channelRef;
+  final EntityRef laneRef;
+  final int number;
+  final String key;
+  final String title;
+  final String? description;
+  final TrackerPriority priority;
+  final int position;
+  final DateTime? dueAt;
+  final DateTime? completedAt;
+  final KaedeUser creator;
+  final KaedeUser? assignee;
+  final String version;
+
+  bool get completed => completedAt != null;
+
+  Json toJson() => <String, Object?>{
+        'id': ref.id.value,
+        'origin_domain': ref.domain.value,
+        'channel_id': channelRef.id.value,
+        'channel_domain': channelRef.domain.value,
+        'lane_id': laneRef.id.value,
+        'lane_domain': laneRef.domain.value,
+        'number': '$number',
+        'key': key,
+        'title': title,
+        'description': description,
+        'priority': priority.name,
+        'position': position,
+        'due_at': dueAt?.toUtc().toIso8601String(),
+        'completed_at': completedAt?.toUtc().toIso8601String(),
+        'creator': creator.toJson(),
+        'assignee': assignee?.toJson(),
+        'version': version,
+      };
+}
+
+final class TrackerBoard {
+  const TrackerBoard({
+    required this.channelRef,
+    required this.keyPrefix,
+    required this.nextTaskNumber,
+    required this.version,
+    required this.permissions,
+    required this.lanes,
+    required this.tasks,
+  });
+
+  factory TrackerBoard.fromJson(Json json) {
+    final lanes = _objects(json['lanes'])
+        .map(TrackerLane.fromJson)
+        .toList(growable: false)
+      ..sort((left, right) => left.position.compareTo(right.position));
+    final tasks = _objects(json['tasks'])
+        .map(TrackerTask.fromJson)
+        .toList(growable: false)
+      ..sort((left, right) {
+        final laneOrder = lanes
+            .indexWhere((lane) => lane.ref == left.laneRef)
+            .compareTo(lanes.indexWhere((lane) => lane.ref == right.laneRef));
+        return laneOrder != 0
+            ? laneOrder
+            : left.position.compareTo(right.position);
+      });
+    return TrackerBoard(
+      channelRef: EntityRef(
+        Snowflake('${json['channel_id']}'),
+        Domain('${json['channel_domain']}'),
+      ),
+      keyPrefix: _string(json['key_prefix']) ?? 'TASK',
+      nextTaskNumber: _integer(json['next_task_number'], 1),
+      version: _string(json['version']) ?? '',
+      permissions:
+          BigInt.tryParse(_string(json['permissions']) ?? '0') ?? BigInt.zero,
+      lanes: List.unmodifiable(lanes),
+      tasks: List.unmodifiable(tasks),
+    );
+  }
+
+  final EntityRef channelRef;
+  final String keyPrefix;
+  final int nextTaskNumber;
+  final String version;
+  final BigInt permissions;
+  final List<TrackerLane> lanes;
+  final List<TrackerTask> tasks;
+
+  bool allows(BigInt permission) => permissions & permission == permission;
+
+  List<TrackerTask> tasksFor(TrackerLane lane) => List.unmodifiable(
+        tasks.where((task) => task.laneRef == lane.ref).toList()
+          ..sort((left, right) => left.position.compareTo(right.position)),
+      );
+
+  Json toJson() => <String, Object?>{
+        'channel_id': channelRef.id.value,
+        'channel_domain': channelRef.domain.value,
+        'key_prefix': keyPrefix,
+        'next_task_number': '$nextTaskNumber',
+        'version': version,
+        'permissions': permissions.toString(),
+        'lanes': lanes.map((lane) => lane.toJson()).toList(),
+        'tasks': tasks.map((task) => task.toJson()).toList(),
+      };
+}
+
 final class MessageSearchResult {
   const MessageSearchResult({
     required this.message,
@@ -778,6 +1030,7 @@ final class KaedeRole {
     required this.ref,
     required this.guildRef,
     required this.name,
+    this.iconHash,
     required this.color,
     required this.permissions,
     required this.position,
@@ -792,6 +1045,7 @@ final class KaedeRole {
         guildRef: EntityRef(Snowflake(json['guild_id']! as String),
             Domain(json['guild_domain']! as String)),
         name: json['name']! as String,
+        iconHash: _string(json['icon_hash']),
         color: _integer(json['color']),
         permissions: BigInt.tryParse('${json['permissions']}') ?? BigInt.zero,
         position: _integer(json['position']),
@@ -803,6 +1057,7 @@ final class KaedeRole {
   final EntityRef ref;
   final EntityRef guildRef;
   final String name;
+  final String? iconHash;
   final int color;
   final BigInt permissions;
   final int position;
@@ -816,6 +1071,7 @@ final class KaedeRole {
         'guild_id': guildRef.id.value,
         'guild_domain': guildRef.domain.value,
         'name': name,
+        'icon_hash': iconHash,
         'color': color,
         'permissions': permissions.toString(),
         'position': position,

@@ -170,6 +170,9 @@ from app.db.models import (
     Sticker,
     TerminalRoomDeletion,
     ThreadMember,
+    TrackerBoard,
+    TrackerLane,
+    TrackerTask,
     User,
 )
 from app.federation.client import signed_request
@@ -297,6 +300,16 @@ from app.federation.terminal_rooms import (
     queue_terminal_room_deletion,
     terminal_room_base_content,
 )
+from app.federation.tracker import (
+    MAX_TRACKER_LANES,
+    MAX_TRACKER_PAGE_TASK_CANDIDATES,
+    MAX_TRACKER_TASKS,
+    TARGET_TRACKER_PAGE_BYTES,
+    TrackerSnapshotChanged,
+    tracker_snapshot_cursor_task_id,
+    tracker_snapshot_page_payload,
+    tracker_snapshot_page_size,
+)
 from app.media.payloads import terminal_attachment_update_payload
 from app.media.service import discard_attachment
 from app.media.storage import S3Storage, StorageError
@@ -320,6 +333,8 @@ from app.tasks import (
     media_remote_purge,
     mentions_fanout,
 )
+from app.tracker.membership import clear_tracker_assignees, wake_tracker_membership_cleanup
+from app.tracker.outbox import wake_tracker_dispatch_outbox
 from app.voice.rooms import parse_participant_identity, participant_identity
 from app.voice.schemas import CallResponse
 from app.voice.state import create_call
@@ -907,6 +922,13 @@ async def _apply_authoritative_guild_leave(
         revoked_installations,
     )
     removed_thread_members = await cleanup_guild_member_threads(
+        session,
+        settings,
+        guild,
+        owner,
+        [(user_id, user_domain)],
+    )
+    await clear_tracker_assignees(
         session,
         settings,
         guild,
@@ -1622,6 +1644,7 @@ async def process_event(
     replicated_guild = None
     replicated_guild_member: User | None = None
     replicated_guild_dispatch: tuple[str, dict[str, object]] | None = None
+    replicated_tracker_dispatch_queued = False
     home_message = None
     home_message_attachments: list[Attachment] = []
     home_message_created = False
@@ -2522,6 +2545,9 @@ async def process_event(
                         envelope.model_dump(mode="json"),
                         e2ee_policy_channels=e2ee_policy_channels,
                     )
+                    replicated_tracker_dispatch_queued = (
+                        envelope.type == "guild.tracker.board.invalidate"
+                    )
                     history_access_changed = envelope.type in HISTORY_ACCESS_MUTATION_EVENT_TYPES
                 except GuildSequenceGap as exc:
                     raise FederationResyncRetry from exc
@@ -3334,6 +3360,8 @@ async def process_event(
             global_ledger.federation_inbox_event_bytes += envelope_bytes
         await session.commit()
         durably_committed = True
+        if replicated_tracker_dispatch_queued:
+            await wake_tracker_dispatch_outbox()
         if media_tombstone_dispatch_payload is not None and media_tombstone_channel_ref is not None:
             if media_tombstone_guild_ref is not None:
                 await publish_dispatch(
@@ -3532,7 +3560,7 @@ async def process_event(
                 },
             )
         if authoritative_leave_guild is not None and authoritative_leave_target is not None:
-            await wake_queued_guild_federation(authoritative_leave_guild)
+            await wake_tracker_membership_cleanup(authoritative_leave_guild)
             await publish_deleted_installation_roles(
                 redis,
                 authoritative_leave_guild,
@@ -5793,7 +5821,7 @@ async def federation_guild_leave(
         e2ee_policy_channels=e2ee_policy_channels,
     )
     await session.commit()
-    await wake_queued_guild_federation(guild)
+    await wake_tracker_membership_cleanup(guild)
     await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
     await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
@@ -6566,6 +6594,184 @@ async def federation_guild_snapshot(
     )
     await session.commit()
     return payload
+
+
+@router.get("/_kaede/v1/guilds/{guild_id}/trackers/{channel_id}/snapshot")
+async def federation_tracker_snapshot(
+    guild_id: Snowflake,
+    channel_id: Snowflake,
+    cursor: str | None = Query(default=None, max_length=1024),
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    """Return one bounded, revision-fenced page of a visible tracker board."""
+
+    require_guild_federation_access(principal)
+    await enforce_federation_route_rate_limit(
+        redis,
+        principal.origin,
+        "guild-tracker-snapshot",
+        capacity=300,
+        refill_per_minute=300,
+    )
+    guild = await home_guild(session, settings, guild_id, for_share=True)
+    # An authenticated but unrelated peer must not use channel visibility as
+    # an existence oracle. Require a current member hosted by that origin
+    # before evaluating the origin-union channel permission graph.
+    await require_origin_guild_member(session, guild, principal.origin)
+    visible_channels = await cached_visible_guild_channels_for_origin(
+        session,
+        redis,
+        guild,
+        principal.origin,
+    )
+    channel = next(
+        (
+            item
+            for item in visible_channels
+            if item.id == int(channel_id)
+            and item.origin_domain == guild.origin_domain
+            and item.type == 17
+        ),
+        None,
+    )
+    if channel is None:
+        raise HTTPException(status_code=404, detail={"code": "TRACKER_NOT_FOUND"})
+    board = await session.scalar(
+        select(TrackerBoard)
+        .where(
+            TrackerBoard.channel_id == channel.id,
+            TrackerBoard.channel_domain == channel.origin_domain,
+        )
+        .with_for_update(read=True)
+    )
+    if board is None:
+        raise HTTPException(status_code=404, detail={"code": "TRACKER_NOT_FOUND"})
+    try:
+        after_task_id = (
+            tracker_snapshot_cursor_task_id(settings, board, cursor) if cursor is not None else -1
+        )
+    except TrackerSnapshotChanged:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "KAED_FED_TRACKER_SNAPSHOT_CHANGED"},
+        ) from None
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "KAED_FED_INVALID_TRACKER_CURSOR"},
+        ) from None
+
+    lanes = list(
+        await session.scalars(
+            select(TrackerLane)
+            .where(
+                TrackerLane.channel_id == board.channel_id,
+                TrackerLane.channel_domain == board.channel_domain,
+            )
+            .order_by(TrackerLane.position, TrackerLane.id)
+            .limit(MAX_TRACKER_LANES + 1)
+        )
+    )
+    task_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(TrackerTask)
+            .where(
+                TrackerTask.channel_id == board.channel_id,
+                TrackerTask.channel_domain == board.channel_domain,
+            )
+        )
+        or 0
+    )
+    if not lanes or len(lanes) > MAX_TRACKER_LANES or task_count > MAX_TRACKER_TASKS:
+        raise HTTPException(status_code=409, detail={"code": "TRACKER_CAPACITY_INVALID"})
+    candidates = list(
+        await session.scalars(
+            select(TrackerTask)
+            .where(
+                TrackerTask.channel_id == board.channel_id,
+                TrackerTask.channel_domain == board.channel_domain,
+                TrackerTask.id > after_task_id,
+            )
+            .order_by(TrackerTask.id)
+            .limit(MAX_TRACKER_PAGE_TASK_CANDIDATES + 1)
+        )
+    )
+    candidate_user_refs = {(task.creator_id, task.creator_domain) for task in candidates} | {
+        (task.assignee_id, task.assignee_domain)
+        for task in candidates
+        if task.assignee_id is not None and task.assignee_domain is not None
+    }
+    candidate_users = (
+        list(
+            await session.scalars(
+                select(User).where(tuple_(User.id, User.origin_domain).in_(candidate_user_refs))
+            )
+        )
+        if candidate_user_refs
+        else []
+    )
+    users_by_ref = {(user.id, user.origin_domain): user for user in candidate_users}
+    if set(users_by_ref) != candidate_user_refs:
+        raise HTTPException(status_code=409, detail={"code": "TRACKER_STATE_INVALID"})
+
+    selected: list[TrackerTask] = []
+    estimated_bytes = 0
+    for task in candidates[:MAX_TRACKER_PAGE_TASK_CANDIDATES]:
+        task_size = tracker_snapshot_page_size([task], users_by_ref)
+        if selected and estimated_bytes + task_size > TARGET_TRACKER_PAGE_BYTES:
+            break
+        selected.append(task)
+        estimated_bytes += task_size
+    has_more = len(selected) < len(candidates)
+    selected_user_refs = {(task.creator_id, task.creator_domain) for task in selected} | {
+        (task.assignee_id, task.assignee_domain)
+        for task in selected
+        if task.assignee_id is not None and task.assignee_domain is not None
+    }
+    selected_assignee_refs = {
+        (task.assignee_id, task.assignee_domain)
+        for task in selected
+        if task.assignee_id is not None and task.assignee_domain is not None
+    }
+    if selected_assignee_refs:
+        authoritative_assignees = set(
+            (
+                await session.execute(
+                    select(GuildMember.user_id, GuildMember.user_domain).where(
+                        GuildMember.guild_id == guild.id,
+                        GuildMember.guild_domain == guild.origin_domain,
+                        tuple_(GuildMember.user_id, GuildMember.user_domain).in_(
+                            selected_assignee_refs
+                        ),
+                    )
+                )
+            ).tuples()
+        )
+        if authoritative_assignees != selected_assignee_refs:
+            raise HTTPException(status_code=409, detail={"code": "TRACKER_STATE_INVALID"})
+    page = tracker_snapshot_page_payload(
+        settings,
+        board,
+        lanes,
+        selected,
+        [
+            users_by_ref[ref]
+            for ref in sorted(selected_user_refs, key=lambda item: (item[1], item[0]))
+        ],
+        task_count=task_count,
+        has_more=has_more,
+    )
+    await record_room_federation_recipient(
+        session,
+        ("guild", guild.id, guild.origin_domain),
+        principal.origin,
+    )
+    await session.commit()
+    return page
 
 
 @router.get("/_kaede/v1/guilds/{guild_id}/events")

@@ -15,6 +15,7 @@
     | 'home'
     | 'image'
     | 'image-plus'
+    | 'kanban'
     | 'key'
     | 'lock'
     | 'logout'
@@ -103,6 +104,9 @@
     <rect x="3" y="4" width="15" height="16" rx="2" />
     <circle cx="8" cy="9" r="1.5" />
     <path d="m18 15-4-4L5 20M21 8v6M18 11h6" />
+  {:else if name === 'kanban'}
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M9 4v16M15 4v16M5.5 8h1M11.5 8h1M17.5 8h1M11.5 12h1" />
   {:else if name === 'key'}
     <circle cx="8" cy="15" r="4" />
     <path d="m11 12 9-9M15 8l3 3M17 6l2 2" />

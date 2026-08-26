@@ -51,6 +51,17 @@ export function memberRoleColor(
   return role ? roleColorCss(role.color) : undefined;
 }
 
+export function highestIconRole(
+  member: GuildMemberSummary | undefined,
+  roles: Role[] = []
+): Role | undefined {
+  if (!member) return undefined;
+  return roles
+    .filter((role) => Boolean(role.icon_hash) && member.role_ids.includes(role.id))
+    .sort(compareRoleRank)
+    .at(-1);
+}
+
 export function groupGuildMembers(
   members: GuildMemberSummary[],
   presenceFor: (member: GuildMemberSummary) => PresenceStatus,

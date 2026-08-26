@@ -14,6 +14,7 @@ class Intents:
     guild_typing: bool = False
     voice_states: bool = False
     interactions: bool = True
+    guild_tasks: bool = False
 
     @classmethod
     def default(cls) -> Intents:
@@ -21,7 +22,18 @@ class Intents:
 
     @classmethod
     def all(cls) -> Intents:
-        return cls(True, True, True, True, True, True, True, True, True)
+        return cls(
+            guilds=True,
+            guild_members=True,
+            guild_presences=True,
+            guild_messages=True,
+            message_content=True,
+            message_reactions=True,
+            guild_typing=True,
+            voice_states=True,
+            interactions=True,
+            guild_tasks=True,
+        )
 
     def names(self) -> list[str]:
         return [name for name in self.__dataclass_fields__ if getattr(self, name)]

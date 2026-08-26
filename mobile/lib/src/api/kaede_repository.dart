@@ -519,6 +519,179 @@ final class KaedeRepository {
         await api.getJson('/api/v1/channels/${channel.wire}'),
       );
 
+  Future<TrackerBoard> trackerBoard(EntityRef channel) async =>
+      TrackerBoard.fromJson(
+        await api.getJson('/api/v1/channels/${channel.wire}/tracker'),
+      );
+
+  Future<TrackerBoard> updateTrackerBoard(
+    EntityRef channel,
+    String version, {
+    required String keyPrefix,
+  }) async =>
+      TrackerBoard.fromJson(await api.sendJson(
+        'PATCH',
+        '/api/v1/channels/${channel.wire}/tracker',
+        data: <String, Object?>{'key_prefix': keyPrefix.trim().toUpperCase()},
+        headers: <String, String>{'If-Match': version},
+      ));
+
+  Future<TrackerLane> createTrackerLane(
+    EntityRef channel, {
+    required String name,
+    int color = 0,
+    TrackerLaneKind kind = TrackerLaneKind.custom,
+    bool completed = false,
+    int? position,
+  }) async =>
+      TrackerLane.fromJson(await api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/tracker/lanes',
+        data: <String, Object?>{
+          'name': name.trim(),
+          'color': color.clamp(0, 0xFFFFFF),
+          'kind': kind.wire,
+          'completed': completed,
+          if (position != null) 'position': position,
+        },
+      ));
+
+  Future<TrackerLane> updateTrackerLane(
+    EntityRef channel,
+    EntityRef lane,
+    String version, {
+    String? name,
+    int? color,
+    TrackerLaneKind? kind,
+    bool? completed,
+  }) async =>
+      TrackerLane.fromJson(await api.sendJson(
+        'PATCH',
+        '/api/v1/channels/${channel.wire}/tracker/lanes/${lane.wire}',
+        data: <String, Object?>{
+          if (name != null) 'name': name.trim(),
+          if (color != null) 'color': color.clamp(0, 0xFFFFFF),
+          if (kind != null) 'kind': kind.wire,
+          if (completed != null) 'completed': completed,
+        },
+        headers: <String, String>{'If-Match': version},
+      ));
+
+  Future<TrackerLane> moveTrackerLane(
+    EntityRef channel,
+    EntityRef lane,
+    String version,
+    int position,
+  ) async =>
+      TrackerLane.fromJson(await api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/tracker/lanes/${lane.wire}/move',
+        data: <String, Object?>{'position': position},
+        headers: <String, String>{'If-Match': version},
+      ));
+
+  Future<void> deleteTrackerLane(
+    EntityRef channel,
+    EntityRef lane,
+    String version,
+  ) async {
+    await api.sendJson(
+      'DELETE',
+      '/api/v1/channels/${channel.wire}/tracker/lanes/${lane.wire}',
+      headers: <String, String>{'If-Match': version},
+    );
+  }
+
+  Future<TrackerTask> createTrackerTask(
+    EntityRef channel, {
+    required EntityRef lane,
+    required String title,
+    String? description,
+    TrackerPriority priority = TrackerPriority.none,
+    int? position,
+    DateTime? dueAt,
+    EntityRef? assignee,
+    String? clientNonce,
+  }) async =>
+      TrackerTask.fromJson(await api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/tracker/tasks',
+        data: <String, Object?>{
+          'lane_id': lane.wire,
+          'title': title.trim(),
+          if (description != null) 'description': description,
+          'priority': priority.name,
+          if (position != null) 'position': position,
+          if (dueAt != null) 'due_at': dueAt.toUtc().toIso8601String(),
+          if (assignee != null) 'assignee_id': assignee.wire,
+          'client_nonce': clientNonce ?? const Uuid().v4(),
+        },
+      ));
+
+  Future<TrackerTask> updateTrackerTask(
+    EntityRef channel,
+    EntityRef task,
+    String version, {
+    String? title,
+    String? description,
+    bool clearDescription = false,
+    TrackerPriority? priority,
+    DateTime? dueAt,
+    bool clearDueAt = false,
+    EntityRef? assignee,
+    bool clearAssignee = false,
+  }) async =>
+      TrackerTask.fromJson(await api.sendJson(
+        'PATCH',
+        '/api/v1/channels/${channel.wire}/tracker/tasks/${task.wire}',
+        data: <String, Object?>{
+          if (title != null) 'title': title.trim(),
+          if (clearDescription)
+            'description': null
+          else if (description != null)
+            'description': description,
+          if (priority != null) 'priority': priority.name,
+          if (clearDueAt)
+            'due_at': null
+          else if (dueAt != null)
+            'due_at': dueAt.toUtc().toIso8601String(),
+          if (clearAssignee)
+            'assignee_id': null
+          else if (assignee != null)
+            'assignee_id': assignee.wire,
+        },
+        headers: <String, String>{'If-Match': version},
+      ));
+
+  Future<TrackerTask> moveTrackerTask(
+    EntityRef channel,
+    EntityRef task,
+    String version, {
+    required EntityRef lane,
+    required int position,
+  }) async =>
+      TrackerTask.fromJson(await api.sendJson(
+        'POST',
+        '/api/v1/channels/${channel.wire}/tracker/tasks/${task.wire}/move',
+        data: <String, Object?>{
+          'lane_id': lane.wire,
+          'position': position,
+        },
+        headers: <String, String>{'If-Match': version},
+      ));
+
+  Future<void> deleteTrackerTask(
+    EntityRef channel,
+    EntityRef task,
+    String version,
+  ) async {
+    await api.sendJson(
+      'DELETE',
+      '/api/v1/channels/${channel.wire}/tracker/tasks/${task.wire}',
+      headers: <String, String>{'If-Match': version},
+    );
+  }
+
   Future<KaedeChannel> createThread({
     required EntityRef parent,
     required String name,
@@ -1140,6 +1313,37 @@ final class KaedeRepository {
       status: () => api.getJson('/api/v1/attachments/$attachmentId'),
     );
   }
+
+  Future<KaedeRole> uploadRoleIcon({
+    required EntityRef guild,
+    required EntityRef role,
+    required String filename,
+    required String contentType,
+    required File file,
+  }) async {
+    final path = '/api/v1/guilds/${guild.wire}/roles/${role.wire}/icon';
+    final size = await file.length();
+    final ticket = await api.sendJson('POST', path, data: <String, Object?>{
+      'filename': filename,
+      'content_type': contentType,
+      'size': size,
+    });
+    await api.putPresignedFile(ticket['upload_url']! as String, file,
+        contentType: contentType);
+    final attachmentId = '${ticket['id']}';
+    final result = await commitScannedMedia(
+      commit: () => api.sendJson('PUT', path,
+          data: <String, Object?>{'attachment_id': attachmentId}),
+      status: () => api.getJson('/api/v1/attachments/$attachmentId'),
+    );
+    return KaedeRole.fromJson(result);
+  }
+
+  Future<KaedeRole> deleteRoleIcon(EntityRef guild, EntityRef role) async =>
+      KaedeRole.fromJson(await api.sendJson(
+        'DELETE',
+        '/api/v1/guilds/${guild.wire}/roles/${role.wire}/icon',
+      ));
 
   Future<Map<String, Object?>> uploadEmoji({
     required EntityRef guild,

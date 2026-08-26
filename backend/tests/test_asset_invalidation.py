@@ -13,7 +13,7 @@ from sqlalchemy.dialects import postgresql
 from app import tasks
 from app.api import media as media_api
 from app.core.settings import Settings
-from app.db.models import Attachment, Emoji, Guild, Message, User
+from app.db.models import Attachment, Emoji, Guild, Message, Role, User
 from app.media import asset_invalidation, digest_revocation, service, tombstones
 from app.media import jobs as media_jobs
 
@@ -168,6 +168,85 @@ async def test_terminal_guild_asset_queues_signed_partial_guild_update(
                 field_name: None,
             }
         },
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_role_icon_is_cleared_and_federated_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = User(
+        id=20,
+        origin_domain=LOCAL_DOMAIN,
+        is_local=True,
+        username="owner",
+        password_hash="unused",
+        profile_version=1,
+        profile_resolved=True,
+    )
+    guild = Guild(
+        id=10,
+        origin_domain=LOCAL_DOMAIN,
+        name="Paper Lantern",
+        owner_id=owner.id,
+        owner_domain=owner.origin_domain,
+        permission_generation=1,
+        history_policy_generation=1,
+        federated_history_policy="disabled",
+        next_event_seq=1,
+        last_event_seq=0,
+        sync_status="ready",
+        unavailable=False,
+    )
+    role = Role(
+        id=11,
+        origin_domain=LOCAL_DOMAIN,
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        name="Guard",
+        icon_hash=DIGEST,
+        color=0,
+        permissions=0,
+        position=1,
+        hoist=False,
+        mentionable=False,
+    )
+    item = attachment(f"role:{LOCAL_DOMAIN}:{role.id}:icon")
+    calls = 0
+
+    class Session:
+        async def get(self, model: object, key: object) -> object:
+            if model is Role:
+                return role
+            assert model is User
+            return owner
+
+        async def scalar(self, _statement: object) -> object:
+            nonlocal calls
+            calls += 1
+            return guild if calls == 1 else role
+
+    queue_mutation = AsyncMock(return_value=1)
+    monkeypatch.setattr(asset_invalidation, "queue_guild_mutation", queue_mutation)
+
+    result = await asset_invalidation.invalidate_terminal_asset_binding(
+        cast(Any, Session()), settings(), item
+    )
+
+    assert result is not None
+    assert result.dispatch_type == "GUILD_ROLE_UPDATE"
+    assert result.dispatch_payload is not None
+    assert result.dispatch_payload["icon_hash"] is None
+    assert role.icon_hash is None
+    assert item.asset_binding is None
+    queue_mutation.assert_awaited_once_with(
+        ANY,
+        settings(),
+        guild,
+        owner,
+        "guild.role.update",
+        {"role": result.dispatch_payload},
+        snapshot_required=True,
     )
 
 

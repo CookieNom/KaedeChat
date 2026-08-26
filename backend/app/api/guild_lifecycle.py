@@ -58,6 +58,7 @@ from app.media.tombstones import (
     lock_media_tombstone_ref,
     queue_terminal_attachment_tombstone,
 )
+from app.tracker.membership import clear_tracker_assignees, wake_tracker_membership_cleanup
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["guild-lifecycle"])
 log = structlog.get_logger()
@@ -168,6 +169,13 @@ async def leave_guild(
             auth.user,
             [(actor_id, actor_domain)],
         )
+        await clear_tracker_assignees(
+            session,
+            settings,
+            guild,
+            auth.user,
+            [(actor_id, actor_domain)],
+        )
         revoked_installations = await revoke_installations_for_guild_member(
             session,
             guild_id=guild.id,
@@ -196,7 +204,7 @@ async def leave_guild(
 
     await session.commit()
     if guild.origin_domain == settings.domain:
-        await wake_queued_guild_federation(guild)
+        await wake_tracker_membership_cleanup(guild)
         await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
         await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
         await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
@@ -319,6 +327,7 @@ async def _prepare_guild_content_deletion(
     )
     emoji_asset_prefix = f"emoji:{guild.origin_domain}:"
     sticker_asset_prefix = f"sticker:{guild.origin_domain}:"
+    role_asset_prefix = f"role:{guild.origin_domain}:"
     routed_refs = select(
         MediaTombstoneDestination.attachment_id,
         MediaTombstoneDestination.attachment_domain,
@@ -342,6 +351,7 @@ async def _prepare_guild_content_deletion(
                         ),
                         Attachment.asset_binding.startswith(emoji_asset_prefix),
                         Attachment.asset_binding.startswith(sticker_asset_prefix),
+                        Attachment.asset_binding.startswith(role_asset_prefix),
                     )
                 )
             )

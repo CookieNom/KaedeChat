@@ -218,6 +218,12 @@ and storage accounting remain local. Signed relationship events synchronize the
 two independently owned rows; no remote instance can retain local friendship
 privileges after local removal or blocking.
 
+Task tracker boards, lanes, tasks, and creation nonces are normalized local
+guild-authority data. They cascade with their type-17 channel and are not
+silently accepted by a replica; remote mutations fail closed until a tracker
+snapshot/event capability is added to Kaede Fed. The local API and storage
+contract is documented in [Task tracker channels](task-tracker.md).
+
 Messages use monthly range partitions keyed by the timestamp-bearing snowflake.
 History reads include a lower ID floor so PostgreSQL can prune partitions even
 without a cursor. Presence, typing, and live voice occupancy never enter SQL;
@@ -313,7 +319,8 @@ and traffic analysis resistance are outside the current transport capability.
 
 The production scope covers identity and authentication, single-instance chat,
 federation, media and webhooks, voice/video/screen sharing, Android and iOS
-clients, message search, group DMs, and the associated operational controls.
+clients, task tracker channels, message search, group DMs, and the associated
+operational controls.
 Threads and compressed gateway encoding are not currently implemented. MLS 1.0
 messaging, encrypted attachments, recovery, and LiveKit frame encryption ship
 behind the operator activation gate documented in `docs/e2ee.md`.

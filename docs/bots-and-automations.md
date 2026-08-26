@@ -299,6 +299,7 @@ Supported scopes:
 - `moderation.members`, `moderation.messages`
 - `voice.states.read`, `voice.moderate`
 - `invites.manage`, `webhooks.manage`, `emojis.manage`
+- `tasks.read`, `tasks.write`, `tasks.manage`
 - `dm.send`
 
 Supported intents:
@@ -311,6 +312,7 @@ Supported intents:
 - `guild_typing`
 - `voice_states`
 - `interactions`
+- `guild_tasks`
 
 An interaction-only bot normally needs only `applications.commands`,
 `interactions.respond`, and the `interactions` intent. Being able to view a
@@ -627,8 +629,8 @@ The package provides:
 - heartbeat, cursor resume, bounded reconnect, and `Retry-After` handling
 - `Client.event` and `Client.command` decorators
 - typed resources and events: guilds, channels, members, roles, messages, and
-  attachments; invites, webhooks, and emojis; interactions, moderation,
-  presence, and voice
+  attachments; invites, webhooks, emojis, and task trackers; interactions,
+  moderation, presence, and voice
 - scoped CRUD and moderation helpers, safe presigned uploads/downloads,
   message history and reactions, and user lookup
 - `content_unavailable`, encrypted payload, and composite-reference handling
@@ -637,6 +639,14 @@ A snowflake is never converted into a username. `fetch_user(EntityRef)`
 resolves the authoritative profile. `User.handle` returns normal
 `username@instance` formatting, while `User.mention` retains the full
 composite reference.
+
+Task tracker channels have a separate scope and event boundary. `tasks.read`
+allows board fetches and is required alongside the `guild_tasks` intent for
+tracker Gateway events. `tasks.write` admits task CRUD, while `tasks.manage`
+admits lane and board-setting operations. The bot's current tracker permission
+bits and channel overwrites are checked again for every request. See the
+[task tracker channel contract](task-tracker.md#bots-and-applications) for the
+routes, typed SDK resources, concurrency rules, and dispatches.
 
 ## User-facing behavior
 

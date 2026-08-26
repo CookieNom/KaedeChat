@@ -53,6 +53,7 @@ from app.db.models import (
     Sticker,
     TerminalRoomDeletion,
     ThreadMember,
+    TrackerBoard,
     User,
 )
 from app.federation.client import signed_request
@@ -82,6 +83,8 @@ from app.federation.replication import (
 from app.federation.schemas import RemoteUserProfile
 from app.federation.security import validated_event_envelope
 from app.federation.terminal_rooms import lock_terminal_room
+from app.federation.tracker import apply_tracker_invalidation
+from app.media.digest_revocation import valid_content_digest
 from app.media.tombstones import lock_media_tombstone_ref
 
 
@@ -99,6 +102,7 @@ GUILD_MUTATION_EVENT_TYPES = frozenset(
         "guild.channel.update",
         "guild.channel.delete",
         "guild.forum.cursor.update",
+        "guild.tracker.board.invalidate",
         "guild.thread.member.upsert",
         "guild.thread.member.delete",
         "guild.role.create",
@@ -160,6 +164,10 @@ SNAPSHOT_NEUTRAL_GUILD_EVENTS = frozenset(
         "guild.reaction.remove",
         "guild.pin.add",
         "guild.pin.remove",
+        # Tracker content has its own version-fenced snapshot protocol and is
+        # deliberately absent from the structural guild snapshot. Ordered
+        # invalidations must not restart unrelated member-page snapshots.
+        "guild.tracker.board.invalidate",
     }
 )
 
@@ -1574,6 +1582,9 @@ async def apply_guild_mutation_event(
                 raw.get("permission_generation"), "permission generation"
             )
         dispatch = {**dispatch, **raw}
+    elif event_type == "guild.tracker.board.invalidate":
+        await apply_tracker_invalidation(session, locked, content, context)
+        dispatch = {}
     elif event_type == "guild.forum.cursor.update":
         forum_ref = _event_ref(content.get("forum"), "forum")
         forum = await session.get(Channel, forum_ref)
@@ -1631,7 +1642,7 @@ async def apply_guild_mutation_event(
                 "generation": "0",
             }
         encryption_policy = validate_channel_encryption_policy(raw_encryption_policy)
-        if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5, 10, 11, 12, 15}:
+        if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5, 10, 11, 12, 15, 17}:
             raise ValueError("channel mutation type is invalid")
         if not isinstance(name, str) or not 1 <= len(name) <= 100:
             raise ValueError("channel mutation name is invalid")
@@ -1799,7 +1810,7 @@ async def apply_guild_mutation_event(
         raw_deleted_type = raw_deleted_channel.get("type")
         if raw_deleted_type is not None and (
             isinstance(raw_deleted_type, bool)
-            or raw_deleted_type not in {0, 2, 4, 5, 10, 11, 12, 15}
+            or raw_deleted_type not in {0, 2, 4, 5, 10, 11, 12, 15, 17}
         ):
             raise ValueError("channel deletion type is invalid")
         raw_guild_id = raw_deleted_channel.get("guild_id")
@@ -2004,6 +2015,11 @@ async def apply_guild_mutation_event(
         permissions = database_snowflake(raw.get("permissions"), "role permissions")
         if permissions & ~ALL_PERMISSIONS:
             raise ValueError("role mutation contains unknown permissions")
+        icon_hash = raw.get("icon_hash")
+        if icon_hash is not None and (
+            not isinstance(icon_hash, str) or not valid_content_digest(icon_hash)
+        ):
+            raise ValueError("role mutation icon hash is invalid")
         if not isinstance(raw.get("hoist"), bool) or not isinstance(raw.get("mentionable"), bool):
             raise ValueError("role mutation flags are invalid")
         role = await session.get(Role, role_ref)
@@ -2014,6 +2030,7 @@ async def apply_guild_mutation_event(
                 guild_id=locked.id,
                 guild_domain=locked.origin_domain,
                 name=name,
+                icon_hash=icon_hash,
                 color=color,
                 permissions=permissions,
                 position=position,
@@ -2025,6 +2042,7 @@ async def apply_guild_mutation_event(
             raise ValueError("role mutation conflicts with another role")
         else:
             role.name = name
+            role.icon_hash = icon_hash
             role.color = color
             role.permissions = permissions
             role.position = position
@@ -2803,7 +2821,11 @@ async def apply_guild_mutation_event(
             e2ee_policy_channels.extend(
                 item for item in paused if (item.id, item.origin_domain) not in known
             )
-    return None if event_type == "guild.forum.cursor.update" else (dispatch_type, dispatch)
+    return (
+        None
+        if event_type in {"guild.forum.cursor.update", "guild.tracker.board.invalidate"}
+        else (dispatch_type, dispatch)
+    )
 
 
 async def lock_proxy_nonce(
@@ -3285,6 +3307,11 @@ def validate_guild_snapshot(
         permissions = database_snowflake(raw.get("permissions"), "role permissions")
         if permissions & ~ALL_PERMISSIONS:
             raise ValueError("guild snapshot role contains unknown permissions")
+        icon_hash = raw.get("icon_hash")
+        if icon_hash is not None and (
+            not isinstance(icon_hash, str) or not valid_content_digest(icon_hash)
+        ):
+            raise ValueError("guild snapshot role icon hash is invalid")
         if not isinstance(raw.get("hoist"), bool) or not isinstance(raw.get("mentionable"), bool):
             raise ValueError("guild snapshot role flags are invalid")
         role_refs.add(ref)
@@ -3317,7 +3344,7 @@ def validate_guild_snapshot(
         validate_channel_encryption_policy(raw_encryption_policy)
         parent_id = raw.get("parent_id")
         permissions_synced = raw.get("permissions_synced", parent_id is not None)
-        if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5, 10, 11, 12, 15}:
+        if isinstance(channel_type, bool) or channel_type not in {0, 2, 4, 5, 10, 11, 12, 15, 17}:
             raise ValueError("guild snapshot channel type is invalid")
         if not isinstance(name, str) or not 1 <= len(name) <= 100:
             raise ValueError("guild snapshot channel name is invalid")
@@ -3673,6 +3700,12 @@ async def purge_replicated_channel_cache(
             ),
         )
     )
+    await session.execute(
+        delete(TrackerBoard).where(
+            TrackerBoard.channel_id == channel.id,
+            TrackerBoard.channel_domain == channel.origin_domain,
+        )
+    )
     tombstone_omitted_replicated_channel(channel)
     await session.flush()
     if reconcile:
@@ -3944,6 +3977,7 @@ def guild_snapshot_payload(
                 "id": str(role.id),
                 "origin_domain": role.origin_domain,
                 "name": role.name,
+                "icon_hash": role.icon_hash,
                 "color": role.color,
                 "permissions": str(role.permissions),
                 "position": role.position,
@@ -4245,6 +4279,16 @@ async def apply_guild_snapshot(
     for role in existing_roles:
         if (role.id, role.origin_domain) not in role_refs:
             await session.delete(role)
+    # Tracker content is hydrated through its independently paginated,
+    # permission-filtered endpoint. A full structural snapshot invalidates all
+    # cached boards atomically so no old task survives a permission or channel
+    # topology recovery.
+    await session.execute(
+        delete(TrackerBoard).where(
+            TrackerBoard.guild_id == guild.id,
+            TrackerBoard.guild_domain == origin,
+        )
+    )
     existing_channels = list(
         await session.scalars(
             select(Channel).where(Channel.guild_id == guild.id, Channel.guild_domain == origin)
@@ -4316,6 +4360,7 @@ async def apply_guild_snapshot(
         elif (loaded_role.guild_id, loaded_role.guild_domain) != (guild.id, guild.origin_domain):
             raise ValueError("snapshot role identity conflicts with another guild")
         loaded_role.name = str(raw["name"])
+        loaded_role.icon_hash = str(raw["icon_hash"]) if raw.get("icon_hash") is not None else None
         loaded_role.color = int(raw["color"])
         loaded_role.permissions = int(raw["permissions"])
         loaded_role.position = int(raw["position"])

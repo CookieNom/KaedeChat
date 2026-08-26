@@ -56,6 +56,7 @@ from app.db.models import (
     Sticker,
     User,
 )
+from app.tracker.service import create_tracker_state
 
 router = APIRouter(prefix="/api/v1", tags=["guilds"])
 log = structlog.get_logger()
@@ -78,6 +79,8 @@ DEFAULT_PERMISSIONS = int(
     | Permission.CREATE_PUBLIC_THREADS
     | Permission.CREATE_PRIVATE_THREADS
     | Permission.SEND_MESSAGES_IN_THREADS
+    | Permission.CREATE_TRACKER_TASKS
+    | Permission.EDIT_OWN_TRACKER_TASKS
 )
 
 
@@ -693,6 +696,13 @@ async def create_channel(
         created_at=now,
     )
     session.add(channel)
+    if channel.type == 17:
+        await create_tracker_state(
+            session,
+            snowflake,
+            channel,
+            key_prefix=payload.tracker_key_prefix,
+        )
     await queue_guild_mutation(
         session,
         settings,

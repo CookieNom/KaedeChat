@@ -122,7 +122,7 @@
   import CreateThreadDialog from '$lib/components/CreateThreadDialog.svelte';
   import ForumView from '$lib/components/ForumView.svelte';
   import GuildMemberRoster from '$lib/components/GuildMemberRoster.svelte';
-  import { memberRoleColor } from '$lib/chat/members';
+  import { highestIconRole, memberRoleColor } from '$lib/chat/members';
   import EmojiPicker from '$lib/components/EmojiPicker.svelte';
   import GifPicker from '$lib/components/GifPicker.svelte';
   import Icon from '$lib/components/Icon.svelte';
@@ -133,6 +133,7 @@
   import UploadPreviewTray from '$lib/components/UploadPreviewTray.svelte';
   import ThreadHeader from '$lib/components/ThreadHeader.svelte';
   import ThreadsPanel from '$lib/components/ThreadsPanel.svelte';
+  import TaskTrackerView from '$lib/components/TaskTrackerView.svelte';
   import UserProfileCard from '$lib/components/UserProfileCard.svelte';
   import VirtualMessageList from '$lib/components/VirtualMessageList.svelte';
   import {
@@ -164,6 +165,7 @@
   import { portal } from '$lib/ui/portal';
   import { developerMode } from '$lib/ui/developer-mode.svelte';
   import VoiceDock from '$lib/voice/VoiceDock.svelte';
+  import { TRACKER_CHANNEL_TYPE } from '$lib/task-tracker/types';
   import {
     applyVoiceStateUpdate,
     type VoiceOccupant,
@@ -334,6 +336,7 @@
   let channelDialogTarget = $state<Channel | null>(null);
   let channelDialogName = $state('');
   let channelDialogType = $state(0);
+  let channelDialogTrackerPrefix = $state('');
   let channelDialogParent = $state('');
   let channelDialogBusy = $state(false);
   let channelDialogError = $state('');
@@ -1023,6 +1026,7 @@
     channelDialogTarget = target;
     channelDialogName = target?.name ?? '';
     channelDialogType = target?.type ?? type;
+    channelDialogTrackerPrefix = '';
     channelDialogParent =
       target?.parent_id && target.parent_domain
         ? `${target.parent_id}@${target.parent_domain}`
@@ -1259,7 +1263,10 @@
           body: JSON.stringify({
             name: channelDialogName.trim(),
             type: channelDialogType,
-            parent_id: channelDialogType === 4 ? null : (parent?.id ?? null)
+            parent_id: channelDialogType === 4 ? null : (parent?.id ?? null),
+            ...(channelDialogType === TRACKER_CHANNEL_TYPE && channelDialogTrackerPrefix.trim()
+              ? { tracker_key_prefix: channelDialogTrackerPrefix.trim().toUpperCase() }
+              : {})
           })
         });
         if (!stillCurrent()) return;
@@ -3027,8 +3034,22 @@
     targetAround: string | null
   ) {
     try {
+      const [loadedGuild, routeChannel] = await Promise.all([
+        api<Guild>(`/guilds/${encodeURIComponent(targetGuild)}`),
+        fetchChannel(targetChannel).catch(() => null)
+      ]);
+      if (
+        routeGeneration !== loadGeneration ||
+        snapshot !== snapshotGeneration ||
+        targetGuild !== guildId ||
+        targetChannel !== channelId
+      )
+        return;
+      const initialChannel =
+        loadedGuild.channels?.find((item) => matchesEntityRef(targetChannel, item, localDomain)) ??
+        routeChannel;
+      const trackerRoute = initialChannel?.type === TRACKER_CHANNEL_TYPE;
       const [
-        loadedGuild,
         loadedGuilds,
         loadedMessages,
         loadedReadStates,
@@ -3037,23 +3058,30 @@
         loadedStickers,
         loadedPins,
         loadedCommands,
-        routeChannel,
         activeGuildThreads
       ] = await Promise.all([
-        api<Guild>(`/guilds/${encodeURIComponent(targetGuild)}`),
         api<Guild[]>('/users/@me/guilds'),
-        api<Message[]>(
-          `/channels/${encodeURIComponent(targetChannel)}/messages${targetAround ? `?around=${encodeURIComponent(targetAround)}` : ''}`
-        ),
+        trackerRoute
+          ? Promise.resolve([] as Message[])
+          : api<Message[]>(
+              `/channels/${encodeURIComponent(targetChannel)}/messages${targetAround ? `?around=${encodeURIComponent(targetAround)}` : ''}`
+            ),
         api<ReadStateStatus[]>('/users/@me/read-states'),
         api<UserSummary>('/users/@me'),
-        api<CustomEmoji[]>('/users/@me/emojis'),
-        api<GuildSticker[]>('/users/@me/stickers'),
-        api<Message[]>(`/channels/${encodeURIComponent(targetChannel)}/pins`).catch(() => []),
-        api<ApplicationCommand[]>(
-          `/guilds/${encodeURIComponent(targetGuild)}/application-commands`
-        ).catch(() => []),
-        fetchChannel(targetChannel).catch(() => null),
+        trackerRoute
+          ? Promise.resolve([] as CustomEmoji[])
+          : api<CustomEmoji[]>('/users/@me/emojis'),
+        trackerRoute
+          ? Promise.resolve([] as GuildSticker[])
+          : api<GuildSticker[]>('/users/@me/stickers'),
+        trackerRoute
+          ? Promise.resolve([] as Message[])
+          : api<Message[]>(`/channels/${encodeURIComponent(targetChannel)}/pins`).catch(() => []),
+        trackerRoute
+          ? Promise.resolve([] as ApplicationCommand[])
+          : api<ApplicationCommand[]>(
+              `/guilds/${encodeURIComponent(targetGuild)}/application-commands`
+            ).catch(() => []),
         fetchActiveGuildThreads(targetGuild).catch(() => ({
           threads: [],
           members: [],
@@ -3079,6 +3107,7 @@
       }
       guild = preserveHistorySync(loadedGuild);
       loadedRouteChannel = loadedChannel;
+      if (trackerRoute && !preserveMessages) memberRosterOpen = false;
       availableEmojis = loadedEmojis;
       availableStickers = loadedStickers;
       pinnedMessages = loadedPins;
@@ -3173,7 +3202,7 @@
           }
         }
       }
-      if (loadedChannel?.encryption_mode !== 'e2ee') {
+      if (!trackerRoute && loadedChannel?.encryption_mode !== 'e2ee') {
         void initializeE2EE(loadedCurrentUser)
           .then((client) => {
             if (routeGeneration === loadGeneration) e2eeClient = client;
@@ -3220,8 +3249,10 @@
       forgetConfirmedSends();
       if (dispatchBuffer === buffered) dispatchBuffer = null;
       channelReady = true;
-      restoreSlowmode(targetChannel);
-      acknowledgeLatestIfVisible();
+      if (!trackerRoute) {
+        restoreSlowmode(targetChannel);
+        acknowledgeLatestIfVisible();
+      }
     } catch (caught) {
       if (
         routeGeneration !== loadGeneration ||
@@ -5036,9 +5067,11 @@
                             ? 'volume'
                             : item.type === 5
                               ? 'bell'
-                              : item.type === 15
-                                ? 'forum'
-                                : 'hash'}
+                              : item.type === TRACKER_CHANNEL_TYPE
+                                ? 'kanban'
+                                : item.type === 15
+                                  ? 'forum'
+                                  : 'hash'}
                           size={16}
                         />
                         {item.name}
@@ -5124,9 +5157,11 @@
                         ? 'volume'
                         : item.type === 5
                           ? 'bell'
-                          : item.type === 15
-                            ? 'forum'
-                            : 'hash'}
+                          : item.type === TRACKER_CHANNEL_TYPE
+                            ? 'kanban'
+                            : item.type === 15
+                              ? 'forum'
+                              : 'hash'}
                       size={16}
                     />
                     {item.name}
@@ -5198,109 +5233,114 @@
   </aside>
   <section
     class:guild-voice-pane={channel?.type === 2}
+    class:tracker-pane={channel?.type === TRACKER_CHANNEL_TYPE}
     class:sync-paused={guild?.sync_status === 'quota_paused'}
     class:has-status-warning={Boolean(replicaSyncWarning || historySyncWarning || timeoutGuidance)}
     class="message-pane"
   >
-    <header class:guild-voice-header={channel?.type === 2} class="channel-header">
-      <div class="channel-header-primary">
-        <button
-          bind:this={mobileNavigationToggle}
-          class="mobile-sidebar-toggle"
-          type="button"
-          aria-label={mobileNavigationOpen ? 'Close guild navigation' : 'Open guild navigation'}
-          aria-controls="guild-channel-navigation"
-          aria-expanded={mobileNavigationOpen}
-          onclick={toggleMobileNavigation}
-        >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            aria-hidden="true"
+    {#if channel?.type !== TRACKER_CHANNEL_TYPE}
+      <header class:guild-voice-header={channel?.type === 2} class="channel-header">
+        <div class="channel-header-primary">
+          <button
+            bind:this={mobileNavigationToggle}
+            class="mobile-sidebar-toggle"
+            type="button"
+            aria-label={mobileNavigationOpen ? 'Close guild navigation' : 'Open guild navigation'}
+            aria-controls="guild-channel-navigation"
+            aria-expanded={mobileNavigationOpen}
+            onclick={toggleMobileNavigation}
           >
-            <path d="M4 7h16M4 12h16M4 17h16" />
-          </svg>
-        </button>
-        <div class="channel-title">
-          <span class="channel-mark" aria-hidden="true">
-            {#if channel?.type === 2}
-              <Icon name="volume" size={18} />
-            {:else if channel?.type === 5}
-              <Icon name="bell" size={18} />
-            {:else if isForumChannel(channel)}
-              <Icon name="forum" size={18} />
-            {:else if isThreadChannel(channel)}
-              <Icon name="message" size={18} />
-            {:else}
-              #
-            {/if}
-          </span>
-          <div>
-            <strong>{channel?.name ?? 'Channel'}</strong>
-            {#if channel?.topic && !isThreadChannel(channel)}<span>{channel.topic}</span>{/if}
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <path d="M4 7h16M4 12h16M4 17h16" />
+            </svg>
+          </button>
+          <div class="channel-title">
+            <span class="channel-mark" aria-hidden="true">
+              {#if channel?.type === 2}
+                <Icon name="volume" size={18} />
+              {:else if channel?.type === 5}
+                <Icon name="bell" size={18} />
+              {:else if channel?.type === TRACKER_CHANNEL_TYPE}
+                <Icon name="kanban" size={18} />
+              {:else if isForumChannel(channel)}
+                <Icon name="forum" size={18} />
+              {:else if isThreadChannel(channel)}
+                <Icon name="message" size={18} />
+              {:else}
+                #
+              {/if}
+            </span>
+            <div>
+              <strong>{channel?.name ?? 'Channel'}</strong>
+              {#if channel?.topic && !isThreadChannel(channel)}<span>{channel.topic}</span>{/if}
+            </div>
           </div>
         </div>
-      </div>
-      <div class="channel-header-actions">
-        {#if guild && threadDirectoryParent}
-          <ThreadsPanel
-            bind:open={threadDirectoryOpen}
-            {guild}
-            parent={threadDirectoryParent}
-            activeThreads={threadDirectoryActive}
-            archivedThreads={threadDirectoryArchived}
-            loading={threadDirectoryLoading}
-            loadingMore={threadDirectoryLoadingMore}
-            activeHasMore={threadDirectoryActiveHasMore}
-            archivedHasMore={threadDirectoryArchivedHasMore}
-            busy={threadDirectoryBusy}
-            canCreatePublic={canCreateDirectoryPublicThread}
-            canCreatePrivate={canCreateDirectoryPrivateThread}
-            canSendStarter={canSendDirectoryStarter}
-            onOpen={openThreadDirectory}
-            onLoadMore={loadMoreThreadDirectory}
-            onCreate={createDirectoryThread}
-          />
-        {/if}
-        {#if channel?.encryption_mode === 'e2ee'}
+        <div class="channel-header-actions">
+          {#if guild && threadDirectoryParent}
+            <ThreadsPanel
+              bind:open={threadDirectoryOpen}
+              {guild}
+              parent={threadDirectoryParent}
+              activeThreads={threadDirectoryActive}
+              archivedThreads={threadDirectoryArchived}
+              loading={threadDirectoryLoading}
+              loadingMore={threadDirectoryLoadingMore}
+              activeHasMore={threadDirectoryActiveHasMore}
+              archivedHasMore={threadDirectoryArchivedHasMore}
+              busy={threadDirectoryBusy}
+              canCreatePublic={canCreateDirectoryPublicThread}
+              canCreatePrivate={canCreateDirectoryPrivateThread}
+              canSendStarter={canSendDirectoryStarter}
+              onOpen={openThreadDirectory}
+              onLoadMore={loadMoreThreadDirectory}
+              onCreate={createDirectoryThread}
+            />
+          {/if}
+          {#if channel?.encryption_mode === 'e2ee'}
+            <button
+              class="icon-button active e2ee-status-button"
+              type="button"
+              aria-label="End-to-end encryption is on; view safety number"
+              title="End-to-end encrypted · identities unverified until the safety number is compared"
+              onclick={showEncryptionInfo}
+            >
+              <Icon name="lock" size={18} />
+              <span>{channel.encryption_state === 'active' ? 'Encrypted' : 'Rekey needed'}</span>
+            </button>
+          {/if}
+          {#if !isForumChannel(channel) && channel?.type !== TRACKER_CHANNEL_TYPE}
+            <MessageSearch
+              bind:open={messageSearchOpen}
+              scope="guild"
+              scopeRef={guild ? entityRef(guild) : guildId}
+              accountRef={currentUser ? entityRef(currentUser) : null}
+              {channel}
+              users={messageSearchUsers}
+              placement="header"
+            />
+          {/if}
           <button
-            class="icon-button active e2ee-status-button"
+            class:active={memberRosterOpen}
+            class="icon-button member-roster-toggle"
             type="button"
-            aria-label="End-to-end encryption is on; view safety number"
-            title="End-to-end encrypted · identities unverified until the safety number is compared"
-            onclick={showEncryptionInfo}
+            aria-label={memberRosterOpen ? 'Hide member list' : 'Show member list'}
+            aria-pressed={memberRosterOpen}
+            title={memberRosterOpen ? 'Hide member list' : 'Show member list'}
+            onclick={toggleMemberRoster}
           >
-            <Icon name="lock" size={18} />
-            <span>{channel.encryption_state === 'active' ? 'Encrypted' : 'Rekey needed'}</span>
+            <Icon name="users" size={19} />
           </button>
-        {/if}
-        {#if !isForumChannel(channel)}
-          <MessageSearch
-            bind:open={messageSearchOpen}
-            scope="guild"
-            scopeRef={guild ? entityRef(guild) : guildId}
-            accountRef={currentUser ? entityRef(currentUser) : null}
-            {channel}
-            users={messageSearchUsers}
-            placement="header"
-          />
-        {/if}
-        <button
-          class:active={memberRosterOpen}
-          class="icon-button member-roster-toggle"
-          type="button"
-          aria-label={memberRosterOpen ? 'Hide member list' : 'Show member list'}
-          aria-pressed={memberRosterOpen}
-          title={memberRosterOpen ? 'Hide member list' : 'Show member list'}
-          onclick={toggleMemberRoster}
-        >
-          <Icon name="users" size={19} />
-        </button>
-      </div>
-    </header>
+        </div>
+      </header>
+    {/if}
     {#if guild && channel && isThreadChannel(channel)}
       <ThreadHeader
         {guild}
@@ -5376,7 +5416,23 @@
         {/if}
       </div>
     {/if}
-    {#if channel?.type === 2}
+    {#if channel?.type === TRACKER_CHANNEL_TYPE}
+      {#if channel}
+        {#key entityRef(channel)}
+          <TaskTrackerView
+            {channel}
+            {members}
+            {currentUser}
+            {memberRosterOpen}
+            onOpenNavigation={(button) => {
+              mobileNavigationToggle = button;
+              toggleMobileNavigation();
+            }}
+            onToggleMembers={toggleMemberRoster}
+          />
+        {/key}
+      {/if}
+    {:else if channel?.type === 2}
       <div class="guild-voice-content">
         {#key entityRef(channel)}
           <VoiceDock channelRef={entityRef(channel)} permissions={channel.permissions ?? '0'} />
@@ -5462,6 +5518,15 @@
                           guild?.roles ?? []
                         )
                       : undefined}
+                    authorIconRole={threadTimelineStarter.author
+                      ? highestIconRole(
+                          memberFor(
+                            threadTimelineStarter.author_id,
+                            threadTimelineStarter.author_domain
+                          ),
+                          guild?.roles ?? []
+                        )
+                      : undefined}
                     mentionUsers={entities.users.values}
                     mentionRoles={guild?.roles ?? []}
                     presence={threadTimelineStarter.author
@@ -5503,6 +5568,12 @@
                       compact={item.compact}
                       authorColor={item.message.author
                         ? memberRoleColor(
+                            memberFor(item.message.author_id, item.message.author_domain),
+                            guild?.roles ?? []
+                          )
+                        : undefined}
+                      authorIconRole={item.message.author
+                        ? highestIconRole(
                             memberFor(item.message.author_id, item.message.author_domain),
                             guild?.roles ?? []
                           )
@@ -6187,7 +6258,9 @@
           <strong>“{channelDeleteTarget.name ?? 'Untitled'}”</strong> will be permanently removed.
           {channelDeleteTarget.type === 4
             ? ' The category must be empty before it can be deleted.'
-            : ' A channel containing messages cannot be deleted.'}
+            : channelDeleteTarget.type === TRACKER_CHANNEL_TYPE
+              ? ' Its statuses and tasks will be deleted with it.'
+              : ' A channel containing messages cannot be deleted.'}
         </p>
         {#if error}<p class="form-error" role="alert">{error}</p>{/if}
       </div>
@@ -6279,6 +6352,13 @@
               <input type="radio" bind:group={channelDialogType} value={15} />
               <span><strong>Forum</strong><small>Organized posts and discussions</small></span>
             </label>
+            <label>
+              <input type="radio" bind:group={channelDialogType} value={TRACKER_CHANNEL_TYPE} />
+              <span
+                ><strong>Task tracker</strong><small>Plan and assign work on a shared board</small
+                ></span
+              >
+            </label>
           </fieldset>
         {/if}
         <label class="channel-dialog-field">
@@ -6292,6 +6372,19 @@
             required
           />
         </label>
+        {#if !channelDialogTarget && channelDialogType === TRACKER_CHANNEL_TYPE}
+          <label class="channel-dialog-field">
+            Task key prefix <small>Optional · defaults from the channel name</small>
+            <input
+              bind:value={channelDialogTrackerPrefix}
+              minlength="2"
+              maxlength="10"
+              pattern="[A-Za-z][A-Za-z0-9]*"
+              placeholder="e.g. RAID"
+              autocomplete="off"
+            />
+          </label>
+        {/if}
         {#if channelDialogType !== 4}
           <label class="channel-dialog-field">
             Category

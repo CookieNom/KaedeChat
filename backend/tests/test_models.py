@@ -35,6 +35,10 @@ def test_complete_v1_schema_is_registered() -> None:
         "roles",
         "member_roles",
         "channels",
+        "tracker_boards",
+        "tracker_dispatch_outbox",
+        "tracker_lanes",
+        "tracker_tasks",
         "thread_members",
         "channel_overwrites",
         "messages",
@@ -190,6 +194,10 @@ def test_remote_guild_replica_usage_is_durable_and_cascade_scoped() -> None:
     assert guild_fk.ondelete == "CASCADE"
     assert isinstance(usage.c.total_rows.computed, Computed)
     assert isinstance(usage.c.total_bytes.computed, Computed)
+    assert usage.c.tracker_rows.nullable is False
+    assert usage.c.tracker_bytes.nullable is False
+    assert "tracker_rows" in str(usage.c.total_rows.computed.sqltext)
+    assert "tracker_bytes" in str(usage.c.total_bytes.computed.sqltext)
     assert {
         "ck_federation_replica_usage_nonnegative_rows",
         "ck_federation_replica_usage_nonnegative_bytes",
@@ -582,7 +590,7 @@ def test_forum_and_thread_channel_metadata_is_bounded_and_contextual() -> None:
         for constraint in channels.constraints
         if constraint.name == "ck_channels_channel_type"
     )
-    assert str(channel_type.sqltext) == "type IN (0,1,2,4,5,10,11,12,15)"
+    assert str(channel_type.sqltext) == "type IN (0,1,2,4,5,10,11,12,15,17)"
     indexes = {index.name: index for index in channels.indexes}
     assert "ix_channels_parent_activity" in indexes
     assert "ix_channels_thread_archive_due" in indexes
@@ -743,6 +751,102 @@ def test_type_one_channels_and_dm_conversations_have_an_inverse_identity_fk() ->
     assert inverse.deferrable is True
     assert inverse.initially == "DEFERRED"
     assert isinstance(channels.c.dm_conversation_id.computed, Computed)
+
+
+def test_tracker_storage_is_channel_scoped_bounded_and_cascade_safe() -> None:
+    boards = Base.metadata.tables["tracker_boards"]
+    dispatch_outbox = Base.metadata.tables["tracker_dispatch_outbox"]
+    lanes = Base.metadata.tables["tracker_lanes"]
+    tasks = Base.metadata.tables["tracker_tasks"]
+
+    assert tuple(boards.primary_key.columns.keys()) == ("channel_id", "channel_domain")
+    board_type = foreign_key_for_columns(
+        "tracker_boards", ("channel_id", "channel_domain", "channel_type")
+    )
+    assert tuple(element.target_fullname for element in board_type.elements) == (
+        "channels.id",
+        "channels.origin_domain",
+        "channels.type",
+    )
+    assert board_type.ondelete == "CASCADE"
+    outbox_board = foreign_key_for_columns(
+        "tracker_dispatch_outbox",
+        ("channel_id", "channel_domain", "guild_id", "guild_domain"),
+    )
+    assert outbox_board.ondelete == "CASCADE"
+    assert {
+        "ck_tracker_dispatch_outbox_attempts_nonnegative",
+        "ck_tracker_dispatch_outbox_event_type_value",
+    } <= constraint_names("tracker_dispatch_outbox")
+    assert "ix_tracker_dispatch_outbox_due" in {index.name for index in dispatch_outbox.indexes}
+
+    lane_board = foreign_key_for_columns(
+        "tracker_lanes", ("channel_id", "channel_domain", "guild_id", "guild_domain")
+    )
+    task_board = foreign_key_for_columns(
+        "tracker_tasks", ("channel_id", "channel_domain", "guild_id", "guild_domain")
+    )
+    assert lane_board.ondelete == task_board.ondelete == "CASCADE"
+    task_lane = foreign_key_for_columns(
+        "tracker_tasks", ("lane_id", "lane_domain", "channel_id", "channel_domain")
+    )
+    assert tuple(element.target_fullname for element in task_lane.elements) == (
+        "tracker_lanes.id",
+        "tracker_lanes.origin_domain",
+        "tracker_lanes.channel_id",
+        "tracker_lanes.channel_domain",
+    )
+    task_assignee_membership = foreign_key_for_columns(
+        "tracker_tasks", ("guild_id", "guild_domain", "assignee_id", "assignee_domain")
+    )
+    assert tuple(element.target_fullname for element in task_assignee_membership.elements) == (
+        "guild_members.guild_id",
+        "guild_members.guild_domain",
+        "guild_members.user_id",
+        "guild_members.user_domain",
+    )
+    assert task_assignee_membership.ondelete == "SET NULL (assignee_id, assignee_domain)"
+
+    lane_order = next(
+        constraint
+        for constraint in lanes.constraints
+        if isinstance(constraint, UniqueConstraint)
+        and constraint.name == "uq_tracker_lanes_channel_position"
+    )
+    task_order = next(
+        constraint
+        for constraint in tasks.constraints
+        if isinstance(constraint, UniqueConstraint)
+        and constraint.name == "uq_tracker_tasks_lane_position"
+    )
+    assert lane_order.deferrable is task_order.deferrable is True
+    assert lane_order.initially == task_order.initially == "DEFERRED"
+    assert {
+        "ck_tracker_boards_channel_type",
+        "ck_tracker_boards_key_prefix_format",
+    } <= constraint_names("tracker_boards")
+    assert "ck_tracker_lanes_position_range" in constraint_names("tracker_lanes")
+    assert {
+        "ck_tracker_tasks_position_range",
+        "ck_tracker_tasks_client_idempotency_complete",
+        "ck_tracker_tasks_assignee_ref_complete",
+    } <= constraint_names("tracker_tasks")
+    assert {
+        "ix_tracker_tasks_channel_assignee",
+        "ix_tracker_tasks_channel_due",
+    } <= {index.name for index in tasks.indexes}
+
+
+def test_tracker_dispatch_outbox_downgrade_refuses_to_discard_pending_events() -> None:
+    migration = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "versions"
+        / "f92a6c1d4b70_tracker_dispatch_outbox.py"
+    ).read_text()
+    guard = "IF EXISTS (SELECT 1 FROM tracker_dispatch_outbox)"
+    assert guard in migration
+    assert migration.index(guard) < migration.index('op.drop_table("tracker_dispatch_outbox")')
 
 
 def test_security_sensitive_actor_and_origin_foreign_keys_exist() -> None:

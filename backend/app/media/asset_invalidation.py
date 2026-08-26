@@ -7,10 +7,10 @@ from sqlalchemy import and_, exists, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.guild_revision import queue_guild_mutation
-from app.chat.payloads import emoji_payload, sticker_payload
+from app.chat.payloads import emoji_payload, role_payload, sticker_payload
 from app.core.settings import Settings
 from app.core.types import MAX_SNOWFLAKE
-from app.db.models import Attachment, Emoji, Guild, MediaTombstoneSource, Sticker, User
+from app.db.models import Attachment, Emoji, Guild, MediaTombstoneSource, Role, Sticker, User
 from app.federation.relationships import queue_friend_profile_updates
 from app.media.digest_revocation import (
     DIGEST_REVOCATION_STATUSES,
@@ -189,6 +189,55 @@ async def _invalidate_emoji_asset(
     )
 
 
+async def _invalidate_role_asset(
+    session: AsyncSession,
+    settings: Settings,
+    attachment: Attachment,
+    parts: list[str],
+) -> TerminalAssetInvalidation | None:
+    if len(parts) != 4 or parts[1] != settings.domain or parts[3] != "icon":
+        return None
+    role_id = _binding_id(parts[2])
+    if role_id is None:
+        return None
+    candidate = await session.get(Role, (role_id, parts[1]))
+    if candidate is None:
+        return None
+    guild = await _locked_guild_nowait(session, candidate.guild_id, candidate.guild_domain)
+    if guild is None:
+        return None
+    role = await session.scalar(
+        select(Role)
+        .where(Role.id == role_id, Role.origin_domain == parts[1])
+        .with_for_update(nowait=True)
+        .execution_options(populate_existing=True)
+    )
+    if role is None or (role.guild_id, role.guild_domain) != (
+        guild.id,
+        guild.origin_domain,
+    ):
+        return None
+    if attachment.content_sha256 is None or role.icon_hash != attachment.content_sha256:
+        return None
+    actor = await _guild_owner(session, settings, guild)
+    role.icon_hash = None
+    rendered = role_payload(role)
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        actor,
+        "guild.role.update",
+        {"role": rendered},
+        snapshot_required=True,
+    )
+    return TerminalAssetInvalidation(
+        guild=guild,
+        dispatch_type="GUILD_ROLE_UPDATE",
+        dispatch_payload=rendered,
+    )
+
+
 async def _invalidate_sticker_asset(
     session: AsyncSession,
     settings: Settings,
@@ -250,6 +299,8 @@ async def _invalidate_one_terminal_asset_binding(
         result = await _invalidate_user_asset(session, settings, attachment, parts)
     elif parts[0] == "guild":
         result = await _invalidate_guild_asset(session, settings, attachment, parts)
+    elif parts[0] == "role":
+        result = await _invalidate_role_asset(session, settings, attachment, parts)
     elif parts[0] == "emoji":
         result = await _invalidate_emoji_asset(session, settings, attachment, parts)
     elif parts[0] == "sticker":

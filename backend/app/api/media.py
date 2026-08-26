@@ -30,7 +30,14 @@ from app.api.guilds import local_guild
 from app.chat.channel_access import load_channel_access
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.guild_revision import queue_guild_mutation, wake_queued_guild_federation
-from app.chat.payloads import emoji_payload, guild_payload, sticker_payload, user_payload
+from app.chat.hierarchy import guild_role, require_can_manage_role
+from app.chat.payloads import (
+    emoji_payload,
+    guild_payload,
+    role_payload,
+    sticker_payload,
+    user_payload,
+)
 from app.chat.permissions import require_permissions
 from app.core.metrics import increment_metric
 from app.core.permission_contract import required_permissions
@@ -53,6 +60,7 @@ from app.db.models import (
     RemoteMediaCache,
     RemoteMediaOrphan,
     RemoteMediaTombstone,
+    Role,
     Sticker,
     TerminalRoomDeletion,
     User,
@@ -543,6 +551,168 @@ async def commit_guild_asset(
     if previous is not None:
         await enqueue_best_effort(media_local_purge, previous.id, previous.origin_domain)
     return attachment_payload(attachment)
+
+
+async def local_manageable_role(
+    session: AsyncSession,
+    settings: Settings,
+    guild: Guild,
+    actor: User,
+    role_id: EntityRef,
+) -> Role:
+    role_number, role_domain = role_id.resolve(settings.domain)
+    if role_domain != guild.origin_domain:
+        raise HTTPException(status_code=404, detail={"code": "ROLE_NOT_FOUND"})
+    role = await guild_role(session, guild, role_number)
+    if role.id == guild.id:
+        raise HTTPException(status_code=400, detail={"code": "EVERYONE_ROLE_IMMUTABLE"})
+    await require_can_manage_role(session, guild, actor, role)
+    return role
+
+
+@router.post("/api/v1/guilds/{guild_id}/roles/{role_id}/icon", status_code=201)
+async def create_role_icon_ticket(
+    guild_id: EntityRef,
+    role_id: EntityRef,
+    payload: UploadTicketRequest,
+    response: Response,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    require_image_type(payload.content_type)
+    if payload.size > settings.media_max_emoji_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": "ROLE_ICON_TOO_LARGE", "max_bytes": settings.media_max_emoji_bytes},
+        )
+    await enforce_client_rate_limit(
+        redis,
+        response,
+        CLIENT_RATE_LIMITS["upload_ticket"],
+        user_id=auth.user.id,
+        user_domain=auth.user.origin_domain,
+    )
+    guild = await local_guild(session, settings, guild_id)
+    await require_permissions(session, redis, guild, auth.user, required_permissions("role.update"))
+    await local_manageable_role(session, settings, guild, auth.user, role_id)
+    attachment, upload_url = await create_upload_ticket(
+        session,
+        settings,
+        snowflake,
+        auth.user,
+        filename=payload.filename,
+        content_type=payload.content_type,
+        size=payload.size,
+        purpose="role_icon",
+    )
+    await session.commit()
+    return ticket_payload(attachment, upload_url)
+
+
+@router.put("/api/v1/guilds/{guild_id}/roles/{role_id}/icon")
+async def commit_role_icon(
+    guild_id: EntityRef,
+    role_id: EntityRef,
+    payload: AssetCommitRequest,
+    response: Response,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    guild = await local_guild(session, settings, guild_id, for_update=True)
+    await require_permissions(session, redis, guild, auth.user, required_permissions("role.update"))
+    role = await local_manageable_role(session, settings, guild, auth.user, role_id)
+    attachment = await finalize_attachment(
+        session, settings, auth.user, int(payload.attachment_id), required_purpose="role_icon"
+    )
+    if attachment.scan_status != "clean":
+        await session.commit()
+        await enqueue_best_effort(media_process, attachment.id, attachment.origin_domain)
+        response.status_code = status.HTTP_202_ACCEPTED
+        return attachment_payload(attachment)
+    if attachment.content_sha256 is None:
+        raise RuntimeError("clean media is missing its content digest")
+    require_image_type(attachment.detected_content_type)
+    previous = await bind_asset(
+        session,
+        attachment,
+        f"role:{role.origin_domain}:{role.id}:icon",
+    )
+    role.icon_hash = attachment.content_sha256
+    await session.flush()
+    await session.refresh(role)
+    rendered = role_payload(role)
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        auth.user,
+        "guild.role.update",
+        {"role": rendered},
+        snapshot_required=True,
+    )
+    await session.commit()
+    await wake_queued_guild_federation(guild)
+    await publish_dispatch(
+        redis,
+        guild_topic(guild.origin_domain, guild.id),
+        "GUILD_ROLE_UPDATE",
+        rendered,
+    )
+    if previous is not None:
+        await enqueue_best_effort(media_local_purge, previous.id, previous.origin_domain)
+    return rendered
+
+
+@router.delete("/api/v1/guilds/{guild_id}/roles/{role_id}/icon")
+async def delete_role_icon(
+    guild_id: EntityRef,
+    role_id: EntityRef,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    guild = await local_guild(session, settings, guild_id, for_update=True)
+    await require_permissions(session, redis, guild, auth.user, required_permissions("role.update"))
+    role = await local_manageable_role(session, settings, guild, auth.user, role_id)
+    attachment = await session.scalar(
+        select(Attachment)
+        .where(Attachment.asset_binding == f"role:{role.origin_domain}:{role.id}:icon")
+        .with_for_update()
+    )
+    if role.icon_hash is None and attachment is None:
+        return role_payload(role)
+    role.icon_hash = None
+    if attachment is not None:
+        attachment.asset_binding = None
+    await session.flush()
+    await session.refresh(role)
+    rendered = role_payload(role)
+    await queue_guild_mutation(
+        session,
+        settings,
+        guild,
+        auth.user,
+        "guild.role.update",
+        {"role": rendered},
+        snapshot_required=True,
+    )
+    await session.commit()
+    await wake_queued_guild_federation(guild)
+    await publish_dispatch(
+        redis,
+        guild_topic(guild.origin_domain, guild.id),
+        "GUILD_ROLE_UPDATE",
+        rendered,
+    )
+    if attachment is not None:
+        await enqueue_best_effort(media_local_purge, attachment.id, attachment.origin_domain)
+    return rendered
 
 
 @router.post("/api/v1/guilds/{guild_id}/emojis/tickets", status_code=201)

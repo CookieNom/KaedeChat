@@ -57,6 +57,13 @@ pub const EVENT_NAMES: &[&str] = &[
     "THREAD_LIST_SYNC",
     "THREAD_MEMBER_UPDATE",
     "THREAD_MEMBERS_UPDATE",
+    "TRACKER_BOARD_UPDATE",
+    "TRACKER_LANE_CREATE",
+    "TRACKER_LANE_UPDATE",
+    "TRACKER_LANE_DELETE",
+    "TRACKER_TASK_CREATE",
+    "TRACKER_TASK_UPDATE",
+    "TRACKER_TASK_DELETE",
     "GUILD_CREATE",
     "GUILD_UPDATE",
     "GUILD_DELETE",
@@ -128,6 +135,11 @@ pub mod permission {
     pub const BAN_INSTANCES: u64 = 2199023255552;
     pub const PIN_MESSAGES: u64 = 2251799813685248;
     pub const BYPASS_SLOWMODE: u64 = 4503599627370496;
+    pub const CREATE_TRACKER_TASKS: u64 = 9007199254740992;
+    pub const EDIT_OWN_TRACKER_TASKS: u64 = 18014398509481984;
+    pub const MANAGE_TRACKER_TASKS: u64 = 36028797018963968;
+    pub const ASSIGN_TRACKER_TASKS: u64 = 72057594037927936;
+    pub const MANAGE_TRACKER: u64 = 144115188075855872;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -239,7 +251,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "See a channel and its live activity.",
         group: "General",
         resource_scopes: &["channel"],
-        channel_types: &[0, 2, 4, 5, 10, 11, 12, 15],
+        channel_types: &[0, 2, 4, 5, 10, 11, 12, 15, 17],
         dependencies: &[],
         danger: "normal",
     },
@@ -459,7 +471,7 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         description: "Use slash commands and context menu commands from applications.",
         group: "Applications",
         resource_scopes: &["channel"],
-        channel_types: &[0, 2, 5, 10, 11, 12, 15],
+        channel_types: &[0, 2, 5, 10, 11, 12, 15, 17],
         dependencies: &[1024],
         danger: "normal",
     },
@@ -548,6 +560,61 @@ pub const PERMISSION_METADATA: &[PermissionMetadata] = &[
         group: "Text",
         resource_scopes: &["channel"],
         channel_types: &[0, 5, 10, 11, 12, 15],
+        dependencies: &[1024],
+        danger: "elevated",
+    },
+    PermissionMetadata {
+        name: "CREATE_TRACKER_TASKS",
+        bit: 9007199254740992,
+        label: "Create tracker tasks",
+        description: "Add tasks to tracker channels.",
+        group: "Tracker",
+        resource_scopes: &["channel"],
+        channel_types: &[17],
+        dependencies: &[1024],
+        danger: "normal",
+    },
+    PermissionMetadata {
+        name: "EDIT_OWN_TRACKER_TASKS",
+        bit: 18014398509481984,
+        label: "Edit own tracker tasks",
+        description: "Edit, move, complete, and delete tasks you created or are assigned.",
+        group: "Tracker",
+        resource_scopes: &["channel"],
+        channel_types: &[17],
+        dependencies: &[1024],
+        danger: "normal",
+    },
+    PermissionMetadata {
+        name: "MANAGE_TRACKER_TASKS",
+        bit: 36028797018963968,
+        label: "Manage tracker tasks",
+        description: "Edit, move, complete, and delete any task in tracker channels.",
+        group: "Tracker moderation",
+        resource_scopes: &["channel"],
+        channel_types: &[17],
+        dependencies: &[1024],
+        danger: "elevated",
+    },
+    PermissionMetadata {
+        name: "ASSIGN_TRACKER_TASKS",
+        bit: 72057594037927936,
+        label: "Assign tracker tasks",
+        description: "Assign and unassign other members on tracker tasks.",
+        group: "Tracker moderation",
+        resource_scopes: &["channel"],
+        channel_types: &[17],
+        dependencies: &[1024],
+        danger: "elevated",
+    },
+    PermissionMetadata {
+        name: "MANAGE_TRACKER",
+        bit: 144115188075855872,
+        label: "Manage tracker",
+        description: "Change tracker settings and create, edit, reorder, or remove lanes.",
+        group: "Tracker management",
+        resource_scopes: &["channel"],
+        channel_types: &[17],
         dependencies: &[1024],
         danger: "elevated",
     },

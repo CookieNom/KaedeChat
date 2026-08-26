@@ -43,6 +43,11 @@ class Permission(IntFlag):
     BAN_INSTANCES = 1 << 41
     PIN_MESSAGES = 1 << 51
     BYPASS_SLOWMODE = 1 << 52
+    CREATE_TRACKER_TASKS = 1 << 53
+    EDIT_OWN_TRACKER_TASKS = 1 << 54
+    MANAGE_TRACKER_TASKS = 1 << 55
+    ASSIGN_TRACKER_TASKS = 1 << 56
+    MANAGE_TRACKER = 1 << 57
 
 
 ALL_PERMISSIONS = sum(permission.value for permission in Permission)
@@ -154,7 +159,7 @@ PERMISSION_METADATA = (
         "See a channel and its live activity.",
         "General",
         ("channel",),
-        channel_types=(0, 2, 4, 5, 10, 11, 12, 15),
+        channel_types=(0, 2, 4, 5, 10, 11, 12, 15, 17),
     ),
     _permission(
         Permission.SEND_MESSAGES,
@@ -333,7 +338,7 @@ PERMISSION_METADATA = (
         "Use slash commands and context menu commands from applications.",
         "Applications",
         ("channel",),
-        channel_types=(0, 2, 5, 10, 11, 12, 15),
+        channel_types=(0, 2, 5, 10, 11, 12, 15, 17),
         dependencies=(Permission.VIEW_CHANNEL,),
     ),
     _permission(
@@ -406,6 +411,54 @@ PERMISSION_METADATA = (
         "Text",
         ("channel",),
         channel_types=(0, 5, 10, 11, 12, 15),
+        dependencies=(Permission.VIEW_CHANNEL,),
+        danger="elevated",
+    ),
+    _permission(
+        Permission.CREATE_TRACKER_TASKS,
+        "Create tracker tasks",
+        "Add tasks to tracker channels.",
+        "Tracker",
+        ("channel",),
+        channel_types=(17,),
+        dependencies=(Permission.VIEW_CHANNEL,),
+    ),
+    _permission(
+        Permission.EDIT_OWN_TRACKER_TASKS,
+        "Edit own tracker tasks",
+        "Edit, move, complete, and delete tasks you created or are assigned.",
+        "Tracker",
+        ("channel",),
+        channel_types=(17,),
+        dependencies=(Permission.VIEW_CHANNEL,),
+    ),
+    _permission(
+        Permission.MANAGE_TRACKER_TASKS,
+        "Manage tracker tasks",
+        "Edit, move, complete, and delete any task in tracker channels.",
+        "Tracker moderation",
+        ("channel",),
+        channel_types=(17,),
+        dependencies=(Permission.VIEW_CHANNEL,),
+        danger="elevated",
+    ),
+    _permission(
+        Permission.ASSIGN_TRACKER_TASKS,
+        "Assign tracker tasks",
+        "Assign and unassign other members on tracker tasks.",
+        "Tracker moderation",
+        ("channel",),
+        channel_types=(17,),
+        dependencies=(Permission.VIEW_CHANNEL,),
+        danger="elevated",
+    ),
+    _permission(
+        Permission.MANAGE_TRACKER,
+        "Manage tracker",
+        "Change tracker settings and create, edit, reorder, or remove lanes.",
+        "Tracker management",
+        ("channel",),
+        channel_types=(17,),
         dependencies=(Permission.VIEW_CHANNEL,),
         danger="elevated",
     ),

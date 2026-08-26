@@ -201,6 +201,40 @@ _CONTRACTS = (
         Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY,
         "channel",
     ),
+    EndpointPermissionContract("tracker.read", Permission.VIEW_CHANNEL, "channel"),
+    EndpointPermissionContract(
+        "tracker.task.create",
+        Permission.VIEW_CHANNEL | Permission.CREATE_TRACKER_TASKS,
+        "channel",
+        "assigning another member additionally requires ASSIGN_TRACKER_TASKS",
+    ),
+    EndpointPermissionContract(
+        "tracker.task.update.own",
+        Permission.VIEW_CHANNEL | Permission.EDIT_OWN_TRACKER_TASKS,
+        "channel",
+        "the actor must have created the task or currently be assigned to it",
+    ),
+    EndpointPermissionContract(
+        "tracker.task.update.other",
+        Permission.VIEW_CHANNEL | Permission.MANAGE_TRACKER_TASKS,
+        "channel",
+    ),
+    EndpointPermissionContract(
+        "tracker.task.assign",
+        Permission.VIEW_CHANNEL | Permission.ASSIGN_TRACKER_TASKS,
+        "channel",
+        "members may assign or unassign themselves while editing their own task",
+    ),
+    EndpointPermissionContract(
+        "tracker.lane.manage",
+        Permission.VIEW_CHANNEL | Permission.MANAGE_TRACKER,
+        "channel",
+    ),
+    EndpointPermissionContract(
+        "tracker.settings.manage",
+        Permission.VIEW_CHANNEL | Permission.MANAGE_TRACKER,
+        "channel",
+    ),
     EndpointPermissionContract("webhook.manage", Permission.MANAGE_WEBHOOKS, "channel"),
     EndpointPermissionContract(
         "attachment.create",

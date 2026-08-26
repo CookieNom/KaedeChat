@@ -88,6 +88,7 @@ from app.federation.schemas import GuildSelfModerationStatus
 from app.federation.terminal_rooms import lock_terminal_room
 from app.media.service import attachments_for_messages
 from app.media.tombstones import lock_media_tombstone_ref, queue_terminal_attachment_tombstone
+from app.tracker.membership import clear_tracker_assignees, wake_tracker_membership_cleanup
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["moderation"])
 
@@ -510,6 +511,13 @@ async def kick_member(
         auth.user,
         [(user_number, user_domain)],
     )
+    await clear_tracker_assignees(
+        session,
+        settings,
+        guild,
+        auth.user,
+        [(user_number, user_domain)],
+    )
     await session.delete(member)
     e2ee_policy_channels: list[Channel] = []
     await queue_guild_access_revocation(
@@ -532,7 +540,7 @@ async def kick_member(
         pause_e2ee=target_user.account_type != "bot",
     )
     await session.commit()
-    await wake_queued_guild_federation(guild)
+    await wake_tracker_membership_cleanup(guild)
     await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
     await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)
@@ -804,6 +812,13 @@ async def ban_member(
             auth.user,
             [(user_number, user_domain)],
         )
+        await clear_tracker_assignees(
+            session,
+            settings,
+            guild,
+            auth.user,
+            [(user_number, user_domain)],
+        )
         await session.delete(member)
         await queue_guild_access_revocation(
             session,
@@ -835,7 +850,10 @@ async def ban_member(
         reason=reason,
     )
     await session.commit()
-    await wake_queued_guild_federation(guild)
+    if member is not None:
+        await wake_tracker_membership_cleanup(guild)
+    else:
+        await wake_queued_guild_federation(guild)
     await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
     if purged_local_attachments or media_delivery_wakes:
         from app.tasks import federation_deliver, media_local_purge
@@ -1129,6 +1147,13 @@ async def ban_instance(
         auth.user,
         removed_refs,
     )
+    await clear_tracker_assignees(
+        session,
+        settings,
+        guild,
+        auth.user,
+        removed_refs,
+    )
     await session.execute(
         delete(GuildMember).where(
             GuildMember.guild_id == guild.id,
@@ -1180,7 +1205,7 @@ async def ban_instance(
         ],
     )
     await session.commit()
-    await wake_queued_guild_federation(guild)
+    await wake_tracker_membership_cleanup(guild)
     await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
     await publish_deleted_installation_roles(redis, guild, deleted_role_refs)
     await publish_guild_thread_member_cleanup(redis, guild, removed_thread_members)

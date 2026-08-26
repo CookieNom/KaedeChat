@@ -50,6 +50,12 @@ from .models import (
     ThreadMemberUpdateEvent,
     ThreadMembersUpdateEvent,
     ThreadPage,
+    TrackerBoard,
+    TrackerBoardUpdateEvent,
+    TrackerLane,
+    TrackerLaneDeleteEvent,
+    TrackerTask,
+    TrackerTaskDeleteEvent,
     TypingEvent,
     VoiceOccupancy,
     VoiceStateEvent,
@@ -492,6 +498,231 @@ class Client:
         )
         return Channel.from_payload(self, origin, raw)
 
+    async def fetch_tracker(
+        self, channel: EntityRef, *, target: str | None = None
+    ) -> TrackerBoard:
+        """Fetch a task-tracker board, including its ordered lanes and tasks."""
+
+        origin = self._target(target)
+        raw = await self.request(
+            "GET", f"/api/v1/bots/channels/{channel}/tracker", target=origin
+        )
+        return TrackerBoard.from_payload(self, origin, raw)
+
+    async def edit_tracker(
+        self,
+        channel: EntityRef,
+        *,
+        key_prefix: str,
+        target: str | None = None,
+        version: str | None,
+    ) -> TrackerBoard:
+        origin = self._target(target)
+        raw = await self.request(
+            "PATCH",
+            f"/api/v1/bots/channels/{channel}/tracker",
+            target=origin,
+            json={"key_prefix": key_prefix},
+            headers=_version_headers(version),
+        )
+        return TrackerBoard.from_payload(self, origin, raw)
+
+    async def create_tracker_lane(
+        self,
+        channel: EntityRef,
+        name: str,
+        *,
+        target: str | None = None,
+        color: int = 0,
+        kind: str = "custom",
+        completed: bool = False,
+        position: int | None = None,
+    ) -> TrackerLane:
+        origin = self._target(target)
+        body: dict[str, object] = {
+            "name": name,
+            "color": color,
+            "kind": kind,
+            "completed": completed,
+        }
+        if position is not None:
+            body["position"] = position
+        raw = await self.request(
+            "POST",
+            f"/api/v1/bots/channels/{channel}/tracker/lanes",
+            target=origin,
+            json=body,
+        )
+        return TrackerLane.from_payload(self, origin, raw)
+
+    async def edit_tracker_lane(
+        self,
+        channel: EntityRef,
+        lane: EntityRef,
+        *,
+        target: str | None = None,
+        version: str | None,
+        name: str | MissingType = MISSING,
+        color: int | MissingType = MISSING,
+        kind: str | MissingType = MISSING,
+        completed: bool | MissingType = MISSING,
+    ) -> TrackerLane:
+        body = _provided_fields(
+            name=name,
+            color=color,
+            kind=kind,
+            completed=completed,
+        )
+        if not body:
+            raise ValueError("at least one tracker lane field is required")
+        origin = self._target(target)
+        raw = await self.request(
+            "PATCH",
+            f"/api/v1/bots/channels/{channel}/tracker/lanes/{lane}",
+            target=origin,
+            json=body,
+            headers=_version_headers(version),
+        )
+        return TrackerLane.from_payload(self, origin, raw)
+
+    async def move_tracker_lane(
+        self,
+        channel: EntityRef,
+        lane: EntityRef,
+        position: int,
+        *,
+        target: str | None = None,
+        version: str | None,
+    ) -> TrackerLane:
+        origin = self._target(target)
+        raw = await self.request(
+            "POST",
+            f"/api/v1/bots/channels/{channel}/tracker/lanes/{lane}/move",
+            target=origin,
+            json={"position": position},
+            headers=_version_headers(version),
+        )
+        return TrackerLane.from_payload(self, origin, raw)
+
+    async def delete_tracker_lane(
+        self,
+        channel: EntityRef,
+        lane: EntityRef,
+        *,
+        target: str | None = None,
+        version: str | None,
+    ) -> None:
+        await self.request(
+            "DELETE",
+            f"/api/v1/bots/channels/{channel}/tracker/lanes/{lane}",
+            target=target,
+            headers=_version_headers(version),
+        )
+
+    async def create_tracker_task(
+        self,
+        channel: EntityRef,
+        lane: EntityRef,
+        title: str,
+        *,
+        target: str | None = None,
+        description: str | None = None,
+        priority: str = "none",
+        position: int | None = None,
+        due_at: datetime | None = None,
+        assignee: EntityRef | None = None,
+        client_nonce: str | None = None,
+    ) -> TrackerTask:
+        origin = self._target(target)
+        body: dict[str, object] = {
+            "lane_id": str(lane),
+            "title": title,
+            "description": description,
+            "priority": priority,
+            "due_at": due_at.isoformat() if due_at is not None else None,
+            "assignee_id": str(assignee) if assignee is not None else None,
+        }
+        if position is not None:
+            body["position"] = position
+        if client_nonce is not None:
+            body["client_nonce"] = client_nonce
+        raw = await self.request(
+            "POST",
+            f"/api/v1/bots/channels/{channel}/tracker/tasks",
+            target=origin,
+            json=body,
+        )
+        return TrackerTask.from_payload(self, origin, raw)
+
+    async def edit_tracker_task(
+        self,
+        channel: EntityRef,
+        task: EntityRef,
+        *,
+        target: str | None = None,
+        version: str | None,
+        title: str | MissingType = MISSING,
+        description: str | None | MissingType = MISSING,
+        priority: str | MissingType = MISSING,
+        due_at: datetime | None | MissingType = MISSING,
+        assignee: EntityRef | None | MissingType = MISSING,
+    ) -> TrackerTask:
+        body = _provided_fields(
+            title=title,
+            description=description,
+            priority=priority,
+            due_at=(due_at.isoformat() if isinstance(due_at, datetime) else due_at),
+            assignee_id=(
+                str(assignee) if isinstance(assignee, EntityRef) else assignee
+            ),
+        )
+        if not body:
+            raise ValueError("at least one tracker task field is required")
+        origin = self._target(target)
+        raw = await self.request(
+            "PATCH",
+            f"/api/v1/bots/channels/{channel}/tracker/tasks/{task}",
+            target=origin,
+            json=body,
+            headers=_version_headers(version),
+        )
+        return TrackerTask.from_payload(self, origin, raw)
+
+    async def move_tracker_task(
+        self,
+        channel: EntityRef,
+        task: EntityRef,
+        lane: EntityRef,
+        position: int,
+        *,
+        target: str | None = None,
+        version: str | None,
+    ) -> TrackerTask:
+        origin = self._target(target)
+        raw = await self.request(
+            "POST",
+            f"/api/v1/bots/channels/{channel}/tracker/tasks/{task}/move",
+            target=origin,
+            json={"lane_id": str(lane), "position": position},
+            headers=_version_headers(version),
+        )
+        return TrackerTask.from_payload(self, origin, raw)
+
+    async def delete_tracker_task(
+        self,
+        channel: EntityRef,
+        task: EntityRef,
+        *,
+        target: str | None = None,
+        version: str | None,
+    ) -> None:
+        await self.request(
+            "DELETE",
+            f"/api/v1/bots/channels/{channel}/tracker/tasks/{task}",
+            target=target,
+            headers=_version_headers(version),
+        )
+
     def _thread_page(
         self,
         raw: dict[str, Any],
@@ -910,6 +1141,7 @@ class Client:
         default_forum_layout: int | MissingType = MISSING,
         flags: int | MissingType = MISSING,
         e2ee_required: bool | MissingType = MISSING,
+        tracker_key_prefix: str | MissingType = MISSING,
     ) -> Channel:
         origin = self._target(target)
         body: dict[str, object] = {
@@ -929,6 +1161,7 @@ class Client:
                 default_forum_layout=default_forum_layout,
                 flags=flags,
                 e2ee_required=e2ee_required,
+                tracker_key_prefix=tracker_key_prefix,
             )
         )
         raw = await self.request(
@@ -2207,6 +2440,64 @@ class Client:
                     EntityRef(int(data["guild_id"]), str(data["guild_domain"]))
                     if data.get("guild_id") is not None
                     and data.get("guild_domain") is not None
+                    else None
+                ),
+            )
+        if event_type == "TRACKER_BOARD_UPDATE":
+            return TrackerBoardUpdateEvent(
+                target=target,
+                channel_ref=EntityRef(
+                    int(data["channel_id"]), str(data["channel_domain"])
+                ),
+                key_prefix=str(data["key_prefix"]),
+                next_task_number=int(data["next_task_number"]),
+                version=(
+                    str(data["version"]) if data.get("version") is not None else None
+                ),
+                full_refresh=bool(data.get("full_refresh", False)),
+                reason=(
+                    str(data["reason"]) if data.get("reason") is not None else None
+                ),
+            )
+        if event_type in {"TRACKER_LANE_CREATE", "TRACKER_LANE_UPDATE"} and isinstance(
+            data.get("lane"), dict
+        ):
+            return TrackerLane.from_payload(
+                self,
+                target,
+                {**data["lane"], "board_version": data.get("board_version")},
+            )
+        if event_type == "TRACKER_LANE_DELETE":
+            return TrackerLaneDeleteEvent(
+                target=target,
+                channel_ref=EntityRef(
+                    int(data["channel_id"]), str(data["channel_domain"])
+                ),
+                lane_ref=EntityRef(int(data["lane_id"]), str(data["lane_domain"])),
+                board_version=(
+                    str(data["board_version"])
+                    if data.get("board_version") is not None
+                    else None
+                ),
+            )
+        if event_type in {"TRACKER_TASK_CREATE", "TRACKER_TASK_UPDATE"} and isinstance(
+            data.get("task"), dict
+        ):
+            return TrackerTask.from_payload(
+                self,
+                target,
+                {**data["task"], "board_version": data.get("board_version")},
+            )
+        if event_type == "TRACKER_TASK_DELETE":
+            return TrackerTaskDeleteEvent(
+                target=target,
+                channel_ref=EntityRef(
+                    int(data["channel_id"]), str(data["channel_domain"])
+                ),
+                task_ref=EntityRef(int(data["task_id"]), str(data["task_domain"])),
+                board_version=(
+                    str(data["board_version"])
+                    if data.get("board_version") is not None
                     else None
                 ),
             )

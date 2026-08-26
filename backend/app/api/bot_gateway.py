@@ -250,6 +250,8 @@ def authentication_request(websocket: WebSocket, identify: dict[str, Any]) -> Re
 
 
 def event_intent(event_type: str) -> str:
+    if event_type.startswith("TRACKER"):
+        return "guild_tasks"
     if event_type == "ATTACHMENT_UPDATE":
         return "guild_messages"
     if event_type.startswith("MESSAGE_REACTION"):
@@ -274,6 +276,8 @@ def event_intent(event_type: str) -> str:
 def event_scope(event_type: str) -> str:
     """Return the data grant required to receive an event category."""
 
+    if event_type.startswith("TRACKER"):
+        return "tasks.read"
     if event_type == "ATTACHMENT_UPDATE":
         return "attachments.read"
     if event_type.startswith("MESSAGE_REACTION"):

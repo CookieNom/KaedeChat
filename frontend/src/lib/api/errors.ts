@@ -111,6 +111,8 @@ const ERROR_MESSAGES: Record<string, string> = {
     'Decrypt the message here and confirm that you want to share its message evidence with Trust & Safety.',
   FEDERATED_COMMANDS_UNAVAILABLE:
     'Commands from that remote application are temporarily unavailable.',
+  FEDERATED_WRITE_UNSUPPORTED:
+    'This remote resource is read-only here. Make the change on its home instance.',
   INTERACTION_ALREADY_RESPONDED: 'This interaction already has a response.',
   INTERACTION_EXPIRED: 'This interaction expired before the bot responded.',
   INTERACTION_NOT_FOUND: 'That interaction no longer exists or is not assigned to this bot.',
@@ -192,6 +194,22 @@ const ERROR_MESSAGES: Record<string, string> = {
   CHANNEL_SET_CHANGED: 'The channel list changed somewhere else. Reload and try again.',
   SETTINGS_VERSION_CONFLICT: 'Your settings changed somewhere else. Reload and try again.',
   SETTINGS_VERSION_REQUIRED: 'Reload your settings before saving this change.',
+  TRACKER_ASSIGNEE_NOT_MEMBER: 'That assignee is no longer a member of this guild.',
+  TRACKER_CAPACITY_INVALID: 'This tracker contains more data than the instance can safely load.',
+  TRACKER_CLIENT_NONCE_CONFLICT:
+    'This create request was already used for different task details. Close the editor and try again.',
+  TRACKER_LANE_LIMIT_REACHED: 'This tracker has reached its status limit.',
+  TRACKER_LANE_NOT_EMPTY: 'Move or delete every task in this status before deleting it.',
+  TRACKER_LANE_NOT_FOUND: 'That status no longer exists. The tracker may have changed elsewhere.',
+  TRACKER_LAST_LANE: 'A tracker must keep at least one status.',
+  TRACKER_NOT_FOUND: 'This task tracker no longer exists or you cannot view it.',
+  TRACKER_POSITION_INVALID:
+    'That position is no longer available. Refresh the tracker and try again.',
+  TRACKER_TASK_LIMIT_REACHED: 'This tracker has reached its task limit.',
+  TRACKER_TASK_NOT_FOUND: 'That task no longer exists. The tracker may have changed elsewhere.',
+  TRACKER_VERSION_CONFLICT:
+    'This tracker changed somewhere else. The latest version will be loaded before you retry.',
+  TRACKER_VERSION_REQUIRED: 'Reload this tracker before changing it.',
   TARGET_CANNOT_CONNECT: "That member doesn't have permission to join this voice channel.",
   VOICE_NOT_CONNECTED: 'That member is no longer connected to voice.',
   VOICE_DISABLED: 'Voice is disabled on this instance.',

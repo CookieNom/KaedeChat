@@ -54,8 +54,18 @@ from app.chat.schemas import (
 from app.core.permission_contract import required_permissions
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
+from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef, EntityReference
-from app.db.models import Channel, ChannelOverwrite, GuildMember, MemberRole, Message, Role, User
+from app.db.models import (
+    Attachment,
+    Channel,
+    ChannelOverwrite,
+    GuildMember,
+    MemberRole,
+    Message,
+    Role,
+    User,
+)
 
 router = APIRouter(prefix="/api/v1/guilds", tags=["guild-management"])
 
@@ -826,6 +836,13 @@ async def delete_role(
             ChannelOverwrite.target_type == "role",
         )
     )
+    icon_attachment = await session.scalar(
+        select(Attachment)
+        .where(Attachment.asset_binding == f"role:{role.origin_domain}:{role.id}:icon")
+        .with_for_update()
+    )
+    if icon_attachment is not None:
+        icon_attachment.asset_binding = None
     await session.delete(role)
     await session.commit()
     await session.refresh(guild)
@@ -842,6 +859,12 @@ async def delete_role(
             "guild_domain": guild.origin_domain,
         },
     )
+    if icon_attachment is not None:
+        from app.tasks import media_local_purge
+
+        await enqueue_best_effort(
+            media_local_purge, icon_attachment.id, icon_attachment.origin_domain
+        )
     return Response(status_code=204)
 
 

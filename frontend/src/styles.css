@@ -3893,6 +3893,36 @@ progress {
   font-weight: 800;
 }
 
+.role-icon-preview,
+.role-icon-controls > img {
+  object-fit: contain;
+}
+
+.role-icon-field {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.role-icon-field > small {
+  color: var(--text-muted);
+}
+
+.role-icon-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.role-icon-controls > img {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+}
+
 .role-settings-split {
   grid-template-columns: minmax(180px, 0.32fr) minmax(0, 0.68fr);
 }
@@ -4523,6 +4553,10 @@ progress {
   background: var(--surface);
 }
 
+.message-pane.tracker-pane {
+  grid-template-rows: minmax(0, 1fr);
+}
+
 .message-pane:has(> .thread-detail-header) {
   grid-template-rows: 64px auto minmax(0, 1fr) auto;
 }
@@ -5093,6 +5127,15 @@ progress {
 .message-avatar.profile-trigger,
 .message-author {
   cursor: pointer;
+}
+
+.message-role-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  align-self: center;
+  object-fit: contain;
+  vertical-align: middle;
 }
 
 .message-avatar.profile-trigger:hover,

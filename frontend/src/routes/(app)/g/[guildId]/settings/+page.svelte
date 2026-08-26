@@ -27,6 +27,7 @@
   import { assetUrl } from '$lib/media/assets';
   import { moveCrop, resizeCrop, type CropCorner, type NormalizedCrop } from '$lib/media/crop';
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
+  import { TRACKER_CHANNEL_TYPE } from '$lib/task-tracker/types';
   import {
     browserNotifications,
     type GuildNotificationLevel,
@@ -259,6 +260,7 @@
   let newChannelName = $state('');
   let newChannelType = $state(0);
   let newChannelParent = $state('');
+  let newChannelTrackerPrefix = $state('');
   let channelOverwrites = $state<ChannelOverwrite[]>([]);
   let overwriteTarget = $state('');
   let overwriteAllow = $state('0');
@@ -274,6 +276,9 @@
   let rolePermissions = $state('0');
   let roleHoist = $state(false);
   let roleMentionable = $state(false);
+  let roleIconFile = $state<File | null>(null);
+  let roleIconBusy = $state(false);
+  let roleIconError = $state('');
   let newRoleName = $state('');
   let roleEditorTab = $state<'display' | 'permissions' | 'members'>('display');
   let draggedRoleKey = $state<string | null>(null);
@@ -890,6 +895,8 @@
     rolePermissions = role.permissions;
     roleHoist = role.hoist;
     roleMentionable = role.mentionable;
+    roleIconFile = null;
+    roleIconError = '';
     roleEditorTab = 'display';
     error = '';
     notice = '';
@@ -1541,12 +1548,16 @@
         body: JSON.stringify({
           name: newChannelName,
           type: newChannelType,
-          parent_id: newChannelType === 4 ? null : (parent?.id ?? null)
+          parent_id: newChannelType === 4 ? null : (parent?.id ?? null),
+          ...(newChannelType === TRACKER_CHANNEL_TYPE && newChannelTrackerPrefix.trim()
+            ? { tracker_key_prefix: newChannelTrackerPrefix.trim().toUpperCase() }
+            : {})
         })
       });
       if (generation !== loadGeneration || targetGuild !== guildId) return;
       if (guild) guild = { ...guild, channels: [...(guild.channels ?? []), channel] };
       newChannelName = '';
+      newChannelTrackerPrefix = '';
       selectChannel(channel, true);
       notice = `${channel.type === 4 ? 'Category' : 'Channel'} created.`;
     });
@@ -1716,6 +1727,96 @@
       selectRole(updated, true);
       notice = 'Role saved.';
     });
+  }
+
+  async function uploadRoleIcon(file: File | null, input: HTMLInputElement) {
+    const target = selectedRole;
+    const signal = routeController?.signal;
+    roleIconFile = file;
+    roleIconError = '';
+    if (!file || !target || !guild || !canManageSelectedRole || !signal) return;
+    if (!acceptedImageTypes.has(file.type)) {
+      roleIconError = 'Choose a PNG, JPEG, GIF, or WebP image.';
+      return;
+    }
+    const maxBytes = guild.emoji_max_bytes ?? 524288;
+    if (file.size > maxBytes) {
+      roleIconError = `Role icons can be at most ${Math.ceil(maxBytes / 1024)} KiB.`;
+      return;
+    }
+    roleIconBusy = true;
+    error = '';
+    notice = '';
+    const path = `/guilds/${encodeURIComponent(guildId)}/roles/${encodeURIComponent(entityRef(target))}/icon`;
+    try {
+      const ticket = await api<UploadTicket>(path, {
+        method: 'POST',
+        body: JSON.stringify({ filename: file.name, content_type: file.type, size: file.size })
+      });
+      await uploadObject(ticket, file, () => undefined, signal);
+      let updated = await api<Role | { scan_status: string }>(path, {
+        method: 'PUT',
+        body: JSON.stringify({ attachment_id: ticket.id })
+      });
+      if (!('guild_id' in updated)) {
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          await cancelableDelay(1000, signal);
+          const status = await api<{ scan_status: string }>(`/attachments/${ticket.id}`, {
+            signal
+          });
+          if (status.scan_status === 'clean') {
+            updated = await api<Role>(path, {
+              method: 'PUT',
+              body: JSON.stringify({ attachment_id: ticket.id })
+            });
+            break;
+          }
+          if (['rejected', 'infected', 'failed'].includes(status.scan_status)) {
+            throw new Error('The role icon did not pass media processing.');
+          }
+        }
+      }
+      if (!('guild_id' in updated)) {
+        throw new Error('Role icon processing is taking longer than expected.');
+      }
+      if (guild) {
+        guild = {
+          ...guild,
+          roles: guild.roles?.map((role) =>
+            entityKey(role) === entityKey(updated) ? updated : role
+          )
+        };
+      }
+      selectRole(updated, true);
+      notice = 'Role icon updated.';
+    } catch (caught) {
+      roleIconError = userErrorMessage(caught, 'Could not update the role icon. Try again.');
+    } finally {
+      roleIconBusy = false;
+      roleIconFile = null;
+      input.value = '';
+    }
+  }
+
+  async function deleteRoleIcon() {
+    const target = selectedRole;
+    if (!target || !guild || !canManageSelectedRole || roleIconBusy) return;
+    roleIconBusy = true;
+    roleIconError = '';
+    const path = `/guilds/${encodeURIComponent(guildId)}/roles/${encodeURIComponent(entityRef(target))}/icon`;
+    try {
+      const updated = await api<Role>(path, { method: 'DELETE' });
+      guild = {
+        ...guild,
+        roles: guild.roles?.map((role) => (entityKey(role) === entityKey(updated) ? updated : role))
+      };
+      selectRole(updated, true);
+      notice = 'Role icon removed.';
+    } catch (caught) {
+      roleIconError = userErrorMessage(caught, 'Could not remove the role icon. Try again.');
+    } finally {
+      roleIconBusy = false;
+    }
   }
 
   function orderedRoles(): Role[] {
@@ -2538,9 +2639,11 @@
           {#if selectedChannel?.type !== 4}<Icon
               name={selectedChannel?.type === 2
                 ? 'volume'
-                : selectedChannel?.type === 15
-                  ? 'forum'
-                  : 'hash'}
+                : selectedChannel?.type === TRACKER_CHANNEL_TYPE
+                  ? 'kanban'
+                  : selectedChannel?.type === 15
+                    ? 'forum'
+                    : 'hash'}
               size={16}
             />{/if}
           {selectedChannel?.name ?? 'Loading…'}
@@ -2959,9 +3062,11 @@
                         ? 'volume'
                         : channel.type === 5
                           ? 'bell'
-                          : channel.type === 15
-                            ? 'forum'
-                            : 'hash'}
+                          : channel.type === TRACKER_CHANNEL_TYPE
+                            ? 'kanban'
+                            : channel.type === 15
+                              ? 'forum'
+                              : 'hash'}
                       size={16}
                     />
                     <span>{channel.name}</span>
@@ -3653,8 +3758,9 @@
                         Delete {selectedChannel.type === 4 ? 'category' : 'channel'}
                       </h4>
                       <p>
-                        This is permanent. Categories must be empty and channels containing retained
-                        messages cannot be deleted.
+                        {selectedChannel.type === TRACKER_CHANNEL_TYPE
+                          ? 'This is permanent. The board, its statuses, and every task will be deleted.'
+                          : 'This is permanent. Categories must be empty and channels containing retained messages cannot be deleted.'}
                       </p>
                     </div>
                     <button
@@ -3688,7 +3794,7 @@
           >
             <div>
               <strong>Create a channel</strong>
-              <p>Add a text, voice, announcement, forum channel, or a category.</p>
+              <p>Add a text, voice, announcement, forum, task tracker, or category.</p>
             </div>
             <label class="form-field compact-field">
               <span>Name</span>
@@ -3702,8 +3808,23 @@
                 <option value={4}>Category</option>
                 <option value={5}>Announcement</option>
                 <option value={15}>Forum</option>
+                <option value={TRACKER_CHANNEL_TYPE}>Task tracker</option>
               </select>
             </label>
+            {#if newChannelType === TRACKER_CHANNEL_TYPE}
+              <label class="form-field compact-field">
+                <span>Task key prefix</span>
+                <small>Optional; defaults from the channel name</small>
+                <input
+                  bind:value={newChannelTrackerPrefix}
+                  minlength="2"
+                  maxlength="10"
+                  pattern="[A-Za-z][A-Za-z0-9]*"
+                  placeholder="e.g. RAID"
+                  disabled={busy}
+                />
+              </label>
+            {/if}
             {#if newChannelType !== 4}
               <label class="form-field compact-field">
                 <span>Category</span>
@@ -4036,12 +4157,24 @@
                     <span>Role</span>
                     <h3>{selectedRole.name}</h3>
                   </div>
-                  <svg class="role-preview" viewBox="0 0 38 38" aria-hidden="true">
-                    <rect width="38" height="38" rx="13" fill={roleColor} />
-                    <text x="19" y="24" text-anchor="middle" fill={roleContrastColor(roleColor)}
-                      >{roleName.slice(0, 1) || 'R'}</text
-                    >
-                  </svg>
+                  {#if selectedRole.icon_hash}
+                    <img
+                      class="role-preview role-icon-preview"
+                      src={assetUrl(
+                        selectedRole.icon_hash,
+                        'thumbnail_128',
+                        selectedRole.origin_domain
+                      )}
+                      alt=""
+                    />
+                  {:else}
+                    <svg class="role-preview" viewBox="0 0 38 38" aria-hidden="true">
+                      <rect width="38" height="38" rx="13" fill={roleColor} />
+                      <text x="19" y="24" text-anchor="middle" fill={roleContrastColor(roleColor)}
+                        >{roleName.slice(0, 1) || 'R'}</text
+                      >
+                    </svg>
+                  {/if}
                 </div>
                 <div class="editor-tabs role-editor-tabs" role="tablist" aria-label="Role settings">
                   <button
@@ -4094,6 +4227,46 @@
                         />
                       </label>
                     </div>
+                    <fieldset
+                      class="role-icon-field"
+                      disabled={busy || roleIconBusy || !canManageSelectedRole}
+                    >
+                      <legend>Role icon</legend>
+                      <small>
+                        Shown beside members' names in chat. When a member has several icons, their
+                        highest role icon is used.
+                      </small>
+                      <div class="role-icon-controls">
+                        {#if selectedRole.icon_hash}
+                          <img
+                            src={assetUrl(
+                              selectedRole.icon_hash,
+                              'thumbnail_128',
+                              selectedRole.origin_domain
+                            )}
+                            alt={`${selectedRole.name} role icon`}
+                          />
+                        {/if}
+                        <ImageUploadField
+                          id="role-icon-upload"
+                          file={roleIconFile}
+                          disabled={busy || roleIconBusy || !canManageSelectedRole}
+                          onSelect={(file, input) => void uploadRoleIcon(file, input)}
+                        />
+                        {#if selectedRole.icon_hash}
+                          <button
+                            class="secondary-button"
+                            type="button"
+                            disabled={busy || roleIconBusy || !canManageSelectedRole}
+                            onclick={() => void deleteRoleIcon()}>Remove icon</button
+                          >
+                        {/if}
+                      </div>
+                      {#if roleIconBusy}<small role="status"
+                          >Uploading and scanning role icon…</small
+                        >{/if}
+                      {#if roleIconError}<p class="form-error" role="alert">{roleIconError}</p>{/if}
+                    </fieldset>
                     <fieldset
                       class="role-color-field"
                       disabled={busy || selectedRole.id === guild.id || !canManageSelectedRole}

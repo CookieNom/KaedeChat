@@ -14,6 +14,8 @@ are allowed to see, and send writes back to the authority for validation.
 
 - Guilds with text and voice channels, roles, channel overrides, invites,
   moderation, reactions, pins, attachments, webhooks, and audit logs
+- Task tracker channels with ordered lanes, priorities, due dates, assignees,
+  responsive web/desktop/mobile views, and scoped bot automation
 - Direct and group messages, friend-only group invitations, creator controls,
   voluntary leave/ownership transfer, presence, unread state, and calls with
   voice, video, and screen sharing
@@ -368,6 +370,7 @@ with other services.
 - [Federation protocol](docs/kaede-fed-v1.md)
 - [Identity and authentication](docs/m1-identity.md)
 - [Core chat](docs/m2-core-chat.md)
+- [Task tracker channels](docs/task-tracker.md)
 - [Federation implementation](docs/m3-federation.md)
 - [Media and webhooks](docs/m4-media.md)
 - [Voice and calls](docs/m5-voice.md)

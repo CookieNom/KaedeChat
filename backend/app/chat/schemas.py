@@ -107,13 +107,14 @@ class ChannelCreate(RequestModel):
     default_forum_layout: Literal[0, 1, 2] = 0
     e2ee_required: bool = False
     flags: Literal[0, 16] = 0
+    tracker_key_prefix: str | None = Field(default=None, min_length=2, max_length=10)
 
     @field_validator("type")
     @classmethod
     def supported_guild_type(cls, value: int) -> int:
-        if value not in {0, 2, 4, 5, 15}:
+        if value not in {0, 2, 4, 5, 15, 17}:
             raise ValueError(
-                "must be a guild text, voice, category, announcement, or forum channel"
+                "must be a guild text, voice, category, announcement, forum, or tracker channel"
             )
         return value
 
@@ -122,8 +123,22 @@ class ChannelCreate(RequestModel):
     def clean_name(cls, value: str) -> str:
         return cleaned_nonempty(value)
 
+    @field_validator("tracker_key_prefix")
+    @classmethod
+    def valid_tracker_key_prefix(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        if not normalized.isascii() or not normalized.isalnum() or not normalized[0].isalpha():
+            raise ValueError(
+                "must contain uppercase ASCII letters or digits and start with a letter"
+            )
+        return normalized
+
     @model_validator(mode="after")
     def valid_forum_fields(self) -> ChannelCreate:
+        if self.type != 17 and self.tracker_key_prefix is not None:
+            raise ValueError("tracker_key_prefix is only valid for tracker channels")
         if self.type != 15 and (
             self.available_tags
             or self.default_reaction_emoji is not None

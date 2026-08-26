@@ -253,7 +253,10 @@ jobs:
           esac
       - run: uv run python -m scripts.verify_migration_guards verify-guild
       - run: uv run python -m scripts.verify_migration_guards cleanup-guild
+      - run: uv run python -m scripts.verify_migration_guards prepare-thread-permissions
       - run: uv run alembic upgrade head
+      - run: uv run python -m scripts.verify_migration_guards verify-thread-permissions
+      - run: uv run python -m scripts.verify_migration_guards cleanup-thread-permissions
       - run: uv run alembic downgrade base
       - run: uv run alembic upgrade head
       - run: uv run alembic check

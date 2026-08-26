@@ -13,6 +13,7 @@ import app.api.moderation as moderation_api
 import app.gateway as gateway
 from app.admin.auth import ROLE_CAPABILITIES, AdminPrincipal
 from app.api.applications import (
+    SUPPORTED_INTENTS,
     SUPPORTED_SCOPES,
     ApplicationPatch,
     CommandDefinition,
@@ -260,8 +261,12 @@ def test_supported_scopes_cover_runtime_resource_contracts() -> None:
         "invites.manage",
         "webhooks.manage",
         "emojis.manage",
+        "tasks.read",
+        "tasks.write",
+        "tasks.manage",
         "dm.send",
     } <= SUPPORTED_SCOPES
+    assert "guild_tasks" in SUPPORTED_INTENTS
 
 
 @pytest.mark.asyncio
@@ -781,6 +786,7 @@ async def test_instance_ban_endpoint_revokes_installations_in_member_delete_tran
     monkeypatch.setattr(moderation_api, "cleanup_installation_roles", cleanup)
     monkeypatch.setattr(moderation_api, "publish_deleted_installation_roles", publish_roles)
     monkeypatch.setattr(moderation_api, "cleanup_guild_member_threads", AsyncMock(return_value=[]))
+    monkeypatch.setattr(moderation_api, "clear_tracker_assignees", AsyncMock(return_value=[]))
     monkeypatch.setattr(moderation_api, "publish_guild_thread_member_cleanup", AsyncMock())
     monkeypatch.setattr(moderation_api, "publish_e2ee_policy_updates", AsyncMock())
     for name in (
@@ -788,6 +794,7 @@ async def test_instance_ban_endpoint_revokes_installations_in_member_delete_tran
         "queue_guild_instance_access_revocation",
         "queue_guild_mutation",
         "wake_queued_guild_federation",
+        "wake_tracker_membership_cleanup",
         "publish_dispatch",
     ):
         monkeypatch.setattr(moderation_api, name, AsyncMock())
@@ -981,6 +988,7 @@ def patch_moderation_side_effects(
     monkeypatch.setattr(moderation_api, "require_can_manage_member", AsyncMock(return_value=member))
     for name in (
         "add_audit_entry",
+        "clear_tracker_assignees",
         "cleanup_installation_roles",
         "cleanup_guild_member_threads",
         "publish_deleted_installation_roles",
@@ -989,6 +997,7 @@ def patch_moderation_side_effects(
         "queue_guild_access_revocation",
         "queue_guild_mutation",
         "wake_queued_guild_federation",
+        "wake_tracker_membership_cleanup",
         "publish_dispatch",
     ):
         monkeypatch.setattr(moderation_api, name, AsyncMock())
@@ -1583,8 +1592,14 @@ async def test_federated_uninstall_preserves_human_shared_role_and_uses_owner_si
         "app.api.applications.cleanup_guild_member_threads",
         AsyncMock(return_value=[]),
     )
+    clear_assignees = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "app.api.applications.clear_tracker_assignees",
+        clear_assignees,
+    )
     monkeypatch.setattr("app.api.applications.publish_guild_thread_member_cleanup", AsyncMock())
     monkeypatch.setattr("app.api.applications.wake_queued_guild_federation", AsyncMock())
+    monkeypatch.setattr("app.api.applications.wake_tracker_membership_cleanup", AsyncMock())
     monkeypatch.setattr(
         "app.api.applications.publish_deleted_installation_roles",
         publish_roles,
@@ -1622,6 +1637,13 @@ async def test_federated_uninstall_preserves_human_shared_role_and_uses_owner_si
     queue_mutation.assert_awaited_once()
     assert queue_mutation.await_args.args[3] is owner
     publish_roles.assert_awaited_once_with(redis, guild, [])
+    clear_assignees.assert_awaited_once_with(
+        session,
+        settings,
+        guild,
+        owner,
+        [(installed.bot_user_id, installed.bot_user_domain)],
+    )
     session.commit.assert_awaited_once()
 
 

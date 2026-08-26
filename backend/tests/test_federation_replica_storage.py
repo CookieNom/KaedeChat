@@ -201,14 +201,20 @@ async def test_replica_reconciliation_repairs_parent_cascade_accounting() -> Non
 
     await reconcile_replica_storage(session, 42, "remote.example")
 
-    statement = session.scalar.await_args.args[0]  # type: ignore[attr-defined]
-    sql = str(
-        statement.compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
+    statements = [call.args[0] for call in session.scalar.await_args_list]  # type: ignore[attr-defined]
+    sql = [
+        str(
+            statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
         )
+        for statement in statements
+    ]
+    assert any("kaede_reconcile_replica_usage(42, 'remote.example')" in item for item in sql)
+    assert any(
+        "kaede_reconcile_tracker_replica_usage(42, 'remote.example')" in item for item in sql
     )
-    assert "kaede_reconcile_replica_usage(42, 'remote.example')" in sql
 
 
 def test_orphan_remote_identity_candidates_cover_the_fk_graph_and_lock_a_small_batch() -> None:

@@ -15,7 +15,7 @@ from app.api.webhooks import new_webhook_token, token_digest
 from app.chat.payloads import guild_payload
 from app.chat.schemas import MessageCreate
 from app.core.settings import Settings
-from app.db.models import Attachment, Guild, User
+from app.db.models import Attachment, Guild, Role, User
 from app.media.jobs import image_derivatives_are_current
 from app.media.processing import (
     IMAGE_PIPELINE_VERSION,
@@ -356,6 +356,120 @@ async def test_guild_asset_commit_refreshes_server_version_before_render(
     assert getattr(guild, field) == digest
     assert rendered["id"] == str(attachment.id)
     assert calls[:3] == ["flush", "refresh", "render"]
+
+
+async def test_role_icon_commit_binds_digest_and_publishes_role_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = "c" * 64
+    user = User(
+        id=20,
+        origin_domain="alpha.localhost",
+        is_local=True,
+        username="owner",
+        password_hash="unused",
+        profile_version=1,
+        profile_resolved=True,
+    )
+    guild = Guild(
+        id=10,
+        origin_domain="alpha.localhost",
+        name="Paper Lantern",
+        owner_id=user.id,
+        owner_domain=user.origin_domain,
+        permission_generation=1,
+        history_policy_generation=1,
+        federated_history_policy="disabled",
+        next_event_seq=1,
+        last_event_seq=0,
+        sync_status="ready",
+        unavailable=False,
+    )
+    role = Role(
+        id=11,
+        origin_domain=guild.origin_domain,
+        guild_id=guild.id,
+        guild_domain=guild.origin_domain,
+        name="Grand Guard",
+        permissions=0,
+        color=0,
+        position=1,
+        hoist=False,
+        mentionable=False,
+    )
+    attachment = Attachment(
+        id=30,
+        origin_domain=guild.origin_domain,
+        uploader_id=user.id,
+        uploader_domain=user.origin_domain,
+        filename="guard.png",
+        content_type="image/png",
+        detected_content_type="image/png",
+        size=128,
+        object_key="alpha.localhost/30/clean/original",
+        content_sha256=digest,
+        variants={},
+        scan_status="clean",
+        purpose="role_icon",
+    )
+    mutations: list[tuple[str, dict[str, object]]] = []
+
+    class Session:
+        async def flush(self) -> None:
+            return None
+
+        async def refresh(self, value: object) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    async def no_op(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def local_guild(*args: object, **kwargs: object) -> Guild:
+        return guild
+
+    async def manageable_role(*args: object, **kwargs: object) -> Role:
+        return role
+
+    async def finalize_attachment(*args: object, **kwargs: object) -> Attachment:
+        return attachment
+
+    async def bind_asset(*args: object, **kwargs: object) -> None:
+        assert args[2] == f"role:{role.origin_domain}:{role.id}:icon"
+        return None
+
+    async def queue_mutation(*args: object, **kwargs: object) -> None:
+        mutations.append((str(args[4]), args[5]))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(media_api, "local_guild", local_guild)
+    monkeypatch.setattr(media_api, "require_permissions", no_op)
+    monkeypatch.setattr(media_api, "local_manageable_role", manageable_role)
+    monkeypatch.setattr(media_api, "finalize_attachment", finalize_attachment)
+    monkeypatch.setattr(media_api, "bind_asset", bind_asset)
+    monkeypatch.setattr(media_api, "queue_guild_mutation", queue_mutation)
+    monkeypatch.setattr(media_api, "wake_queued_guild_federation", no_op)
+    monkeypatch.setattr(media_api, "publish_dispatch", no_op)
+
+    rendered = await media_api.commit_role_icon(
+        guild_id=media_api.EntityRef(f"{guild.id}@{guild.origin_domain}"),
+        role_id=media_api.EntityRef(f"{role.id}@{role.origin_domain}"),
+        payload=media_api.AssetCommitRequest(attachment_id=str(attachment.id)),
+        response=Response(),
+        auth=SimpleNamespace(user=user),  # type: ignore[arg-type]
+        session=Session(),  # type: ignore[arg-type]
+        redis=object(),  # type: ignore[arg-type]
+        settings=settings(),
+    )
+
+    assert role.icon_hash == digest
+    assert rendered["icon_hash"] == digest
+    assert mutations == [("guild.role.update", {"role": rendered})]
+
+
+def test_role_icons_only_generate_the_compact_chat_derivative() -> None:
+    assert image_derivative_sizes("role_icon") == (128,)
 
 
 @pytest.mark.parametrize(("kind", "field"), (("avatar", "avatar_hash"), ("banner", "banner_hash")))

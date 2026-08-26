@@ -163,6 +163,7 @@ export interface Role {
   guild_id: string;
   guild_domain: string;
   name: string;
+  icon_hash?: string | null;
   color: number;
   permissions: string;
   position: number;

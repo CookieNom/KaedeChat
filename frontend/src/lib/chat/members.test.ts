@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GuildMemberSummary, PresenceStatus, Role } from './types';
-import { groupGuildMembers, highestColoredRole, memberRoleColor } from './members';
+import { groupGuildMembers, highestColoredRole, highestIconRole, memberRoleColor } from './members';
 
 function member(id: string, username: string, presence: PresenceStatus): GuildMemberSummary {
   return {
@@ -30,6 +30,7 @@ function role(id: string, name: string, position: number, hoist = true): Role {
     guild_id: '1',
     guild_domain: 'chat.example',
     name,
+    icon_hash: null,
     color: 0x22c55e,
     permissions: '0',
     position,
@@ -86,6 +87,21 @@ describe('groupGuildMembers', () => {
     expect(grouped.hoisted[1].members.map((item) => item.user.username)).toEqual(['staff']);
     expect(grouped.online.map((item) => item.user.username)).toEqual(['plain']);
     expect(grouped.offline.map((item) => item.user.username)).toEqual(['sleeping']);
+  });
+});
+
+describe('highestIconRole', () => {
+  it('uses the highest assigned role with an icon independently of role color', () => {
+    const lower = role('20', 'Lower', 2);
+    lower.icon_hash = 'a'.repeat(64);
+    const higherWithoutIcon = role('19', 'Higher', 5);
+    const higherWithIcon = role('18', 'Icon', 4);
+    higherWithIcon.icon_hash = 'b'.repeat(64);
+    higherWithIcon.color = 0;
+    const item = member('1', 'Ari', 'online');
+    item.role_ids = [lower.id, higherWithoutIcon.id, higherWithIcon.id];
+
+    expect(highestIconRole(item, [lower, higherWithoutIcon, higherWithIcon])).toBe(higherWithIcon);
   });
 });
 
