@@ -159,6 +159,17 @@ export function roleMentionTokenFromMailto(
   return `<@&${address}>`;
 }
 
+export function customEmojiTokenFromMailto(
+  previousText: string,
+  address: string,
+  nextText: string
+): string | undefined {
+  if (!nextText.startsWith('>')) return undefined;
+  const prefix = /<(a?):([A-Za-z0-9_]{2,32}):$/.exec(previousText);
+  if (!prefix || !/^[1-9][0-9]{0,18}@[a-z0-9.-]{1,253}$/i.test(address)) return undefined;
+  return `<${prefix[1]}:${prefix[2]}:${address}>`;
+}
+
 function replaceLegacyMentionLinks(
   root: DocumentFragment,
   users: UserSummary[],
@@ -171,6 +182,17 @@ function replaceLegacyMentionLinks(
     if (!(previous instanceof Text)) continue;
     const address = anchor.textContent?.trim() ?? '';
     if (next instanceof Text) {
+      const emojiToken = customEmojiTokenFromMailto(previous.data, address, next.data);
+      if (emojiToken) {
+        const prefixLength = /<(?:a?):[A-Za-z0-9_]{2,32}:$/.exec(previous.data)?.[0].length ?? 0;
+        const emoji = customEmojiImage(emojiToken);
+        if (emoji && prefixLength) {
+          previous.data = previous.data.slice(0, -prefixLength);
+          next.data = next.data.slice(1);
+          anchor.replaceWith(emoji);
+          continue;
+        }
+      }
       const roleToken = roleMentionTokenFromMailto(previous.data, address, next.data);
       if (roleToken) {
         previous.data = previous.data.slice(0, -3);

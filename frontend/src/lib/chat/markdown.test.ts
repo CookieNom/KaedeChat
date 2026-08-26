@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  customEmojiTokenFromMailto,
   mentionPresentation,
   roleMentionPresentation,
   roleMentionTokenFromMailto,
@@ -100,5 +101,15 @@ describe('message markdown tokenization', () => {
       '<@&83676044829147136@kaede.chat>'
     );
     expect(roleMentionTokenFromMailto('<@', '83676044829147136@kaede.chat', '>')).toBeUndefined();
+  });
+
+  it('reconstructs custom emoji split apart by Markdown email autolinking', () => {
+    expect(
+      customEmojiTokenFromMailto('<:cat_gun:', '85903466177765376@kaede.chat', '> after')
+    ).toBe('<:cat_gun:85903466177765376@kaede.chat>');
+    expect(
+      customEmojiTokenFromMailto('before <a:party:', '85903466177765376@kaede.chat', '>')
+    ).toBe('<a:party:85903466177765376@kaede.chat>');
+    expect(customEmojiTokenFromMailto('<:x:', '85903466177765376@kaede.chat', '>')).toBeUndefined();
   });
 });
