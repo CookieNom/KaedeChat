@@ -1,6 +1,6 @@
 import { api } from '$lib/api/client';
 import { compareEntityRefs, entityKey, entityRef } from './refs';
-import type { Channel, ForumTag, Message, ThreadMember, UserSummary } from './types';
+import type { Attachment, Channel, ForumTag, Message, ThreadMember, UserSummary } from './types';
 
 export const THREAD_TYPES = [10, 11, 12] as const;
 export const FORUM_TYPE = 15 as const;
@@ -177,6 +177,15 @@ export function isPinnedForumPost(
 export function forumRequiresTag(channel: Pick<Channel, 'flags'>): boolean {
   const flags = Number(channel.flags ?? 0);
   return Number.isFinite(flags) && Boolean(flags & (1 << 4));
+}
+
+export function forumPostThumbnail(
+  channel: Pick<Channel, 'starter_message'>
+): Attachment | undefined {
+  return channel.starter_message?.attachments?.find(
+    (attachment) =>
+      attachment.scan_status === 'clean' && attachment.content_type.startsWith('image/')
+  );
 }
 
 export function filterForumPosts(posts: Channel[], filters: ForumFilters): Channel[] {

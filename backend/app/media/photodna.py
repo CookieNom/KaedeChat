@@ -20,6 +20,8 @@ from PIL import Image
 from app.core.settings import Settings
 from app.db.bot_models import AbuseReport
 from app.media.photodna_dimensions import (
+    MAX_PHOTODNA_HASH_PIXELS,
+    MAX_STATIC_SOURCE_PIXELS,
     MIN_NATIVE_IMAGE_DIMENSION,
     normalized_photodna_dimensions,
 )
@@ -32,7 +34,7 @@ MAX_RESPONSE_BYTES = 256 * 1024
 MAX_MATCH_FLAGS = 32
 EDGE_V2_DECODED_BYTES = 924
 MAX_ANIMATION_FRAMES = 256
-MAX_ANIMATION_TOTAL_PIXELS = 25_000_000
+MAX_ANIMATION_TOTAL_PIXELS = MAX_PHOTODNA_HASH_PIXELS
 MAX_GENERATOR_RESPONSE_BYTES = 384 * 1024
 HASH_GENERATION_LIMITER = asyncio.Semaphore(1)
 HASH_LOCK_POLL_SECONDS = 0.05
@@ -442,11 +444,17 @@ def image_ineligibility_reason(data: bytes) -> str | None:
         raise PhotoDNAError("PhotoDNA could not read the image dimensions") from exc
     if frames < 1 or frames > MAX_ANIMATION_FRAMES:
         raise PhotoDNAInputRejected("animated image has too many frames to scan safely")
-    if width * height * frames > MAX_ANIMATION_TOTAL_PIXELS:
+    source_pixels = width * height
+    if frames == 1 and source_pixels > MAX_STATIC_SOURCE_PIXELS:
+        raise PhotoDNAInputRejected("image is too large to scan safely")
+    if frames > 1 and source_pixels * frames > MAX_ANIMATION_TOTAL_PIXELS:
         raise PhotoDNAInputRejected("animated image is too large to scan safely")
     if width < MIN_NATIVE_IMAGE_DIMENSION or height < MIN_NATIVE_IMAGE_DIMENSION:
         return "dimension_below_50_pixels"
-    normalized_width, normalized_height = normalized_photodna_dimensions(width, height)
+    try:
+        normalized_width, normalized_height = normalized_photodna_dimensions(width, height)
+    except ValueError as exc:
+        raise PhotoDNAInputRejected("PhotoDNA cannot verify this image size") from exc
     if normalized_width * normalized_height * frames > MAX_ANIMATION_TOTAL_PIXELS:
         raise PhotoDNAInputRejected("normalized image is too large to scan safely")
     return None

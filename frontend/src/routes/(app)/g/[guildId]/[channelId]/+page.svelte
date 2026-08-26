@@ -318,6 +318,7 @@
   let lastMemberRefreshAt = 0;
   let dispatchBuffer: Dispatch[] | null = null;
   let uploads = $state<PendingUpload[]>([]);
+  let forumUploads = $state<PendingUpload[]>([]);
   let e2eeClient = $state<KaedeE2EEClient | null>(null);
   let e2eeSafetyNumber = $state('');
   let fileInput = $state<HTMLInputElement | null>(null);
@@ -401,6 +402,7 @@
   let voiceMemberMenuElement = $state<HTMLElement | null>(null);
   let voiceModerationBusy = $state(false);
   const uploadControllers = new SvelteMap<string, AbortController>();
+  const forumUploadControllers = new SvelteMap<string, AbortController>();
   const pendingSends = new SvelteMap<string, PendingMessageSend>();
   const collapsedCategories = new SvelteSet<string>();
   const readAcknowledgements = new ReadAcknowledgementQueue<Message>({
@@ -686,6 +688,14 @@
   );
   const canAttachFiles = $derived(
     Boolean(canSendMessages && channel && channelHasPermission(channel, Permission.ATTACH_FILES))
+  );
+  const forumUploadTarget = $derived(channel && isForumChannel(channel) ? channel : forumParent);
+  const canAttachForumFiles = $derived(
+    Boolean(
+      forumUploadTarget &&
+      channelHasPermission(forumUploadTarget, Permission.SEND_MESSAGES) &&
+      channelHasPermission(forumUploadTarget, Permission.ATTACH_FILES)
+    )
   );
   const canPinMessages = $derived(
     Boolean(channel && !channel.archived && channelHasPermission(channel, PIN_MESSAGES))
@@ -2178,6 +2188,8 @@
       const update = dispatch.d as {
         message_id: string;
         message_domain: string;
+        channel_id: string;
+        channel_domain: string;
         attachment: Attachment;
       };
       setMessages(
@@ -2195,6 +2207,25 @@
             : item
         )
       );
+      if (
+        channel?.starter_message &&
+        channel.starter_message.id === update.message_id &&
+        channel.starter_message.origin_domain === update.message_domain
+      ) {
+        rememberThread({
+          ...channel,
+          starter_message: {
+            ...channel.starter_message,
+            attachments: channel.starter_message.attachments?.map((attachment) =>
+              attachment.id === update.attachment.id &&
+              attachment.origin_domain === update.attachment.origin_domain
+                ? update.attachment
+                : attachment
+            )
+          }
+        });
+      }
+      scheduleForumRefreshForChannel(update.channel_id, update.channel_domain);
     } else if (dispatch.t === 'MESSAGE_DELETE') {
       const deleted = dispatch.d as {
         id: string;
@@ -2795,6 +2826,7 @@
       if (forumRefreshTimer !== null) window.clearTimeout(forumRefreshTimer);
       forumRefreshTimer = null;
       resetUploads();
+      resetForumUploads();
     };
   });
 
@@ -2894,6 +2926,7 @@
       setMessages([]);
       setMembers([]);
       resetUploads();
+      resetForumUploads();
       content = '';
       applicationCommands = [];
       selectedApplicationCommand = null;
@@ -3010,6 +3043,13 @@
       gifPickerOpen = false;
       emojiPickerOpen = false;
       if (!canAttachFiles && uploads.length) resetUploads();
+    });
+  });
+
+  $effect(() => {
+    if (canAttachForumFiles) return;
+    untrack(() => {
+      if (forumUploads.length) resetForumUploads();
     });
   });
 
@@ -3457,7 +3497,7 @@
     if (!guild || forumPostBusy) return;
     const generation = loadGeneration;
     forumError = '';
-    const attachmentIds = uploads
+    const attachmentIds = forumUploads
       .filter((item) => item.status === 'ready' && item.attachmentId)
       .map((item) => item.attachmentId as string);
     if (!draft.name.trim() || (!draft.content.trim() && !attachmentIds.length)) return;
@@ -3478,7 +3518,7 @@
         starter_message: created.starter_message ?? created.channel.starter_message
       };
       rememberThread(createdChannel);
-      clearSubmittedUploads(attachmentIds);
+      clearSubmittedForumUploads(attachmentIds);
       if (threadRequiresE2EEActivation(createdChannel)) {
         try {
           createdChannel = await activateRequiredThread(createdChannel, forum);
@@ -3975,6 +4015,10 @@
     uploads = withoutSubmittedUploads(uploads, attachmentIds);
   }
 
+  function clearSubmittedForumUploads(attachmentIds: readonly string[]) {
+    forumUploads = withoutSubmittedUploads(forumUploads, attachmentIds);
+  }
+
   function acknowledgeLatestIfVisible() {
     if (document.visibilityState !== 'visible' || !timelineAtBottom) return;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -4416,16 +4460,109 @@
     }
   }
 
+  async function queueForumFiles(forum: Channel, files: FileList | File[]) {
+    if (
+      forumPostBusy ||
+      forumUploads.length >= 10 ||
+      !isForumChannel(forum) ||
+      !forumUploadTarget ||
+      entityKey(forumUploadTarget) !== entityKey(forum) ||
+      !channelHasPermission(forum, Permission.SEND_MESSAGES) ||
+      !channelHasPermission(forum, Permission.ATTACH_FILES)
+    )
+      return;
+    const target = entityRef(forum);
+    const forumKey = entityKey(forum);
+    const generation = loadGeneration;
+    const routeChannel = channelId;
+    for (const file of Array.from(files).slice(0, 10 - forumUploads.length)) {
+      const key = crypto.randomUUID();
+      const controller = new AbortController();
+      forumUploadControllers.set(key, controller);
+      forumUploads = [...forumUploads, { key, file, progress: 0, status: 'uploading' }];
+      void uploadChannelFile(
+        target,
+        file,
+        (progress) => {
+          if (
+            controller.signal.aborted ||
+            generation !== loadGeneration ||
+            routeChannel !== channelId ||
+            !forumUploadTarget ||
+            entityKey(forumUploadTarget) !== forumKey
+          )
+            return;
+          forumUploads = forumUploads.map((item) =>
+            item.key === key ? { ...item, progress } : item
+          );
+        },
+        controller.signal
+      )
+        .then((ticket) => {
+          forumUploadControllers.delete(key);
+          if (
+            generation !== loadGeneration ||
+            routeChannel !== channelId ||
+            !forumUploadTarget ||
+            entityKey(forumUploadTarget) !== forumKey
+          )
+            return;
+          forumUploads = forumUploads.map((item) =>
+            item.key === key
+              ? {
+                  ...item,
+                  progress: 100,
+                  status: 'ready',
+                  attachmentId: ticket.id
+                }
+              : item
+          );
+        })
+        .catch((caught: unknown) => {
+          forumUploadControllers.delete(key);
+          if (
+            controller.signal.aborted ||
+            generation !== loadGeneration ||
+            routeChannel !== channelId ||
+            !forumUploadTarget ||
+            entityKey(forumUploadTarget) !== forumKey
+          )
+            return;
+          forumUploads = forumUploads.map((item) =>
+            item.key === key
+              ? {
+                  ...item,
+                  status: 'failed',
+                  error: userErrorMessage(caught, 'Upload failed. Remove the file and try again.')
+                }
+              : item
+          );
+        });
+    }
+  }
+
   function removeUpload(key: string) {
     uploadControllers.get(key)?.abort();
     uploadControllers.delete(key);
     uploads = uploads.filter((item) => item.key !== key);
   }
 
+  function removeForumUpload(key: string) {
+    forumUploadControllers.get(key)?.abort();
+    forumUploadControllers.delete(key);
+    forumUploads = forumUploads.filter((item) => item.key !== key);
+  }
+
   function resetUploads() {
     for (const controller of uploadControllers.values()) controller.abort();
     uploadControllers.clear();
     uploads = [];
+  }
+
+  function resetForumUploads() {
+    for (const controller of forumUploadControllers.values()) controller.abort();
+    forumUploadControllers.clear();
+    forumUploads = [];
   }
 
   function composerPaste(event: ClipboardEvent) {
@@ -5451,12 +5588,12 @@
         canManageTags={channelHasPermission(channel, MANAGE_THREADS)}
         customEmojis={pickerEmojis}
         busy={forumPostBusy}
-        {uploads}
+        uploads={forumUploads}
         onCreate={(draft) => createForumPost(channel, draft)}
         onFiltersChange={(filters) => reloadForumPosts(channel, filters)}
         onLoadMore={() => loadMoreForumPosts(channel)}
-        onFiles={canAttachFiles ? queueFiles : undefined}
-        onRemoveUpload={removeUpload}
+        onFiles={canAttachForumFiles ? (files) => queueForumFiles(channel, files) : undefined}
+        onRemoveUpload={removeForumUpload}
       />
     {:else}
       <div
@@ -5478,10 +5615,15 @@
             canManageTags={channelHasPermission(forumParent, MANAGE_THREADS)}
             customEmojis={pickerEmojis}
             busy={forumPostBusy}
+            uploads={forumUploads}
             compact
             onCreate={(draft) => createForumPost(forumParent, draft)}
             onFiltersChange={(filters) => reloadForumPosts(forumParent, filters)}
             onLoadMore={() => loadMoreForumPosts(forumParent)}
+            onFiles={canAttachForumFiles
+              ? (files) => queueForumFiles(forumParent, files)
+              : undefined}
+            onRemoveUpload={removeForumUpload}
           />
         {/if}
         <div class="thread-conversation">

@@ -351,12 +351,17 @@ async def process_attachment_record(
         if detected in IMAGE_TYPES:
             try:
                 finding = await scan_image(data, settings)
-            except PhotoDNAInputRejected:
+            except PhotoDNAInputRejected as exc:
                 # The configured PhotoDNA decoder cannot safely inspect this
                 # image. This is a terminal, fail-closed policy decision, not a
                 # malware verdict, a positive PhotoDNA match, or an outage to
                 # retry. The durable marker also prevents legacy reprocessing
                 # from selecting the same deterministic failure forever.
+                log.info(
+                    "media_photodna_input_rejected",
+                    attachment_id=str(attachment.id),
+                    reason=str(exc),
+                )
                 attachment.scan_status = "rejected"
                 await update_report_evidence_status(session, attachment, "rejected")
                 if attachment.staging_object_key is None:

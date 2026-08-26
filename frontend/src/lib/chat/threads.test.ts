@@ -11,6 +11,7 @@ import {
   forumDefaultLayout,
   forumDefaultReactionPayload,
   forumDefaultSort,
+  forumPostThumbnail,
   forumRequiresTag,
   isForumChannel,
   isPinnedForumPost,
@@ -210,6 +211,22 @@ describe('thread and forum helpers', () => {
     expect(forumRequiresTag(channel('1', 15, { flags: '16' }))).toBe(true);
     expect(isPinnedForumPost(channel('2', 11, { flags: '2' }))).toBe(true);
     expect(isPinnedForumPost(channel('3', 11, { flags: '2', archived: true }))).toBe(false);
+  });
+
+  it('uses the first clean image attachment as a forum post thumbnail', () => {
+    const post = channel('2', 11, {
+      starter_message: {
+        attachments: [
+          { id: 'document', content_type: 'application/pdf', scan_status: 'clean' },
+          { id: 'scanning-image', content_type: 'image/png', scan_status: 'pending' },
+          { id: 'thumbnail', content_type: 'image/webp', scan_status: 'clean' },
+          { id: 'later-image', content_type: 'image/jpeg', scan_status: 'clean' }
+        ]
+      } as never
+    });
+
+    expect(forumPostThumbnail(post)?.id).toBe('thumbnail');
+    expect(forumPostThumbnail(channel('3', 11))).toBeUndefined();
   });
 
   it('parses the native thread command without treating ordinary bot commands as native', () => {

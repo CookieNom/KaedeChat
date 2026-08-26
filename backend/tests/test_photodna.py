@@ -4,7 +4,6 @@ import asyncio
 import base64
 import io
 import json
-import warnings
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -36,6 +35,7 @@ from app.media.photodna import (
     scan_image,
     sdk_hash_generation_lock,
 )
+from app.media.photodna_dimensions import normalized_photodna_dimensions
 from app.media.processing import content_digest
 
 
@@ -444,23 +444,136 @@ def test_cloud_eligibility_terminally_rejects_pillow_decompression_bombs(
         image_ineligibility_reason(b"compressed image header")
 
 
-def test_parent_and_isolated_adapter_reject_images_above_decoded_pixel_budget(
+def test_parent_and_isolated_adapter_downscale_large_static_image_for_hashing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    rendered = io.BytesIO()
-    # One-bit pixels keep this regression fixture small while its declared
-    # decode shape crosses the production 25-million-pixel ceiling.
-    Image.new("1", (5001, 5000)).save(rendered, format="PNG")
-    body = rendered.getvalue()
+    source_dimensions = (5001, 5000)
+    expected_dimensions = (5000, 4999)
+    encoded = base64.b64encode(b"x" * 924)
+    resized: list[tuple[int, int]] = []
+    hash_calls: list[tuple[int, int]] = []
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-        with pytest.raises(PhotoDNAInputRejected, match="too large to scan safely"):
-            image_ineligibility_reason(body)
+    class Pixels:
+        shape = (expected_dimensions[1], expected_dimensions[0], 3)
 
-        monkeypatch.setattr(photodna_sdk, "_sdk", lambda: (object(), object()))
-        with pytest.raises(photodna_sdk.PhotoDNASDKError, match="pixel limit exceeded"):
-            photodna_sdk._hashes(body)
+    class Rendered:
+        mode = "RGB"
+        info: dict[str, object] = {}
+
+        def __init__(self, width: int, height: int) -> None:
+            self.width = width
+            self.height = height
+
+        @property
+        def size(self) -> tuple[int, int]:
+            return self.width, self.height
+
+        def convert(self, _mode: str) -> Rendered:
+            return self
+
+    class Source(Rendered):
+        n_frames = 1
+
+        def __enter__(self) -> Source:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def seek(self, _index: int) -> None:
+            return None
+
+        def draft(self, _mode: str, size: tuple[int, int]) -> None:
+            assert size == expected_dimensions
+
+        def resize(self, size: tuple[int, int], *_args: object, **_kwargs: object) -> Rendered:
+            resized.append(size)
+            return Rendered(*size)
+
+    class Generator:
+        def PhotoDnaEdgeHash(
+            self,
+            _pixels: object,
+            output: Any,
+            width: int,
+            height: int,
+            _stride: int,
+            _options: object,
+        ) -> int:
+            hash_calls.append((width, height))
+            output.raw = encoded
+            return 0
+
+    edge = SimpleNamespace(
+        PhotoDnaOptions=SimpleNamespace(
+            Rgb=0,
+            Rgba=0x100,
+            Cmyk=0x300,
+            HashFormatEdgeV2Base64=0x90,
+        ),
+        HashSize=SimpleNamespace(EdgeV2Base64=SimpleNamespace(value=1232)),
+    )
+    monkeypatch.setattr(photodna_module.Image, "open", lambda _stream: Source(*source_dimensions))
+    monkeypatch.setattr(photodna_sdk, "_sdk", lambda: (edge, Generator()))
+    monkeypatch.setattr(photodna_sdk.np, "asarray", lambda _image: Pixels())
+    monkeypatch.setattr(photodna_sdk.np, "ascontiguousarray", lambda pixels: pixels)
+
+    assert normalized_photodna_dimensions(*source_dimensions) == expected_dimensions
+    assert expected_dimensions[0] * expected_dimensions[1] <= 25_000_000
+    assert image_ineligibility_reason(b"large static image") is None
+    assert photodna_sdk._hash(b"large static image") == encoded.decode("ascii")
+    assert resized == [expected_dimensions]
+    assert hash_calls == [expected_dimensions]
+
+
+def test_parent_and_isolated_adapter_reject_static_images_above_media_pixel_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Oversized:
+        width = 10_001
+        height = 10_000
+        n_frames = 1
+        size = (width, height)
+
+        def __enter__(self) -> Oversized:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(photodna_module.Image, "open", lambda _stream: Oversized())
+
+    with pytest.raises(PhotoDNAInputRejected, match="too large to scan safely"):
+        image_ineligibility_reason(b"oversized static image")
+
+    monkeypatch.setattr(photodna_sdk, "_sdk", lambda: (object(), object()))
+    with pytest.raises(photodna_sdk.PhotoDNASDKError, match="image pixel limit exceeded"):
+        photodna_sdk._hashes(b"oversized static image")
+
+
+def test_large_static_normalization_does_not_relax_animation_pixel_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OversizedAnimation:
+        width = 4_000
+        height = 4_000
+        n_frames = 2
+        size = (width, height)
+
+        def __enter__(self) -> OversizedAnimation:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(photodna_module.Image, "open", lambda _stream: OversizedAnimation())
+
+    with pytest.raises(PhotoDNAInputRejected, match="animated image is too large"):
+        image_ineligibility_reason(b"oversized animation")
+
+    monkeypatch.setattr(photodna_sdk, "_sdk", lambda: (object(), object()))
+    with pytest.raises(photodna_sdk.PhotoDNASDKError, match="animation pixel limit exceeded"):
+        photodna_sdk._hashes(b"oversized animation")
 
 
 async def test_sdk_directory_lock_serializes_independent_process_admission(tmp_path: Any) -> None:

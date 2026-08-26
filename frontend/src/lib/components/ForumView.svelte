@@ -5,6 +5,7 @@
     FORUM_POST_CONTENT_MAX_LENGTH,
     forumDefaultLayout,
     forumDefaultSort,
+    forumPostThumbnail,
     forumRequiresTag,
     forumTags,
     isPinnedForumPost,
@@ -422,26 +423,8 @@
   {:else}
     <div class:gallery={layout === 'gallery'} class="forum-posts">
       {#each visiblePosts as post (entityKey(post))}
-        {@const image = post.starter_message?.attachments?.find(
-          (attachment) =>
-            attachment.content_type.startsWith('image/') && attachment.scan_status === 'clean'
-        )}
+        {@const image = forumPostThumbnail(post)}
         <a class:pinned={isPinnedForumPost(post)} href={guildChannelPath(guild, post)}>
-          {#if layout === 'gallery' && image}
-            <img
-              use:authenticatedMedia={{
-                path: attachmentMediaPath(
-                  image.origin_domain,
-                  image.id,
-                  'thumbnail_512',
-                  image.history_media_url
-                ),
-                contentType: image.content_type
-              }}
-              src=""
-              alt={image.filename}
-            />
-          {/if}
           <div class="post-copy">
             <div class="post-title">
               {#if isPinnedForumPost(post)}<span title="Pinned post">📌</span>{/if}
@@ -475,6 +458,23 @@
               <time>{timestamp(post)}</time>
             </footer>
           </div>
+          {#if image}
+            <img
+              use:authenticatedMedia={{
+                path: attachmentMediaPath(
+                  image.origin_domain,
+                  image.id,
+                  layout === 'gallery' ? 'thumbnail_512' : 'thumbnail_128',
+                  image.history_media_url
+                ),
+                contentType: image.content_type
+              }}
+              src=""
+              alt={image.filename}
+              loading="lazy"
+              decoding="async"
+            />
+          {/if}
         </a>
       {/each}
     </div>
@@ -928,15 +928,24 @@
   }
 
   .forum-posts img {
-    width: min(260px, 34%);
-    min-height: 120px;
+    width: 104px;
+    height: 104px;
+    flex: 0 0 104px;
+    align-self: center;
+    margin: 0.75rem 0.75rem 0.75rem 0;
+    border-radius: 8px;
     object-fit: cover;
     background: var(--surface-raised);
   }
 
   .forum-posts.gallery img {
+    order: -1;
     width: 100%;
     height: 150px;
+    flex-basis: auto;
+    align-self: stretch;
+    margin: 0;
+    border-radius: 0;
   }
 
   .post-copy {
@@ -1002,6 +1011,13 @@
 
     .forum-posts.gallery {
       grid-template-columns: 1fr;
+    }
+
+    .forum-posts:not(.gallery) img {
+      width: 76px;
+      height: 76px;
+      flex-basis: 76px;
+      margin: 0.65rem 0.65rem 0.65rem 0;
     }
 
     .post-fields {
