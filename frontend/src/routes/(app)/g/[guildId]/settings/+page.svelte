@@ -4314,7 +4314,7 @@
                         <input
                           value={roleColor}
                           maxlength="7"
-                          pattern="#?[0-9a-fA-F]{6}"
+                          pattern={'#?[0-9a-fA-F]{6}'}
                           onblur={normalizeRoleColorInput}
                           onkeydown={(event) => {
                             if (event.key === 'Enter') {
