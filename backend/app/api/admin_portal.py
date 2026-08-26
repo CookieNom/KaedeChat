@@ -1632,6 +1632,10 @@ async def patch_report(
         metadata={"status": payload.status},
     )
     await session.commit()
+    # ``updated_at`` is populated by the database's ON UPDATE expression.
+    # SQLAlchemy expires that attribute even with expire_on_commit disabled;
+    # refresh before the synchronous payload helper reads it.
+    await session.refresh(report)
     return report_payload(report)
 
 
@@ -1818,6 +1822,7 @@ async def enforce_report(
         metadata={**enforcement, "reason": payload.reason},
     )
     await session.commit()
+    await session.refresh(report)
 
     token_store = AccessTokenStore(redis, settings.access_token_ttl_seconds)
     for session_id in revoked_session_ids:

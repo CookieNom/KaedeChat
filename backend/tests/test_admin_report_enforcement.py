@@ -11,7 +11,7 @@ from starlette.requests import Request
 
 from app.admin.auth import AdminPrincipal
 from app.api import admin_portal
-from app.api.admin_portal import ReportActionCreate, report_subject_ref
+from app.api.admin_portal import ReportActionCreate, ReportPatch, report_subject_ref
 from app.api.dependencies import suspension_blocks_request
 from app.auth.account_status import (
     account_is_banned,
@@ -118,6 +118,7 @@ class FakeSession:
         self.target = target
         self.added: list[object] = []
         self.committed = False
+        self.refreshed = False
 
     async def get(self, model: type[object], key: object, **_kwargs: object) -> object | None:
         if model is AbuseReport:
@@ -134,6 +135,61 @@ class FakeSession:
 
     async def commit(self) -> None:
         self.committed = True
+        # Model SQLAlchemy expiring the database-generated ON UPDATE value.
+        self.report.updated_at = None
+
+    async def refresh(self, value: object) -> None:
+        assert value is self.report
+        self.report.updated_at = datetime(2026, 8, 25, 12, 0, 1, tzinfo=UTC)
+        self.refreshed = True
+
+
+@pytest.mark.asyncio
+async def test_closing_report_refreshes_database_managed_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    report = cast(
+        AbuseReport,
+        SimpleNamespace(
+            id=43,
+            target_type="message",
+            target_ref="99@local.test",
+            evidence={"author_ref": "7@local.test"},
+            message_ref="99@local.test",
+            source="user",
+            reporter_id=9,
+            reporter_domain="local.test",
+            category="harassment",
+            description="abuse",
+            encryption_mode="plaintext",
+            status="in_review",
+            assigned_admin_id=None,
+            assigned_admin_domain=None,
+            resolution=None,
+            created_at=now,
+            updated_at=now,
+            resolved_at=None,
+        ),
+    )
+    target = cast(User, SimpleNamespace(id=7, origin_domain="local.test"))
+    session = FakeSession(report, target)
+    actor = cast(User, SimpleNamespace(id=1, origin_domain="local.test"))
+    principal = AdminPrincipal(actor, frozenset({"trust_safety"}), frozenset({"*"}))
+    monkeypatch.setattr(admin_portal, "audit", AsyncMock())
+
+    result = await admin_portal.patch_report(
+        43,
+        ReportPatch(status="closed_no_action", resolution="reviewed; no violation"),
+        principal,
+        cast(Any, session),
+        cast(Any, FakeSnowflake()),
+    )
+
+    assert result["status"] == "closed_no_action"
+    assert result["updated_at"] == "2026-08-25T12:00:01+00:00"
+    assert report.resolved_at is not None
+    assert session.refreshed is True
 
 
 @pytest.mark.asyncio
