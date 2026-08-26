@@ -22,6 +22,30 @@ export interface CustomEmojiOption {
   guild_name?: string;
 }
 
+export interface CustomEmojiGroup {
+  key: string;
+  name: string;
+  emojis: CustomEmojiOption[];
+}
+
+export function groupCustomEmojis(emojis: CustomEmojiOption[]): CustomEmojiGroup[] {
+  const groups = new Map<string, CustomEmojiGroup>();
+  for (const emoji of emojis) {
+    const key = `${emoji.guild_id}@${emoji.guild_domain.toLowerCase()}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        key,
+        name: emoji.guild_name?.trim() || emoji.guild_domain,
+        emojis: []
+      };
+      groups.set(key, group);
+    }
+    group.emojis.push(emoji);
+  }
+  return [...groups.values()];
+}
+
 const FEDERATED_DOMAIN =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
 const SNOWFLAKE = /^[1-9][0-9]{0,18}$/;

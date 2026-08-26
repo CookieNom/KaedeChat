@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     emojiCategories,
+    groupCustomEmojis,
     loadUnicodeEmojis,
     type CustomEmojiOption,
     type EmojiOption
@@ -51,6 +52,7 @@
           emoji.guild_name?.toLowerCase().includes(normalizedQuery))
     )
   );
+  const customEmojiGroups = $derived(groupCustomEmojis(matchingCustom));
   const matchingStickers = $derived(
     stickers.filter((sticker) => {
       const needle = stickerQuery.trim().toLowerCase();
@@ -171,20 +173,22 @@
       {/each}
     </nav>
     <div class="emoji-results" role="region" aria-label="Emoji results" aria-live="polite">
-      {#if matchingCustom.length}
-        <h3>Custom emoji from your guilds</h3>
-        <div class="emoji-grid custom-emojis">
-          {#each matchingCustom as emoji (`${emoji.id}@${emoji.origin_domain}`)}
-            <button
-              type="button"
-              title={`:${emoji.name}:${emoji.guild_name ? ` — ${emoji.guild_name}` : ''}`}
-              onclick={() => onSelect(emoji.value)}
-            >
-              <img src={emoji.url} alt={`:${emoji.name}:`} loading="lazy" />
-            </button>
-          {/each}
-        </div>
-      {/if}
+      {#each customEmojiGroups as group (group.key)}
+        <section class="custom-emoji-group" aria-labelledby={`emoji-guild-${group.key}`}>
+          <h3 id={`emoji-guild-${group.key}`}>{group.name}</h3>
+          <div class="emoji-grid custom-emojis">
+            {#each group.emojis as emoji (`${emoji.id}@${emoji.origin_domain}`)}
+              <button
+                type="button"
+                title={`:${emoji.name}: — ${group.name}`}
+                onclick={() => onSelect(emoji.value)}
+              >
+                <img src={emoji.url} alt={`:${emoji.name}:`} loading="lazy" />
+              </button>
+            {/each}
+          </div>
+        </section>
+      {/each}
       {#if category !== 'custom' || normalizedQuery}
         <h3>
           {normalizedQuery
@@ -380,6 +384,9 @@
   }
   .custom-emojis {
     margin-bottom: 14px;
+  }
+  .custom-emoji-group:last-of-type .custom-emojis {
+    margin-bottom: 0;
   }
   .custom-emojis img {
     width: 30px;

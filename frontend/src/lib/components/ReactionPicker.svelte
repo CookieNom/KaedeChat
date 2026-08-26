@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     emojiCategories,
+    groupCustomEmojis,
     loadUnicodeEmojis,
     type CustomEmojiOption,
     type EmojiOption
@@ -41,6 +42,7 @@
           emoji.guild_name?.toLowerCase().includes(needle))
     )
   );
+  const customGroups = $derived(groupCustomEmojis(custom));
 
   onMount(async () => {
     try {
@@ -85,15 +87,22 @@
     {/each}
   </nav>
   <div class="results">
-    {#if custom.length}
-      <div class="grid">
-        {#each custom as emoji (`${emoji.id}@${emoji.origin_domain}`)}
-          <button type="button" title={`:${emoji.name}:`} onclick={() => onSelect(emoji.value)}>
-            <img src={emoji.url} alt={`:${emoji.name}:`} loading="lazy" />
-          </button>
-        {/each}
-      </div>
-    {/if}
+    {#each customGroups as group (group.key)}
+      <section class="custom-group" aria-labelledby={`reaction-guild-${group.key}`}>
+        <h3 id={`reaction-guild-${group.key}`}>{group.name}</h3>
+        <div class="grid">
+          {#each group.emojis as emoji (`${emoji.id}@${emoji.origin_domain}`)}
+            <button
+              type="button"
+              title={`:${emoji.name}: — ${group.name}`}
+              onclick={() => onSelect(emoji.value)}
+            >
+              <img src={emoji.url} alt={`:${emoji.name}:`} loading="lazy" />
+            </button>
+          {/each}
+        </div>
+      </section>
+    {/each}
     {#if loading}
       <p>Loading emoji…</p>
     {:else if category !== 'custom' || needle}
@@ -166,6 +175,16 @@
   .results p {
     color: var(--text-muted);
     text-align: center;
+  }
+  .custom-group + .custom-group {
+    margin-top: 0.65rem;
+  }
+  .custom-group h3 {
+    margin: 0 0 0.35rem;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
   }
   .grid {
     display: grid;

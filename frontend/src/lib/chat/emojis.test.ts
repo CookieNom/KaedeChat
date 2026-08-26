@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { customEmojiToken, customEmojiUrl, emojiCategories, loadUnicodeEmojis } from './emojis';
+import {
+  customEmojiToken,
+  customEmojiUrl,
+  emojiCategories,
+  groupCustomEmojis,
+  loadUnicodeEmojis,
+  type CustomEmojiOption
+} from './emojis';
 
 describe('emoji catalog', () => {
   it('loads the complete catalog with variants and flags', async () => {
@@ -29,6 +36,36 @@ describe('emoji catalog', () => {
 });
 
 describe('custom emoji identity', () => {
+  it('groups custom emoji by guild while preserving their display order', () => {
+    const emoji = (
+      id: string,
+      guildId: string,
+      guildName: string,
+      name: string
+    ): CustomEmojiOption => ({
+      id,
+      origin_domain: 'emoji.example',
+      name,
+      url: `/emoji/${id}`,
+      value: `<:${name}:${id}@emoji.example>`,
+      guild_id: guildId,
+      guild_domain: 'chat.example',
+      guild_name: guildName
+    });
+    const groups = groupCustomEmojis([
+      emoji('1', '10', 'Kaede', 'wave'),
+      emoji('2', '20', 'Friends', 'party'),
+      emoji('3', '10', 'Kaede', 'cat')
+    ]);
+
+    expect(
+      groups.map((group) => ({ name: group.name, emojis: group.emojis.map((item) => item.name) }))
+    ).toEqual([
+      { name: 'Kaede', emojis: ['wave', 'cat'] },
+      { name: 'Friends', emojis: ['party'] }
+    ]);
+  });
+
   it('creates deterministic static and animated federation tokens', () => {
     expect(
       customEmojiToken({
