@@ -76,3 +76,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "S"]
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
+
+[[tool.mypy.overrides]]
+module = ["rembg", "rembg.*"]
+ignore_missing_imports = true

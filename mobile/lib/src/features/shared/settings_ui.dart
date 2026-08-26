@@ -16,7 +16,8 @@ const kSettingsDividerColor = KaedeColors.border;
 
 /// Uppercase section header, the way Discord labels each settings group.
 class SettingsSectionHeader extends StatelessWidget {
-  const SettingsSectionHeader(this.title, {super.key, this.subheading, this.top = 26});
+  const SettingsSectionHeader(this.title,
+      {super.key, this.subheading, this.top = 26});
 
   final String title;
   final String? subheading;
@@ -129,8 +130,7 @@ class SettingsRow extends StatelessWidget {
               ],
               Expanded(
                 child: Padding(
-                  padding: EdgeInsets.symmetric(
-                      vertical: hasSubtitle ? 9 : 11),
+                  padding: EdgeInsets.symmetric(vertical: hasSubtitle ? 9 : 11),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -206,9 +206,7 @@ class _DiscordSwitchState extends State<DiscordSwitch> {
   Widget build(BuildContext context) {
     final on = widget.value;
     return InkWell(
-      onTap: widget.onChanged == null
-          ? null
-          : () => widget.onChanged!(!on),
+      onTap: widget.onChanged == null ? null : () => widget.onChanged!(!on),
       borderRadius: BorderRadius.circular(14),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
@@ -313,11 +311,12 @@ Future<String?> showSettingsChoiceSheet(
               ),
             ],
             const SizedBox(height: 18),
-            for (final choice in choices) _ChoiceTile(
-              choice: choice,
-              selected: choice.value == selected,
-              onSelected: () => Navigator.pop(sheetContext, choice.value),
-            ),
+            for (final choice in choices)
+              _ChoiceTile(
+                choice: choice,
+                selected: choice.value == selected,
+                onSelected: () => Navigator.pop(sheetContext, choice.value),
+              ),
           ],
         ),
       ),
@@ -375,7 +374,9 @@ class _ChoiceTile extends StatelessWidget {
                   ),
                 ),
                 Icon(
-                  selected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
+                  selected
+                      ? Icons.check_circle_rounded
+                      : Icons.radio_button_unchecked_rounded,
                   color: selected ? KaedeColors.coralText : KaedeColors.muted,
                 ),
               ],
@@ -440,7 +441,8 @@ class SettingsChoiceRow extends StatelessWidget {
 
 /// Full-width primary action inside a settings section.
 class SettingsPrimaryButton extends StatelessWidget {
-  const SettingsPrimaryButton(this.label, {
+  const SettingsPrimaryButton(
+    this.label, {
     super.key,
     required this.onPressed,
     this.icon,
@@ -480,8 +482,8 @@ class SettingsDangerButton extends StatelessWidget {
             minimumSize: const Size(0, 44),
           ),
           child: Text(label,
-              style: const TextStyle(
-                  fontWeight: FontWeight.w700, fontSize: 14.5)),
+              style:
+                  const TextStyle(fontWeight: FontWeight.w700, fontSize: 14.5)),
         ),
       );
 }

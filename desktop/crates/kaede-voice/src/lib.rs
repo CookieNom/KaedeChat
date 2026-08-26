@@ -222,6 +222,13 @@ pub struct VoiceMediaSettings {
     pub publish: MediaPublishSettings,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct VoiceGrantRequest<'a> {
+    pub sender_device_id: Option<&'a str>,
+    pub connection_id: &'a str,
+    pub takeover: bool,
+}
+
 impl Default for MediaPublishSettings {
     fn default() -> Self {
         Self {
@@ -279,17 +286,15 @@ pub async fn join_channel(
     media: VoiceMediaSettings,
     expected_policy: ExpectedVoicePolicy,
     media_key: Option<Vec<u8>>,
-    sender_device_id: Option<&str>,
-    connection_id: &str,
-    takeover: bool,
+    request: VoiceGrantRequest<'_>,
 ) -> Result<VoiceHandle, VoiceError> {
     let grant: VoiceGrant = api
         .post(
             &format!("channels/{channel}/voice/token"),
             &serde_json::json!({
-                "sender_device_id": sender_device_id,
-                "connection_id": connection_id,
-                "takeover": takeover,
+                "sender_device_id": request.sender_device_id,
+                "connection_id": request.connection_id,
+                "takeover": request.takeover,
                 "client_kind": "desktop"
             }),
         )
@@ -309,17 +314,15 @@ pub async fn join_call(
     media: VoiceMediaSettings,
     expected_policy: ExpectedVoicePolicy,
     media_key: Option<Vec<u8>>,
-    sender_device_id: Option<&str>,
-    connection_id: &str,
-    takeover: bool,
+    request: VoiceGrantRequest<'_>,
 ) -> Result<VoiceHandle, VoiceError> {
     let grant: VoiceGrant = api
         .post(
             &format!("calls/{call}/voice/token"),
             &serde_json::json!({
-                "sender_device_id": sender_device_id,
-                "connection_id": connection_id,
-                "takeover": takeover,
+                "sender_device_id": request.sender_device_id,
+                "connection_id": request.connection_id,
+                "takeover": request.takeover,
                 "client_kind": "desktop"
             }),
         )
@@ -1479,7 +1482,7 @@ mod tests {
     fn disconnect_reasons_do_not_leak_debug_enum_names() {
         assert_eq!(
             disconnect_message(DisconnectReason::DuplicateIdentity),
-            "This account joined voice from another client, so this connection was closed."
+            "Voice moved to another device. This device will stay disconnected unless you explicitly move voice back here."
         );
         assert!(disconnect_message(DisconnectReason::ConnectionTimeout).contains("join again"));
     }

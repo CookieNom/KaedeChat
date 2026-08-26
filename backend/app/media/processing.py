@@ -267,7 +267,7 @@ def image_derivatives(
                     "background removal is currently available for static stickers only"
                 )
             try:
-                from rembg import remove  # type: ignore[import-not-found]
+                from rembg import remove
             except ImportError as exc:
                 raise MediaValidationError("background removal is unavailable") from exc
             try:

@@ -75,7 +75,10 @@ def federation_channel_state(channel: Channel) -> dict[str, object]:
         "parent_domain": channel.parent_domain,
         "permissions_synced": bool(channel.permissions_synced),
         "rate_limit_per_user": channel.rate_limit_per_user,
-        "flags": str(channel.flags),
+        # SQLAlchemy applies these defaults during INSERT. Guild mutations are
+        # rendered before queue_guild_mutation flushes a newly-created channel,
+        # so materialize the wire defaults here instead of emitting null.
+        "flags": str(channel.flags or 0),
         "owner_id": str(channel.owner_id) if channel.owner_id is not None else None,
         "owner_domain": channel.owner_domain,
         "archived": channel.archived,
@@ -101,12 +104,12 @@ def federation_channel_state(channel: Channel) -> dict[str, object]:
         "last_thread_domain": channel.last_thread_domain,
         "default_auto_archive_duration": channel.default_auto_archive_duration,
         "default_thread_rate_limit_per_user": channel.default_thread_rate_limit_per_user,
-        "available_tags": channel.available_tags,
-        "applied_tag_ids": channel.applied_tag_ids,
+        "available_tags": channel.available_tags or [],
+        "applied_tag_ids": channel.applied_tag_ids or [],
         "default_reaction_emoji": channel.default_reaction_emoji,
         "default_sort_order": channel.default_sort_order,
         "default_forum_layout": channel.default_forum_layout,
-        "e2ee_required": channel.e2ee_required,
+        "e2ee_required": bool(channel.e2ee_required),
         "created_at": materialize_channel_created_at(channel).isoformat(),
         # Server defaults are populated during flush, but channel-create events
         # are rendered before queue_guild_mutation performs that flush.

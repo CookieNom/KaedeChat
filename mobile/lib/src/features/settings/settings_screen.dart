@@ -509,7 +509,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onTap: _saving ? null : _importEncryptionRecovery,
           ),
           const SettingsSectionHeader('Activity status',
-              subheading: 'Your availability follows you between mobile, desktop, and web.'),
+              subheading:
+                  'Your availability follows you between mobile, desktop, and web.'),
           SettingsRow(
             title: 'Online',
             leading: _PresenceIcon(PresenceStatus.online),
@@ -586,12 +587,12 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               decoration: BoxDecoration(
                 color: KaedeColors.warning.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(10),
-                border:
-                    Border.all(color: KaedeColors.warning.withValues(alpha: .4)),
+                border: Border.all(
+                    color: KaedeColors.warning.withValues(alpha: .4)),
               ),
               child: Padding(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 12, vertical: 10),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 child: Row(
                   children: [
                     const Icon(Icons.warning_amber_rounded,
@@ -620,9 +621,7 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
           ],
-          if (!ref
-              .read(mobileControllerProvider.notifier)
-              .remotePushAvailable)
+          if (!ref.read(mobileControllerProvider.notifier).remotePushAvailable)
             const SettingsInfo(
               'This build can show alerts while Kaede is running, but it has no compatible closed-app push provider.',
             ),
@@ -676,13 +675,9 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 context,
                 title: 'Who can message you',
                 choices: const [
-                  SettingsChoice(
-                      'everyone',
-                      'Everyone',
+                  SettingsChoice('everyone', 'Everyone',
                       hint: 'Any Kaede account can start a direct message.'),
-                  SettingsChoice(
-                      'friends',
-                      'Friends only',
+                  SettingsChoice('friends', 'Friends only',
                       hint: 'Only people you have added as a friend.'),
                   SettingsChoice('shared_guild', 'Friends and shared guilds',
                       hint:
@@ -720,27 +715,29 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             leading: _LeadingIcon(Icons.check_circle_rounded,
                 color: KaedeColors.mint),
           ),
-          for (final session in _sessions) SettingsRow(
-            title: '${session['device_name'] ?? 'Kaede client'}',
-            subtitle: _sessionSubtitle(session),
-            leading: _LeadingIcon(_deviceIcon('${session['device_name'] ?? ''}')),
-            divider: true,
-            trailing: TextButton(
-              onPressed: () => _revoke('${session['id']}'),
-              style: TextButton.styleFrom(
-                foregroundColor: KaedeColors.danger,
-                minimumSize: const Size(0, 36),
-                padding: const EdgeInsets.symmetric(horizontal: 10),
+          for (final session in _sessions)
+            SettingsRow(
+              title: '${session['device_name'] ?? 'Kaede client'}',
+              subtitle: _sessionSubtitle(session),
+              leading:
+                  _LeadingIcon(_deviceIcon('${session['device_name'] ?? ''}')),
+              divider: true,
+              trailing: TextButton(
+                onPressed: () => _revoke('${session['id']}'),
+                style: TextButton.styleFrom(
+                  foregroundColor: KaedeColors.danger,
+                  minimumSize: const Size(0, 36),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                ),
+                child: const Text('Sign out'),
               ),
-              child: const Text('Sign out'),
             ),
-          ),
           const SizedBox(height: 26),
           Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 320),
-              child: SettingsDangerButton('Log out',
-                  onPressed: _confirmSignOut),
+              child:
+                  SettingsDangerButton('Log out', onPressed: _confirmSignOut),
             ),
           ),
           const SizedBox(height: 8),
@@ -778,7 +775,9 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         selected
             ? Icons.check_circle_rounded
             : Icons.radio_button_unchecked_rounded,
-        color: selected ? KaedeColors.coralText : KaedeColors.muted.withValues(alpha: .6),
+        color: selected
+            ? KaedeColors.coralText
+            : KaedeColors.muted.withValues(alpha: .6),
       );
 
   static String _dmPrivacyLabel(String value) => switch (value) {
@@ -1302,8 +1301,8 @@ class _PresenceIcon extends StatelessWidget {
         width: 26,
         height: 26,
         alignment: Alignment.center,
-        child: Icon(presenceIcon(status),
-            size: 18, color: presenceColor(status)),
+        child:
+            Icon(presenceIcon(status), size: 18, color: presenceColor(status)),
       );
 }
 

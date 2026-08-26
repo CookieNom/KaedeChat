@@ -23,6 +23,7 @@ from scripts.verification import (
     authentication_secret,
     failure_message,
     password_kdf_metadata,
+    receive_dispatch,
     require,
 )
 
@@ -427,7 +428,7 @@ def verify() -> None:
                     "d": {"guild_id": guild_id, "ranges": [[0, 99]]},
                 }
             )
-            member_list = socket.receive_json()
+            member_list = receive_dispatch(socket, "GUILD_MEMBER_LIST_UPDATE")
             require(
                 member_list["t"] == "GUILD_MEMBER_LIST_UPDATE"
                 and len(member_list["d"]["ops"][0]["items"]) == 3,
@@ -449,11 +450,7 @@ def verify() -> None:
                 headers=alice_headers,
             )
             require(typing.status_code == 204, f"typing event failed: {typing.text}")
-            typing_dispatch = socket.receive_json()
-            for _ in range(9):
-                if typing_dispatch.get("t") == "TYPING_START":
-                    break
-                typing_dispatch = socket.receive_json()
+            typing_dispatch = receive_dispatch(socket, "TYPING_START")
             require(
                 typing_dispatch["t"] == "TYPING_START"
                 and typing_dispatch["d"]["channel_id"] == channel_id

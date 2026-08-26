@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
-from typing import Any
+from typing import Any, Protocol
 
 MAX_FAILURE_MESSAGE_LENGTH = 2_000
 _PRIVATE_KEY_BLOCK = re.compile(
@@ -111,6 +111,33 @@ class VerificationFailure(RuntimeError):
 
     def __init__(self, message: str) -> None:
         super().__init__(_sanitize_failure_message(message))
+
+
+class JsonReceiver(Protocol):
+    def receive_json(self) -> object: ...
+
+
+def receive_dispatch(
+    receiver: JsonReceiver,
+    expected_type: str,
+    *,
+    max_frames: int = 10,
+) -> dict[str, Any]:
+    """Receive an expected dispatch while tolerating bounded interleaving."""
+
+    observed: list[str] = []
+    for _ in range(max_frames):
+        frame = receiver.receive_json()
+        if not isinstance(frame, dict):
+            observed.append(type(frame).__name__)
+            continue
+        event_type = frame.get("t")
+        observed.append(str(event_type) if event_type is not None else f"op={frame.get('op')!r}")
+        if event_type == expected_type:
+            return frame
+    raise VerificationFailure(
+        f"{expected_type} dispatch missing after {max_frames} frames; observed {observed!r}"
+    )
 
 
 def require(condition: object, message: str) -> None:

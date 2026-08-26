@@ -1,4 +1,19 @@
-from scripts.verification import VerificationFailure, failure_message, require
+import pytest
+
+from scripts.verification import (
+    VerificationFailure,
+    failure_message,
+    receive_dispatch,
+    require,
+)
+
+
+class FakeJsonReceiver:
+    def __init__(self, frames: list[object]) -> None:
+        self.frames = iter(frames)
+
+    def receive_json(self) -> object:
+        return next(self.frames)
 
 
 def test_require_raises_a_verification_failure() -> None:
@@ -20,6 +35,33 @@ def test_failure_message_includes_reason_and_recovery_command() -> None:
     assert "chat verification failed: expected 3 members; received 0" in message
     assert "correct the reported invariant" in message
     assert "`make chat-check`" in message
+
+
+def test_receive_dispatch_tolerates_interleaved_gateway_events() -> None:
+    expected = {"op": 0, "t": "GUILD_MEMBER_LIST_UPDATE", "d": {"ops": []}}
+    receiver = FakeJsonReceiver(
+        [
+            {"op": 0, "t": "THREAD_LIST_SYNC", "d": {"threads": []}},
+            expected,
+        ]
+    )
+
+    assert receive_dispatch(receiver, "GUILD_MEMBER_LIST_UPDATE", max_frames=2) is expected
+
+
+def test_receive_dispatch_reports_observed_events_when_target_is_missing() -> None:
+    receiver = FakeJsonReceiver(
+        [
+            {"op": 0, "t": "THREAD_LIST_SYNC"},
+            {"op": 11},
+        ]
+    )
+
+    with pytest.raises(VerificationFailure) as raised:
+        receive_dispatch(receiver, "GUILD_MEMBER_LIST_UPDATE", max_frames=2)
+
+    assert "THREAD_LIST_SYNC" in str(raised.value)
+    assert "op=11" in str(raised.value)
 
 
 def test_verification_failures_redact_credentials_from_response_bodies() -> None:

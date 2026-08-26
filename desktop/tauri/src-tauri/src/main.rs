@@ -29,8 +29,8 @@ use kaede_protocol::{Domain, EntityRef};
 use kaede_turnstile::EmbeddedTurnstile;
 use kaede_voice::{
     ExpectedVoicePolicy, MediaPublishSettings, ScreenShareSettings, VoiceCommand, VoiceError,
-    VoiceHandle, VoiceMediaSettings, VoiceStatus, camera_devices, screen_source_thumbnail,
-    screen_sources,
+    VoiceGrantRequest, VoiceHandle, VoiceMediaSettings, VoiceStatus, camera_devices,
+    screen_source_thumbnail, screen_sources,
 };
 use parking_lot::Mutex as SyncMutex;
 use reqwest::Method;
@@ -1858,6 +1858,7 @@ async fn native_test_output(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri maps these stable IPC fields by parameter name.
 async fn native_voice_join(
     reference: String,
     is_call: bool,
@@ -1869,12 +1870,14 @@ async fn native_voice_join(
     state: State<'_, NativeState>,
 ) -> Result<(), NativeError> {
     join_native_voice(
-        reference,
-        is_call,
-        expected_policy,
-        e2ee_key,
-        sender_device_id,
-        connection_id,
+        VoiceTarget {
+            reference,
+            is_call,
+            expected_policy,
+            e2ee_key: e2ee_key.map(SecretString::from),
+            sender_device_id,
+            connection_id,
+        },
         takeover,
         &state,
     )
@@ -1882,59 +1885,37 @@ async fn native_voice_join(
 }
 
 async fn join_native_voice(
-    reference: String,
-    is_call: bool,
-    expected_policy: ExpectedVoicePolicy,
-    e2ee_key: Option<String>,
-    sender_device_id: Option<String>,
-    connection_id: String,
+    target: VoiceTarget,
     takeover: bool,
     state: &NativeState,
 ) -> Result<(), NativeError> {
     let generation = state.voice_install.begin().await;
-    join_native_voice_reserved(
-        reference,
-        is_call,
-        expected_policy,
-        e2ee_key,
-        sender_device_id,
-        connection_id,
-        takeover,
-        state,
-        generation,
-    )
-    .await
+    join_native_voice_reserved(target, takeover, state, generation).await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn join_native_voice_reserved(
-    reference: String,
-    is_call: bool,
-    expected_policy: ExpectedVoicePolicy,
-    e2ee_key: Option<String>,
-    sender_device_id: Option<String>,
-    connection_id: String,
+    target: VoiceTarget,
     takeover: bool,
     state: &NativeState,
     generation: u64,
 ) -> Result<(), NativeError> {
-    let entity = EntityRef::from_str(&reference).map_err(|error| {
+    let entity = EntityRef::from_str(&target.reference).map_err(|error| {
         NativeError::operation(
             "INVALID_VOICE_REFERENCE",
             "This voice channel reference is invalid. Close and reopen the channel, then try joining again.",
             error,
         )
     })?;
-    if !is_call
-        && (expected_policy.channel_id != entity.id.to_string()
-            || expected_policy.channel_domain != entity.domain.as_str())
+    if !target.is_call
+        && (target.expected_policy.channel_id != entity.id.to_string()
+            || target.expected_policy.channel_domain != entity.domain.as_str())
     {
         return Err(NativeError::local(
             "VOICE_E2EE_POLICY_MISMATCH",
             "The voice channel changed before Kaede could join. Refresh the conversation and try again.",
         ));
     }
-    if expected_policy.e2ee != e2ee_key.is_some() {
+    if target.expected_policy.e2ee != target.e2ee_key.is_some() {
         return Err(NativeError::local(
             "VOICE_E2EE_POLICY_MISMATCH",
             "The voice encryption policy did not match the supplied media key. Nothing was connected.",
@@ -1953,9 +1934,11 @@ async fn join_native_voice_reserved(
         output_device: output,
         publish: media,
     };
-    let media_key = e2ee_key
-        .as_deref()
+    let media_key = target
+        .e2ee_key
+        .as_ref()
         .map(|encoded| {
+            let encoded = encoded.expose_secret();
             let decoded = URL_SAFE_NO_PAD.decode(encoded).map_err(|error| {
                 NativeError::operation(
                     "INVALID_E2EE_MEDIA_KEY",
@@ -1972,16 +1955,19 @@ async fn join_native_voice_reserved(
             Ok(decoded)
         })
         .transpose()?;
-    let mut handle = if is_call {
+    let grant_request = VoiceGrantRequest {
+        sender_device_id: target.sender_device_id.as_deref(),
+        connection_id: &target.connection_id,
+        takeover,
+    };
+    let mut handle = if target.is_call {
         kaede_voice::join_call(
             account.api.clone(),
             &entity,
             media,
-            expected_policy.clone(),
+            target.expected_policy.clone(),
             media_key,
-            sender_device_id.as_deref(),
-            &connection_id,
-            takeover,
+            grant_request,
         )
         .await
     } else {
@@ -1989,11 +1975,9 @@ async fn join_native_voice_reserved(
             account.api.clone(),
             &entity,
             media,
-            expected_policy.clone(),
+            target.expected_policy.clone(),
             media_key,
-            sender_device_id.as_deref(),
-            &connection_id,
-            takeover,
+            grant_request,
         )
         .await
     }
@@ -2005,14 +1989,7 @@ async fn join_native_voice_reserved(
     *state.push_to_talk_sender.lock() = Some(handle.commands.clone());
     *state.voice_video.lock().await = handle.video_frames.take();
     let previous = state.voice.lock().await.replace(handle);
-    *state.voice_target.write().await = Some(VoiceTarget {
-        reference,
-        is_call,
-        expected_policy,
-        e2ee_key: e2ee_key.map(SecretString::from),
-        sender_device_id,
-        connection_id,
-    });
+    *state.voice_target.write().await = Some(target);
     *state.voice_ui.write().await = VoiceUiState::default();
     drop(install_guard);
     if let Some(previous) = previous {
@@ -2135,21 +2112,7 @@ async fn native_media_quality_set(
         None
     };
     if let Some((generation, target)) = restart
-        && let Err(error) = join_native_voice_reserved(
-            target.reference,
-            target.is_call,
-            target.expected_policy,
-            target
-                .e2ee_key
-                .as_ref()
-                .map(|key| key.expose_secret().to_owned()),
-            target.sender_device_id,
-            target.connection_id,
-            false,
-            &state,
-            generation,
-        )
-        .await
+        && let Err(error) = join_native_voice_reserved(target, false, &state, generation).await
     {
         let rollback_result = previous_preferences.save(&state.paths).await;
         *state.preferences.write().await = previous_preferences;
@@ -2309,21 +2272,7 @@ async fn native_preferences_set(
         None
     };
     if let Some((generation, target)) = restart {
-        join_native_voice_reserved(
-            target.reference,
-            target.is_call,
-            target.expected_policy,
-            target
-                .e2ee_key
-                .as_ref()
-                .map(|key| key.expose_secret().to_owned()),
-            target.sender_device_id,
-            target.connection_id,
-            false,
-            &state,
-            generation,
-        )
-        .await?;
+        join_native_voice_reserved(target, false, &state, generation).await?;
     }
     Ok(())
 }
@@ -2705,6 +2654,7 @@ mod tests {
             },
             e2ee_key: None,
             sender_device_id: None,
+            connection_id: "voice-connection".to_owned(),
         }
     }
 

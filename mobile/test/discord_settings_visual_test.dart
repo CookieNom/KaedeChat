@@ -463,7 +463,8 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.textContaining('Keep the welcome channel calm'), findsOneWidget);
+    expect(
+        find.textContaining('Keep the welcome channel calm'), findsOneWidget);
     expect(find.text('CHANGES'), findsOneWidget);
     expect(find.textContaining('Rate limit per user:'), findsOneWidget);
   });

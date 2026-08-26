@@ -273,6 +273,7 @@ class User(Base, FederatedIdMixin, TimestampMixin):
             "federation_introduced_by_domain",
             postgresql_where=text("NOT is_local"),
         ),
+        Index("ix_users_suspended_until", "suspended_until"),
     )
 
 
@@ -301,7 +302,7 @@ class InstanceUserRestriction(Base, TimestampMixin):
             "(restriction_type = 'suspended' AND expires_at IS NOT NULL)",
             name="type_expiry_consistent",
         ),
-        Index("ix_instance_user_restrictions_expiry", "expires_at"),
+        Index("ix_instance_user_restrictions_expires_at", "expires_at"),
     )
 
 

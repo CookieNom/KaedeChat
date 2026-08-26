@@ -163,14 +163,38 @@ async def prepare_thread_permission_fixture(session: AsyncSession) -> None:
     await session.execute(
         text("INSERT INTO instances (domain, is_self) VALUES (:domain, false)"), values
     )
-    await session.execute(
-        text(
-            "INSERT INTO users "
-            "(id, origin_domain, is_local, username) "
-            "VALUES (:owner_id, :domain, false, 'thread_permission_guard')"
-        ),
-        values,
+    has_federation_introducer = bool(
+        (
+            await session.execute(
+                text(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = 'users' "
+                    "AND column_name = 'federation_introduced_by_domain'"
+                    ")"
+                )
+            )
+        ).scalar_one()
     )
+    if has_federation_introducer:
+        await session.execute(
+            text(
+                "INSERT INTO users "
+                "(id, origin_domain, is_local, username, federation_introduced_by_domain) "
+                "VALUES (:owner_id, :domain, false, 'thread_permission_guard', :domain)"
+            ),
+            values,
+        )
+    else:
+        await session.execute(
+            text(
+                "INSERT INTO users "
+                "(id, origin_domain, is_local, username) "
+                "VALUES (:owner_id, :domain, false, 'thread_permission_guard')"
+            ),
+            values,
+        )
     await session.execute(
         text(
             "INSERT INTO guilds (id, origin_domain, name, owner_id, owner_domain) "

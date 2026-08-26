@@ -163,7 +163,7 @@ def test_history_policy_defaults_to_disabled_and_supports_channel_overrides() ->
     assert effective_history_policy(parent, child) == "disabled"
 
 
-def test_new_channel_federation_state_materializes_the_pre_flush_policy_default() -> None:
+def test_new_channel_federation_state_materializes_pre_flush_defaults() -> None:
     new_channel = Channel(
         id=31,
         origin_domain="home.example",
@@ -176,7 +176,13 @@ def test_new_channel_federation_state_materializes_the_pre_flush_policy_default(
         created_floor_id=31,
     )
 
-    assert federation_channel_state(new_channel)["federated_history_policy"] == "inherit"
+    state = federation_channel_state(new_channel)
+
+    assert state["federated_history_policy"] == "inherit"
+    assert state["flags"] == "0"
+    assert state["available_tags"] == []
+    assert state["applied_tag_ids"] == []
+    assert state["e2ee_required"] is False
 
 
 def test_history_policy_schemas_reject_unknown_and_explicit_null_values() -> None:
