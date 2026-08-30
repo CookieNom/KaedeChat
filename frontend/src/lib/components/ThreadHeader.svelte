@@ -15,7 +15,6 @@
   import { guildChannelPath } from '$lib/navigation/routes';
   import Icon from './Icon.svelte';
   import ForumTagEmoji from './ForumTagEmoji.svelte';
-  import ReactionEmoji from './ReactionEmoji.svelte';
 
   let {
     guild,
@@ -90,6 +89,8 @@
   let memberQuery = $state('');
   let renameOpen = $state(false);
   let renameName = $state('');
+  let threadActionsRoot = $state<HTMLElement | null>(null);
+  let threadActionsMenu = $state<HTMLDetailsElement | null>(null);
   const forumPost = $derived(isForumChannel(parent));
   const selectedReaction = $derived(canonicalReactionEmoji(reactionEmoji) ?? '');
   const notificationOptions: Array<{
@@ -149,9 +150,40 @@
     if (!name || name === thread.name || busy) return;
     if ((await onRename(name)) !== false) renameOpen = false;
   }
+
+  function closeThreadActions(restoreFocus = false) {
+    if (!threadActionsMenu?.open) return;
+    threadActionsMenu.open = false;
+    if (restoreFocus) threadActionsMenu.querySelector<HTMLElement>('summary')?.focus();
+  }
+
+  function runThreadAction(action: () => Promise<void> | void) {
+    closeThreadActions();
+    void action();
+  }
+
+  function dismissThreadActions(event: PointerEvent) {
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    for (const details of threadActionsRoot?.querySelectorAll<HTMLDetailsElement>(
+      'details[open]'
+    ) ?? []) {
+      if (!details.contains(target)) details.open = false;
+    }
+  }
+
+  function dismissThreadActionsOnEscape(event: KeyboardEvent) {
+    const details = threadActionsRoot?.querySelector<HTMLDetailsElement>('details[open]');
+    if (!details || event.key !== 'Escape') return;
+    event.preventDefault();
+    details.open = false;
+    details.querySelector<HTMLElement>('summary')?.focus();
+  }
 </script>
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- guildChannelPath resolves the typed route -->
+<svelte:window onpointerdown={dismissThreadActions} onkeydown={dismissThreadActionsOnEscape} />
+
 <div class="thread-detail-header">
   <div class="thread-header">
     <div class="thread-heading">
@@ -168,7 +200,7 @@
         {#if thread.locked}<small>{forumPost ? 'Closed' : 'Locked'}</small>{/if}
       </div>
     </div>
-    <div class="thread-actions">
+    <div bind:this={threadActionsRoot} class="thread-actions">
       <button
         type="button"
         disabled={busy || thread.archived}
@@ -264,22 +296,26 @@
         </details>
       {/if}
       {#if canEdit || canManage || canEnableEncryption || canRekeyEncryption}
-        <details>
+        <details bind:this={threadActionsMenu}>
           <summary aria-label="Thread actions"><Icon name="more" size={19} /></summary>
           <div class="thread-menu">
             {#if canEnableEncryption || canRekeyEncryption}
-              <button type="button" disabled={busy} onclick={() => void onEncryption()}>
+              <button type="button" disabled={busy} onclick={() => runThreadAction(onEncryption)}>
                 {canRekeyEncryption ? 'Secure Current Members' : 'Turn on End-to-End Encryption'}
               </button>
             {/if}
             {#if canEdit}
-              <button type="button" disabled={busy || thread.archived} onclick={startRename}>
+              <button
+                type="button"
+                disabled={busy || thread.archived}
+                onclick={() => runThreadAction(startRename)}
+              >
                 Rename {forumPost ? 'Post' : 'Thread'}
               </button>
               <button
                 type="button"
                 disabled={busy}
-                onclick={() => void onArchive(!thread.archived)}
+                onclick={() => runThreadAction(() => onArchive(!thread.archived))}
               >
                 {thread.archived
                   ? `Unarchive ${forumPost ? 'Post' : 'Thread'}`
@@ -289,7 +325,7 @@
                 <button
                   type="button"
                   disabled={busy || thread.archived}
-                  onclick={() => void onInvitable(!thread.invitable)}
+                  onclick={() => runThreadAction(() => onInvitable(!thread.invitable))}
                 >
                   {thread.invitable ? 'Disable Member Invites' : 'Allow Member Invites'}
                 </button>
@@ -300,12 +336,16 @@
                 <button
                   type="button"
                   disabled={busy || thread.archived}
-                  onclick={() => void onPin(!isPinnedForumPost(thread))}
+                  onclick={() => runThreadAction(() => onPin(!isPinnedForumPost(thread)))}
                 >
                   {isPinnedForumPost(thread) ? 'Unpin Post' : 'Pin Post'}
                 </button>
               {/if}
-              <button type="button" disabled={busy} onclick={() => void onLock(!thread.locked)}>
+              <button
+                type="button"
+                disabled={busy}
+                onclick={() => runThreadAction(() => onLock(!thread.locked))}
+              >
                 {forumPost
                   ? thread.locked
                     ? 'Reopen Post'
@@ -314,7 +354,12 @@
                     ? 'Unlock Thread'
                     : 'Lock Thread'}
               </button>
-              <button class="danger" type="button" disabled={busy} onclick={() => void onDelete()}>
+              <button
+                class="danger"
+                type="button"
+                disabled={busy}
+                onclick={() => runThreadAction(onDelete)}
+              >
                 Delete {forumPost ? 'Post' : 'Thread'}
               </button>
             {/if}
@@ -378,10 +423,15 @@
         class="post-reaction-action"
         class:active={messageHasOwnReaction(starterMessage, selectedReaction)}
         type="button"
+        aria-pressed={messageHasOwnReaction(starterMessage, selectedReaction)}
         disabled={busy || thread.archived || !canReact}
         onclick={reactToPost}
       >
-        <ReactionEmoji value={selectedReaction} />React to Post
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
+        </svg>
+        <span>React to Post</span>
       </button>
     </div>
   {/if}
@@ -492,15 +542,11 @@
 
   .forum-post-actions {
     display: flex;
-    min-height: 48px;
+    min-height: 42px;
     align-items: center;
     border-bottom: 1px solid var(--line);
-    padding: 0.4rem 0.8rem;
+    padding: 0.3rem 0.8rem;
     background: var(--surface);
-  }
-
-  .forum-post-actions .post-reaction-action {
-    margin-top: 0;
   }
 
   .thread-header {

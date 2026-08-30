@@ -367,6 +367,12 @@ p {
   background: var(--surface-hover);
 }
 
+.announcement-follow-button {
+  width: auto;
+  margin-right: 0.15rem;
+  padding-inline: 0.65rem;
+}
+
 .icon-button.e2ee-status-button {
   width: auto;
   padding-inline: 0.65rem;
@@ -6041,22 +6047,37 @@ progress {
 
 .post-reaction-action {
   display: inline-flex;
-  min-height: 32px;
+  min-height: 30px;
   align-items: center;
-  gap: 0.4rem;
-  margin-top: 0.45rem;
+  gap: 0.35rem;
   border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0 0.65rem;
+  border-radius: 6px;
+  padding: 0 0.5rem;
   color: var(--text-soft);
   background: var(--surface-subtle);
-  font-weight: 750;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.post-reaction-action:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-hover);
 }
 
 .post-reaction-action.active {
   border-color: var(--accent);
   color: var(--accent-text);
   background: var(--accent-soft);
+}
+
+.post-reaction-action > svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .webhook-badge {
@@ -9012,6 +9033,16 @@ body.media-viewer-open {
 }
 
 @media (max-width: 740px) {
+  .announcement-follow-button {
+    width: 40px;
+    margin-right: 0;
+    padding: 0;
+  }
+
+  .announcement-follow-button span {
+    display: none;
+  }
+
   .icon-button.e2ee-status-button {
     width: 40px;
     padding: 0;

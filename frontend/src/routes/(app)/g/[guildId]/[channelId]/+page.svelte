@@ -463,6 +463,7 @@
   let mobileNavigationToggle = $state<HTMLButtonElement | null>(null);
   let mobileNavigationDrawer = $state<HTMLElement | null>(null);
   let mobileNavigationClose = $state<HTMLButtonElement | null>(null);
+  let guildNameMenu = $state<HTMLDetailsElement | null>(null);
   let memberRosterOpen = $state(true);
   let profile = $state<{ user: UserSummary; x: number; y: number } | null>(null);
   let moderationDialog = $state<{
@@ -5888,11 +5889,20 @@
 
 <svelte:head><title>{channel?.name ?? 'Channel'} · Kaede Chat</title></svelte:head>
 <svelte:window
-  onclick={() => {
+  onclick={(event) => {
     closeChannelMenu(false);
     closeVoiceMemberMenu();
+    if (guildNameMenu?.open && !guildNameMenu.contains(event.target as Node)) {
+      guildNameMenu.open = false;
+    }
   }}
   onkeydown={(event) => {
+    if (guildNameMenu?.open && event.key === 'Escape') {
+      event.preventDefault();
+      guildNameMenu.open = false;
+      guildNameMenu.querySelector<HTMLElement>('summary')?.focus();
+      return;
+    }
     if (announcementFollowOpen && event.key === 'Escape') {
       event.preventDefault();
       announcementFollowOpen = false;
@@ -6056,7 +6066,7 @@
         <div>
           <p>Guild</p>
           {#if guild}
-            <details class="guild-name-menu">
+            <details bind:this={guildNameMenu} class="guild-name-menu">
               <summary>
                 <span>{guild.name}</span>
                 <Icon name="chevron-down" size={16} />
@@ -6488,6 +6498,8 @@
               type="button"
               aria-haspopup="dialog"
               aria-expanded={announcementFollowOpen}
+              aria-label="Follow announcement channel"
+              title="Follow announcement channel"
               onclick={() => (announcementFollowOpen = true)}
             >
               <Icon name="bell" size={18} /><span>Follow</span>
@@ -6588,7 +6600,11 @@
           )}
         onLock={(locked) =>
           void patchCurrentThread(
-            !locked && channel.archived ? { archived: false, locked } : { locked }
+            locked && forumParent
+              ? { archived: true, locked }
+              : !locked && channel.archived
+                ? { archived: false, locked }
+                : { locked }
           )}
         onMemberChange={changeThreadMember}
         onPin={(pinned) => void patchCurrentThread({ pinned })}

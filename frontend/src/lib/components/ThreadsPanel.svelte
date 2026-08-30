@@ -45,6 +45,7 @@
   let name = $state('');
   let message = $state('');
   let privateThread = $state(false);
+  let panel: HTMLDetailsElement;
   const visibleThreads = $derived(view === 'active' ? activeThreads : archivedThreads);
   const hasMore = $derived(view === 'active' ? activeHasMore : archivedHasMore);
 
@@ -76,10 +77,24 @@
       void onLoadMore(view === 'archived');
     }
   }
+
+  function dismissOnOutsidePointer(event: PointerEvent) {
+    const target = event.target;
+    if (open && target instanceof Node && !panel.contains(target)) open = false;
+  }
+
+  function dismissOnEscape(event: KeyboardEvent) {
+    if (!open || event.key !== 'Escape') return;
+    event.preventDefault();
+    open = false;
+    panel.querySelector<HTMLElement>('summary')?.focus();
+  }
 </script>
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- guildChannelPath resolves the typed route -->
-<details class="threads-panel" bind:open ontoggle={opened}>
+<svelte:window onpointerdown={dismissOnOutsidePointer} onkeydown={dismissOnEscape} />
+
+<details bind:this={panel} class="threads-panel" bind:open ontoggle={opened}>
   <summary class="icon-button" aria-label="Threads" title="Threads">
     <Icon name="threads" size={19} />
   </summary>

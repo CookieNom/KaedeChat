@@ -84,6 +84,7 @@
   let emojiPickerOpen = $state(false);
   let fileInput = $state<HTMLInputElement | null>(null);
   let messageInput = $state<HTMLTextAreaElement | null>(null);
+  let sortViewMenu = $state<HTMLDetailsElement | null>(null);
   let configuredForum = '';
   let emittedFilters = '';
 
@@ -204,9 +205,28 @@
     const target = event.currentTarget as HTMLElement;
     if (target.scrollHeight - target.scrollTop - target.clientHeight < 360) void onLoadMore();
   }
+
+  function dismissSortViewOnOutsidePointer(event: PointerEvent) {
+    const target = event.target;
+    if (sortViewMenu?.open && target instanceof Node && !sortViewMenu.contains(target)) {
+      sortViewMenu.open = false;
+    }
+  }
+
+  function dismissSortViewOnEscape(event: KeyboardEvent) {
+    if (!sortViewMenu?.open || event.key !== 'Escape') return;
+    event.preventDefault();
+    sortViewMenu.open = false;
+    sortViewMenu.querySelector<HTMLElement>('summary')?.focus();
+  }
 </script>
 
 <!-- eslint-disable svelte/no-navigation-without-resolve -- guildChannelPath resolves the typed route -->
+<svelte:window
+  onpointerdown={dismissSortViewOnOutsidePointer}
+  onkeydown={dismissSortViewOnEscape}
+/>
+
 <section
   class:compact
   class="forum-view"
@@ -219,7 +239,7 @@
         <Icon name="search" size={19} />
         <input bind:value={query} aria-label="Search post titles" placeholder="Search" />
       </label>
-      <details class="sort-view-menu">
+      <details bind:this={sortViewMenu} class="sort-view-menu">
         <summary>↕ Sort &amp; View <Icon name="chevron-down" size={15} /></summary>
         <div class="sort-view-popover">
           <fieldset>
