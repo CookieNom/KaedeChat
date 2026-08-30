@@ -97,7 +97,7 @@ copy for its jurisdiction and supplied all six public build-time fields:
 - `KAEDE_LEGAL_INSTANCE_NAME` — the instance name users recognize;
 - `KAEDE_LEGAL_OPERATOR_NAME` — the operator's real legal identity;
 - `KAEDE_LEGAL_CONTACT_EMAIL` — a monitored address for legal, privacy, and
-  account-closure requests;
+  account-access requests;
 - `KAEDE_LEGAL_EFFECTIVE_DATE` — a real `YYYY-MM-DD` policy date;
 - `KAEDE_LEGAL_MINIMUM_AGE` — an integer from 1 through 120; and
 - `KAEDE_LEGAL_JURISDICTION` — the governing jurisdiction selected by the
@@ -107,9 +107,12 @@ These values are embedded into the public static frontend and are not secrets.
 A custom build fails if any field is absent or malformed; a partially filled
 policy also fails under the default landing. Changing the landing variant or
 any legal field requires rebuilding `frontend-build`. Kaede currently has no
-self-service account-deletion control, so the supplied policy directs closure
-and deletion requests to `KAEDE_LEGAL_CONTACT_EMAIL`. Do not claim a settings
-workflow unless the deployment actually adds and verifies one.
+full account export, account migration, or self-service account-deletion
+control. The supplied policy says so and directs privacy and account-disabling
+requests to `KAEDE_LEGAL_CONTACT_EMAIL`; it does not promise that contacting the
+operator automatically deletes stored or federated data. Do not claim a
+settings workflow or deletion outcome unless the deployment actually adds and
+verifies one.
 
 Before starting any service, validate both the file itself and the effective
 application environment:

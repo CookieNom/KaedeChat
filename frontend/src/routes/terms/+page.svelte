@@ -16,8 +16,9 @@
         agree, please do not use the service.
       </p>
       <p>
-        Kaede is the open source software that powers the Instance. These Terms govern our operation
-        of that software, not the software itself, which is distributed under its own licence.
+        Kaede is the software that powers the Instance. These Terms govern your use of this
+        Instance, not your use of the Kaede source code or third-party components under their
+        separate terms.
       </p>
     </section>
 
@@ -34,7 +35,9 @@
           Keep your credentials private. We cannot verify every message, so never share your
           password or codes.
         </li>
-        <li>You may create one account per person. One person, one account.</li>
+        <li>
+          This Instance secures your account and provides the domain used in your federated handle.
+        </li>
       </ul>
     </section>
 
@@ -56,9 +59,10 @@
       <h2>4. Your content</h2>
       <p>
         You keep the rights to what you post. By posting, you give us a limited, non-exclusive
-        licence to store, display, and transmit your content on the Instance and to federate it to
-        other Kaede instances where that is permitted. You also agree that the content you share is
-        something you have the right to share.
+        licence to store, process, display, and transmit your content as needed to operate the
+        Instance. This includes sending content and related account information to other Kaede
+        instances when you use federated communities or conversations. You also agree that the
+        content you share is something you have the right to share.
       </p>
       <p>
         You are responsible for your own content. We may remove content that violates these Terms,
@@ -67,20 +71,26 @@
     </section>
 
     <section>
-      <h2>5. What we store, and what we do not</h2>
+      <h2>5. Storage, encryption, and third parties</h2>
       <p>
-        We store the content of your messages and media so the service can work. We do not sell your
-        data, and we do not run advertising on the Instance. For the full picture of what we collect
-        and why, see our <a href={resolve('/privacy')}>privacy policy</a>.
+        The Instance stores account information, messages, media, and service metadata so Kaede can
+        work. Supported rooms may use end-to-end encryption, but account, membership, delivery, and
+        moderation metadata are not end-to-end encrypted. Optional features may use infrastructure
+        or integration providers. See our <a href={resolve('/privacy')}>privacy policy</a> for the data
+        flows and choices that apply.
+      </p>
+      <p>
+        If you use end-to-end encryption, keep any recovery material safe. We cannot guarantee that
+        encrypted content or keys can be recovered after you lose your devices or credentials.
       </p>
     </section>
 
     <section>
       <h2>6. Moderation</h2>
       <p>
-        Moderators on the Instance may move, edit, delete, or report content and members in line
-        with these Terms and any channel- or community-specific rules. Where we suspend or remove an
-        account, we aim to explain why when it is safe to do so.
+        Moderators may delete content, remove members, restrict accounts, and act on reports in line
+        with these Terms and any community-specific rules. Moderation of a federated interaction may
+        also involve the operator of another instance. We may act without advance notice.
       </p>
     </section>
 
@@ -89,39 +99,39 @@
       <p>
         The Instance is provided “as is” and “as available.” We work to keep it reliable, but we do
         not guarantee it will be uninterrupted or error-free. We may change, suspend, or discontinue
-        parts of the service, and we may update these Terms. If a change is material, we will give
-        notice in the Instance before it takes effect.
+        parts of the service, and we may update these Terms. The effective date at the top
+        identifies the published version; check it for changes.
       </p>
     </section>
 
     <section>
       <h2>8. Termination</h2>
       <p>
-        To request account closure, email
+        To ask us to disable your account or discuss a data request, email
         <a href={`mailto:${operatorLegalConfig.contactEmail}`}>{operatorLegalConfig.contactEmail}</a
-        >. We may suspend or terminate an account that breaches these Terms. Sections that by their
-        nature should survive termination — including Sections 4, 5, and 11 — remain in effect after
-        an account ends.
+        >. A request does not remove copies already delivered to another instance, content retained
+        by other members, or records we must keep. We may suspend or disable an account that
+        breaches these Terms. Provisions that by their nature continue after access ends remain in
+        effect.
       </p>
     </section>
 
     <section>
       <h2>9. Intellectual property</h2>
       <p>
-        The Instance, its branding, and content we own are ours. Kaede is open source software and
-        is not affected by this section. You may not use our name or marks in a way that suggests we
-        endorse you without our permission.
+        The Instance’s branding and content we own remain ours. Kaede and third-party components are
+        governed by their separate terms. You may not use our name or marks in a way that suggests
+        we endorse you without our permission.
       </p>
     </section>
 
     <section>
       <h2>10. Disclaimers and limitation of liability</h2>
       <p>
-        To the extent allowed by law, we are not liable for indirect, incidental, or consequential
-        damages, or for any loss of data, that result from your use of the Instance. Our total
-        liability to you for any claim is limited to the greatest amount the law allows. Nothing in
-        these Terms limits liability that cannot be limited by law, including for death, personal
-        injury, or fraud.
+        To the maximum extent permitted by law, we disclaim implied warranties and are not liable
+        for indirect, incidental, special, consequential, or punitive damages, or for lost data
+        arising from use of the Instance. Nothing in these Terms excludes or limits liability that
+        applicable law does not allow us to exclude or limit.
       </p>
     </section>
 
@@ -139,7 +149,7 @@
       <p>
         Questions about these Terms? Reach us at
         <a href={`mailto:${operatorLegalConfig.contactEmail}`}>{operatorLegalConfig.contactEmail}</a
-        >. We read the messages and we reply.
+        >.
       </p>
     </section>
   </LegalPage>

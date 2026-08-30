@@ -1,6 +1,7 @@
 import { api } from '$lib/api/client';
 import { uploadObject, type UploadTicket, type VoiceUploadMetadata } from '$lib/media/uploads';
 import { attachmentMediaPath, authenticatedMediaBlob } from '$lib/media/authenticated';
+import { scrubImageMetadata } from '$lib/media/privacy-metadata';
 import {
   base64url,
   clearBytes,
@@ -81,6 +82,7 @@ export async function encryptFile(
   file: Blob & { name?: string; type: string },
   chunkSize = DEFAULT_CHUNK_SIZE
 ): Promise<{ ciphertext: Blob; manifest: EncryptedFileManifest }> {
+  file = await scrubImageMetadata(file);
   if (!Number.isInteger(chunkSize) || chunkSize < 64 * 1024 || chunkSize > 1024 * 1024) {
     throw new TypeError('Invalid encrypted file chunk size.');
   }

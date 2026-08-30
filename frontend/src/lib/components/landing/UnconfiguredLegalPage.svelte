@@ -8,7 +8,7 @@
   <section>
     <h2>No operator policy is published</h2>
     <p>
-      This build does not include an operator-authored {policy}. This notice is not a {policy} and does
+      This build does not include an operator-reviewed {policy}. This notice is not a {policy} and does
       not create terms for an instance operator. Ask the operator of the instance you use for its current
       policies and contact details.
     </p>

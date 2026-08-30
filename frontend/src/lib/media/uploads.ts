@@ -1,6 +1,7 @@
 import { api } from '$lib/api/client';
 import { isNativeDesktop, nativeInvokeBytes } from '$lib/platform/native';
 import type { EncryptedFileManifest } from '$lib/e2ee/media';
+import { scrubImageMetadata } from './privacy-metadata';
 
 export interface UploadTicket {
   id: string;
@@ -40,12 +41,13 @@ function uploadStatusMessage(status: number): string {
   return 'Media storage could not accept the file. Choose the file again and retry.';
 }
 
-export function uploadObject(
+export async function uploadObject(
   ticket: UploadTicket,
   file: File,
   onProgress: (progress: number) => void,
   signal?: AbortSignal
 ): Promise<void> {
+  file = await scrubImageMetadata(file);
   if (isNativeDesktop()) {
     return (async () => {
       if (signal?.aborted) throw new DOMException('Upload cancelled', 'AbortError');

@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
+import 'package:kaede_mobile/src/api/privacy_metadata.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -236,6 +237,8 @@ Future<_EncryptedFile> _encryptFile(
           .hasMatch(safeContentType)) {
     throw const FormatException('Encrypted file metadata is invalid.');
   }
+  final prepared = await prepareImageFile(source, contentType);
+  source = prepared.file;
   final fileId = _random(16);
   final rawKey = _random(32);
   final salt = _random(16);
@@ -318,6 +321,7 @@ Future<_EncryptedFile> _encryptFile(
     rawKey.fillRange(0, rawKey.length, 0);
     await inputHandle.close();
     await outputHandle.close();
+    await prepared.dispose();
   }
 }
 

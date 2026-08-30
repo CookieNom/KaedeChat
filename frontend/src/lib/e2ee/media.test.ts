@@ -16,6 +16,13 @@ describe('encrypted attachments', () => {
       webcrypto.getRandomValues(
         contents.subarray(offset, Math.min(contents.length, offset + 65_536))
       );
+    contents.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    const imageDataLength = contents.length - 32;
+    const view = new DataView(contents.buffer);
+    view.setUint32(8, imageDataLength);
+    contents.set([73, 68, 65, 84], 12);
+    const end = 20 + imageDataLength;
+    contents.set([0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130], end);
     const file = Object.assign(new Blob([contents], { type: 'image/png' }), {
       name: 'private-photo.png'
     });

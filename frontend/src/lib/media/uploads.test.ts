@@ -41,7 +41,10 @@ function ticket(): UploadTicket {
 }
 
 describe('media upload contracts', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    FakeXMLHttpRequest.latest = null;
+    vi.unstubAllGlobals();
+  });
 
   it('keeps API snowflakes as strings', () => {
     expect(typeof ticket().id).toBe('string');
@@ -63,11 +66,12 @@ describe('media upload contracts', () => {
     const controller = new AbortController();
     const request = uploadObject(
       ticket(),
-      new File(['content'], 'paper.png', { type: 'image/png' }),
+      new File(['content'], 'paper.bin', { type: 'application/octet-stream' }),
       vi.fn(),
       controller.signal
     );
 
+    await vi.waitFor(() => expect(FakeXMLHttpRequest.latest).not.toBeNull());
     controller.abort();
 
     await expect(request).rejects.toMatchObject({ name: 'AbortError' });
@@ -78,9 +82,11 @@ describe('media upload contracts', () => {
     vi.stubGlobal('XMLHttpRequest', FakeXMLHttpRequest as unknown as typeof XMLHttpRequest);
     const request = uploadObject(
       ticket(),
-      new File(['content'], 'paper.png', { type: 'image/png' }),
+      new File(['content'], 'paper.bin', { type: 'application/octet-stream' }),
       vi.fn()
     );
+
+    await vi.waitFor(() => expect(FakeXMLHttpRequest.latest).not.toBeNull());
 
     FakeXMLHttpRequest.latest?.onerror?.();
 
@@ -93,9 +99,10 @@ describe('media upload contracts', () => {
     vi.stubGlobal('XMLHttpRequest', FakeXMLHttpRequest as unknown as typeof XMLHttpRequest);
     const request = uploadObject(
       ticket(),
-      new File(['content'], 'paper.png', { type: 'image/png' }),
+      new File(['content'], 'paper.bin', { type: 'application/octet-stream' }),
       vi.fn()
     );
+    await vi.waitFor(() => expect(FakeXMLHttpRequest.latest).not.toBeNull());
     if (FakeXMLHttpRequest.latest) FakeXMLHttpRequest.latest.status = 403;
 
     FakeXMLHttpRequest.latest?.onload?.();

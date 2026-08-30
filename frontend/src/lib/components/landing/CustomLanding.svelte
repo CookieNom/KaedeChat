@@ -1,5 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
+  import { operatorLegalConfig } from '$lib/branding/landing';
   import Icon from '$lib/components/Icon.svelte';
 
   const year = new Date().getFullYear();
@@ -12,8 +13,8 @@
     },
     {
       icon: 'headphones' as const,
-      title: 'Voice & video that just work',
-      body: 'Hop into a voice room, start a video call, or share your screen. No dial-in codes, no waiting in a lobby.'
+      title: 'Voice, video & screen sharing',
+      body: 'When voice service is enabled, community rooms and calls can include audio, camera video, and screen sharing.'
     },
     {
       icon: 'image' as const,
@@ -22,46 +23,48 @@
     },
     {
       icon: 'globe' as const,
-      title: 'Federated by design',
-      body: 'Your handle works the way an email address does. Move between instances without rebuilding who you are.'
+      title: 'One home, many communities',
+      body: 'Your account stays on the instance where you registered, while federation lets you join supported communities and conversations on other Kaede instances.'
     },
     {
       icon: 'lock' as const,
-      title: 'End-to-end encryption',
-      body: 'For the rooms where it matters, messages are encrypted so that only the people in the room can read them.'
+      title: 'Optional end-to-end encryption',
+      body: 'Supported rooms can encrypt message content and media for their participants. Encryption does not hide account, delivery, membership, or other service metadata.'
     },
     {
       icon: 'server' as const,
-      title: 'Self-hosted',
-      body: 'The whole platform runs on hardware we manage. The source is public, so you can check that it does what it says.'
+      title: 'Independent instances',
+      body: 'Each Kaede instance has its own operator, infrastructure, moderation, configuration, and policies. Features and data practices can differ between instances.'
     }
   ];
 
   const principles = [
     {
-      title: 'We run the servers',
-      body: 'This instance is operated by hand. The hardware, the moderation, and the policies are ours, and they are ours to answer for.'
+      title: 'Know your operator',
+      body: operatorLegalConfig
+        ? `${operatorLegalConfig.operatorName} operates ${operatorLegalConfig.instanceName}. Its infrastructure may include service providers described in the privacy policy.`
+        : 'The operator of your home instance controls its infrastructure, moderation, and policies.'
     },
     {
-      title: 'Your account is portable',
-      body: 'Because Kaede federates, your handle and your identity travel with you if you ever decide to leave for another instance.'
+      title: 'Your identity has a home',
+      body: 'Your account is secured by this instance, and your domain-based handle identifies you across compatible Kaede communities.'
     },
     {
-      title: 'The rules are written down',
-      body: 'Our terms of service and privacy policy are short, plain, and linked below. When something changes, we say so in the open.'
+      title: 'Federation shares data',
+      body: 'Using remote communities or contacting remote users sends the data needed for those interactions to other instances, whose operators have their own policies.'
     },
     {
-      title: 'You can always export',
-      body: 'Your messages and media belong to you. We do not lock them in, and we do not sell them.'
+      title: 'You have practical controls',
+      body: 'You can update your profile and preferences, delete supported messages and media, manage notifications, and export an encrypted recovery bundle.'
     }
   ];
 </script>
 
 <svelte:head>
-  <title>Kaede Chat — a home for real conversation</title>
+  <title>Kaede Chat — federated community chat</title>
   <meta
     name="description"
-    content="Self-hosted, federated chat with voice, video, files, and end-to-end encryption. Run on servers we operate, open source, and free to join."
+    content="Federated community chat with text, files, and optional voice, video, and end-to-end encryption."
   />
 </svelte:head>
 
@@ -70,7 +73,7 @@
     <a class="wordmark" href={resolve('/')}><span>K</span>Kaede Chat</a>
     <nav aria-label="Page">
       <a href="#features">Features</a>
-      <a href="#how-we-run">How we run it</a>
+      <a href="#how-we-run">What to know</a>
       <a href="#hosting">Hosting</a>
       <a class="cl-signin" href={resolve('/login')}>Sign in</a>
       <a class="secondary-button" href={resolve('/register')}>Create account</a>
@@ -78,11 +81,12 @@
   </header>
 
   <section class="cl-hero">
-    <span class="landing-pill"><i></i>Self-hosted · Federated · Open source</span>
-    <h1>Where <em>our</em> conversations live.</h1>
+    <span class="landing-pill"><i></i>Federated community chat</span>
+    <h1>A place for <em>our</em> conversations.</h1>
     <p>
-      Kaede runs on servers we operate. It is a complete chat platform — text, voice, video, and
-      files for communities that would rather answer to people than to an ad team.
+      Kaede brings text channels, direct messages, files, and community tools together. Voice,
+      video, screen sharing, search, and encrypted rooms are available when this instance enables
+      them.
     </p>
     <div class="welcome-actions cl-cta">
       <a class="primary-button large-button" href={resolve('/register')}>
@@ -90,7 +94,7 @@
       </a>
       <a class="secondary-button large-button" href={resolve('/login')}>Sign in</a>
     </div>
-    <p class="cl-assure">Free to join · No ad tracking · You can read the source</p>
+    <p class="cl-assure">Your account stays on this instance · Remote interactions federate</p>
 
     <div class="cl-preview" role="img" aria-label="A preview of a Kaede channel">
       <div class="cl-preview-bar">
@@ -128,24 +132,24 @@
   <section class="cl-trust">
     <div>
       <span><Icon name="server" size={18} /></span>
-      <p>Runs on servers we operate</p>
+      <p>Operated by {operatorLegalConfig?.operatorName ?? 'this instance’s operator'}</p>
     </div>
     <div>
       <span><Icon name="globe" size={18} /></span>
-      <p>Federated — join from any Kaede instance</p>
+      <p>Federated with compatible Kaede instances</p>
     </div>
     <div>
       <span><Icon name="headphones" size={18} /></span>
-      <p>Text, voice, video &amp; screen share</p>
+      <p>Features depend on instance configuration</p>
     </div>
   </section>
 
   <section class="cl-section" id="features">
     <div class="cl-section-head">
-      <h2>Everything a community needs, nothing it doesn’t</h2>
+      <h2>Built for community conversation</h2>
       <p>
-        Kaede is not a stripped-down chat with an afterthought bolted on. The things people expect
-        from a good chat app are here and they work.
+        Kaede supports everyday community chat across web, desktop, and mobile. Some features
+        require services that an instance operator may leave disabled.
       </p>
     </div>
     <div class="cl-grid">
@@ -161,10 +165,8 @@
 
   <section class="cl-section cl-section-alt" id="how-we-run">
     <div class="cl-section-head">
-      <h2>How we run it</h2>
-      <p>
-        A few things we think you should know before you settle in. None of this is small print.
-      </p>
+      <h2>What to know</h2>
+      <p>The practical limits matter. Here is what the software supports today.</p>
     </div>
     <ol class="cl-principles">
       {#each principles as principle, index (principle.title)}
@@ -183,12 +185,11 @@
     <div class="cl-host">
       <span class="cl-host-icon"><Icon name="shield" /></span>
       <div class="cl-host-copy">
-        <h2>Running Kaede is a thing you can do</h2>
+        <h2>Kaede can run as an independent instance</h2>
         <p>
-          Kaede is open source and free to self-host. If you want a place like this for your own
-          community, the source, the deployment guides, and a reference configuration are all
-          public. You get to choose the operator, the policies, and the hardware — and your
-          community can reach us through federation either way.
+          The project includes deployment guides and a reference configuration for operating your
+          own instance. An operator is responsible for its hosting, storage, moderation, security,
+          legal obligations, and any optional third-party services it enables.
         </p>
       </div>
     </div>
@@ -197,8 +198,8 @@
   <section class="cl-cta-band">
     <h2>Come say hello.</h2>
     <p>
-      Create an account, find a community, and claim your corner. Already have a handle? Sign in and
-      pick up where you left off.
+      Create an account on this instance, or sign in with an account registered here. Accounts from
+      another instance are not used to sign in here.
     </p>
     <div class="welcome-actions cl-cta">
       <a class="primary-button large-button" href={resolve('/register')}>
@@ -211,7 +212,10 @@
   <footer class="cl-footer">
     <div class="cl-footer-brand">
       <a class="wordmark" href={resolve('/')}><span>K</span>Kaede Chat</a>
-      <p>A home for real conversation, run on servers we operate.</p>
+      <p>
+        Federated community chat operated by {operatorLegalConfig?.operatorName ??
+          'this instance’s operator'}.
+      </p>
     </div>
     <nav class="cl-footer-links" aria-label="Footer">
       <a href={resolve('/terms')}>Terms of service</a>
@@ -220,7 +224,7 @@
       <a href={resolve('/register')}>Create account</a>
     </nav>
     <p class="cl-footer-note">
-      © {year} · Operated on our own servers. Kaede is open source software.
+      © {year} · Review the terms and privacy policy for this instance before registering.
     </p>
   </footer>
 </main>

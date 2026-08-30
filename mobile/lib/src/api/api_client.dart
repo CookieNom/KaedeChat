@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:kaede_mobile/src/api/privacy_metadata.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/network_json.dart';
@@ -240,6 +241,7 @@ final class KaedeApiClient {
     List<int> bytes, {
     required String contentType,
   }) async {
+    bytes = await scrubImageMetadata(bytes, contentType);
     final uri = _safeExternalUri(url, purpose: 'upload');
     try {
       final response = await uploadClient.put<Object?>(
@@ -282,6 +284,8 @@ final class KaedeApiClient {
     required String contentType,
     void Function(int sent, int total)? onProgress,
   }) async {
+    final prepared = await prepareImageFile(file, contentType);
+    file = prepared.file;
     final uri = _safeExternalUri(url, purpose: 'upload');
     final client = _fileHttpClient();
     try {
@@ -321,6 +325,8 @@ final class KaedeApiClient {
                 : 'Kaede could not reach attachment storage. Check your connection and try again.',
         status: 502,
       );
+    } finally {
+      await prepared.dispose();
     }
   }
 
