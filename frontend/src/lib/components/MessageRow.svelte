@@ -102,6 +102,10 @@
     onEdit,
     canReact = false,
     canReactToExisting = false,
+    showPostFooter = false,
+    postFollowing = false,
+    postFollowDisabled = false,
+    onPostFollow,
     customEmojis = [],
     reactionUserKey = '',
     onToggleReaction,
@@ -151,6 +155,10 @@
     onDelete?: (message: Message) => void;
     canReact?: boolean;
     canReactToExisting?: boolean;
+    showPostFooter?: boolean;
+    postFollowing?: boolean;
+    postFollowDisabled?: boolean;
+    onPostFollow?: (following: boolean) => Promise<void> | void;
     customEmojis?: CustomEmojiOption[];
     reactionUserKey?: string;
     onToggleReaction?: (message: Message, emoji: string, remove: boolean) => void;
@@ -216,7 +224,9 @@
   let mediaAttempts = $state<Record<string, number>>({});
   let attachmentActionError = $state('');
   let menuListenersActive = false;
+  let reactionPickerOnly = false;
   const closeExclusiveMenu = (restoreFocus: boolean) => closeMenu(restoreFocus);
+  const reactionEntries = $derived(Object.entries(message.reaction_counts ?? {}));
   const stageSystemNotice = $derived([27, 28, 29, 31].includes(message.message_type));
   const pinSystemNotice = $derived(message.message_type === 6);
   const channelFollowSystemNotice = $derived(message.message_type === 12);
@@ -427,20 +437,27 @@
     );
   }
 
-  function showMenu(pointerX: number, pointerY: number, trigger: HTMLElement | null) {
+  function showMenu(
+    pointerX: number,
+    pointerY: number,
+    trigger: HTMLElement | null,
+    pickerOnly = false
+  ) {
     dismissFloatingLayers();
     claimMessageMenu(closeExclusiveMenu);
     menuAnchorX = pointerX;
     menuAnchorY = pointerY;
     menuTrigger = trigger;
+    reactionPickerOpen = pickerOnly;
+    reactionPickerOnly = pickerOnly;
     menuOpen = true;
     addMenuListeners();
     void tick().then(() => {
-      reactionPickerOpen = false;
       recentReactionValues = recentReactions(reactionUserKey);
       if (!menuOpen || !menuElement) return;
       placeContextMenu(menuElement, pointerX, pointerY);
-      menuItems()[0]?.focus();
+      if (reactionPickerOpen) menuElement.querySelector<HTMLInputElement>('input')?.focus();
+      else menuItems()[0]?.focus();
     });
   }
 
@@ -541,7 +558,7 @@
     if (!state || (!state.remove && !canReact && !(canReactToExisting && state.exists))) return;
     reactionBusy = true;
     if (!state.remove) rememberReaction(reactionUserKey, state.emoji);
-    closeMenu(false);
+    closeMenu(reactionPickerOnly);
     try {
       await onToggleReaction(message, state.emoji, state.remove);
     } finally {
@@ -551,12 +568,21 @@
 
   function openReactionPicker(event: MouseEvent) {
     event.stopPropagation();
+    reactionPickerOnly = false;
     reactionPickerOpen = true;
     void tick().then(() => {
       if (menuOpen && menuElement) {
         placeContextMenu(menuElement, menuAnchorX, menuAnchorY);
+        menuElement.querySelector<HTMLInputElement>('input')?.focus();
       }
     });
+  }
+
+  function openInlineReactionPicker(event: MouseEvent) {
+    event.stopPropagation();
+    const trigger = event.currentTarget as HTMLButtonElement;
+    const bounds = trigger.getBoundingClientRect();
+    showMenu(bounds.left, bounds.bottom, trigger, true);
   }
 
   function openReactionViewer(event: MouseEvent) {
@@ -678,6 +704,10 @@
     return `${window.location.origin}${window.location.pathname}${window.location.search}#message-${entityRef(message)}`;
   }
 
+  function postLink(): string {
+    return `${window.location.origin}${window.location.pathname}${window.location.search}`;
+  }
+
   function closeMenu(restoreFocus = true) {
     if (!menuOpen) return;
     menuOpen = false;
@@ -686,6 +716,7 @@
     releaseMessageMenu(closeExclusiveMenu);
     const trigger = menuTrigger;
     reactionPickerOpen = false;
+    reactionPickerOnly = false;
     menuTrigger = null;
     if (restoreFocus && trigger?.isConnected) void tick().then(() => trigger.focus());
   }
@@ -1254,23 +1285,6 @@
         <p class="form-error" role="alert">{attachmentActionError}</p>
       {/if}
     {/if}
-    {#if !message.deleted_at && Object.keys(message.reaction_counts ?? {}).length}
-      <div class="message-reactions" aria-label="Message reactions">
-        {#each Object.entries(message.reaction_counts ?? {}) as [emoji, count] (emoji)}
-          <button
-            class:active={messageHasOwnReaction(message, emoji)}
-            type="button"
-            disabled={!onToggleReaction ||
-              reactionBusy ||
-              (!canReact && !canReactToExisting && !messageHasOwnReaction(message, emoji))}
-            aria-label={`${messageHasOwnReaction(message, emoji) ? 'Remove' : 'Add'} ${emoji} reaction, ${count}`}
-            onclick={(event) => void toggleReaction(emoji, event)}
-          >
-            <ReactionEmoji value={emoji} /><span>{count}</span>
-          </button>
-        {/each}
-      </div>
-    {/if}
     {#if isPublishedAnnouncement(message) || message.edited_at || message.failed || message.delivery_status === 'failed' || message.delivery_status === 'retrying' || message.queued}
       <div class="message-meta-actions">
         {#if isPublishedAnnouncement(message)}<small>📣 Published</small>{/if}
@@ -1294,6 +1308,75 @@
       </div>
     {/if}
   </div>
+  {#if !message.deleted_at && (reactionEntries.length || showPostFooter)}
+    <div class:post-footer={showPostFooter} class="message-footer-actions">
+      <div class="message-reactions" aria-label="Message reactions">
+        {#each reactionEntries as [emoji, count] (emoji)}
+          <button
+            class:active={messageHasOwnReaction(message, emoji)}
+            type="button"
+            disabled={!onToggleReaction ||
+              reactionBusy ||
+              (!canReact && !canReactToExisting && !messageHasOwnReaction(message, emoji))}
+            aria-label={`${messageHasOwnReaction(message, emoji) ? 'Remove' : 'Add'} ${emoji} reaction, ${count}`}
+            onclick={(event) => void toggleReaction(emoji, event)}
+          >
+            <ReactionEmoji value={emoji} /><span>{count}</span>
+          </button>
+        {/each}
+        {#if showPostFooter && canReact && onToggleReaction}
+          <button
+            class:labeled={!reactionEntries.length}
+            class="add-reaction"
+            type="button"
+            disabled={reactionBusy}
+            aria-label={reactionEntries.length ? 'Add reaction' : 'React to Post'}
+            title={reactionEntries.length ? 'Add reaction' : 'React to Post'}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen && reactionPickerOpen}
+            aria-controls={menuOpen ? `${domIdPrefix}-actions-${entityRef(message)}` : undefined}
+            onclick={openInlineReactionPicker}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
+            </svg>
+            {#if !reactionEntries.length}<span>React to Post</span>{/if}
+          </button>
+        {/if}
+      </div>
+      {#if showPostFooter}
+        <div class="post-footer-controls">
+          {#if onPostFollow}
+            <button
+              class="post-follow-action"
+              type="button"
+              disabled={postFollowDisabled}
+              aria-pressed={postFollowing}
+              onclick={() => void onPostFollow?.(!postFollowing)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
+              </svg>
+              <span>{postFollowing ? 'Following' : 'Follow'}</span>
+            </button>
+          {/if}
+          <button
+            class="post-link-action"
+            type="button"
+            aria-label="Copy post link"
+            title="Copy post link"
+            onclick={(event) => void copy(postLink(), event)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2" />
+              <path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2" />
+            </svg>
+          </button>
+        </div>
+      {/if}
+    </div>
+  {/if}
   {#if menuOpen}
     <div
       use:portal
@@ -1311,7 +1394,10 @@
         <ReactionPicker
           {customEmojis}
           onSelect={(value) => void toggleReaction(value)}
-          onClose={() => (reactionPickerOpen = false)}
+          onClose={() => {
+            if (reactionPickerOnly) closeMenu(true);
+            else reactionPickerOpen = false;
+          }}
         />
       {:else}
         {#if !groupSystemNotice}

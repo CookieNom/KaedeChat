@@ -1,16 +1,8 @@
 <script lang="ts">
   import { entityKey } from '$lib/chat/refs';
   import type { CustomEmojiOption } from '$lib/chat/emojis';
-  import { canonicalReactionEmoji, messageHasOwnReaction } from '$lib/chat/reactions';
   import { isForumChannel, isPinnedForumPost } from '$lib/chat/threads';
-  import type {
-    Channel,
-    ForumTag,
-    Guild,
-    GuildMemberSummary,
-    Message,
-    ThreadMember
-  } from '$lib/chat/types';
+  import type { Channel, ForumTag, Guild, GuildMemberSummary, ThreadMember } from '$lib/chat/types';
   import { userDisplayName } from '$lib/chat/users';
   import { guildChannelPath } from '$lib/navigation/routes';
   import Icon from './Icon.svelte';
@@ -22,9 +14,6 @@
     parent,
     joined = false,
     notificationLevel = 'inherit',
-    starterMessage = null,
-    reactionEmoji = '👍',
-    canReact = false,
     canEdit = false,
     canManage = false,
     canInviteMembers = false,
@@ -39,7 +28,6 @@
     customEmojis = [],
     onMembership,
     onNotifications,
-    onReaction,
     onRename,
     onEncryption,
     onInvitable,
@@ -55,9 +43,6 @@
     parent: Channel | null;
     joined?: boolean;
     notificationLevel?: ThreadMember['notification_level'];
-    starterMessage?: Message | null;
-    reactionEmoji?: string;
-    canReact?: boolean;
     canEdit?: boolean;
     canManage?: boolean;
     canInviteMembers?: boolean;
@@ -74,7 +59,6 @@
     onNotifications: (
       level: NonNullable<ThreadMember['notification_level']>
     ) => Promise<void> | void;
-    onReaction: (message: Message, emoji: string, remove: boolean) => Promise<void> | void;
     onRename: (name: string) => Promise<boolean | void> | boolean | void;
     onEncryption: () => Promise<void> | void;
     onInvitable: (invitable: boolean) => Promise<void> | void;
@@ -92,7 +76,6 @@
   let threadActionsRoot = $state<HTMLElement | null>(null);
   let threadActionsMenu = $state<HTMLDetailsElement | null>(null);
   const forumPost = $derived(isForumChannel(parent));
-  const selectedReaction = $derived(canonicalReactionEmoji(reactionEmoji) ?? '');
   const notificationOptions: Array<{
     value: NonNullable<ThreadMember['notification_level']>;
     label: string;
@@ -128,15 +111,6 @@
         ? [...current, tagId]
         : current;
     if (next !== current) void onTagsChange(next);
-  }
-
-  function reactToPost() {
-    if (!starterMessage || !selectedReaction || thread.archived || !canReact) return;
-    void onReaction(
-      starterMessage,
-      selectedReaction,
-      messageHasOwnReaction(starterMessage, selectedReaction)
-    );
   }
 
   function startRename() {
@@ -187,30 +161,34 @@
 <div class="thread-detail-header">
   <div class="thread-header">
     <div class="thread-heading">
-      <div class="thread-breadcrumb">
-        {#if parent}<a href={guildChannelPath(guild, parent)}>{parent.name ?? 'channel'}</a><span
-            >›</span
-          >{/if}
-        <span>{thread.name}</span>
-      </div>
+      {#if !forumPost}
+        <div class="thread-breadcrumb">
+          {#if parent}<a href={guildChannelPath(guild, parent)}>{parent.name ?? 'channel'}</a><span
+              >›</span
+            >{/if}
+          <span>{thread.name}</span>
+        </div>
+      {/if}
       <div class="thread-title">
-        <span aria-hidden="true">🧵</span>
+        <Icon name={forumPost ? 'message' : 'threads'} size={18} />
         <strong>{thread.name}</strong>
         {#if thread.archived}<small>Archived</small>{/if}
         {#if thread.locked}<small>{forumPost ? 'Closed' : 'Locked'}</small>{/if}
       </div>
     </div>
     <div bind:this={threadActionsRoot} class="thread-actions">
-      <button
-        type="button"
-        disabled={busy || thread.archived}
-        title={thread.archived ? 'Archived threads cannot be joined or followed' : undefined}
-        onclick={() => void onMembership(!joined)}
-      >
-        <Icon name={joined ? 'check' : 'bell'} size={16} />
-        {forumPost ? (joined ? 'Following' : 'Follow') : joined ? 'Leave' : 'Join'}
-      </button>
-      {#if joined && !thread.archived}
+      {#if !forumPost}
+        <button
+          type="button"
+          disabled={busy || thread.archived}
+          title={thread.archived ? 'Archived threads cannot be joined' : undefined}
+          onclick={() => void onMembership(!joined)}
+        >
+          <Icon name={joined ? 'check' : 'bell'} size={16} />
+          {joined ? 'Leave' : 'Join'}
+        </button>
+      {/if}
+      {#if !forumPost && joined && !thread.archived}
         <details>
           <summary aria-label="Thread notification settings" title="Notification Settings">
             <Icon name="bell" size={17} />
@@ -231,39 +209,42 @@
           </div>
         </details>
       {/if}
-      <details>
-        <summary
-          ><Icon name="users" size={18} /><span>{thread.member_count ?? threadMembers.length}</span
-          ></summary
-        >
-        <div class="member-popover">
-          <strong>Thread Members</strong>
-          {#if canInviteMembers || canRemoveMembers}<input
-              bind:value={memberQuery}
-              placeholder="Search members"
-              aria-label="Search members"
-            />{/if}
-          <div>
-            {#each canInviteMembers || canRemoveMembers ? visibleGuildMembers : guildMembers.filter( (member) => memberKeys.has(entityKey(member.user)) ) as member (entityKey(member.user))}
-              <label>
-                <span>{userDisplayName(member.user)}</span>
-                {#if canInviteMembers || canRemoveMembers}
-                  <input
-                    type="checkbox"
-                    checked={memberKeys.has(entityKey(member.user))}
-                    disabled={busy ||
-                      (memberKeys.has(entityKey(member.user))
-                        ? !canRemoveMembers
-                        : !canInviteMembers)}
-                    onchange={(event) =>
-                      void onMemberChange(entityKey(member.user), event.currentTarget.checked)}
-                  />
-                {/if}
-              </label>
-            {/each}
+      {#if !forumPost}
+        <details>
+          <summary
+            ><Icon name="users" size={18} /><span
+              >{thread.member_count ?? threadMembers.length}</span
+            ></summary
+          >
+          <div class="member-popover">
+            <strong>Thread Members</strong>
+            {#if canInviteMembers || canRemoveMembers}<input
+                bind:value={memberQuery}
+                placeholder="Search members"
+                aria-label="Search members"
+              />{/if}
+            <div>
+              {#each canInviteMembers || canRemoveMembers ? visibleGuildMembers : guildMembers.filter( (member) => memberKeys.has(entityKey(member.user)) ) as member (entityKey(member.user))}
+                <label>
+                  <span>{userDisplayName(member.user)}</span>
+                  {#if canInviteMembers || canRemoveMembers}
+                    <input
+                      type="checkbox"
+                      checked={memberKeys.has(entityKey(member.user))}
+                      disabled={busy ||
+                        (memberKeys.has(entityKey(member.user))
+                          ? !canRemoveMembers
+                          : !canInviteMembers)}
+                      onchange={(event) =>
+                        void onMemberChange(entityKey(member.user), event.currentTarget.checked)}
+                    />
+                  {/if}
+                </label>
+              {/each}
+            </div>
           </div>
-        </div>
-      </details>
+        </details>
+      {/if}
       {#if forumPost && availableTags.length}
         <details>
           <summary>Tags</summary>
@@ -366,6 +347,16 @@
           </div>
         </details>
       {/if}
+      {#if forumPost && parent}
+        <a
+          class="thread-close-action"
+          href={guildChannelPath(guild, parent)}
+          aria-label="Close post"
+          title="Close post"
+        >
+          <Icon name="x" size={19} />
+        </a>
+      {/if}
     </div>
   </div>
   {#if renameOpen}
@@ -415,24 +406,6 @@
           </footer>
         </form>
       </div>
-    </div>
-  {/if}
-  {#if forumPost && starterMessage && selectedReaction && !starterMessage.deleted_at && !starterMessage.content_unavailable}
-    <div class="forum-post-actions">
-      <button
-        class="post-reaction-action"
-        class:active={messageHasOwnReaction(starterMessage, selectedReaction)}
-        type="button"
-        aria-pressed={messageHasOwnReaction(starterMessage, selectedReaction)}
-        disabled={busy || thread.archived || !canReact}
-        onclick={reactToPost}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="12" cy="12" r="9" />
-          <path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" />
-        </svg>
-        <span>React to Post</span>
-      </button>
     </div>
   {/if}
   {#if encryptionStatus}
@@ -540,15 +513,6 @@
     background: var(--accent);
   }
 
-  .forum-post-actions {
-    display: flex;
-    min-height: 42px;
-    align-items: center;
-    border-bottom: 1px solid var(--line);
-    padding: 0.3rem 0.8rem;
-    background: var(--surface);
-  }
-
   .thread-header {
     display: flex;
     min-width: 0;
@@ -599,6 +563,7 @@
   }
 
   .thread-actions > button,
+  .thread-actions > a,
   summary {
     display: inline-flex;
     min-height: 34px;
@@ -613,6 +578,13 @@
     font-weight: 750;
     cursor: pointer;
     list-style: none;
+    text-decoration: none;
+  }
+
+  .thread-actions > a {
+    width: 34px;
+    justify-content: center;
+    padding: 0;
   }
 
   summary::-webkit-details-marker {

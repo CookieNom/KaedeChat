@@ -15,6 +15,7 @@ const guildSettings = readFileSync(
 );
 const threadsPanel = readFileSync(new URL('./ThreadsPanel.svelte', import.meta.url), 'utf8');
 const threadHeader = readFileSync(new URL('./ThreadHeader.svelte', import.meta.url), 'utf8');
+const messageRow = readFileSync(new URL('./MessageRow.svelte', import.meta.url), 'utf8');
 const globalStyles = readFileSync(new URL('../../styles.css', import.meta.url), 'utf8');
 
 describe('Discord parity cleanup', () => {
@@ -62,10 +63,45 @@ describe('Discord parity cleanup', () => {
     expect(threadHeader).toContain('threadActionsMenu.open = false;');
   });
 
-  it('uses a compact generic smile action for forum post reactions', () => {
-    expect(threadHeader).toContain('<span>React to Post</span>');
-    expect(threadHeader).toContain('<circle cx="12" cy="12" r="9" />');
-    expect(threadHeader).not.toContain('<ReactionEmoji value={selectedReaction} />');
-    expect(globalStyles).toMatch(/\.post-reaction-action\s*\{[^}]*min-height: 30px;/u);
+  it('puts forum reactions and an add-reaction picker in the starter message footer', () => {
+    expect(threadHeader).not.toContain('starterMessage');
+    expect(threadHeader).not.toContain('React to Post');
+    expect(guildRoute.match(/showPostFooter=/gu)).toHaveLength(2);
+    expect(messageRow).toContain('showPostFooter = false');
+    expect(messageRow).toContain(
+      'class:post-footer={showPostFooter} class="message-footer-actions"'
+    );
+    expect(messageRow).toContain(
+      "aria-label={reactionEntries.length ? 'Add reaction' : 'React to Post'}"
+    );
+    expect(messageRow).toContain('{#if !reactionEntries.length}<span>React to Post</span>{/if}');
+    expect(messageRow.match(/class="add-reaction"/gu)).toHaveLength(1);
+    expect(messageRow).toContain('onclick={openInlineReactionPicker}');
+    expect(messageRow).toContain('showMenu(bounds.left, bounds.bottom, trigger, true);');
+    expect(globalStyles).toMatch(/\.message-footer-actions\.post-footer\s*\{/u);
+    expect(globalStyles).toMatch(/\.message-reactions button\.add-reaction\s*\{/u);
+    expect(globalStyles).toMatch(/\.message-reactions button\.add-reaction\.labeled\s*\{/u);
+  });
+
+  it('uses a detail-pane post header and a Discord-style starter footer', () => {
+    expect(guildRoute).toContain('class:forum-thread-pane=');
+    expect(guildRoute.indexOf('<ThreadHeader')).toBeGreaterThan(
+      guildRoute.indexOf('class="thread-conversation"')
+    );
+    expect(guildRoute).toContain('class="forum-post-intro"');
+    expect(guildRoute).toContain('<ForumTagEmoji');
+    expect(messageRow).toContain('class="post-footer-controls"');
+    expect(messageRow).toContain("<span>{postFollowing ? 'Following' : 'Follow'}</span>");
+    expect(messageRow).toContain('aria-label="Copy post link"');
+    expect(threadHeader).toContain('class="thread-close-action"');
+    expect(globalStyles).toMatch(
+      /\.message-footer-actions\.post-footer\s*\{[^}]*grid-column: 1 \/ -1;/u
+    );
+    expect(globalStyles).toMatch(
+      /\.forum-thread-pane > \.conversation-layout\.forum-thread-split\s*\{[^}]*display: contents;/u
+    );
+    expect(globalStyles).toMatch(
+      /\.forum-thread-pane \.thread-conversation\s*\{[^}]*grid-column: 2;[^}]*grid-row: 1 \/ 3;/u
+    );
   });
 });

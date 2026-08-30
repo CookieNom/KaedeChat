@@ -79,11 +79,7 @@
   } from '$lib/chat/announcements';
   import { fileUploadMatches, type PollCreatePayload } from '$lib/chat/rich-content';
   import { messageSearchUserCandidates } from '$lib/chat/message-search';
-  import {
-    canonicalReactionEmoji,
-    messageHasOwnReaction,
-    messageReactionCount
-  } from '$lib/chat/reactions';
+  import { canonicalReactionEmoji, messageReactionCount } from '$lib/chat/reactions';
   import {
     applyReactionClear,
     applyReactionDispatch,
@@ -193,6 +189,7 @@
   import CreatePollDialog from '$lib/components/CreatePollDialog.svelte';
   import CreateThreadDialog from '$lib/components/CreateThreadDialog.svelte';
   import ForwardMessageDialog from '$lib/components/ForwardMessageDialog.svelte';
+  import ForumTagEmoji from '$lib/components/ForumTagEmoji.svelte';
   import ForumView from '$lib/components/ForumView.svelte';
   import GuildMemberRoster from '$lib/components/GuildMemberRoster.svelte';
   import { highestIconRole, memberRoleColor } from '$lib/chat/members';
@@ -529,6 +526,7 @@
       : null
   );
   const forumParent = $derived(isForumChannel(parentChannel) ? parentChannel : null);
+  const headerChannel = $derived(forumParent ?? channel);
   const threadDirectoryParent = $derived(
     channel && (channel.type === 0 || channel.type === 5)
       ? channel
@@ -536,22 +534,13 @@
         ? parentChannel
         : null
   );
-  const forumDefaultReaction = $derived.by(() => {
-    const reaction = forumParent?.default_reaction_emoji;
-    if (reaction?.emoji_name) return canonicalReactionEmoji(reaction.emoji_name) ?? '';
-    if (!reaction?.emoji_id) return '👍';
-    const emoji = availableEmojis.find(
-      (item) =>
-        item.id === reaction.emoji_id &&
-        item.guild_id === forumParent?.guild_id &&
-        item.guild_domain === forumParent?.guild_domain
-    );
-    return emoji ? customEmojiToken(emoji) : '';
-  });
   const forumStarterMessage = $derived(
     channel && isThreadChannel(channel)
       ? (channel.starter_message ?? messages.find((message) => message.message_type === 0) ?? null)
       : null
+  );
+  const forumAppliedTags = $derived(
+    forumParent?.available_tags?.filter((tag) => channel?.applied_tag_ids?.includes(tag.id)) ?? []
   );
   const threadTimelineStarter = $derived.by(() => {
     if (!channel || !isThreadChannel(channel) || !channel.starter_message) return null;
@@ -6441,6 +6430,7 @@
   </aside>
   <section
     class:guild-voice-pane={isVoiceLikeChannel(channel)}
+    class:forum-thread-pane={Boolean(forumParent && channel && isThreadChannel(channel))}
     class:tracker-pane={channel?.type === TRACKER_CHANNEL_TYPE}
     class:sync-paused={guild?.sync_status === 'quota_paused'}
     class:has-status-warning={Boolean(replicaSyncWarning || historySyncWarning || timeoutGuidance)}
@@ -6471,23 +6461,25 @@
           </button>
           <div class="channel-title">
             <span class="channel-mark" aria-hidden="true">
-              {#if isVoiceLikeChannel(channel)}
-                <Icon name={channel.type === 13 ? 'microphone' : 'volume'} size={18} />
-              {:else if channel?.type === 5}
+              {#if isVoiceLikeChannel(headerChannel)}
+                <Icon name={headerChannel.type === 13 ? 'microphone' : 'volume'} size={18} />
+              {:else if headerChannel?.type === 5}
                 <Icon name="bell" size={18} />
-              {:else if channel?.type === TRACKER_CHANNEL_TYPE}
+              {:else if headerChannel?.type === TRACKER_CHANNEL_TYPE}
                 <Icon name="kanban" size={18} />
-              {:else if isForumChannel(channel)}
+              {:else if isForumChannel(headerChannel)}
                 <Icon name="forum" size={18} />
-              {:else if isThreadChannel(channel)}
+              {:else if isThreadChannel(headerChannel)}
                 <Icon name="message" size={18} />
               {:else}
                 #
               {/if}
             </span>
             <div>
-              <strong>{channel?.name ?? 'Channel'}</strong>
-              {#if channel?.topic && !isThreadChannel(channel)}<span>{channel.topic}</span>{/if}
+              <strong>{headerChannel?.name ?? 'Channel'}</strong>
+              {#if headerChannel?.topic && !isThreadChannel(headerChannel)}<span
+                  >{headerChannel.topic}</span
+                >{/if}
             </div>
           </div>
         </div>
@@ -6561,56 +6553,6 @@
           </button>
         </div>
       </header>
-    {/if}
-    {#if guild && channel && isThreadChannel(channel)}
-      <ThreadHeader
-        {guild}
-        thread={channel}
-        parent={parentChannel}
-        joined={currentThreadJoined}
-        notificationLevel={currentThreadNotificationLevel}
-        starterMessage={forumStarterMessage}
-        reactionEmoji={forumDefaultReaction}
-        canReact={canAddReactions ||
-          messageReactionCount(forumStarterMessage ?? {}, forumDefaultReaction) > 0 ||
-          messageHasOwnReaction(forumStarterMessage ?? {}, forumDefaultReaction)}
-        canEdit={canEditCurrentThread}
-        canManage={canManageThreads}
-        canInviteMembers={canInviteThreadMembers}
-        canRemoveMembers={canRemoveThreadMembers}
-        canEnableEncryption={canEnableThreadEncryption}
-        canRekeyEncryption={canRekeyThreadEncryption}
-        busy={threadActionBusy}
-        encryptionStatus={threadEncryptionStatus}
-        {threadMembers}
-        guildMembers={members}
-        availableTags={forumParent?.available_tags ?? []}
-        customEmojis={pickerEmojis}
-        onMembership={changeThreadMembership}
-        onNotifications={changeThreadNotifications}
-        onReaction={toggleMessageReaction}
-        onRename={(name) => patchCurrentThread({ name })}
-        onEncryption={updateCurrentThreadEncryption}
-        onInvitable={(invitable) => void patchCurrentThread({ invitable })}
-        onArchive={(archived) =>
-          void patchCurrentThread(
-            !archived && channel.locked && canManageThreads
-              ? { archived, locked: false }
-              : { archived }
-          )}
-        onLock={(locked) =>
-          void patchCurrentThread(
-            locked && forumParent
-              ? { archived: true, locked }
-              : !locked && channel.archived
-                ? { archived: false, locked }
-                : { locked }
-          )}
-        onMemberChange={changeThreadMember}
-        onPin={(pinned) => void patchCurrentThread({ pinned })}
-        onTagsChange={(applied_tag_ids) => void patchCurrentThread({ applied_tag_ids })}
-        onDelete={deleteCurrentThread}
-      />
     {/if}
     {#if readStateWarning}
       <div class="read-state-warning" role="status">
@@ -6720,7 +6662,54 @@
             onRemoveUpload={removeForumUpload}
           />
         {/if}
-        <div class="thread-conversation">
+        <div
+          class:has-thread-header={Boolean(channel && isThreadChannel(channel))}
+          class="thread-conversation"
+        >
+          {#if guild && channel && isThreadChannel(channel)}
+            <ThreadHeader
+              {guild}
+              thread={channel}
+              parent={parentChannel}
+              joined={currentThreadJoined}
+              notificationLevel={currentThreadNotificationLevel}
+              canEdit={canEditCurrentThread}
+              canManage={canManageThreads}
+              canInviteMembers={canInviteThreadMembers}
+              canRemoveMembers={canRemoveThreadMembers}
+              canEnableEncryption={canEnableThreadEncryption}
+              canRekeyEncryption={canRekeyThreadEncryption}
+              busy={threadActionBusy}
+              encryptionStatus={threadEncryptionStatus}
+              {threadMembers}
+              guildMembers={members}
+              availableTags={forumParent?.available_tags ?? []}
+              customEmojis={pickerEmojis}
+              onMembership={changeThreadMembership}
+              onNotifications={changeThreadNotifications}
+              onRename={(name) => patchCurrentThread({ name })}
+              onEncryption={updateCurrentThreadEncryption}
+              onInvitable={(invitable) => void patchCurrentThread({ invitable })}
+              onArchive={(archived) =>
+                void patchCurrentThread(
+                  !archived && channel.locked && canManageThreads
+                    ? { archived, locked: false }
+                    : { archived }
+                )}
+              onLock={(locked) =>
+                void patchCurrentThread(
+                  locked && forumParent
+                    ? { archived: true, locked }
+                    : !locked && channel.archived
+                      ? { archived: false, locked }
+                      : { locked }
+                )}
+              onMemberChange={changeThreadMember}
+              onPin={(pinned) => void patchCurrentThread({ pinned })}
+              onTagsChange={(applied_tag_ids) => void patchCurrentThread({ applied_tag_ids })}
+              onDelete={deleteCurrentThread}
+            />
+          {/if}
           <div
             class="message-list"
             aria-live="polite"
@@ -6738,6 +6727,29 @@
               {/if}
             {/snippet}
             {#snippet threadStarterHeader()}
+              {#if forumParent && channel && isThreadChannel(channel)}
+                <section class="forum-post-intro" aria-labelledby="forum-post-title">
+                  <span class="forum-post-intro-mark" aria-hidden="true">
+                    <Icon name="message" size={30} />
+                  </span>
+                  <h1 id="forum-post-title">{channel.name}</h1>
+                  {#if forumAppliedTags.length}
+                    <div class="forum-post-tag-list" aria-label="Post tags">
+                      {#each forumAppliedTags as tag (tag.id)}
+                        <span>
+                          <ForumTagEmoji
+                            {tag}
+                            guildId={forumParent.guild_id}
+                            guildDomain={forumParent.guild_domain}
+                            customEmojis={pickerEmojis}
+                          />
+                          {tag.name}
+                        </span>
+                      {/each}
+                    </div>
+                  {/if}
+                </section>
+              {/if}
               {#if threadTimelineStarter}
                 <div
                   class="thread-starter-reference"
@@ -6771,6 +6783,17 @@
                     presence={threadTimelineStarter.author
                       ? presenceFor(threadTimelineStarter.author)
                       : 'offline'}
+                    canReact={Boolean(forumParent && canAddReactions)}
+                    canReactToExisting={Boolean(forumParent && channel && !channel.archived)}
+                    showPostFooter={Boolean(forumParent)}
+                    postFollowing={currentThreadJoined}
+                    postFollowDisabled={threadActionBusy || Boolean(channel?.archived)}
+                    onPostFollow={forumParent ? changeThreadMembership : undefined}
+                    customEmojis={pickerEmojis}
+                    reactionUserKey={currentUser ? entityKey(currentUser) : ''}
+                    onToggleReaction={forumParent && channel && !channel.archived
+                      ? toggleMessageReaction
+                      : undefined}
                     actionsEnabled={false}
                     timestampFormat="date-time"
                     domIdPrefix="thread-starter"
@@ -6875,6 +6898,18 @@
                       onOpenThreads={showThreadDirectory}
                       canReact={canAddReactions}
                       canReactToExisting={Boolean(channel && !channel.archived)}
+                      showPostFooter={Boolean(
+                        forumParent &&
+                        forumStarterMessage &&
+                        entityKey(item.message) === entityKey(forumStarterMessage)
+                      )}
+                      postFollowing={currentThreadJoined}
+                      postFollowDisabled={threadActionBusy || Boolean(channel?.archived)}
+                      onPostFollow={forumParent &&
+                      forumStarterMessage &&
+                      entityKey(item.message) === entityKey(forumStarterMessage)
+                        ? changeThreadMembership
+                        : undefined}
                       customEmojis={pickerEmojis}
                       reactionUserKey={currentUser ? entityKey(currentUser) : ''}
                       onToggleReaction={!channel?.archived ? toggleMessageReaction : undefined}
